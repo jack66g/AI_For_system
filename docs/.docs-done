@@ -1,0 +1,5 @@
+docs 整理完成（2026-09-30，D 线·文档整理）
+- 原 AIKernel_MD文档库 全部 113 份 md 已全量读取，合并为本目录 4 份文档（01 总览/02 接口指令集/03 历史决策/04 审计），另含 17MB 自动生成接口导表处置说明（可由 build_index.py --extract 再生成）。
+- AIKernel_MD文档库\ 整目录与 交接提示词_20260929.md（含凭据，未入档）已删除。
+- 活文档不动：linux-6.18.39/AIKernel/ARCHITECTURE.md（现役权威）、README-GITHUB.md（保留原处）。
+- 本目录 4 份文档敏感信息已扫描（密码/token 零命中），可推公开 GitHub。
