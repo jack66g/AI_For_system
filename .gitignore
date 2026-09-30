@@ -1,0 +1,60 @@
+# 构建产物
+build/
+*.o
+*.o.*
+*.a
+*.ko
+*.ko.*
+*.cmd
+*.order
+*.mod
+*.mod.c
+*.symvers
+*.bin
+*.elf
+*.map
+*.su
+*.d
+*.i
+*.s
+.tmp_versions/
+modules.builtin*
+Module.symvers
+vmlinux
+vmlinux.gz
+System.map
+bzImage
+zImage
+Image
+
+# 测试编译出的可执行文件
+agent/ai/aikernel-shell
+agent/ai/t2fix_utf8_test
+*.test
+
+# 磁盘镜像与虚拟机产物
+*.iso
+*.raw
+*.qcow2
+*.img
+*.vmdk
+initramfs/
+initrd*
+rootfs/
+w6i-isodir/
+w6i-rootfs/
+
+# 大体积打包文件
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.zip
+
+# 日志与临时文件
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db

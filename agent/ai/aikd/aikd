@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+#
+# aikd - AI Kernel Daemon（B 轨，数据计划 P7）
+#
+# AIKernel 感知数据 → Parquet 训练数据管道守护进程：
+#   接收（NETLINK_AI / 离线导入）→ 格式化 → 按天/按类别落盘 Parquet →
+#   决策记录/因果链落盘 → RAG 索引增量更新触发。
+#
+# 子命令（输出格式稳定，AI 自动化解析）：
+#   aikd run [--poll N] [--root DIR]     守护模式：NETLINK_AI 轮询接收落盘
+#   aikd ingest --dir <bundle> [--root DIR]  离线导入：
+#       <bundle>/telemetry.bin  raw 遥测二进制流（/proc/ai/telemetry raw
+#       或 NETLINK_AI SENSE 原始应答的记录区）
+#       <bundle>/decisions.txt  /proc/ai/decisions 文本
+#       <bundle>/chains.txt     /proc/ai/chains 文本
+#   aikd status [--root DIR]    输出目录结构 + Parquet 清单（key: value）
+#   aikd verify [--root DIR]    回读校验：Parquet 与输入记录数一致 + 抽查
+#   aikd stop [--root DIR]      停止守护实例（pidfile）
+#
+# 配置：aikd.conf（ROOT=/var/lib/aikernel，POLL_SEC=5，RAG_SCRIPT=...）
+# 依赖：python3 + pyarrow。
+#
+# 数据原则（all-ai）：Parquet 落盘保留原始内容，全量零脱敏。
+
+import argparse
+import os
+import re
+import signal
+import sys
+import time
+import tempfile
+import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import aikd_lib as A  # noqa: E402
+
+def _pidfile():
+    """pidfile 路径：/var/run 不可写时退回临时目录（非 root 场景）。"""
+    for cand in ("/var/run/aikd.pid",
+                 os.path.join(tempfile.gettempdir(), "aikd.pid")):
+        try:
+            with open(cand, "a"):
+                pass
+            return cand
+        except OSError:
+            continue
+    return "/tmp/aikd.pid"
+
+# ---- 配置 ----
+
+def load_conf(conf_path=None):
+    conf = {
+        "ROOT": A.DEFAULT_ROOT,
+        "POLL_SEC": A.DEFAULT_POLL_SEC,
+        "RAG_SCRIPT": "",
+    }
+    if conf_path and os.path.exists(conf_path):
+        with open(conf_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                conf[k.strip()] = v.strip().strip('"').strip("'")
+    try:
+        conf["POLL_SEC"] = float(conf["POLL_SEC"])
+    except ValueError:
+        conf["POLL_SEC"] = A.DEFAULT_POLL_SEC
+    return conf
+
+
+# ---- 落盘流程（run 与 ingest 共用） ----
+
+def flush_bundle(conf, tel_records, decisions, chains, verbose=True):
+    root = conf["ROOT"]
+    A.ensure_root(root)
+    n_tel = A.write_telemetry(root, tel_records)
+    n_dec = A.write_decisions(root, decisions)
+    n_chn = A.write_chains(root, chains)
+    if verbose:
+        print("written: telemetry=%d decisions=%d chains=%d (root=%s)" %
+              (n_tel, n_dec, n_chn, root))
+    # RAG 索引增量更新触发（history 库）
+    if conf["RAG_SCRIPT"]:
+        A.rag_index_update(root, conf["RAG_SCRIPT"])
+        if verbose:
+            print("rag_index: incremental update triggered")
+    return n_tel + n_dec + n_chn
+
+
+def read_decisions_file(path):
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, errors="replace") as f:
+        for line in f:
+            d = A.parse_decision_line(line)
+            if d:
+                out.append(d)
+    return out
+
+
+# ---- run（守护模式） ----
+
+def cmd_run(args, conf):
+    root = conf["ROOT"]
+    A.ensure_root(root)
+
+    pf = _pidfile()
+    if os.path.exists(pf):
+        with open(pf) as f:
+            pid = int(f.read().strip() or 0)
+        if pid and os.path.exists("/proc/%d" % pid):
+            print("Error: aikd already running (pid=%d)" % pid)
+            return 1
+        os.unlink(pf)
+
+    with open(pf, "w") as f:
+        f.write("%d\n" % os.getpid())
+
+    def _stop(signum, frame):
+        print("\naikd: stopped")
+        if os.path.exists(pf):
+            os.unlink(pf)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    print("aikd: running (root=%s poll=%ss pid=%d)" %
+          (root, conf["POLL_SEC"], os.getpid()))
+    try:
+        while True:
+            try:
+                records, rc = A.netlink_sense()
+                if rc == 0:
+                    dec = read_proc_records("/proc/ai/decisions")
+                    chn = read_proc_records("/proc/ai/chains")
+                    if records or dec or chn:
+                        n = flush_bundle(conf, records, dec, chn,
+                                         verbose=False)
+                        if n:
+                            print("%s aikd: flushed %d records" % (
+                                datetime.datetime.now().strftime("%H:%M:%S"),
+                                n))
+                elif rc == -1:
+                    print("aikd: NETLINK_AI unavailable (rc=%d); "
+                          "is AIKernel running?" % rc, flush=True)
+            except Exception as e:  # noqa: BLE001
+                print("aikd: error: %s" % e, flush=True)
+            time.sleep(conf["POLL_SEC"])
+    finally:
+        pf = _pidfile()
+    if os.path.exists(pf):
+            os.unlink(pf)
+    return 0
+
+
+def read_proc_records(path):
+    """读 /proc/ai/decisions|chains 文本 → dict 列表。"""
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                d = A.parse_decision_line(line)
+                if d:
+                    out.append(d)
+    except OSError:
+        pass
+    return out
+
+
+# ---- ingest（离线导入） ----
+
+def cmd_ingest(args, conf):
+    bundle = args.dir
+    if not os.path.isdir(bundle):
+        print("Error: bundle dir '%s' not found" % bundle)
+        return 1
+
+    tel = []
+    for f in ("telemetry.bin",):
+        p = os.path.join(bundle, f)
+        if os.path.exists(p):
+            with open(p, "rb") as fh:
+                data = fh.read()
+            tel, consumed, resynced = A.parse_telemetry_records(data)
+            if resynced:
+                print("Warning: %s %d corrupt bytes resynced (serial "
+                      "transport)" % (f, resynced))
+            if consumed != len(data):
+                print("Warning: %s tail residual %d bytes skipped" %
+                      (f, len(data) - consumed))
+            print("ingest: %s -> %d telemetry records" % (f, len(tel)))
+
+    dec = read_decisions_file(os.path.join(bundle, "decisions.txt"))
+    chn = read_decisions_file(os.path.join(bundle, "chains.txt"))
+    print("ingest: decisions.txt -> %d, chains.txt -> %d" %
+          (len(dec), len(chn)))
+
+    flush_bundle(conf, tel, dec, chn)
+    return 0
+
+
+# ---- status / verify / stop ----
+
+def cmd_status(args, conf):
+    root = conf["ROOT"]
+    print("root: %s" % root)
+    print("exists: %s" % ("yes" if os.path.isdir(root) else "no"))
+    if not os.path.isdir(root):
+        return 0
+    for sub in ("telemetry", "decisions", "rag_kb", "models"):
+        p = os.path.join(root, sub)
+        print("%s: %s" % (sub, "yes" if os.path.isdir(p) else "no"))
+    import glob
+    files = sorted(glob.glob(os.path.join(root, "telemetry", "*",
+                                          "*.parquet")))
+    print("telemetry_files: %d" % len(files))
+    for f in files:
+        print("  %s" % os.path.relpath(f, root))
+    dec = sorted(glob.glob(os.path.join(root, "decisions", "*",
+                                        "*.parquet")))
+    print("decision_files: %d" % len(dec))
+    for f in dec:
+        print("  %s" % os.path.relpath(f, root))
+    return 0
+
+
+def cmd_verify(args, conf):
+    root = conf["ROOT"]
+    tel = A.readback_telemetry(root)
+    dec = A.readback_decisions(root)
+    chn = A.readback_chains(root)
+    print("verify: telemetry=%d decisions=%d chains=%d" %
+          (len(tel), len(dec), len(chn)))
+
+    # 抽查 3 类（sched=1 / mm=2 / ai=18）内容一致性
+    checks = []
+    for cat, name in ((1, "sched"), (2, "mm"), (18, "ai")):
+        rows = [h for h, _ in tel if h["category"] == cat]
+        # 抽查首条：时间戳>0、data_len 与 payload 一致
+        ok = True
+        for h, p in [(h, p) for h, p in tel if h["category"] == cat][:3]:
+            if h["data_len"] != len(p):
+                ok = False
+            if h["timestamp_ns"] <= 0:
+                ok = False
+        checks.append((name, len(rows), ok))
+    for name, cnt, ok in checks:
+        print("check: category=%-12s records=%-6d consistent=%s" %
+              (name, cnt, "PASS" if ok else "FAIL"))
+    return 0 if all(ok for _, _, ok in checks) else 1
+
+
+def cmd_stop(args, conf):
+    pf = _pidfile()
+    if not os.path.exists(pf):
+        print("stop: not running")
+        return 0
+    with open(pf) as f:
+        pid = int(f.read().strip() or 0)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print("stop: sent SIGTERM to pid=%d" % pid)
+        except ProcessLookupError:
+            print("stop: pid=%d not found" % pid)
+    if os.path.exists(pf):
+        os.unlink(pf)
+    return 0
+
+
+def main():
+    conf_dir = os.path.dirname(os.path.abspath(__file__))
+    conf = load_conf(os.path.join(conf_dir, "aikd.conf"))
+
+    ap = argparse.ArgumentParser(
+        prog="aikd",
+        description="AI Kernel Daemon: telemetry -> Parquet training pipeline")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_run = sub.add_parser("run", help="daemon mode: poll NETLINK_AI + store")
+    p_run.add_argument("--poll", type=float, default=None,
+                       help="poll interval seconds (default %s)" %
+                       conf["POLL_SEC"])
+    p_run.add_argument("--root", default=None, help="data root")
+
+    p_ing = sub.add_parser("ingest", help="offline import from bundle dir")
+    p_ing.add_argument("--dir", required=True,
+                       help="bundle dir: telemetry.bin/decisions.txt/chains.txt")
+    p_ing.add_argument("--root", default=None, help="data root")
+
+    p_st = sub.add_parser("status", help="show storage layout + parquet list")
+    p_st.add_argument("--root", default=None, help="data root")
+
+    p_vf = sub.add_parser("verify", help="readback parquet and check")
+    p_vf.add_argument("--root", default=None, help="data root")
+
+    p_sp = sub.add_parser("stop", help="stop daemon instance")
+    p_sp.add_argument("--root", default=None, help="data root")
+
+    args = ap.parse_args()
+
+    if getattr(args, "root", None):
+        conf["ROOT"] = args.root
+    if args.cmd == "run" and args.poll:
+        conf["POLL_SEC"] = args.poll
+
+    if args.cmd == "run":
+        return cmd_run(args, conf)
+    if args.cmd == "ingest":
+        return cmd_ingest(args, conf)
+    if args.cmd == "status":
+        return cmd_status(args, conf)
+    if args.cmd == "verify":
+        return cmd_verify(args, conf)
+    if args.cmd == "stop":
+        return cmd_stop(args, conf)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

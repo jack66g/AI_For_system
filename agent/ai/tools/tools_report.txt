@@ -1,0 +1,19 @@
+AIKernel Agent 工具注册表生成报告（v2）
+生成时间: 2026-09-30T02:26:42
+来源: AIKernel 内核源码静态梳理
+QEMU dump: 未提供（使用内核源码默认表）
+
+工具总数: 73
+分通道计数:
+  procfs-read    19
+  sysfs-write    12
+  netlink-act    27
+  netlink-sense  1
+  exec           1
+  memory         13
+分风险级计数:
+  R              27
+  W1             15
+  W2             30
+  exec按命令    1（exec.run，逐命令见 exec.commands）
+exec 白名单命令数: 47 (R=31 W1=11 W2=5)；单源: tools.json exec.commands

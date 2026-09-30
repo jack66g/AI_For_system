@@ -1,0 +1,222 @@
+#!/bin/sh
+# ============================================================
+# AIKernel 0.1.0-alpha 安装器 /init (busybox ash, PID1)
+# 流程: 挂载ISO -> 扫描目标盘 -> 一次y/N确认 -> sfdisk单分区
+#       -> mkfs.ext4 -> 解出厂rootfs -> 2G swapfile -> 装内核
+#       -> grub-install(MBR) -> fstab(UUID) -> 完成提示
+# 内核参数: aiinstall.autoreboot=1 完成后自动关机(自动化试装用)
+# 幂等: 可重复运行(重跑覆盖同布局)
+# v2: GRUB 步骤改用真 grub-install(修复手工 dd core.img 自写
+#     early.cfg 导致的引导期 prefix 解析失败/can't find command
+#     'linux' bug); fstab 与 grub.cfg 的 root 落实为 UUID
+# ============================================================
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+[ -e /dev/null ] || mknod /dev/null c 1 3 2>/dev/null
+mdev -s 2>/dev/null
+mkdir -p /run /run/lock 2>/dev/null
+
+AUTOREBOOT=0
+case "$(cat /proc/cmdline)" in *aiinstall.autoreboot=1*) AUTOREBOOT=1;; esac
+
+die() {
+  printf '\n[!] 安装失败: %s\n' "$*"
+  printf '[!] 目标盘可能处于中间状态，重跑安装器可修复(幂等)。\n'
+  if [ "$AUTOREBOOT" = 1 ]; then sleep 3; /sbin/poweroff -f; fi
+  printf '按回车重启... '
+  read x
+  /sbin/reboot -f
+}
+
+cancel() {
+  printf '\n已取消，未做任何更改。\n'
+  if [ "$AUTOREBOOT" = 1 ]; then sleep 2; /sbin/poweroff -f; fi
+  printf '按回车重启... '
+  read x
+  /sbin/reboot -f
+}
+
+printf '\n'
+printf '==================================================\n'
+printf '   AIKernel 0.1.0-alpha 安装器\n'
+printf '   AIKernel Installer (busybox initramfs)\n'
+printf '==================================================\n'
+cat /proc/version
+printf '\n'
+
+# ---- 1. 挂载安装介质(3轮重试, 防光驱注册竞态) ----
+MEDIA=""
+round=0
+while [ -z "$MEDIA" ] && [ $round -lt 3 ]; do
+  round=$(( round + 1 ))
+  for dev in /dev/sr0 /dev/sr1 /dev/sr2; do
+    [ -b "$dev" ] || continue
+    if mount -t iso9660 "$dev" /media 2>/dev/null; then
+      if [ -f /media/rootfs-factory.tar ] && [ -f /media/boot/bzImage ]; then
+        MEDIA="$dev"; break
+      fi
+      umount /media 2>/dev/null
+    fi
+  done
+  [ -n "$MEDIA" ] || sleep 2
+done
+[ -n "$MEDIA" ] || die "找不到安装介质(含 rootfs-factory.tar 的 ISO)"
+printf '安装介质: %s\n' "$MEDIA"
+printf '  - /media/boot/bzImage        OK (%s bytes)\n' "$(stat -c %s /media/boot/bzImage)"
+printf '  - /media/rootfs-factory.tar  OK (%s bytes)\n' "$(stat -c %s /media/rootfs-factory.tar)"
+
+# ---- 2. 扫描目标盘(排除安装介质自身/光驱/虚拟设备, >=6GiB) ----
+MDEV="${MEDIA#/dev/}"
+CANDS=""
+for sysd in /sys/block/*; do
+  d="${sysd##*/}"
+  case "$d" in loop*|ram*|fd*|zram*|dm-*|md*|nbd*|rom*|sr*) continue;; esac
+  [ "$d" = "$MDEV" ] && continue
+  [ -e "$sysd/device" ] || continue
+  sz=$(cat "$sysd/size" 2>/dev/null)
+  [ -n "$sz" ] || continue
+  gib=$(( sz * 512 / 1073741824 ))
+  [ "$gib" -ge 6 ] || continue
+  CANDS="$CANDS $d"
+done
+set -- $CANDS
+N=$#
+if [ "$N" -eq 0 ]; then die "未找到可安装的硬盘(要求 >= 6GiB)"; fi
+if [ "$N" -eq 1 ]; then
+  TARGET="/dev/$1"
+else
+  printf '\n检测到多块硬盘:\n'
+  i=1
+  for d in $CANDS; do
+    model=$(cat /sys/block/$d/device/model 2>/dev/null | tr -s ' ')
+    sz=$(cat /sys/block/$d/size)
+    printf '  %d) /dev/%-10s %-20s %d GiB\n' $i "$d" "${model:-?}" $(( sz * 512 / 1073741824 ))
+    i=$(( i + 1 ))
+  done
+  printf '选择安装目标盘序号 [1-%d]: ' "$N"
+  read sel
+  case "$sel" in ''|*[!0-9]*) die "无效选择: $sel";; esac
+  if [ "$sel" -lt 1 ] || [ "$sel" -gt "$N" ]; then die "无效选择: $sel"; fi
+  i=1
+  for d in $CANDS; do
+    [ "$i" = "$sel" ] && TARGET="/dev/$d"
+    i=$(( i + 1 ))
+  done
+fi
+case "${TARGET#/dev/}" in
+  nvme*|mmcblk*) PART1="${TARGET}p1" ;;
+  *)             PART1="${TARGET}1" ;;
+esac
+
+# ---- 3. 一次 y/N 确认(默认 N 防手滑) ----
+model=$(cat /sys/block/${TARGET#/dev/}/device/model 2>/dev/null | tr -s ' ')
+[ -n "$model" ] || case "${TARGET#/dev/}" in
+  vd*)    model="VirtIO Block Device" ;;
+  nvme*)  model="NVMe Device" ;;
+  *)      model="未知型号" ;;
+esac
+sz=$(cat /sys/block/${TARGET#/dev/}/size)
+gib=$(( sz * 512 / 1073741824 ))
+printf '\n--------------------------------------------------\n'
+printf '目标盘   : %s (%s, %d GiB)\n' "$TARGET" "${model:-未知型号}" "$gib"
+printf '分区方案 : 单 ext4 分区 + 2G swapfile + GRUB(MBR)\n'
+printf '警告     : 目标盘全部数据将被擦除!\n'
+printf '--------------------------------------------------\n'
+printf '确认安装到 %s? [y/N] ' "$TARGET"
+read ANS
+case "$ANS" in
+  y|Y) ;;
+  *) cancel ;;
+esac
+
+# ---- 4. 分区 ----
+printf '\n[1/7] 分区 sfdisk %s (MBR, 单Linux分区, 2048扇区对齐, bootable)...\n' "$TARGET"
+sfdisk "$TARGET" >/dev/null <<EOF
+label: dos
+start=2048, type=83, bootable
+EOF
+[ $? -eq 0 ] || die "sfdisk 分区失败"
+i=0
+while [ ! -b "$PART1" ] && [ $i -lt 20 ]; do sleep 1; mdev -s 2>/dev/null; i=$(( i + 1 )); done
+[ -b "$PART1" ] || die "分区节点 $PART1 未出现"
+
+# ---- 5. 格式化 ----
+printf '[2/7] 格式化 ext4 %s (label=aikernel-root)...\n' "$PART1"
+mkfs.ext4 -F -L aikernel-root "$PART1" >/dev/null 2>&1
+[ $? -eq 0 ] || die "mkfs.ext4 失败"
+
+# ---- 6. 解压出厂 rootfs ----
+mkdir -p /mnt/newroot
+mount -t ext4 "$PART1" /mnt/newroot || die "挂载 $PART1 失败"
+printf '[3/7] 解压出厂 rootfs (约2GB, TCG下需数分钟, 请耐心等待)...\n'
+tar -xpf /media/rootfs-factory.tar -C /mnt/newroot
+[ $? -eq 0 ] || die "rootfs 解压失败"
+# 注意: /sbin/init 是绝对符号链接链(→/lib/systemd/systemd), 挂载点视角会逃逸出树;
+# 检查树内真实二进制
+[ -x /mnt/newroot/usr/lib/systemd/systemd ] || die "rootfs 解压后缺少 /usr/lib/systemd/systemd"
+printf '      解压完成: %s 文件\n' "$(find /mnt/newroot -mindepth 1 | wc -l)"
+
+# ---- 7. swapfile ----
+printf '[4/7] 创建 2G swapfile...\n'
+dd if=/dev/zero of=/mnt/newroot/swapfile bs=1M count=2048 2>/dev/null
+chmod 600 /mnt/newroot/swapfile
+mkswap /mnt/newroot/swapfile >/dev/null 2>&1 || die "mkswap 失败"
+
+# ---- 8. 内核 ----
+printf '[5/7] 安装内核 -> /boot/vmlinuz-aikernel...\n'
+mkdir -p /mnt/newroot/boot
+cp /media/boot/bzImage /mnt/newroot/boot/vmlinuz-aikernel || die "内核复制失败"
+
+# ---- 9. fstab(UUID) ----
+UUID=$(blkid -s UUID -o value "$PART1" 2>/dev/null)
+[ -n "$UUID" ] || die "blkid 未取得分区 UUID"
+# 内核无 initramfs 引导: root=UUID= 需读 fs(仅 initramfs 期可做), 必须用
+# 内核原生可解析的 PARTUUID(MBR: <diskid>-01)
+PARTUUID=$(blkid -s PARTUUID -o value "$PART1" 2>/dev/null)
+[ -n "$PARTUUID" ] || die "blkid 未取得分区 PARTUUID"
+printf '[6/7] 写 /etc/fstab (root UUID=%s, cmdline PARTUUID=%s)...\n' "$UUID" "$PARTUUID"
+cat > /mnt/newroot/etc/fstab <<EOF
+UUID=$UUID / ext4 defaults 1 1
+/swapfile none swap sw 0 0
+EOF
+
+# ---- 10. GRUB: 真 grub-install 到目标盘 MBR ----
+printf '[7/7] 安装 GRUB (grub-install --target=i386-pc, MBR)...\n'
+mkdir -p /mnt/newroot/boot/grub
+/sbin/grub-install --target=i386-pc --boot-directory=/mnt/newroot/boot "$TARGET" > /tmp/grub-install.log 2>&1
+RC=$?
+[ $RC -eq 0 ] || { echo "---- grub-install 日志(尾部) ----"; tail -20 /tmp/grub-install.log; die "grub-install 失败 (rc=$RC)"; }
+cat > /mnt/newroot/boot/grub/grub.cfg <<EOF
+set default=0
+set timeout=3
+serial --unit=0 --speed=115200
+terminal_input serial console
+terminal_output serial console
+menuentry 'AIKernel 0.1.0-alpha' {
+	linux /boot/vmlinuz-aikernel root=PARTUUID=$PARTUUID rw console=tty0 console=ttyS0 ai.enabled=1 kunit.enable=0
+}
+EOF
+sync
+umount /mnt/newroot
+sync
+
+# ---- 11. 完成 ----
+printf '\n==================================================\n'
+printf '   AIKernel 安装完成!\n'
+printf '   目标盘: %s (%s, %d GiB)\n' "$TARGET" "${model:-disk}" "$gib"
+printf '   根分区: %s  UUID=%s\n' "$PART1" "$UUID"
+printf '\n'
+printf '   重启进入 AIKernel，首次开机 AI 将引导你完成初始化。\n'
+printf '==================================================\n'
+if [ "$AUTOREBOOT" = 1 ]; then
+  sleep 3
+  /sbin/poweroff -f
+else
+  printf '按回车重启... '
+  read x
+  /sbin/reboot -f
+fi
