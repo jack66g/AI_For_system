@@ -25,6 +25,8 @@
  *                        "exec"."commands"（bin/args_template/timeout/risk/
  *                        path_check/args0），本文件内置表降级为 fallback。
  *   memory        : 调 sme_client（13 个端点），原始 JSON 直接回填。
+ *   shell         : AI 应用户请求降入交互式维护 shell（fork/exec bash，
+ *                   继承终端；exit 返回后以工具结果回填 ask 闭环）。
  *
  * 通道说明（netlink-act 粒度，v3 定向协议）：ACT 载荷 v2 起携带 param
  * 定向参数名——本执行器按注册表 tool->param（tools.json 单源，即内核
@@ -1142,6 +1144,60 @@ static int exec_memory(const struct ai_tool *tool, const char *args_json,
 	return rc;
 }
 
+/* ---- shell（AI 应用户请求降入维护 shell，方案 A） ----
+ *
+ * 复用 cmd_shell 内置动作语义：fork/exec /bin/bash 继承 stdio 与终端，
+ * 父进程 waitpid 等退出。区别在于触发路径：由模型在 ask 闭环中调用
+ * sys.shell 工具进入（用户说「帮我打开一个 shell」），exit 后以工具
+ * 结果回填 ask 对话。审计行按通道记录，另在进入前打印一行人读说明。
+ */
+static int exec_shell_drop(const struct ai_tool *tool, char **out)
+{
+	pid_t pid;
+	int status = 0;
+
+	(void)tool;
+
+	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+		*out = strdup("ERROR: 当前环境非交互终端（stdin/stdout 被重"
+			      "定向），无法降入维护 shell。");
+		return AI_ERR_INVALID_ARG;
+	}
+
+	printf("AI 应请求开启 shell：进入维护 shell（bash）。"
+	       "输入 exit 返回 AI 对话。\n");
+	fflush(stdout);
+
+	pid = fork();
+	if (pid < 0) {
+		if (asprintf(out, "ERROR: fork 失败（%s）。",
+			     strerror(errno)) < 0)
+			*out = NULL;
+		return AI_ERR_GENERIC;
+	}
+
+	if (pid == 0) {
+		execl("/bin/bash", "bash", (char *)NULL);
+		fprintf(stderr, "shell: 无法启动 /bin/bash（%s）。\n",
+			strerror(errno));
+		_exit(127);
+	}
+
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+		*out = strdup("ERROR: /bin/bash 启动失败。");
+		return AI_ERR_GENERIC;
+	}
+
+	printf("已返回 AI 对话。\n");
+	fflush(stdout);
+	*out = strdup("用户已在维护 shell 中输入 exit 返回，"
+		      "继续 AI 对话。");
+	return AI_OK;
+}
+
 /* ---- 统一入口 ---- */
 
 int tool_executor_run(const struct ai_tool *tool, const char *args_json,
@@ -1212,6 +1268,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_MEMORY:
 		rc = exec_memory(tool, args_json, out);
 		break;
+	case TOOL_CH_SHELL:
+		rc = exec_shell_drop(tool, out);
+		break;
 	default:
 		*out = strdup("ERROR: 未知通道（注册表数据异常）");
 		rc = AI_ERR_INVALID_ARG;
@@ -1226,7 +1285,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   "sysfs-write" : tool->channel == TOOL_CH_NETLINK_ACT ?
 		   "netlink-act" : tool->channel == TOOL_CH_NETLINK_SENSE ?
 		   "netlink-sense" : tool->channel == TOOL_CH_EXEC ?
-		   "exec" : "memory",
+		   "exec" : tool->channel == TOOL_CH_SHELL ?
+		   "shell（AI 应请求开启 shell）" : "memory",
 		   args_json, rc == AI_OK);
 
 	if (ok)

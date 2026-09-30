@@ -1,20 +1,21 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-09-30T02:26:42",
+  "generated_at": "2026-10-01T02:12:18",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 73,
+  "tool_count": 74,
   "channel_counts": {
     "procfs-read": 19,
     "sysfs-write": 12,
     "netlink-act": 27,
     "netlink-sense": 1,
     "exec": 1,
-    "memory": 13
+    "memory": 13,
+    "shell": 1
   },
   "risk_counts": {
     "R": 27,
-    "W1": 15,
+    "W1": 16,
     "W2": 30,
     "exec按命令": 1
   },
@@ -1772,7 +1773,7 @@
       "name": "memory.search",
       "channel": "memory",
       "risk": "R",
-      "description": "SME 外部记忆语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
+      "description": "系统接口/参数/用法问题必先查本工具：凡涉及 AIKernel 系统接口、/proc/ai 与 /sys/kernel/ai 节点、内核参数、netlink/procfs/sysfs 操作方式、工具用法的问题（怎么调、如何查看、如何配置），必须先用本工具检索 SME 记忆库（含 aikernel-interface 接口语料），依据命中结果再回答或行动，不要凭空猜测接口用法。SME 语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1988,6 +1989,17 @@
       "channel": "memory",
       "risk": "R",
       "description": "观测指标摘要（GET /metrics，Module 10；telemetry 未启用时返回 enabled=false）",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "sys.shell",
+      "channel": "shell",
+      "risk": "W1",
+      "description": "替用户降入交互式维护 shell（bash）。仅当用户明确请求打开 shell / 进入命令行时调用（如「帮我打开一个 shell」）；用户输入 exit 退出后本工具返回，再把控制权交还对话。审计行记录「AI 应请求开启 shell」。",
       "parameters": {
         "type": "object",
         "properties": {},

@@ -215,7 +215,9 @@ int cmd_setup_password(void *shell_ptr, int argc, char **argv)
 	"root 密码：请用户输入命令 setup-password，并说明密码输入不回显、" \
 	"你不会看到密码内容；3) 引导用户选择 AI 模型来源：回复 1 选择本地" \
 	"模型（机器内置 ollama），回复 2 选择云端 API。规则：每次回复不超过" \
-	"3 句话，用中文；不要编造系统状态；不要透露或询问密码本身。"
+	"3 句话，用中文；不要编造系统状态；涉及系统接口、参数或用法的提问" \
+	"先查记忆库（memory.search，含 aikernel-interface 接口语料）再回答，" \
+	"无工具可用时如实说明，不要凭空编造接口；不要透露或询问密码本身。"
 
 /*
  * onboarding_ai_say - 发一段对话给当前模型，打印回复

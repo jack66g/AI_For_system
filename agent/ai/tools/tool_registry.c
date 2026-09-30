@@ -45,6 +45,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_EXEC;
 	if (strcmp(s, "memory") == 0)
 		return TOOL_CH_MEMORY;
+	if (strcmp(s, "shell") == 0)
+		return TOOL_CH_SHELL;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -52,7 +54,7 @@ static const char *channel_str(enum tool_channel ch)
 {
 	static const char *const names[] = {
 		"procfs-read", "sysfs-write", "netlink-act", "netlink-sense",
-		"exec", "memory", "unknown",
+		"exec", "memory", "shell", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)
