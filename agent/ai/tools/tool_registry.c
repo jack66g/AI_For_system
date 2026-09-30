@@ -789,7 +789,10 @@ char *tool_registry_summarize(const struct tool_registry *reg)
 	if (!reg || reg->tool_count <= 0)
 		return NULL;
 
-	/* W4A：与 build_tools_json 同型修复——escape 膨胀上界 + off 钳制 */
+	/* W7S：描述 80 字节截断（UTF-8 边界安全）——TCG 环境下 74 工具全量
+	 * 描述会把 ask 首轮 prompt 撑到 ~6.5k token，prefill 逼近 8k ctx
+	 * 且耗时 15 分钟级；截断后 ~5k token，语义锚（名称/通道/风险/首句）
+	 * 保留。完整描述仍在 tools.json（executor 按 name 路由不受影响）。 */
 	for (i = 0; i < reg->tool_count; i++)
 		cap += (strlen(reg->tools[i].name) +
 			strlen(reg->tools[i].desc)) * 6 + 256;
@@ -800,6 +803,19 @@ char *tool_registry_summarize(const struct tool_registry *reg)
 
 	for (i = 0; i < reg->tool_count; i++) {
 		const struct ai_tool *t = &reg->tools[i];
+		char dtmp[96];
+		const char *desc;
+		size_t dlen;
+
+		/* W7S：80 字节 UTF-8 安全描述截断（见函数头注释） */
+		desc = t->desc ? t->desc : "";
+		dlen = strlen(desc);
+		if (dlen > 80) {
+			dlen = ai_json_utf8_floor(desc, 80);
+			memcpy(dtmp, desc, dlen);
+			dtmp[dlen] = '\0';
+			desc = dtmp;
+		}
 
 #define AI_SUM_CLAMP() \
 		do { if (off > cap - 1) off = cap - 1; } while (0)
@@ -811,12 +827,12 @@ char *tool_registry_summarize(const struct tool_registry *reg)
 			off += (size_t)snprintf(out + off, cap - off,
 						"- %s [%s/%s] %s",
 						t->name, channel_str(t->channel),
-						t->risk, t->desc ? t->desc : "");
+						t->risk, desc);
 		else
 			off += (size_t)snprintf(out + off, cap - off,
 						"- %s [%s] %s",
 						t->name, channel_str(t->channel),
-						t->desc ? t->desc : "");
+						desc);
 		AI_SUM_CLAMP();
 		if (t->param_count > 0) {
 			off += (size_t)snprintf(out + off, cap - off,
