@@ -53,6 +53,7 @@ CH_NETLINK = "netlink-act"
 CH_NLSENSE = "netlink-sense"
 CH_EXEC = "exec"
 CH_MEMORY = "memory"
+CH_SHELL = "shell"
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -471,14 +472,34 @@ def tool_mem(name, risk, desc, props=None, required=None):
     }
 
 
+def tool_shell_drop():
+    """AI 应用户请求降入维护 shell（方案 A：executor 层 fork/exec bash，
+    复用 cmd_shell 内置动作语义；exit 返回后结果回填 ask 闭环）"""
+    return {
+        "name": "sys.shell",
+        "channel": CH_SHELL,
+        "risk": RISK_W1,
+        "description": "替用户降入交互式维护 shell（bash）。仅当用户明确"
+                       "请求打开 shell / 进入命令行时调用（如「帮我打开一个 "
+                       "shell」）；用户输入 exit 退出后本工具返回，再把控制"
+                       "权交还对话。审计行记录「AI 应请求开启 shell」。",
+        "parameters": obj_schema({}, []),
+    }
+
+
 def memory_tools():
     """v2 SME 面 13 工具（原 3 + 新 10）"""
     id_param = {"id": {"type": "string",
                        "description": "记忆 ID（如 m_xxxx）"}}
     return [
         tool_mem("memory.search", RISK_R,
-                 "SME 外部记忆语义检索（POST /memories/search，两段式+混合"
-                 "检索），返回命中记忆 JSON 原文",
+                 "系统接口/参数/用法问题必先查本工具：凡涉及 AIKernel 系统"
+                 "接口、/proc/ai 与 /sys/kernel/ai 节点、内核参数、netlink/"
+                 "procfs/sysfs 操作方式、工具用法的问题（怎么调、如何查看、"
+                 "如何配置），必须先用本工具检索 SME 记忆库（含 "
+                 "aikernel-interface 接口语料），依据命中结果再回答或行动，"
+                 "不要凭空猜测接口用法。SME 语义检索（POST /memories/search，"
+                 "两段式+混合检索），返回命中记忆 JSON 原文",
                  {"text": {"type": "string", "description": "查询文本"},
                   "top_k": {"type": "integer",
                             "description": "返回条数上限（默认 3）",
@@ -568,6 +589,7 @@ def build_tools(procfs_table, sysfs_table):
     tools.append(tool_netlink_sense())
     tools.append(tool_exec_run())
     tools.extend(memory_tools())
+    tools.append(tool_shell_drop())
     return tools
 
 
@@ -695,7 +717,8 @@ def main():
         f"工具总数: {len(tools)}",
         "分通道计数:",
     ]
-    for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC, CH_MEMORY):
+    for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
+               CH_MEMORY, CH_SHELL):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

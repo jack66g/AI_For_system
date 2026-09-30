@@ -28,6 +28,7 @@ enum tool_channel {
 	TOOL_CH_NETLINK_SENSE,	/* v2：NETLINK_AI SENSE 拉遥测（只读） */
 	TOOL_CH_EXEC,
 	TOOL_CH_MEMORY,
+	TOOL_CH_SHELL,		/* v3：AI 应用户请求降入维护 shell（交互） */
 	TOOL_CH_UNKNOWN,
 };
 

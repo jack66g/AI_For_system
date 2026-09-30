@@ -19,7 +19,6 @@
 #   ├── telemetry/YYYY-MM-DD/<cat>_NNNN.parquet + index.parquet
 #   ├── decisions/YYYY-MM-DD/decisions.parquet
 #   ├── decisions/chains_YYYY-MM-DD.parquet
-#   ├── rag_kb/    （RAG 知识库，既有）
 #   └── models/    （训练模型，既有）
 #
 # 依赖：python3 + pyarrow（pip install pyarrow）。
@@ -208,7 +207,7 @@ def schema_index():
 # ---- 落盘 ----
 
 def ensure_root(root: str):
-    for sub in ("telemetry", "decisions", "rag_kb", "models"):
+    for sub in ("telemetry", "decisions", "models"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
 
 
@@ -459,13 +458,3 @@ def netlink_sense(max_records=AI_NL_SENSE_MAX_RECORDS, timeout=2.0):
         sock.close()
 
 
-def rag_index_update(root: str, rag_script: str):
-    """RAG 索引增量更新触发（history 库：Kernel_Modification_Log 等）。"""
-    if not rag_script or not os.path.exists(rag_script):
-        return
-    import subprocess
-    try:
-        subprocess.run([sys.executable, rag_script, "--index", "--only",
-                        "history"], check=True, capture_output=True)
-    except Exception:
-        pass

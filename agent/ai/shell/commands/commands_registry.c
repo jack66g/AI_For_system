@@ -107,7 +107,8 @@ static struct ai_command command_table[] = {
 	},
 	{
 		.name        = "shell",
-		.description = "Escape to bash maintenance shell (exit to return)",
+		.description = "Escape to bash maintenance shell (exit to "
+			       "return), or just ask the AI: 帮我打开一个 shell",
 		.usage       = "shell",
 		.handler     = cmd_shell,
 		.min_args    = 0,
