@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# AI Subsystem Kernel Build
+#
+# This is the kernel build entry for agent/ai/.
+# The user-space AI Shell build uses Makefile (standalone).
+#
+
+obj-$(CONFIG_AIKERNEL_CORE) += core/

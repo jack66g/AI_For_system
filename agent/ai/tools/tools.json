@@ -1,0 +1,1998 @@
+{
+  "version": 2,
+  "generator": "agent/ai/tools/gen_registry.py",
+  "generated_at": "2026-09-30T02:26:42",
+  "source": "AIKernel 内核源码静态梳理",
+  "tool_count": 73,
+  "channel_counts": {
+    "procfs-read": 19,
+    "sysfs-write": 12,
+    "netlink-act": 27,
+    "netlink-sense": 1,
+    "exec": 1,
+    "memory": 13
+  },
+  "risk_counts": {
+    "R": 27,
+    "W1": 15,
+    "W2": 30,
+    "exec按命令": 1
+  },
+  "exec_command_tiers": {
+    "R": 31,
+    "W1": 11,
+    "W2": 5
+  },
+  "tools": [
+    {
+      "name": "procfs.read.status",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/status（只读）：内核 AI 子系统运行状态总览（enabled/模型/内存/统计开关）",
+      "path": "/proc/ai/status",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.decisions",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/decisions（只读）：决策记录 ring 快照（4096 条，含 decision/outcome 全字段）",
+      "path": "/proc/ai/decisions",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.chains",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/chains（只读）：因果链视图（trigger_event_id → decision_id → outcome）",
+      "path": "/proc/ai/chains",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.control",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/control（只读）：可控制参数表（23 个参数的 name/domain/min/max/current/default）",
+      "path": "/proc/ai/control",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.latency",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/latency（只读）：决策/感知延迟统计（执行耗时直方图）",
+      "path": "/proc/ai/latency",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.hitrate",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/hitrate（只读）：策略命中率统计（attempts/hits）",
+      "path": "/proc/ai/hitrate",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.telemetry",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/telemetry（只读）：遥测 ring 转储（全类别事件记录；读，写见 procfs.write.*）",
+      "path": "/proc/ai/telemetry",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.sched_stats",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/sched/stats（只读）：调度域遥测统计（AI 采样器累计）",
+      "path": "/proc/ai/sched/stats",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.sched_classify",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/sched/classify（只读）：调度分类接口（AI 识别的任务分类结果）",
+      "path": "/proc/ai/sched/classify",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.vfs_stats",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/vfs/stats（只读）：VFS/B 轨遥测统计（挂载/文件锁/poll/错误）",
+      "path": "/proc/ai/vfs/stats",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.vfs_rates",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/vfs/rates（只读）：VFS 事件速率统计",
+      "path": "/proc/ai/vfs/rates",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.telemetry_emitted",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/telemetry_emitted（只读）：遥测已发射事件计数（全 CPU 合计）",
+      "path": "/sys/kernel/ai/stats/telemetry_emitted",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.telemetry_dropped",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/telemetry_dropped（只读）：遥测丢弃事件计数（ring 满等）",
+      "path": "/sys/kernel/ai/stats/telemetry_dropped",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.telemetry_sampled_skip",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/telemetry_sampled_skip（只读）：遥测采样跳过计数",
+      "path": "/sys/kernel/ai/stats/telemetry_sampled_skip",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.decisions_total",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/decisions_total（只读）：决策总尝试数（策略匹配计数）",
+      "path": "/sys/kernel/ai/stats/decisions_total",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.decisions_hit",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/decisions_hit（只读）：决策命中数",
+      "path": "/sys/kernel/ai/stats/decisions_hit",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.decisions_hitrate_permille",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/decisions_hitrate_permille（只读）：决策命中率（千分比）",
+      "path": "/sys/kernel/ai/stats/decisions_hitrate_permille",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.stats.runtime_state",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/stats/runtime_state（只读）：Runtime 状态机当前值",
+      "path": "/sys/kernel/ai/stats/runtime_state",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "procfs.read.cgroup.inferences",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/fs/cgroup/ai.inferences（只读）：cgroup AI 已发起推理计数（RO）",
+      "path": "/sys/fs/cgroup/ai.inferences",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "sysfs.write.enabled",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/enabled（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：AI 子系统总开关（1/0；写 1 会幂等拉起 Runtime）",
+      "path": "/sys/kernel/ai/enabled",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.model_load",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/model_load（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：加载 AIKWMDL v1 格式模型（AIKernel/tools 或 ~/w1k-model/gen_model.py 可生成），旧 echo 语义已废",
+      "path": "/sys/kernel/ai/model_load",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "模型名或路径"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.model_unload",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/model_unload（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：按名卸载模型",
+      "path": "/sys/kernel/ai/model_unload",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "模型名"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_think",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/think（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：触发一次内核决策闭环（格式: event_id,domain,type,value[,pid]；走 ai_runtime_think 全流程，等价第 2 决策来源）",
+      "path": "/sys/kernel/ai/policy/think",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "格式: <event_id>,<domain>,<type>,<value>[,<pid>]"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_outcome",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/outcome（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：上报决策结果（决策闭环第 4 步，格式: decision_id,outcome,metric_delta）",
+      "path": "/sys/kernel/ai/policy/outcome",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "格式: <decision_id>,<outcome 0-4>,<metric_delta>"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_global_enable",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/global_enable（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：决策执行全局闸门（关闭后 ai_policy_execute 单分支拒绝）",
+      "path": "/sys/kernel/ai/policy/global_enable",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=允许决策执行 0=全局拒绝"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_max_impact_pct",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/max_impact_pct（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：安全边界：决策参数最大影响幅度（百分比）",
+      "path": "/sys/kernel/ai/policy/max_impact_pct",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "最大影响幅度百分比"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_rollback",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/rollback（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：按 decision_id 回退决策（恢复决策前快照值）",
+      "path": "/sys/kernel/ai/policy/rollback",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "decision_id"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_refresh",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/refresh（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：同步策略目录（扫描策略注册表，幂等新建 <name> 开关文件）",
+      "path": "/sys/kernel/ai/policy/refresh",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "任意非空内容触发"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "sysfs.write.policy_chain_dir",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/policy/chain_dir（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：因果链 CSV 导出根目录",
+      "path": "/sys/kernel/ai/policy/chain_dir",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "导出目录绝对路径"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "procfs.write.telemetry_format",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "切换遥测输出格式：format=raw（原始定长记录）或 format=human（文本行，默认）。影响后续读 /proc/ai/telemetry 与 SENSE 输出（写 /proc/ai/telemetry，value 取 ['format=raw', 'format=human']）",
+      "path": "/proc/ai/telemetry",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "固定取值: format=raw/format=human",
+            "enum": [
+              "format=raw",
+              "format=human"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "procfs.write.telemetry_reset",
+      "channel": "sysfs-write",
+      "risk": "W2",
+      "description": "清空全部遥测/决策 ring（需 CAP_SYS_ADMIN；记录不可恢复，慎用——如需留档先在 procfs 侧导出）（写 /proc/ai/telemetry，value 取 ['reset']）",
+      "path": "/proc/ai/telemetry",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "固定取值: reset",
+            "enum": [
+              "reset"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sched.nice",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sched.nice：设置进程 nice 值（实时生效；data[0]=pid data[1]=value） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sched.nice",
+      "domain": 1,
+      "task_param": true,
+      "value_min": -20,
+      "value_max": 19,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [-20, 19]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": -20,
+            "maximum": 19
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "pid",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sched.affinity",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sched.affinity：设置进程 CPU 亲和（掩码/编号，实时生效；同上 data 约定） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sched.affinity",
+      "domain": 1,
+      "task_param": true,
+      "value_min": 0,
+      "value_max": 255,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 255]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "pid",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sched.oom_score",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sched.oom_score：设置进程 oom_score_adj（实时生效；同上 data 约定） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sched.oom_score",
+      "domain": 1,
+      "task_param": true,
+      "value_min": -1000,
+      "value_max": 1000,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [-1000, 1000]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": -1000,
+            "maximum": 1000
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "pid",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sched.timeslice",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sched.timeslice：调度时间片参数（EEVDF base_slice，单位 0.1ms；安全限幅+快照+记录） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sched.timeslice",
+      "domain": 1,
+      "task_param": false,
+      "value_min": 1,
+      "value_max": 1000,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [1, 1000]，内核默认 20，客户端与内核双层钳制）",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.mm.swappiness",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 mm.swappiness：内存换页倾向 swappiness（实时生效，经 mm/vmscan.c 门控访问器） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "mm.swappiness",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 100,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 100]，内核默认 60，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.mm.readahead",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 mm.readahead：预读窗口 KB（写全部 bdi ra_pages，与 /sys/class/bdi/*/readahead_kb 同源，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "mm.readahead",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 4096,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 4096]，内核默认 128，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.mm.thp",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 mm.thp：透明大页模式（0=never 1=madvise 2=always，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "mm.thp",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 2,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 2]，内核默认 1，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.mm.reclaim_prio",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 mm.reclaim_prio：回收优先级（映射 /proc/sys/vm/vfs_cache_pressure） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "mm.reclaim_prio",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 100,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 100]，内核默认 60，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.io.priority",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 io.priority：I/O 优先级（实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "io.priority",
+      "domain": 3,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 7,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 7]，内核默认 4，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 7
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.io.bandwidth",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 io.bandwidth：写回带宽比 max_ratio（百分比；0=恢复默认 100；与 /sys/class/bdi/*/max_ratio 同源，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "io.bandwidth",
+      "domain": 3,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 100,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 100]，内核默认 100，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.net.cwnd",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 net.cwnd：TCP 拥塞窗口参数（仅作用于 ai_cca 拥塞控制算法的连接） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "net.cwnd",
+      "domain": 4,
+      "task_param": false,
+      "value_min": 1,
+      "value_max": 4096,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [1, 4096]，内核默认 256，客户端与内核双层钳制）",
+            "minimum": 1,
+            "maximum": 4096
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.net.rto",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 net.rto：TCP 重传超时参数 ms（实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "net.rto",
+      "domain": 4,
+      "task_param": false,
+      "value_min": 1,
+      "value_max": 10000,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [1, 10000]，内核默认 200，客户端与内核双层钳制）",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.net.qdisc",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 net.qdisc：诚实保留 reserved：运行时 graft（dev_graft_qdisc）实测冻结网络栈，无安全实现路径；仅支持查询 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "net.qdisc",
+      "domain": 4,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 2,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 2]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.net.nftables",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 net.nftables：AIKernel 自有 netfilter LOCAL_OUT 采集钩子开关（真注册/真计数），非 nft chain（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "net.nftables",
+      "domain": 4,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.power.freq",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 power.freq：aiguard 频率上限万分比（如 3000=30%；经 aiguard governor 真实钳制；QEMU 无 cpufreq 时作用于请求表，实机直接生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "power.freq",
+      "domain": 6,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 10000,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 10000]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.power.cstate",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 power.cstate：CPU DMA 延迟容忍（单位 ×100us；经 PM QoS /dev/cpu_dma_latency 真实生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "power.cstate",
+      "domain": 6,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 10,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 10]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.power.wakeup",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 power.wakeup：调度唤醒事件采集开关（sched_wakeup tracepoint 探针门控：0=停采 1=采集）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "power.wakeup",
+      "domain": 6,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 1，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sec.lsm_override",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sec.lsm_override：AIKernel 自家 LSM 执行档位（0=observe 只观测 1=enforce 按规则拦截；默认 0）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sec.lsm_override",
+      "domain": 5,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sec.seccomp",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sec.seccomp：向 AIKernel LSM 决策表注入/解除目标 pid 的 deny 规则（lsm=ai 启用时真实拦截），非 seccomp BPF（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sec.seccomp",
+      "domain": 5,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.sec.audit",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 sec.audit：AIKernel 审计采集开关（0=停采、事件在 gate 直接丢弃 1=采集关联）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "sec.audit",
+      "domain": 5,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.proc.signal",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 proc.signal：向目标进程投递信号（data[0]=pid data[1]=信号号；kthread/init 受保护拒绝，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "proc.signal",
+      "domain": 12,
+      "task_param": true,
+      "value_min": 0,
+      "value_max": 64,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 64]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "pid",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.proc.freeze",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 proc.freeze：冻结/解冻目标进程（data[0]=pid data[1]=1 冻结 SIGSTOP / 0 解冻 SIGCONT，实时生效）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "proc.freeze",
+      "domain": 12,
+      "task_param": true,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "pid",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.proc.rlimit",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 proc.rlimit：设置目标进程资源软限（data[0]=pid data[1]=软限值 data[2]=资源号 res，prlimit64 语义仅改 cur，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "proc.rlimit",
+      "domain": 12,
+      "task_param": true,
+      "value_min": 0,
+      "value_max": 1000000,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 PID（>0）",
+            "minimum": 1
+          },
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1000000]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "res": {
+            "type": "integer",
+            "description": "rlimit 资源号（内核 RLIMIT_* 常量：7=NOFILE 9=STACK 4=CORE…；缺省 7）",
+            "minimum": 0,
+            "maximum": 15
+          }
+        },
+        "required": [
+          "pid",
+          "value",
+          "res"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.ai.decision_inject",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 ai.decision_inject：AI 决策注入全局总开关：开启后内核 5 个决策挂点（OOM 评分/vruntime 加权/唤醒抢占/预读窗口/回收优先级）按 per-hook 使能真实生效启发式偏置；默认关=与原生行为一致（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "ai.decision_inject",
+      "domain": 5,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.ai.decision_oom",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 ai.decision_oom：OOM 受害者评分偏置使能（交互式保护/批处理加压，badness ±200；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "ai.decision_oom",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.ai.decision_sched",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 ai.decision_sched：调度决策注入使能（vruntime 加权 ±10% + 唤醒抢占提示，成对开关；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "ai.decision_sched",
+      "domain": 1,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.act.ai.decision_mm",
+      "channel": "netlink-act",
+      "risk": "W2",
+      "description": "NETLINK_AI ACT 下发可控参数 ai.decision_mm：内存决策注入使能（预读窗口 ±1 档 + 回收扫描优先级 ±1，成对开关；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "param": "ai.decision_mm",
+      "domain": 2,
+      "task_param": false,
+      "value_min": 0,
+      "value_max": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "integer",
+            "description": "模型置信度 0-100（默认 50）",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "netlink.sense",
+      "channel": "netlink-sense",
+      "risk": "R",
+      "description": "NETLINK_AI SENSE 拉取内核感知遥测（AI_CMD_SENSE，只读，要求 AI 子系统已启用）：按 CPU 读取遥测记录，human 格式返回遥测文本，raw 格式返回二进制流统计",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "string",
+            "description": "\"all\" 或 CPU 编号（如 \"0\"）",
+            "default": "all"
+          },
+          "count": {
+            "type": "integer",
+            "description": "最多拉取记录数（1-4096）",
+            "minimum": 1,
+            "maximum": 4096,
+            "default": 128
+          },
+          "format": {
+            "type": "string",
+            "description": "输出格式（默认 human）",
+            "enum": [
+              "raw",
+              "human"
+            ],
+            "default": "human"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "exec.run",
+      "channel": "exec",
+      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL；stdin 接 /dev/null（无参 cat 不会挂起）",
+      "exec": {
+        "default_timeout": 30,
+        "commands": [
+          {
+            "command": "ls",
+            "risk": "R",
+            "bin": "/usr/bin/ls"
+          },
+          {
+            "command": "cat",
+            "risk": "R",
+            "bin": "/usr/bin/cat"
+          },
+          {
+            "command": "head",
+            "risk": "R",
+            "bin": "/usr/bin/head"
+          },
+          {
+            "command": "tail",
+            "risk": "R",
+            "bin": "/usr/bin/tail"
+          },
+          {
+            "command": "grep",
+            "risk": "R",
+            "bin": "/usr/bin/grep"
+          },
+          {
+            "command": "ps",
+            "risk": "R",
+            "bin": "/usr/bin/ps"
+          },
+          {
+            "command": "free",
+            "risk": "R",
+            "bin": "/usr/bin/free"
+          },
+          {
+            "command": "df",
+            "risk": "R",
+            "bin": "/usr/bin/df"
+          },
+          {
+            "command": "uname",
+            "risk": "R",
+            "bin": "/usr/bin/uname"
+          },
+          {
+            "command": "uptime",
+            "risk": "R",
+            "bin": "/usr/bin/uptime"
+          },
+          {
+            "command": "date",
+            "risk": "R",
+            "bin": "/usr/bin/date"
+          },
+          {
+            "command": "dmesg",
+            "risk": "R",
+            "bin": "/usr/bin/dmesg"
+          },
+          {
+            "command": "ip",
+            "risk": "R",
+            "bin": "/usr/bin/ip"
+          },
+          {
+            "command": "ss",
+            "risk": "R",
+            "bin": "/usr/bin/ss"
+          },
+          {
+            "command": "stat",
+            "risk": "R",
+            "bin": "/usr/bin/stat"
+          },
+          {
+            "command": "wc",
+            "risk": "R",
+            "bin": "/usr/bin/wc"
+          },
+          {
+            "command": "sort",
+            "risk": "R",
+            "bin": "/usr/bin/sort"
+          },
+          {
+            "command": "uniq",
+            "risk": "R",
+            "bin": "/usr/bin/uniq"
+          },
+          {
+            "command": "cut",
+            "risk": "R",
+            "bin": "/usr/bin/cut"
+          },
+          {
+            "command": "which",
+            "risk": "R",
+            "bin": "/usr/bin/which"
+          },
+          {
+            "command": "whereis",
+            "risk": "R",
+            "bin": "/usr/bin/whereis"
+          },
+          {
+            "command": "lsblk",
+            "risk": "R",
+            "bin": "/usr/bin/lsblk"
+          },
+          {
+            "command": "du",
+            "risk": "R",
+            "bin": "/usr/bin/du"
+          },
+          {
+            "command": "lscpu",
+            "risk": "R",
+            "bin": "/usr/bin/lscpu"
+          },
+          {
+            "command": "vmstat",
+            "risk": "R",
+            "bin": "/usr/bin/vmstat"
+          },
+          {
+            "command": "pidof",
+            "risk": "R",
+            "bin": "/usr/bin/pidof"
+          },
+          {
+            "command": "pgrep",
+            "risk": "R",
+            "bin": "/usr/bin/pgrep"
+          },
+          {
+            "command": "id",
+            "risk": "R",
+            "bin": "/usr/bin/id"
+          },
+          {
+            "command": "journalctl",
+            "risk": "R",
+            "bin": "/usr/bin/journalctl",
+            "timeout": 60,
+            "args_template": [
+              "--no-pager"
+            ]
+          },
+          {
+            "command": "curl",
+            "risk": "R",
+            "bin": "/usr/bin/curl",
+            "timeout": 60
+          },
+          {
+            "command": "ollama",
+            "risk": "R",
+            "bin": "/usr/local/bin/ollama",
+            "timeout": 60
+          },
+          {
+            "command": "systemctl",
+            "risk": "W2",
+            "bin": "/usr/bin/systemctl",
+            "timeout": 60,
+            "args_template": [
+              "--no-pager"
+            ],
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "list-units",
+                "risk": "R"
+              },
+              {
+                "verb": "is-active",
+                "risk": "R"
+              },
+              {
+                "verb": "is-enabled",
+                "risk": "R"
+              },
+              {
+                "verb": "start",
+                "risk": "W2"
+              },
+              {
+                "verb": "stop",
+                "risk": "W2"
+              },
+              {
+                "verb": "restart",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "ping",
+            "risk": "W1",
+            "bin": "/usr/bin/ping",
+            "path_check": true
+          },
+          {
+            "command": "mkdir",
+            "risk": "W1",
+            "bin": "/usr/bin/mkdir",
+            "path_check": true
+          },
+          {
+            "command": "touch",
+            "risk": "W1",
+            "bin": "/usr/bin/touch",
+            "path_check": true
+          },
+          {
+            "command": "cp",
+            "risk": "W1",
+            "bin": "/usr/bin/cp",
+            "path_check": true
+          },
+          {
+            "command": "mv",
+            "risk": "W1",
+            "bin": "/usr/bin/mv",
+            "path_check": true
+          },
+          {
+            "command": "ln",
+            "risk": "W1",
+            "bin": "/usr/bin/ln",
+            "path_check": true
+          },
+          {
+            "command": "sed",
+            "risk": "W1",
+            "bin": "/usr/bin/sed",
+            "path_check": true
+          },
+          {
+            "command": "tee",
+            "risk": "W1",
+            "bin": "/usr/bin/tee",
+            "path_check": true
+          },
+          {
+            "command": "tar",
+            "risk": "W1",
+            "bin": "/usr/bin/tar",
+            "timeout": 120,
+            "path_check": true
+          },
+          {
+            "command": "gzip",
+            "risk": "W1",
+            "bin": "/usr/bin/gzip",
+            "timeout": 120,
+            "path_check": true
+          },
+          {
+            "command": "traceroute",
+            "risk": "W1",
+            "bin": "/usr/bin/traceroute",
+            "timeout": 60
+          },
+          {
+            "command": "kill",
+            "risk": "W2",
+            "bin": "/usr/bin/kill"
+          },
+          {
+            "command": "apt",
+            "risk": "W2",
+            "bin": "/usr/bin/apt",
+            "timeout": 300
+          },
+          {
+            "command": "dpkg",
+            "risk": "W2",
+            "bin": "/usr/bin/dpkg",
+            "timeout": 300
+          },
+          {
+            "command": "passwd",
+            "risk": "W2",
+            "bin": "/usr/bin/passwd"
+          }
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "命令名（白名单内）",
+            "enum": [
+              "ls",
+              "cat",
+              "head",
+              "tail",
+              "grep",
+              "ps",
+              "free",
+              "df",
+              "uname",
+              "uptime",
+              "date",
+              "dmesg",
+              "ip",
+              "ss",
+              "stat",
+              "wc",
+              "sort",
+              "uniq",
+              "cut",
+              "which",
+              "whereis",
+              "lsblk",
+              "du",
+              "lscpu",
+              "vmstat",
+              "pidof",
+              "pgrep",
+              "id",
+              "journalctl",
+              "curl",
+              "ollama",
+              "systemctl",
+              "ping",
+              "mkdir",
+              "touch",
+              "cp",
+              "mv",
+              "ln",
+              "sed",
+              "tee",
+              "tar",
+              "gzip",
+              "traceroute",
+              "kill",
+              "apt",
+              "dpkg",
+              "passwd"
+            ]
+          },
+          "args": {
+            "type": "array",
+            "description": "命令参数列表（如 [\"-h\"]；含元字符/超 256 字符整条拒绝）",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "memory.search",
+      "channel": "memory",
+      "risk": "R",
+      "description": "SME 外部记忆语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "查询文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "返回条数上限（默认 3）",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "memory.add",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "写入一条记忆到 SME（POST /memories），供后续 ask 检索",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "记忆文本"
+          },
+          "metadata": {
+            "type": "string",
+            "description": "可选元数据 JSON 对象字符串"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "memory.stats",
+      "channel": "memory",
+      "risk": "R",
+      "description": "查询 SME 记忆库统计（GET /stats，含记忆数/Region 数/graph 边数）",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "memory.get",
+      "channel": "memory",
+      "risk": "R",
+      "description": "按 ID 读取单条记忆全文（GET /memories/{id}）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID（如 m_xxxx）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "memory.hit",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "Ebbinghaus 强化：命中计数 +1、检索权重上调（POST /memories/{id}/hit）；对检索命中的记忆及时调用",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID（如 m_xxxx）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "memory.archive",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "归档记忆（POST /memories/{id}/archive）：默认检索不可见，不删除",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID（如 m_xxxx）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "memory.restore",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "恢复归档记忆（POST /memories/{id}/restore）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID（如 m_xxxx）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "memory.facts_multi_hop",
+      "channel": "memory",
+      "risk": "R",
+      "description": "知识图谱多跳查询（POST /facts/multi_hop）：按文本找实体并沿关系跳转；factgraph 模块未启用时返回 enabled=false",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "实体查询文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "上限（默认 10）",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "memory.regions_search",
+      "channel": "memory",
+      "risk": "R",
+      "description": "空间区域检索（POST /regions/search）：返回最相关 Region",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "查询文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "区域上限（默认 5）",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "memory.consolidate",
+      "channel": "memory",
+      "risk": "W2",
+      "description": "触发记忆巩固（POST /consolidate）：聚类生成摘要记忆，会新增派生记忆（created 数组）",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "memory.compress",
+      "channel": "memory",
+      "risk": "W2",
+      "description": "触发记忆压缩（POST /compress）：生成压缩摘要，会新增派生记忆",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "memory.export",
+      "channel": "memory",
+      "risk": "R",
+      "description": "全量导出记忆库 JSON（GET /export）落盘到 /tmp 文件，返回文件路径与预览",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "导出文件路径（默认 /tmp/sme-export.json）"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "memory.metrics",
+      "channel": "memory",
+      "risk": "R",
+      "description": "观测指标摘要（GET /metrics，Module 10；telemetry 未启用时返回 enabled=false）",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ]
+}

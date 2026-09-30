@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# AI Agent Subsystem Kconfig
+#
+# Top-level menu for AI Agent kernel integration.
+# When CONFIG_AI_AGENT is enabled, the kernel build descends into agent/ai/.
+#
+
+menu "AI Agent Support"
+
+config AI_AGENT
+	bool "AI Agent Support"
+	default n
+	help
+	  Enable AI Agent Subsystem in the Linux kernel.
+
+	  This provides kernel-level infrastructure for AI inference,
+	  including a kernel-to-userspace interface (/dev/ai, sysfs, netlink)
+	  and an AI runtime framework.
+
+	  The AI Agent does NOT run large language models inside the kernel.
+	  It provides the low-level interface for user-space AI runtimes
+	  to communicate with kernel services.
+
+	  If unsure, say N.
+
+source "agent/ai/Kconfig"
+
+endmenu

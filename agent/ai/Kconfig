@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# AIKernel - AI Subsystem Kconfig
+#
+# 本文件定义 AI 子系统的内核配置选项。
+# 由 agent/Kconfig 引入，在 AI_AGENT 菜单内。
+
+menu "AI Kernel Subsystem"
+
+config AIKERNEL_AGENT
+	bool "AI Kernel Subsystem (Agent)"
+	depends on AI_AGENT
+	default n
+	help
+	  Enable the AI Kernel Subsystem.
+	  This provides an AI Runtime and AI Shell for kernel-integrated
+	  AI inference capabilities.
+
+	  This is a user-space tool built alongside the kernel.
+	  It does not modify core kernel functionality (Scheduler,
+	  Memory, VFS) in phase 1.
+
+	  NOTE: renamed from AIKERNEL to AIKERNEL_AGENT (Prompt 01) to make
+	  room for the AIKernel total switch CONFIG_AIKERNEL (AIKernel/Kconfig).
+
+	  If unsure, say N.
+
+config AIKERNEL_CORE
+	bool "AI Kernel Core Module"
+	depends on AIKERNEL_AGENT
+	default y
+	help
+	  Build the AI kernel core module (agent/ai/core/).
+	  Provides kernel-side AI infrastructure: registration,
+	  request handling, and event dispatch.
+
+config AIKERNEL_SHELL
+	bool "AI Shell"
+	depends on AIKERNEL_AGENT
+	default y
+	help
+	  Build the AI Shell interactive CLI tool.
+	  The AI Shell provides an interactive command-line interface
+	  similar to git or docker for AI operations.
+
+config AIKERNEL_CLOUD_PROVIDER
+	bool "Cloud AI Provider (OpenAI Compatible)"
+	depends on AIKERNEL_AGENT
+	default y
+	help
+	  Enable the OpenAI-compatible Cloud AI Provider.
+	  Supports all services using the OpenAI Chat Completions API:
+	  DeepSeek, OpenAI, Qwen, Moonshot, OpenRouter, SiliconFlow, etc.
+	  Includes true incremental streaming (SSE over chunked HTTP/HTTPS)
+	  when AIKERNEL_STREAM_MODE is also enabled.
+	  This switch gates the build: agent/ai/Makefile compiles
+	  cloud/provider_openai_compatible.c, cloud/http/http_client.c,
+	  cloud/tls/tls_manager.c and the cloud backend only when set.
+
+config AIKERNEL_LOCAL_PROVIDER
+	bool "Local AI Provider (Ollama / OpenAI-compatible local server)"
+	depends on AIKERNEL_AGENT
+	default y
+	help
+	  Enable the Local AI Provider for on-device model inference via
+	  an OpenAI-compatible local server (Ollama, llama.cpp server,
+	  LM Studio). Covers both protocols: OpenAI /v1 and Ollama native
+	  /api/chat (the only channel supporting options.num_ctx).
+	  This switch gates the build: agent/ai/Makefile compiles
+	  local/provider_local.c, local_chat.c, local_http.c,
+	  ollama_native.c and the local backend only when set.
+	  The provider registry, status and model management reflect the
+	  switch: with it off, no local provider is registered.
+
+config AIKERNEL_STREAM_MODE
+	bool "Stream Mode Support (SSE / NDJSON incremental output)"
+	depends on AIKERNEL_AGENT
+	default y
+	help
+	  Enable streaming response support. True incremental delivery:
+	  each delta.content is flushed to the terminal as it arrives
+	  (cloud: SSE over chunked HTTP/HTTPS with incremental chunked
+	  decoding; local: SSE / Ollama NDJSON). Falls back to
+	  non-streaming requests when the switch is off, and
+	  `config set stream on` then reports that streaming is not
+	  compiled in instead of silently pretending.
+	  This switch gates the build: agent/ai/Makefile compiles
+	  local/local_stream.c and runtime/communication/stream_parse.c
+	  (and the streaming branches of both backends) only when set.
+
+endmenu

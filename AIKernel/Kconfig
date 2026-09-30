@@ -1,0 +1,253 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# AIKernel - AI 内核融合重构子系统 Kconfig
+#
+# 本文件是 AIKernel 的总配置菜单。
+# 总开关 CONFIG_AIKERNEL（default n）+ 每个子模块独立开关（全部 default n）。
+# 关闭时所有 AI 功能为零开销（static inline 空函数），内核行为与原生一致。
+#
+# 注：agent/ai/Kconfig 的旧总开关已改名为 CONFIG_AIKERNEL_AGENT，
+#     避免与本文件 CONFIG_AIKERNEL 符号冲突（见 AIKernel_Design/01_*.md）。
+
+menu "AIKernel"
+
+config AIKERNEL
+	bool "AIKernel - AI 内核融合重构总开关"
+	default n
+	help
+	  AIKernel：Linux 内核深度 AI 融合重构的总开关。
+	  启用后可在内核全部核心子系统（调度/内存/网络/文件系统/安全/电源等）
+	  埋入 AI 感知（ai_telemetry_*）与控制（ai_policy_* / ai_*_hook）能力，
+	  AI Runtime 作为中枢统一调度。
+
+	  AIKernel 贯彻 all-ai 理念：感知数据全量、原始、零脱敏；
+	  单次遥测写入目标 < 100ns（per-CPU ring buffer，无锁）。
+
+	  所有子模块开关均默认关闭；不确定时保持默认（n），零开销零回归。
+
+	  If unsure, say N.
+
+config AIKERNEL_RUNTIME
+	bool "AIKernel Runtime 核心"
+	depends on AIKERNEL
+	default n
+	help
+	  构建 AI Runtime 核心（AIKernel/core/ai_runtime.c）：
+	  模型注册/注销、推理请求提交（ai_runtime_chat/think）、回调管理、
+	  生命周期管理。AI Runtime 是全部 AI 能力的执行中枢。
+
+	  Prompt 13 强化（决策控制闭环 + 因果链）：
+	    - 决策策略引擎（ai_policy.c）：域+动作注册表、决策执行器
+	      （<200ns、可回退）、决策记录（数据计划 23.2 全字段）4096 条 ring、
+	      outcome 回写（trigger→decision→outcome 闭环）；
+	    - 安全边界（ai_policy_safety.c）：/sys/kernel/ai/policy/global_enable
+	      一键关闭、max_impact_pct 最大影响幅度、决策快照回滚（rollback）；
+	    - 可控制参数表（ai_control.c）：数据计划 20.3 七域参数，每条=一个
+	      策略接口（mm.swappiness/sched.nice/affinity/oom_score 立即生效，
+	      其余接口预留）；
+	    - 因果链（ai_causal.c）：/proc/ai/chains + /var/lib/aikernel/
+	      causal_chains/YYYY-MM-DD/ CSV 导出（parquet 由 aikd 落盘）；
+	    - AI 自我观测（第18类遥测）：AI_DECISION/AI_OUTCOME 事件回写 ring。
+
+	  If unsure, say N.
+
+config AIKERNEL_SCHED
+	bool "AIKernel 调度子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 调度：AIKernel/sched/。在调度器决策点埋入 AI Hook，
+	  支持负载预测、调度策略优化（Prompt 03 实现）。
+
+	  If unsure, say N.
+
+config AIKERNEL_MM
+	bool "AIKernel 内存管理子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 内存管理：AIKernel/mm/。页面预测、回收策略、OOM 决策（Prompt 04）。
+
+	  If unsure, say N.
+
+config AIKERNEL_AI_ZONE
+	bool "AIKernel AI 专用内存区（预留骨架）"
+	depends on AIKERNEL_MM
+	default n
+	help
+	  AI 专用内存区域预留骨架（AIKernel/mm/ai_zone.c）：
+	  为 AI 推理模型保留的快速内存区域（重构计划 3.11）。
+	  本步仅建 region 注册表骨架（reserve/release/query），
+	  实际的内存映射与模型驻留策略由后续 Prompt 填充。
+
+	  If unsure, say N.
+
+config AIKERNEL_IO
+	bool "AIKernel I/O 子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI I/O：AIKernel/io/。I/O 调度、预读优化、写回策略（Prompt 05）。
+
+	  If unsure, say N.
+
+config AIKERNEL_NET
+	bool "AIKernel 网络子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 网络：AIKernel/net/。拥塞控制、流量分类、攻击检测（Prompt 06）。
+
+	  If unsure, say N.
+
+config AIKERNEL_SECURITY
+	bool "AIKernel 安全子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 安全：AIKernel/security/。入侵检测、异常行为识别（Prompt 07）。
+
+	  If unsure, say N.
+
+config AIKERNEL_POWER
+	bool "AIKernel 电源管理子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 电源：AIKernel/power/。频率/休眠决策、功耗优化（Prompt 10）。
+
+	  If unsure, say N.
+
+config AIKERNEL_VFS
+	bool "AIKernel VFS 子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI VFS：AIKernel/vfs/。缓存策略、文件预取、异常检测（Prompt 08）。
+
+	  If unsure, say N.
+
+config AIKERNEL_INTERRUPT
+	bool "AIKernel 中断子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 中断：AIKernel/interrupt/。中断预测、watchdog 自适应（Prompt 09）。
+
+	  If unsure, say N.
+
+config AIKERNEL_LOCK
+	bool "AIKernel 同步锁子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 同步：AIKernel/lock/。锁策略优化、死锁预测（Prompt 09）。
+
+	  If unsure, say N.
+
+config AIKERNEL_TIME
+	bool "AIKernel 时间子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 时间：AIKernel/time/。定时器优化、时钟源选择（Prompt 09）。
+
+	  If unsure, say N.
+
+config AIKERNEL_VIRT
+	bool "AIKernel 虚拟化子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  AI 虚拟化：AIKernel/virt/。VM 调度、内存管理（Prompt 10）。
+
+	  If unsure, say N.
+
+config AIKERNEL_BPF
+	bool "AIKernel BPF 集成"
+	depends on AIKERNEL && BPF && BPF_SYSCALL && PERF_EVENTS
+	default n
+	help
+	  AI + BPF：AIKernel/bpf/。BPF 程序协同（bpf_ai_query/bpf_ai_telemetry
+	  helper、BPF_MAP_TYPE_AI_MODEL 模型参数 map）、Tracing/Perf 集成
+	  （AI 观察 Hook + AI PMU 事件 ai/inference、ai/decision、
+	  ai/telemetry_write）、第14类感知（Prompt 11）。
+
+	  If unsure, say N.
+
+config AIKERNEL_TELEMETRY
+	bool "AIKernel 遥测子系统"
+	depends on AIKERNEL
+	default n
+	help
+	  构建 AI 遥测采集核心（AIKernel/core/ai_telemetry.c）：
+	  per-CPU ring buffer（每 CPU 128KB，单次写入 < 100ns，无锁）、
+	  17 大类 101 子类事件枚举、采样开关、全量原始数据（零脱敏）。
+
+	  这是全系统唯一的 AI 感知写入入口，所有子系统埋点共用。
+	  关闭时所有 ai_telemetry_* 为 static inline 空函数，零开销。
+
+	  If unsure, say N.
+
+config AIKERNEL_USRIFACE
+	bool "AIKernel 用户态接口层（sysfs/procfs + 启动参数）"
+	depends on AIKERNEL && AIKERNEL_RUNTIME
+	default n
+	help
+	  构建 AI 用户态接口（Prompt 02）：
+	    - AIKernel/core/ai_startup.c：ai.* 启动参数（ai.enabled/model_path/log_level）
+	    - AIKernel/core/ai_sysfs.c：/sys/kernel/ai/ 控制面
+	      （enabled/model_load/model_unload/policy/<name>/stats/）
+	    - AIKernel/core/ai_procfs.c：/proc/ai/ 状态面
+	      （status/decisions/latency/hitrate/telemetry 流式出口，raw/human 双模式）
+	  ai.enabled=0 启动时全部节点不创建（与原生内核行为一致）。
+	  写操作统一 CAP_SYS_ADMIN 校验（LSM capable 路径）。
+
+	  If unsure, say N.
+
+config AIKERNEL_NETLINK
+	bool "AIKernel NETLINK_AI 协议族"
+	depends on AIKERNEL && AIKERNEL_RUNTIME && NET
+	default n
+	help
+	  构建 NETLINK_AI 协议族（AIKernel/net/ai_netlink.c，编号 31）：
+	    - AI_CMD_SENSE：一条消息拉取最近 N 条感知记录（上限 4096，raw/human）
+	    - AI_CMD_ACT：下发决策指令并执行对应决策域策略（CAP_SYS_ADMIN）
+	    - AI_CMD_REG：注册回调（异步事件推送预留，CAP_SYS_ADMIN）
+	  AI Runtime 与内核通信的高速通道（接口契约见
+	  include/uapi/linux/ai_netlink.h）。
+
+	  If unsure, say N.
+
+config AIKERNEL_CGROUP
+	bool "AIKernel cgroup 控制器（ai）"
+	depends on AIKERNEL && AIKERNEL_RUNTIME && CGROUPS
+	default n
+	help
+	  构建 ai.cgroup 控制器（AIKernel/core/ai_cgroup.c）：
+	  Prompt 02 骨架（css 分配/上线/释放 + ai.inferences 计数 +
+	  ai.max_inferences 上限字段）已填充（Prompt 12）：
+	    - ai.max_inferences 强制生效（超限 → AI_ERR_BUSY 拒绝 + limit_hit 遥测）
+	    - ai.max_tops（TOPS 上限接口字段，度量接入后强制）
+	    - ai.mem_limit_mb（AI 显存上限接口字段）
+	    - ai_cgroup_query() 查询限制/用量
+	  子系统 id 加入 cgroup_subsys 列表（v2 默认层级启用）。
+
+	  If unsure, say N.
+
+config AIKERNEL_KUNIT_TEST
+	bool "AIKernel KUnit 测试套件"
+	depends on AIKERNEL && KUNIT
+	default n
+	help
+	  构建 AIKernel KUnit 测试套件（AIKernel/test/）：
+	    - ai_runtime_test：生命周期/状态/模型注册/chat 语义
+	    - ai_telemetry_test：ring buffer 写读/溢出/采样率/reset
+	    - ai_policy_test：注册/执行/回滚/安全边界/outcome
+	    - ai_causal_test：因果链完整性/ring 满覆盖
+	  随内核 built-in 在启动时执行（KUnit 框架，结果打印内核日志）。
+	  CONFIG_AIKERNEL=n 时本开关不可选 → 测试零产物（编译为无操作）。
+
+	  If unsure, say N.
+
+endmenu
