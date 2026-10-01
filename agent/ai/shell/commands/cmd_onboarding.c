@@ -26,7 +26,6 @@
 #include <sys/wait.h>
 #include <termios.h>
 
-static const char w4a_layout_probe[8192] = {1};
 #include "ai_shell.h"
 #include "ai_commands.h"
 #include "ai_config.h"
