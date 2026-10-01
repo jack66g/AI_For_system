@@ -9,6 +9,9 @@
 # v2: GRUB 步骤改用真 grub-install(修复手工 dd core.img 自写
 #     early.cfg 导致的引导期 prefix 解析失败/can't find command
 #     'linux' bug); fstab 与 grub.cfg 的 root 落实为 UUID
+# v3(I3): grub.cfg 控制台顺序修复 —— 默认项 console=ttyS0 console=tty0
+#     (交互落 tty0, VMware 图形窗口用户可见可输入); 新增第二菜单项
+#     '(serial console)' 保持旧顺序 tty0→ttyS0 供串口用户
 # ============================================================
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export LD_LIBRARY_PATH=/lib:/usr/lib
@@ -196,7 +199,12 @@ set timeout=3
 serial --unit=0 --speed=115200
 terminal_input serial console
 terminal_output serial console
+# 默认项: ttyS0 先注册、tty0 收尾 => 交互控制台落在图形控制台(VMware 窗口可见可输入)
 menuentry 'AIKernel 0.1.0-alpha' {
+	linux /boot/vmlinuz-aikernel root=PARTUUID=$PARTUUID rw console=ttyS0 console=tty0 ai.enabled=1 kunit.enable=0
+}
+# 第二项: 旧顺序(tty0 先、ttyS0 收尾) => 交互落在串口, 供 -nographic/串口用户
+menuentry 'AIKernel 0.1.0-alpha (serial console)' {
 	linux /boot/vmlinuz-aikernel root=PARTUUID=$PARTUUID rw console=tty0 console=ttyS0 ai.enabled=1 kunit.enable=0
 }
 EOF
