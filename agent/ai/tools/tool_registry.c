@@ -722,6 +722,108 @@ const struct ai_tool *tool_registry_find(const struct tool_registry *reg,
 	return NULL;
 }
 
+/* W7S-T2：从已解析 params 重建最小 parameters schema——丢弃参数描述/
+ * minimum/maximum/default，保留 name/type/required/enum（exec 白名单）。
+ * tools.json 缩进原文直接透传时 74 工具 ≈ 13KB（约 5k token），是 ask
+ * prompt 的最大头（ollama 默认 ctx 截断 + 本地小模型行为退化）。紧凑
+ * 重建后约 3KB。失败返回 NULL（调用方回退 "{}"）。 */
+static char *params_min_json(const struct ai_tool *t)
+{
+	size_t cap = 96;
+	char *out;
+	size_t off = 0;
+	int i, j;
+	int nreq = 0;
+
+	if (!t)
+		return NULL;
+	for (i = 0; i < t->param_count; i++) {
+		const struct tool_param *p = &t->params[i];
+
+		cap += (p->name ? strlen(p->name) : 2) * 6 + 48;
+		cap += (p->type ? strlen(p->type) : 6) * 6 + 16;
+		for (j = 0; j < p->enum_count; j++)
+			cap += (p->enum_vals[j] ?
+				strlen(p->enum_vals[j]) : 2) * 6 + 8;
+	}
+	out = malloc(cap);
+	if (!out)
+		return NULL;
+
+#define PMJ_CLAMP() do { if (off > cap - 1) off = cap - 1; } while (0)
+
+	off += (size_t)snprintf(out + off, cap - off,
+				"{\"type\":\"object\",\"properties\":{");
+	PMJ_CLAMP();
+	for (i = 0; i < t->param_count; i++) {
+		const struct tool_param *p = &t->params[i];
+		char *en = ai_json_escape(p->name ? p->name : "");
+
+		if (!en) {
+			free(out);
+			return NULL;
+		}
+		off += (size_t)snprintf(out + off, cap - off,
+					"%s\"%s\":{\"type\":\"%s\"",
+					i > 0 ? "," : "", en,
+					p->type ? p->type : "string");
+		PMJ_CLAMP();
+		free(en);
+		if (p->enum_count > 0) {
+			off += (size_t)snprintf(out + off, cap - off,
+						",\"enum\":[");
+			PMJ_CLAMP();
+			for (j = 0; j < p->enum_count; j++) {
+				char *ee = ai_json_escape(p->enum_vals[j] ?
+							  p->enum_vals[j] : "");
+
+				if (!ee) {
+					free(out);
+					return NULL;
+				}
+				off += (size_t)snprintf(out + off, cap - off,
+							"%s\"%s\"",
+							j > 0 ? "," : "", ee);
+				PMJ_CLAMP();
+				free(ee);
+			}
+			off += (size_t)snprintf(out + off, cap - off, "]");
+			PMJ_CLAMP();
+		}
+		off += (size_t)snprintf(out + off, cap - off, "}");
+		PMJ_CLAMP();
+		if (p->required)
+			nreq++;
+	}
+	off += (size_t)snprintf(out + off, cap - off, "}");
+	PMJ_CLAMP();
+	if (nreq > 0) {
+		off += (size_t)snprintf(out + off, cap - off, ",\"required\":[");
+		PMJ_CLAMP();
+		for (i = 0, j = 0; i < t->param_count; i++) {
+			const struct tool_param *p = &t->params[i];
+			char *en;
+
+			if (!p->required)
+				continue;
+			en = ai_json_escape(p->name ? p->name : "");
+			if (!en)
+				continue;
+			off += (size_t)snprintf(out + off, cap - off,
+						"%s\"%s\"", j > 0 ? "," : "", en);
+			PMJ_CLAMP();
+			free(en);
+			j++;
+		}
+		off += (size_t)snprintf(out + off, cap - off, "]");
+		PMJ_CLAMP();
+	}
+	off += (size_t)snprintf(out + off, cap - off, "}");
+	PMJ_CLAMP();
+
+	return out;
+}
+
 char *tool_registry_build_tools_json(const struct tool_registry *reg)
 {
 	size_t cap;
@@ -755,11 +857,28 @@ char *tool_registry_build_tools_json(const struct tool_registry *reg)
 	for (i = 0; i < reg->tool_count; i++) {
 		const struct ai_tool *t = &reg->tools[i];
 		char *esc_name = ai_json_escape(t->name);
-		char *esc_desc = ai_json_escape(t->desc ? t->desc : "");
+		/* W7S-T2：desc 80 字节截断（与 summarize 同款，UTF-8 边界
+		 * 安全）——tools.json 里的完整描述经此路径原样进 prompt，
+		 * 74 工具累计 ~7k token，为 prompt 超限主因之一。 */
+		char dtmp[96];
+		const char *desc = t->desc ? t->desc : "";
+		size_t dlen = strlen(desc);
+		char *esc_desc;
+		/* W7S-T2：最小 parameters schema（见 params_min_json 注释） */
+		char *pjson = params_min_json(t);
+
+		if (dlen > 80) {
+			dlen = ai_json_utf8_floor(desc, 80);
+			memcpy(dtmp, desc, dlen);
+			dtmp[dlen] = '\0';
+			desc = dtmp;
+		}
+		esc_desc = ai_json_escape(desc);
 
 		if (!esc_name || !esc_desc) {
 			free(esc_name);
 			free(esc_desc);
+			free(pjson);
 			free(out);
 			return NULL;
 		}
@@ -768,11 +887,13 @@ char *tool_registry_build_tools_json(const struct tool_registry *reg)
 			"\"name\":\"%s\",\"description\":\"%s\","
 			"\"parameters\":%s}}",
 			i > 0 ? "," : "", esc_name, esc_desc,
-			t->parameters_json ? t->parameters_json : "{}");
+			pjson ? pjson :
+			(t->parameters_json ? t->parameters_json : "{}"));
 		if (off > cap - 1)
 			off = cap - 1;
 		free(esc_name);
 		free(esc_desc);
+		free(pjson);
 	}
 	off += (size_t)snprintf(out + off, cap - off, "]");
 
