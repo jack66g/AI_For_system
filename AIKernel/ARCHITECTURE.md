@@ -633,3 +633,61 @@ oom_kill.c/fair.c/vmscan.c 三处最小侵入（readahead 零 host 改动）。
   即用"**。
 - 仍不可说："AI 接管调度/OOM 决策"——决策现为启发式 v1（确定性、可审计），模型决策属第二阶段
   （采集→训练→离线验证→set_source 注入）。
+
+---
+
+## 成品交付：SME 统一检索 + 内核稳定化 + ISO 安装盘（2026-10-01，W7 三线）
+
+### W7S · SME 统一检索闭环（P1，替代 RAG）
+
+- **RAG 整体移除**（用户决策：SME 通用记忆插件即检索层，砍掉 TF-IDF 半成品）：
+  两树 AIKernel/rag/ 删除、agent rag 命令与白名单清理、GitHub 同步（b29ce18）。
+- **SME 新版 API（v1.3.0+）核验**：agent sme_client 13 端点零失配；新增 /memories/batch
+  用于灌入（搜索请求体字段为 text）。
+- **接口语料 154 条入库**：74 工具全 schema + 27 参数（含 4 个 ai.decision_*）+ docs/02 参考
+  + 6 条高频问答，tag=aikernel-interface；喂料脚本 `w7s_gen_corpus.py`。
+- **RAG 遗留大清理**：基线 18250 条中 18239 条 RAG 时代 chunk 归档（可恢复不删），
+  **活记忆收敛到 165 条高密度语料**；裸检索验收 top1 双命中（"怎么调进程优先级"→0.78
+  问答条目）。
+- **检索引导**：memory.search description + ask/onboarding 行为准则（"接口类问题先查再答"）；
+  **ask prompt 压缩 13758→4568 token**（tools schema 压缩，1.5b 方差显著降低）。
+- **AI 驱动 shell 跳转（方案 A）**：sys.shell 工具（AI 应请求降入 bash，istty 保护+
+  "AI 应请求开启 shell"审计）；REPL 直敲路径保留。**tty2 暗门**：getty@tty2 密码登录
+  （灾备，宣传口径不提）。
+- **闭环验证**：链路每一环独立实证——模型自主调 memory.search（capture）、自主选
+  netlink.act.sched.nice 触发 W2（audit `result=CONFIRM=yes`）、内核真实生效
+  （pid 1 nice 0→10，decisions_total 0→1）；audit 历史含 09-29 完整参数闭环 4 次铁证。
+  1.5b 当日完整参数闭环 0/12 为模型能力上限（换 7b+/云端预期显著改善，schema 已压缩到位）。
+
+### W7K · 内核稳定化（P2，bzImage #32）
+
+- **Bug1 kswapd shrink_folio_list NULL deref**：根因修复；10 分钟 grow 风暴压测
+  （swapcache 匿名页回收崩溃路径全打击，pswpout +488070）零 Oops（修复前可复现）。
+- **Bug2 用户进程启动期布局敏感 SIGSEGV**：判定**外部因素（构建链），内核无责**——
+  证据链：ai_zone 无 memblock 挂接不改内存 map、熵源挂点纯遥测、exec 路径全在成功后；
+  未垫探针二进制 #32 上 5 次冷启动 rc=0 零 Oops（垫探针保留为构建期保险）。
+- 回归全绿：KUnit 6 套件 37/37；rootfs 副本完整启动（26 real+1 reserved）；
+  W3 决策挂点零回归（reclaim 挂点恰在 Bug1 崩溃路径上满负荷工作）。
+- 版本行：`#32 SMP PREEMPT_DYNAMIC Thu Oct 1 02:38:14 CST 2026`；两树同步。
+
+### W7I · ISO 安装盘交付（P3）
+
+- **出厂态修正**（S 线演示态→真机自含）：ollama.service / aikernel-memory.service 恢复
+  enable、model.toml 回 127.0.0.1:11434、SME_URL 回 127.0.0.1:8000、
+  **SME 首启种子三件套**（sme-seed.jsonl 154 条 + 幂等 sme-seed.sh + sme-seed.service），
+  新机器首启自动获得接口语料；计划外修复：S 线演示 SME 数据库混入出厂 rootfs，返工重打。
+- **终装 E2E 全过**（全新 qcow2）：安装（一次 y/N，30 秒）→ 从盘 GRUB 引导 → 三服务自启
+  → autologin 直进 AI 终端 → onboarding（AI 生成欢迎词→强制设密→选本地）→ `ai[...]>`
+  → sme-seed `added:154` + memory.search 命中接口语料（**"AI 了如指掌"在新装机器成立**）。
+- **交付物**：`C:\Users\黄小乐\Desktop\AIKernel_rescue\AIKernel-0.1.0-alpha-x86_64.iso`
+  （1.94 GiB，md5 `ffb23d3d...` 双侧一致，内核 #32）。
+- 遗留：EFI/UEFI 引导未做（BIOS/MBR 单路径）；TCG 下完整 ask 分钟级不可行（真机原生速度
+  无此约束），演示用 onboarding/短对话。
+
+### 发布口径（W7 后）
+
+- 可说：**"纯 AI 终端系统：开机第一眼是 AI 控制台，AI 对话完成初始化与一切操作（含进入
+  传统 shell），自带系统记忆检索（自然语言查接口即执行），27 参数 26 真实生效，W2 二次
+  校验，KUnit 37 用例内核自证；ISO 安装盘装机即用（内置 ollama+模型+接口语料种子）"**。
+- 仍不说："AI 接管调度/OOM 决策"（启发式 v1）；"语义检索"（SME 检索能力随插件演进）；
+  EFI 引导；1.5b 工具闭环成功率（演示建议 onboarding/短对话或更强模型）。
