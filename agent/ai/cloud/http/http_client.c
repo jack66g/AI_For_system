@@ -20,6 +20,7 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/error.h"
+#include "mbedtls/x509_crt.h"
 
 #include "http_client.h"
 
@@ -152,6 +153,24 @@ static char *build_http_request(const char *host, const char *path,
 static char *strip_chunked(char *body)
 {
 	char *src = body, *dst = body;
+	unsigned int first_size = 0;
+	const char *p = body;
+
+	/* W10-B：先探测首行是否为合法 hex chunk 大小——非 chunked 响应
+	 * （Content-Length / 连接关闭定长）必须原样返回。原实现对任意 body
+	 * 无条件按 chunked 解析：首字符非 hex 时 chunk_size==0 直接 break，
+	 * 末尾 *dst='\0' 恰好落在 body 首字节，把整段 body 清空。 */
+	while (*p && *p != '\r' && *p != '\n') {
+		char c = *p;
+
+		if (c >= '0' && c <= '9')      first_size = first_size * 16 + (unsigned)(c - '0');
+		else if (c >= 'a' && c <= 'f') first_size = first_size * 16 + (unsigned)(c - 'a' + 10);
+		else if (c >= 'A' && c <= 'F') first_size = first_size * 16 + (unsigned)(c - 'A' + 10);
+		else return body;   /* 非 hex 开头 → 非 chunked，原样 */
+		p++;
+	}
+	if (first_size == 0)
+		return body;        /* 空 body / 仅终止块，原样 */
 
 	while (*src) {
 		unsigned int chunk_size = 0;
@@ -180,6 +199,80 @@ static char *strip_chunked(char *body)
 	return body;
 }
 
+/* ---- TLS 证书强校验（VERIFY_REQUIRED，无降级开关）----
+ *
+ * https:// 一律校验服务端证书链：加载系统 CA 包
+ * /etc/ssl/certs/ca-certificates.crt（rootfs 的 ca-certificates 包），
+ * CA 包不可用或证书校验失败均直接报错——API Key 不能暴露给中间人。
+ * 明文 http://（本地 ollama 等场景）不经此路径。 */
+#define AI_TLS_CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
+
+static int tls_conf_verify(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca,
+			   char **error_msg)
+{
+	int ret;
+
+	mbedtls_x509_crt_init(ca);
+	ret = mbedtls_x509_crt_parse_file(ca, AI_TLS_CA_BUNDLE);
+	if (ret < 0) {
+		char err[128];
+		char buf[384];
+
+		mbedtls_strerror(ret, err, sizeof(err));
+		if (error_msg) {
+			snprintf(buf, sizeof(buf),
+				 "TLS certificate verification unavailable: "
+				 "cannot load CA bundle " AI_TLS_CA_BUNDLE
+				 " (%s)", err);
+			*error_msg = strdup(buf);
+		}
+		return -1;
+	}
+	/* ret > 0：个别证书解析失败但链整体可用，与上游官方示例口径一致 */
+	mbedtls_ssl_conf_ca_chain(conf, ca, NULL);
+	mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+	return 0;
+}
+
+static int tls_handshake_verify(mbedtls_ssl_context *ssl, char **error_msg)
+{
+	int ret;
+
+	while ((ret = mbedtls_ssl_handshake(ssl)) != 0) {
+		char buf[1024];
+
+		if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+		    ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+			continue;
+		if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+			char vrfy[512];
+			uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
+
+			mbedtls_x509_crt_verify_info(vrfy, sizeof(vrfy),
+						    "", flags);
+			if (error_msg) {
+				snprintf(buf, sizeof(buf),
+					 "TLS certificate verification failed: %s",
+					 vrfy);
+				*error_msg = strdup(buf);
+			}
+			return ret;
+		}
+		{
+			char err[256];
+
+			mbedtls_strerror(ret, err, sizeof(err));
+			if (error_msg) {
+				snprintf(buf, sizeof(buf),
+					 "TLS handshake failed: %s", err);
+				*error_msg = strdup(buf);
+			}
+			return ret;
+		}
+	}
+	return 0;
+}
+
 /* ---- HTTPS POST 主函数 ---- */
 
 int https_post(const char *url, const char *api_key, const char *json_body,
@@ -187,7 +280,6 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 {
 	struct url_info uinfo;
 	int sock = -1, ret = -1;
-	char *err_buf = NULL;
 	*response = NULL;
 	if (error_msg) *error_msg = NULL;
 	if (!g_initialized) {
@@ -207,31 +299,23 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 	if (uinfo.use_tls) {
 		mbedtls_ssl_context ssl;
 		mbedtls_ssl_config conf;
+		mbedtls_x509_crt ca;
 		mbedtls_ssl_init(&ssl);
 		mbedtls_ssl_config_init(&conf);
+		mbedtls_x509_crt_init(&ca);
 		mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
 			MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
-		mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+		if (tls_conf_verify(&conf, &ca, error_msg) != 0)
+			goto tls_cleanup;
 		mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &g_ctr_drbg);
 		mbedtls_ssl_setup(&ssl, &conf);
 		mbedtls_ssl_set_hostname(&ssl, uinfo.host);
 		mbedtls_ssl_set_bio(&ssl, &sock, mbedtls_net_send,
 			mbedtls_net_recv, NULL);
 
-		/* TLS 握手 */
-		{ int tls_ret;
-		  while ((tls_ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-			if (tls_ret != MBEDTLS_ERR_SSL_WANT_READ &&
-			    tls_ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-				char err[256];
-				mbedtls_strerror(tls_ret, err, sizeof(err));
-				err_buf = malloc(512);
-				snprintf(err_buf, 512, "TLS handshake failed: %s", err);
-				if (error_msg) *error_msg = err_buf; else free(err_buf);
-				goto tls_cleanup;
-			}
-		  }
-		}
+		/* TLS 握手（证书校验失败 → 专属错误文案） */
+		if (tls_handshake_verify(&ssl, error_msg) != 0)
+			goto tls_cleanup;
 
 		/* 构建并发送请求 */
 		{ size_t req_len;
@@ -286,18 +370,42 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 	tls_cleanup:
 		mbedtls_ssl_free(&ssl);
 		mbedtls_ssl_config_free(&conf);
+		mbedtls_x509_crt_free(&ca);
 	} else {
 		/* HTTP 非加密 */
 		size_t req_len;
 		char *req = build_http_request(uinfo.host, uinfo.path,
 			api_key, json_body, &req_len);
 		if (req) {
-			write(sock, req, req_len);
+			ssize_t wn = write(sock, req, req_len);
+
+			if (wn < 0 || (size_t)wn != req_len) {
+				free(req);
+				if (error_msg)
+					*error_msg = strdup("HTTP write failed");
+				if (sock >= 0) close(sock);
+				return -1;
+			}
 			char *resp = malloc(65536);
 			if (resp) {
-				ssize_t n = read(sock, resp, 65535);
-				if (n > 0) {
-					resp[n] = '\0';
+				/* W10-B：循环读到对端关闭（请求带 Connection: close）。
+				 * 原单次 read 在 TLS 记录/HTTP 分段到达时丢 body */
+				size_t resp_size = 0, resp_cap = 65536;
+				ssize_t n;
+
+				while ((n = read(sock, resp + resp_size,
+						 resp_cap - resp_size - 1)) > 0) {
+					resp_size += (size_t)n;
+					if (resp_cap - resp_size < 2) {
+						char *t = realloc(resp,
+								  resp_cap * 2);
+						if (!t) break;
+						resp = t;
+						resp_cap *= 2;
+					}
+				}
+				if (resp_size > 0) {
+					resp[resp_size] = '\0';
 					char *body = strstr(resp, "\r\n\r\n");
 					if (body) {
 						body += 4;
@@ -348,7 +456,6 @@ int https_get(const char *url, char **response, char **error_msg)
 {
 struct url_info uinfo;
 int sock = -1, ret = -1;
-char *err_buf = NULL;
 
 *response = NULL;
 if (error_msg) *error_msg = NULL;
@@ -371,31 +478,23 @@ if (sock < 0) {
 if (uinfo.use_tls) {
 	mbedtls_ssl_context ssl;
 	mbedtls_ssl_config conf;
+	mbedtls_x509_crt ca;
 	mbedtls_ssl_init(&ssl);
 	mbedtls_ssl_config_init(&conf);
+	mbedtls_x509_crt_init(&ca);
 	mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
 		MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
-	mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+	if (tls_conf_verify(&conf, &ca, error_msg) != 0)
+		goto get_tls_cleanup;
 	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &g_ctr_drbg);
 	mbedtls_ssl_setup(&ssl, &conf);
 	mbedtls_ssl_set_hostname(&ssl, uinfo.host);
 	mbedtls_ssl_set_bio(&ssl, &sock, mbedtls_net_send,
 		mbedtls_net_recv, NULL);
 
-	/* TLS 握手 */
-	{ int tls_ret;
-	  while ((tls_ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-		if (tls_ret != MBEDTLS_ERR_SSL_WANT_READ &&
-		    tls_ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-			char err[256];
-			mbedtls_strerror(tls_ret, err, sizeof(err));
-			err_buf = malloc(512);
-			snprintf(err_buf, 512, "TLS handshake failed: %s", err);
-			if (error_msg) *error_msg = err_buf; else free(err_buf);
-			goto get_tls_cleanup;
-		}
-	  }
-	}
+	/* TLS 握手（证书校验失败 → 专属错误文案） */
+	if (tls_handshake_verify(&ssl, error_msg) != 0)
+		goto get_tls_cleanup;
 
 	/* 构建并发送 GET 请求 */
 	{ size_t req_len;
@@ -450,16 +549,39 @@ if (uinfo.use_tls) {
 get_tls_cleanup:
 	mbedtls_ssl_free(&ssl);
 	mbedtls_ssl_config_free(&conf);
+	mbedtls_x509_crt_free(&ca);
 } else {
 	size_t req_len;
 	char *req = build_get_request(uinfo.host, uinfo.path, &req_len);
 	if (req) {
-		write(sock, req, req_len);
+		ssize_t wn = write(sock, req, req_len);
+
+		if (wn < 0 || (size_t)wn != req_len) {
+			free(req);
+			if (error_msg)
+				*error_msg = strdup("HTTP write failed");
+			if (sock >= 0) close(sock);
+			return -1;
+		}
 		char *resp = malloc(65536);
 		if (resp) {
-			ssize_t n = read(sock, resp, 65535);
-			if (n > 0) {
-				resp[n] = '\0';
+			/* W10-B：循环读到对端关闭（请求带 Connection: close）。
+			 * 原单次 read 在 TLS 记录/HTTP 分段到达时丢 body */
+			size_t resp_size = 0, resp_cap = 65536;
+			ssize_t n;
+
+			while ((n = read(sock, resp + resp_size,
+					 resp_cap - resp_size - 1)) > 0) {
+				resp_size += (size_t)n;
+				if (resp_cap - resp_size < 2) {
+					char *t = realloc(resp, resp_cap * 2);
+					if (!t) break;
+					resp = t;
+					resp_cap *= 2;
+				}
+			}
+			if (resp_size > 0) {
+				resp[resp_size] = '\0';
 				char *body = strstr(resp, "\r\n\r\n");
 				if (body) {
 					body += 4;
@@ -650,7 +772,6 @@ int https_post_stream(const char *url, const char *api_key,
 	struct url_info uinfo;
 	struct stream_io io;
 	int sock = -1, ret = -1;
-	char *err_buf = NULL;
 	char *hdr = NULL;
 	size_t hdr_len = 0, hdr_cap = 8192;
 	int chunked = 0;
@@ -689,39 +810,25 @@ int https_post_stream(const char *url, const char *api_key,
 	if (uinfo.use_tls) {
 		mbedtls_ssl_context ssl;
 		mbedtls_ssl_config conf;
+		mbedtls_x509_crt ca;
 		int done = 0;
 
 		mbedtls_ssl_init(&ssl);
 		mbedtls_ssl_config_init(&conf);
+		mbedtls_x509_crt_init(&ca);
 		mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
 			MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
-		mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+		if (tls_conf_verify(&conf, &ca, error_msg) != 0)
+			goto ps_tls_cleanup;
 		mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &g_ctr_drbg);
 		mbedtls_ssl_setup(&ssl, &conf);
 		mbedtls_ssl_set_hostname(&ssl, uinfo.host);
 		mbedtls_ssl_set_bio(&ssl, &sock, mbedtls_net_send,
 			mbedtls_net_recv, NULL);
 
-		/* TLS 握手 */
-		{ int tls_ret;
-		  while ((tls_ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-			if (tls_ret != MBEDTLS_ERR_SSL_WANT_READ &&
-			    tls_ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-				char err[256];
-
-				mbedtls_strerror(tls_ret, err, sizeof(err));
-				if (error_msg) {
-					err_buf = malloc(512);
-					if (err_buf)
-						snprintf(err_buf, 512,
-							 "TLS handshake failed: %s",
-							 err);
-					*error_msg = err_buf;
-				}
-				goto ps_tls_cleanup;
-			}
-		  }
-		}
+		/* TLS 握手（证书校验失败 → 专属错误文案） */
+		if (tls_handshake_verify(&ssl, error_msg) != 0)
+			goto ps_tls_cleanup;
 
 		/* 构建并发送请求 */
 		{ size_t req_len;
@@ -845,6 +952,7 @@ int https_post_stream(const char *url, const char *api_key,
 ps_tls_cleanup:
 		mbedtls_ssl_free(&ssl);
 		mbedtls_ssl_config_free(&conf);
+		mbedtls_x509_crt_free(&ca);
 	} else {
 		/* 明文 HTTP */
 		size_t req_len;
