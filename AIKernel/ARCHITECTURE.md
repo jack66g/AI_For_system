@@ -615,7 +615,7 @@ W2I 揪出：`gen_registry.py` 把 proc.signal/proc.freeze 标 `task=False`（sc
 
 4 个 REAL ACT 参数注册（`ai_decision.c:312-318`）：`ai.decision_inject`(域5) /
 `ai.decision_oom`(域2) / `ai.decision_sched`(域1) / `ai.decision_mm`(域2)，全 0/1 默认 0，
-控制表 **26 real + 1 reserved**。注册表已扩到 **73 工具**（gen_registry + 生成，两树 md5 一致，
+控制表 **26 real + 1 reserved**。注册表已扩到 **74 工具**（gen_registry + 生成，两树 md5 一致，
 guest 三处 sha256 9a6a7b9e 一致）。受控冒烟 PASS：mock 注入 `netlink.act.ai.decision_inject
 {value:1}` → W2 y → sysfs 翻 1 + dmesg `policy act 'ai.decision_inject' ... executed=1`
 （抬 max_impact_pct 流程后还原）。
@@ -691,3 +691,52 @@ oom_kill.c/fair.c/vmscan.c 三处最小侵入（readahead 零 host 改动）。
   校验，KUnit 37 用例内核自证；ISO 安装盘装机即用（内置 ollama+模型+接口语料种子）"**。
 - 仍不说："AI 接管调度/OOM 决策"（启发式 v1）；"语义检索"（SME 检索能力随插件演进）；
   EFI 引导；1.5b 工具闭环成功率（演示建议 onboarding/短对话或更强模型）。
+
+---
+
+## W10 成品化双线：启动崩溃元凶定案 + 运维四件套（2026-10-02，ISO v1.2）
+
+### W10-B · 清理执行 + TLS 真校验 + 启动崩溃元凶定案
+
+- **死代码执行删除（4 项实锤）**：tls_manager/cert_manager 死模块、sch_fq `fq_qdisc_ops`
+  恢复 static（EXPORT 零调用方）、8KB 布局垫（nm 实证从未进二进制）。agent clean 重建
+  **gcc 警告 0**（存量 3 条一并清零：write 返回值 2 处修复）。
+- **W=1 全绿**：ai_causal.c format-truncation 根修（含栈上 day[16]→[24] 调用点）+
+  ai_startup.c 分段拼接同性质修复；`make W=1 AIKernel/` 零 error 零警告。
+- **TLS 真校验（安全关键）**：`tls_conf_verify()` 加载系统 CA 包
+  `/etc/ssl/certs/ca-certificates.crt` + VERIFY_REQUIRED，https 无降级开关；四场景验证：
+  明文 http 正常 / https 打明文端点拒绝 / 自签证书报 "CN mismatch / not signed by trusted
+  CA" / **真网 `https://api.github.com` 系统 CA 校验通过**。顺手修两个接云必踩 bug：
+  分段 body 单次 read 丢失、非 chunked 响应被 strip_chunked 清空。
+- **启动 SIGSEGV 元凶定案（修正 W7K"构建链外部因素"结论）**：Ubuntu 22.04
+  **ld.bfd 2.38 链接器 bug**——init-first.o 的 `__libc_argc/__libc_argv/__environ` 三处
+  PC32 重定位编码为真实地址-0x20（argc 写进 `_dl_platform` → `_dl_non_dynamic_init`
+  解引用崩溃）。修复：Makefile `LDFLAGS := -fuse-ld=gold`，clean 重建 5/5 rc=0。
+  8KB 垫悬案终结（从未生效 + 不再需要）。
+- 仓库卫生：tests ELF 移出跟踪（~1.1MB）、pyc/tools_report 忽略、w6i-tools 收敛 GitHub
+  单一权威、文档口径 73→74 统一；GitHub `378397b..f5027b4`（5 组提交）；两树 8 核心文件
+  md5 三方（VM=Windows=GitHub）一致。
+
+### W10-A · 运维四件套进出厂 + ISO v1.2（内核 #35）
+
+- **四件套**（systemd 正道 + 出厂 rootfs 固化）：①sshd——ssh-keygen.service 首启再生
+  host key + PasswordAuthentication yes（onboarding 强制设的密码即 ssh 密码，设计闭环），
+  E2E 实测密码登录成功；②systemd-timesyncd + 阿里云 NTP，`timedatectl` 真同步成功；
+  ③journald Storage=persistent + 200M 上限，跨重启 `journalctl --boot=-1` 可读；④nftables
+  基线（input drop，放行 lo/established/icmp/ssh22）+ **11434/8000 出厂即绑 127.0.0.1**
+  零暴露面。附加：unattended-upgrades（仅 security 源）、/root/README.md 产品一页。
+- **计划外修复两阻断**：装出的系统原本无 DHCP 客户端（networkd 未启用）→ networkd +
+  80-wired.network 补齐；dbus 单元文件全丢 → 重装。无此二补 ssh/NTP 全不可达。
+- **AI 接入三件套**：exec 白名单 47→49（nft=W2、timedatectl=R，单源重生成 diff 干净）；
+  SME 语料 154→157（防火墙/日志/时间三条，裸检索 top1 命中）；行为准则确认覆盖。
+- **内核 #35**：#34 全部驱动 + NF_TABLES_INET/IPV4/IPV6 + NFT_CT（防火墙地基；
+  NAT/LIMIT/LOG 类细控仍需下波补内核选项）。ISO v1.2：1.77GiB（apt 索引出厂即清，比
+  v1.1 小），md5 `40d9cc00...` 双侧一致。
+- 遗留：完整 ask 闭环 TCG 下不可演示（20 分钟/轮，真机或云端模型无此约束）；出厂 SME
+  快照与 seed 解耦（P3-3）；UEFI 未做。
+
+### 口径（W10 后）
+
+运维四件套落地后，系统具备"可挂机"基线（远程 ssh / NTP 真同步 / 日志可回溯 / 防火墙
+默认 drop + 安全自动更新）；完整 ask 闭环的演示依赖云端模型或 7b+ 本地模型（1.5b+TCG
+为已知天花板，非代码缺陷）。
