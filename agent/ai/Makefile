@@ -1,7 +1,7 @@
 # AIKernel - AI Subsystem Makefile
 #
 # 构建 AI Shell 二进制文件 'ai' 和 'aikernel-shell'。
-# Phase 4: 通信层重构 - 集成 Communication Layer + TLS Manager + Certificate Manager
+# 通信层：http_client 内置 mbedTLS（TLS 证书强校验，VERIFY_REQUIRED）。
 #
 # 用法:
 #   make              # 构建 ai
@@ -10,7 +10,13 @@
 
 CC      ?= gcc
 CFLAGS  := -Wall -Wextra -std=c11 -O2 -g -static
-LDFLAGS :=
+# W10-B：链接器锁定 gold。Ubuntu 22.04 的 ld.bfd 2.38 对本工程的 .bss 布局
+# 存在重定位编码缺陷（全量 clean 重建必现）：init-first.o 的
+# __libc_argc/__libc_argv/__environ 三处 R_X86_64_PC32 被编码到真实地址
+# -0x20 的位置（argc 写进 _dl_platform），启动期 _dl_non_dynamic_init 解引用
+# 垃圾指针 SIGSEGV；且 __environ 永不被初始化，链接产物整体不可信。
+# 增量链接因 .o 布局不同碰巧不触发（lottery），不可依赖。ld.gold 无此问题。
+LDFLAGS := -fuse-ld=gold
 
 # 目录
 SRC_DIR        := .
@@ -22,19 +28,17 @@ BACKEND_DIR    := runtime/communication/backend
 PROVIDER_DIR   := provider
 CLOUD_DIR      := cloud
 HTTP_DIR       := cloud/http
-TLS_DIR        := cloud/tls
 LOCAL_DIR      := local
 MEMORY_DIR     := memory
 TOOLS_DIR      := tools
 CONFIG_DIR     := config
-CERTS_DIR      := config/certs
 INCLUDE_DIR    := include
 BUILD_DIR      := build
 MBEDTLS_DIR    := third_party/mbedtls
 
 # ============================================================================
 # Kconfig 三开关接线（A4：配置面与构建事实一致化）
-#   CONFIG_AIKERNEL_CLOUD_PROVIDER → cloud provider/backend/http_client/tls
+#   CONFIG_AIKERNEL_CLOUD_PROVIDER → cloud provider/backend/http_client
 #   CONFIG_AIKERNEL_LOCAL_PROVIDER → local provider/backend/chat/native
 #   CONFIG_AIKERNEL_STREAM_MODE    → 流式（local_stream + stream_parse +
 #                                    云通道 SSE 增量分支；关闭时 stream 恒 off）
@@ -72,8 +76,7 @@ ifeq ($(KC_CLOUD),y)
 KC_CFLAGS += -DCONFIG_AI_CLOUD_PROVIDER
 KC_SRCS += $(CLOUD_DIR)/provider_openai_compatible.c \
 	   $(BACKEND_DIR)/cloud_backend.c \
-	   $(HTTP_DIR)/http_client.c \
-	   $(TLS_DIR)/tls_manager.c
+	   $(HTTP_DIR)/http_client.c
 endif
 
 ifeq ($(KC_LOCAL),y)
@@ -99,7 +102,7 @@ CFLAGS += $(KC_CFLAGS)
 TARGET_AI     := ai
 TARGET_SHELL  := aikernel-shell
 
-# 公共源文件（provider/backend/http/tls/stream 按上方 Kconfig 开关条件编入）
+# 公共源文件（provider/backend/http/stream 按上方 Kconfig 开关条件编入）
 COMMON_SRCS := \
 	$(SHELL_DIR)/shell.c \
 	$(CMD_DIR)/commands_registry.c \
@@ -126,7 +129,6 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/tool_registry.c \
 	$(TOOLS_DIR)/executor.c \
 	$(CONFIG_DIR)/config_manager.c \
-	$(CERTS_DIR)/cert_manager.c \
 	$(LOCAL_DIR)/local_http.c \
 	$(KC_SRCS)
 # 注：local_http.c 无条件编入——它是轻量 HTTP 传输工具层，被
