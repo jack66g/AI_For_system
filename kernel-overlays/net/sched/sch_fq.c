@@ -1318,7 +1318,7 @@ static int fq_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 	return gnet_stats_copy_app(d, &st, sizeof(st));
 }
 
-struct Qdisc_ops fq_qdisc_ops __read_mostly = {
+static struct Qdisc_ops fq_qdisc_ops __read_mostly = {
 	.id		=	"fq",
 	.priv_size	=	sizeof(struct fq_sched_data),
 
@@ -1362,7 +1362,3 @@ module_exit(fq_module_exit)
 MODULE_AUTHOR("Eric Dumazet");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Fair Queue Packet Scheduler");
-
-/* AIKernel：导出 ops 供运行时 graft（net.qdisc 参数，dev_graft_qdisc
- * 路径）；上游 pfifo_qdisc_ops EXPORT_SYMBOL 同款先例 */
-EXPORT_SYMBOL(fq_qdisc_ops);
