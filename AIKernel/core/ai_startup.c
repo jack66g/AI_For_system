@@ -151,8 +151,22 @@ int ai_startup_load_model(const char *name)
 	if (strlen(ai_startup_get_model_path()) + strlen(name) +
 	    strlen(AI_STARTUP_MODEL_FILE_SUFFIX) + 1 >= sizeof(path))
 		return AI_ERR_INVALID_ARG;
-	snprintf(path, sizeof(path), "%s%s%s",
-		 ai_startup_get_model_path(), name, AI_STARTUP_MODEL_FILE_SUFFIX);
+	{
+		/* 上方预检查已保证放得下；显式拼接替代 snprintf——
+		 * 编译器无法证明不截断，W=1 下 format-truncation 误报挡构建 */
+		size_t off = 0;
+		const char *seg[3] = { ai_startup_get_model_path(), name,
+				       AI_STARTUP_MODEL_FILE_SUFFIX };
+		size_t si;
+
+		for (si = 0; si < ARRAY_SIZE(seg); si++) {
+			size_t l = strlen(seg[si]);
+
+			memcpy(path + off, seg[si], l);
+			off += l;
+		}
+		path[off] = '\0';
+	}
 
 	/* 6.18 kernel_read_file 语义：buf_size=调用者缓冲容量（必须覆盖文件
 	 * 大小，否则 while(copied<buf_size) 不循环=0 字节读入，buf 停留在

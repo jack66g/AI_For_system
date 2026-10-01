@@ -39,7 +39,9 @@ static DEFINE_SPINLOCK(ai_causal_lock);
 
 static char ai_causal_dir[AI_PATH_MAX] = AI_CAUSAL_DEFAULT_DIR;
 static struct file *ai_causal_file;
-static char ai_causal_day[16];      /* "YYYY-MM-DD"（当前打开文件对应日期） */
+static char ai_causal_day[24];      /* "YYYY-MM-DD"（当前打开文件对应日期）；
+				     * 16→24：u64 极值年份可达 9 位（约 5.8e8），
+				     * 预留余量使 format-truncation 可证安全（W=1） */
 static u32 ai_causal_seq;
 static DEFINE_MUTEX(ai_causal_export_lock);
 
@@ -118,7 +120,9 @@ int ai_causal_chain_push(const struct ai_decision_record *rec)
 	/* 进程上下文：CSV 文件追加导出（原子上下文仅 ring） */
 	if (!in_atomic() && !irqs_disabled()) {
 		struct file *f;
-		char day[16], path[AI_PATH_MAX + 64];
+		char day[24], path[AI_PATH_MAX + 64];   /* day 同 ai_causal_day 放宽：
+							 * u64 极值年份 9 位，16 字节
+							 * 触发 W=1 format-truncation */
 		struct timespec64 ts;
 
 		ktime_get_real_ts64(&ts);
