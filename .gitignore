@@ -59,3 +59,13 @@ w6i-rootfs/
 .DS_Store
 Thumbs.db
 docs/.docs-done
+
+# W10-B 清理补充（2026-10-02）：可再生 artifact 与本地产物不入库
+agent/ai/tests/test_utf8_body
+agent/ai/tests/test_http_retry
+agent/ai/tests/test_provider_stream
+agent/ai/tests/test_cloud_stream
+agent/ai/tests/w10b_tls_probe
+agent/ai/tools/tools_report.txt
+__pycache__/
+*.pyc
