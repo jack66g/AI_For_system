@@ -30,6 +30,7 @@ Image
 # 测试编译出的可执行文件
 agent/ai/aikernel-shell
 agent/ai/t2fix_utf8_test
+agent/ai/ai
 *.test
 
 # 磁盘镜像与虚拟机产物
