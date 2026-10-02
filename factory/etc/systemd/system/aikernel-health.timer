@@ -1,0 +1,10 @@
+[Unit]
+Description=AIKernel 健康自愈定时器（每 5 分钟一轮检查）
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=aikernel-health.service
+
+[Install]
+WantedBy=timers.target

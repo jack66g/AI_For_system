@@ -1,0 +1,13 @@
+[Unit]
+Description=AIKernel SME First-Boot Seed (interface memories, differential import)
+After=aikernel-memory.service ollama.service
+Wants=aikernel-memory.service ollama.service
+ConditionPathExists=/usr/local/share/aikernel/sme-seed.jsonl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/share/aikernel/sme-seed.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
