@@ -1,0 +1,8 @@
+[Unit]
+Description=AIKernel 健康自愈检查（ollama/SME/ssh + 根分区水位）
+After=network-online.target ollama.service aikernel-memory.service ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aikernel-health.sh
+RemainAfterExit=no

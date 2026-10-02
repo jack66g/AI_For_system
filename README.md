@@ -1,7 +1,6 @@
 # AIKernel — AI 主体接管 Linux 的控制系统
 
-> 版本：0.1.0-alpha（2026-09-30 快照）
-> 源码包：`AIKernel-src-6.18.39-20260930.tar.gz`（本文件同目录）
+> 版本：0.1.0-alpha.4 / v1.4（2026-10-02 快照）
 
 ## 来源标注（上传 GitHub 时请保留本节）
 
@@ -23,16 +22,25 @@ AI 作为主体、Linux 内核作为被管理对象的控制系统：
   5 个已通电的 AI 决策挂点（OOM 评分偏置/vruntime 加权/唤醒抢占/预读/回收优先级，
   默认关、可由 AI 经工具开启）、决策源接口化（`ai_decision_set_source()` 预留模型接入）、
   模型下发真推理（Q31 定点 MLP）、内核内 KUnit 37 用例。
-- **agent 用户态控制台**（aikernel-shell，C 静态链接）：REPL + ask 工具闭环（74 工具注册表，
-  五通道：netlink/procfs/sysfs/exec/memory）、W2 危险操作 y/N 再校验、权限分级、会话持久化、
-  本地/云端双通道真增量流式、AI onboarding 首启引导、维护 shell 逃生口。
-- **发行形态**：ISO 安装盘（GRUB → 安装器 → 内置 Ollama + qwen2.5:1.5b，装完离线即用）。
+- **agent 用户态控制台**（aikernel-shell，C 静态链接）：REPL + ask 工具闭环（**75 工具**
+  注册表，五通道：netlink/procfs/sysfs/exec/memory）、W2 危险操作 y/N 再校验、权限分级、
+  会话持久化、本地/云端双通道真增量流式、AI onboarding 首启引导、维护 shell 逃生口。
+- **出厂系统**：内置 Ollama + qwen2.5:1.5b 本地 AI 栈、SME 记忆引擎（首启语料种子幂等导入）、
+  健康自愈定时器（aikernel-health，5min 一轮）、远程 AI API（127.0.0.1:8761，Bearer token
+  安装时随机生成）、nftables 基线防火墙、networkd/timesyncd/journald 出厂配置——
+  全部清单见 [`factory/README.md`](factory/README.md)。
+- **发行形态**：ISO 安装盘（GRUB → 安装器 → 装完离线即用）。
+  **v1.4（0.1.0-alpha.4）起支持 BIOS + UEFI 双引导**：安装器对目标盘做 ESP FAT32 512M +
+  ext4 根双分区，grub-install 双跑（i386-pc 到 MBR + x86_64-efi 到 ESP，含
+  `\EFI\BOOT\BOOTX64.EFI` fallback，无 NVRAM 场景 OVMF 亦可引导）。
 
 ## 从哪里开始读
 
 - `AIKernel/ARCHITECTURE.md` — 架构、实现状态、全部验证证据链（本仓库最权威文档）
-- `agent/ai/tools/tools.json` — 74 工具注册表（能力清单）
+- `agent/ai/tools/tools.json` — 75 工具注册表（能力清单）
 - `agent/ai/` — 用户态控制台源码；`AIKernel/` — 内核侧源码
+- `factory/` — 出厂系统资产（systemd 单元、本地 AI 栈、健康自愈、API、种子语料）
+- `w6i-tools/` — ISO 打包线（initrd/init 安装器、build-iso.sh、双引导 grub 配置）
 
 ## 构建与验证
 

@@ -1271,6 +1271,18 @@
   {
     "type": "function",
     "function": {
+      "name": "procfs.read.net_nf_conntrack",
+      "description": "读取 /proc/net/nf_conntrack（只读）：内核连接跟踪表（nf_conntrack：每条连接的源/目的地址与端口、协议、状态与超时；查「当前有哪些网络连接/谁连着我/连接数多少」用它；补充手段：exec ss 查套接字级连接",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "exec.run",
       "description": "执行白名单 shell 命令（fork+execv 不经 shell）。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL；stdin 接 /dev/null（无参 cat 不会挂起）",
       "parameters": {
@@ -1312,6 +1324,9 @@
               "curl",
               "ollama",
               "systemctl",
+              "nft",
+              "timedatectl",
+              "tc",
               "ping",
               "mkdir",
               "touch",

@@ -294,6 +294,11 @@ EXEC_COMMANDS = [
               ("is-active", RISK_R), ("is-enabled", RISK_R),
               ("start", RISK_W2), ("stop", RISK_W2),
               ("restart", RISK_W2)]),
+    # W10-A 运维四件套 AI 接入：防火墙（W2 高危写）与时间状态（R）；journalctl 上方已有
+    ex("nft", RISK_W2, timeout=30, bin="/usr/sbin/nft"),
+    ex("timedatectl", RISK_R, timeout=30, bin="/usr/bin/timedatectl"),
+    # W11 网络细控 AI 接入：tc 流量整形/优先级（W2 高危写，真改网络行为）
+    ex("tc", RISK_W2, timeout=30, bin="/usr/sbin/tc"),
     # ---- W1 级（低危写；写目标绝对路径限 /root /tmp /var/ai）----
     # 8 个直接注册；tar/gzip/traceroute 单列：自定义超时
     *[ex(c, RISK_W1, path_check=True) for c in (
@@ -587,6 +592,14 @@ def build_tools(procfs_table, sysfs_table):
 
     tools.extend(tool_netlink(*p) for p in NETLINK_PARAMS)
     tools.append(tool_netlink_sense())
+    # W11 网络细控：内核连接跟踪表查询（NF_CONNTRACK_PROCFS=y 时内核原生
+    # 导出 /proc/net/nf_conntrack；procfs-read 通道零依赖直读内核态数据，
+    # 比引入用户态 conntrack 工具包更诚实）
+    tools.append(tool_readfile(
+        "procfs.read.net_nf_conntrack", "/proc/net/nf_conntrack",
+        "内核连接跟踪表（nf_conntrack：每条连接的源/目的地址与端口、协议、"
+        "状态与超时；查「当前有哪些网络连接/谁连着我/连接数多少」用它；"
+        "补充手段：exec ss 查套接字级连接"))
     tools.append(tool_exec_run())
     tools.extend(memory_tools())
     tools.append(tool_shell_drop())

@@ -1,17 +1,31 @@
 #!/bin/sh
 # ============================================================
 # AIKernel 0.1.0-alpha 安装器 /init (busybox ash, PID1)
-# 流程: 挂载ISO -> 扫描目标盘 -> 一次y/N确认 -> sfdisk单分区
-#       -> mkfs.ext4 -> 解出厂rootfs -> 2G swapfile -> 装内核
-#       -> grub-install(MBR) -> fstab(UUID) -> 完成提示
+# 流程: 挂载ISO -> 扫描目标盘 -> 一次y/N确认
+#       -> sfdisk 双分区(ESP FAT32 512M + ext4根)
+#       -> mkfs.vfat/mkfs.ext4 -> 解出厂rootfs -> 2G swapfile
+#       -> 装内核 -> API token 生成 -> fstab(UUID)
+#       -> grub-install 双跑(i386-pc 到 MBR + x86_64-efi 到 ESP)
+#       -> ESP fallback \EFI\BOOT\BOOTX64.EFI -> 完成提示
 # 内核参数: aiinstall.autoreboot=1 完成后自动关机(自动化试装用)
 # 幂等: 可重复运行(重跑覆盖同布局)
 # v2: GRUB 步骤改用真 grub-install(修复手工 dd core.img 自写
-#     early.cfg 导致的引导期 prefix 解析失败/can't find command
-#     'linux' bug); fstab 与 grub.cfg 的 root 落实为 UUID
+#     early.cfg 导致的引导期 prefix 解析失败 bug); fstab/grub.cfg
+#     的 root 落实为 UUID
 # v3(I3): grub.cfg 控制台顺序修复 —— 默认项 console=ttyS0 console=tty0
 #     (交互落 tty0, VMware 图形窗口用户可见可输入); 新增第二菜单项
 #     '(serial console)' 保持旧顺序 tty0→ttyS0 供串口用户
+# v4(W12): EFI/UEFI 双路径 —— 目标盘改双分区(ESP FAT32 512M 类型EF
+#     + ext4 根, MBR/dos 布局保证 BIOS 嵌入位); grub-install 双跑
+#     (i386-pc 与 x86_64-efi 各自 try/catch, 一种失败不阻塞另一种,
+#     两者皆败才判安装失败); ESP 放 fallback \EFI\BOOT\BOOTX64.EFI
+#     (无 NVRAM 场景 OVMF 亦可引导); fstab 增 ESP 行(vfat umask=0077);
+#     安装时生成 /etc/aikernel/api-token(随机32hex, 600) 供
+#     aikernel-api 远程 AI 接口鉴权
+# v4.1(W12 修复): a) 补挂 ESP 到 /mnt/newroot/boot/efi (漏 mount 导致
+#     grub-install x86_64-efi 报 "doesn't look like an EFI partition");
+#     b) reboot/poweroff 改走 PATH(busybox applet 在 /bin, 原 /sbin/绝对
+#     路径不存在 -> PID1 exit 127 -> 重启期 kernel panic)
 # ============================================================
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export LD_LIBRARY_PATH=/lib:/usr/lib
@@ -29,24 +43,24 @@ case "$(cat /proc/cmdline)" in *aiinstall.autoreboot=1*) AUTOREBOOT=1;; esac
 die() {
   printf '\n[!] 安装失败: %s\n' "$*"
   printf '[!] 目标盘可能处于中间状态，重跑安装器可修复(幂等)。\n'
-  if [ "$AUTOREBOOT" = 1 ]; then sleep 3; /sbin/poweroff -f; fi
+  if [ "$AUTOREBOOT" = 1 ]; then sleep 3; poweroff -f; fi
   printf '按回车重启... '
   read x
-  /sbin/reboot -f
+  reboot -f
 }
 
 cancel() {
   printf '\n已取消，未做任何更改。\n'
-  if [ "$AUTOREBOOT" = 1 ]; then sleep 2; /sbin/poweroff -f; fi
+  if [ "$AUTOREBOOT" = 1 ]; then sleep 2; poweroff -f; fi
   printf '按回车重启... '
   read x
-  /sbin/reboot -f
+  reboot -f
 }
 
 printf '\n'
 printf '==================================================\n'
 printf '   AIKernel 0.1.0-alpha 安装器\n'
-printf '   AIKernel Installer (busybox initramfs)\n'
+printf '   AIKernel Installer (busybox initramfs, BIOS+EFI)\n'
 printf '==================================================\n'
 cat /proc/version
 printf '\n'
@@ -111,8 +125,8 @@ else
   done
 fi
 case "${TARGET#/dev/}" in
-  nvme*|mmcblk*) PART1="${TARGET}p1" ;;
-  *)             PART1="${TARGET}1" ;;
+  nvme*|mmcblk*) PART1="${TARGET}p1"; PART2="${TARGET}p2" ;;
+  *)             PART1="${TARGET}1";  PART2="${TARGET}2" ;;
 esac
 
 # ---- 3. 一次 y/N 确认(默认 N 防手滑) ----
@@ -120,13 +134,15 @@ model=$(cat /sys/block/${TARGET#/dev/}/device/model 2>/dev/null | tr -s ' ')
 [ -n "$model" ] || case "${TARGET#/dev/}" in
   vd*)    model="VirtIO Block Device" ;;
   nvme*)  model="NVMe Device" ;;
+  sd*)    model="SCSI Disk" ;;
   *)      model="未知型号" ;;
 esac
 sz=$(cat /sys/block/${TARGET#/dev/}/size)
 gib=$(( sz * 512 / 1073741824 ))
 printf '\n--------------------------------------------------\n'
 printf '目标盘   : %s (%s, %d GiB)\n' "$TARGET" "${model:-未知型号}" "$gib"
-printf '分区方案 : 单 ext4 分区 + 2G swapfile + GRUB(MBR)\n'
+printf '分区方案 : ESP(FAT32 512M) + ext4根 + 2G swapfile\n'
+printf '           GRUB 双装(BIOS MBR + UEFI ESP)\n'
 printf '警告     : 目标盘全部数据将被擦除!\n'
 printf '--------------------------------------------------\n'
 printf '确认安装到 %s? [y/N] ' "$TARGET"
@@ -136,26 +152,31 @@ case "$ANS" in
   *) cancel ;;
 esac
 
-# ---- 4. 分区 ----
-printf '\n[1/7] 分区 sfdisk %s (MBR, 单Linux分区, 2048扇区对齐, bootable)...\n' "$TARGET"
+# ---- 4. 分区: dos 布局, p1=ESP(type ef, 512MiB, bootable) p2=Linux ----
+printf '\n[1/8] 分区 sfdisk %s (MBR: p1=ESP 512MiB type-ef bootable, p2=Linux 其余)...\n' "$TARGET"
 sfdisk "$TARGET" >/dev/null <<EOF
 label: dos
-start=2048, type=83, bootable
+start=2048, size=1048576, type=ef, bootable
+type=83
 EOF
 [ $? -eq 0 ] || die "sfdisk 分区失败"
 i=0
-while [ ! -b "$PART1" ] && [ $i -lt 20 ]; do sleep 1; mdev -s 2>/dev/null; i=$(( i + 1 )); done
+while { [ ! -b "$PART1" ] || [ ! -b "$PART2" ]; } && [ $i -lt 20 ]; do sleep 1; mdev -s 2>/dev/null; i=$(( i + 1 )); done
 [ -b "$PART1" ] || die "分区节点 $PART1 未出现"
+[ -b "$PART2" ] || die "分区节点 $PART2 未出现"
 
 # ---- 5. 格式化 ----
-printf '[2/7] 格式化 ext4 %s (label=aikernel-root)...\n' "$PART1"
-mkfs.ext4 -F -L aikernel-root "$PART1" >/dev/null 2>&1
+printf '[2/8] 格式化 ESP %s (mkfs.vfat -F32, label=AIK-EFI)...\n' "$PART1"
+/sbin/mkfs.vfat -F 32 -n AIK-EFI "$PART1" >/dev/null 2>&1
+[ $? -eq 0 ] || die "mkfs.vfat 失败"
+printf '      格式化 ext4 %s (label=aikernel-root)...\n' "$PART2"
+mkfs.ext4 -F -L aikernel-root "$PART2" >/dev/null 2>&1
 [ $? -eq 0 ] || die "mkfs.ext4 失败"
 
 # ---- 6. 解压出厂 rootfs ----
 mkdir -p /mnt/newroot
-mount -t ext4 "$PART1" /mnt/newroot || die "挂载 $PART1 失败"
-printf '[3/7] 解压出厂 rootfs (约2GB, TCG下需数分钟, 请耐心等待)...\n'
+mount -t ext4 "$PART2" /mnt/newroot || die "挂载 $PART2 失败"
+printf '[3/8] 解压出厂 rootfs (约2GB, TCG下需数分钟, 请耐心等待)...\n'
 tar -xpf /media/rootfs-factory.tar -C /mnt/newroot
 [ $? -eq 0 ] || die "rootfs 解压失败"
 # 注意: /sbin/init 是绝对符号链接链(→/lib/systemd/systemd), 挂载点视角会逃逸出树;
@@ -164,35 +185,80 @@ tar -xpf /media/rootfs-factory.tar -C /mnt/newroot
 printf '      解压完成: %s 文件\n' "$(find /mnt/newroot -mindepth 1 | wc -l)"
 
 # ---- 7. swapfile ----
-printf '[4/7] 创建 2G swapfile...\n'
+printf '[4/8] 创建 2G swapfile...\n'
 dd if=/dev/zero of=/mnt/newroot/swapfile bs=1M count=2048 2>/dev/null
 chmod 600 /mnt/newroot/swapfile
 mkswap /mnt/newroot/swapfile >/dev/null 2>&1 || die "mkswap 失败"
 
 # ---- 8. 内核 ----
-printf '[5/7] 安装内核 -> /boot/vmlinuz-aikernel...\n'
+printf '[5/8] 安装内核 -> /boot/vmlinuz-aikernel...\n'
 mkdir -p /mnt/newroot/boot
 cp /media/boot/bzImage /mnt/newroot/boot/vmlinuz-aikernel || die "内核复制失败"
 
-# ---- 9. fstab(UUID) ----
-UUID=$(blkid -s UUID -o value "$PART1" 2>/dev/null)
-[ -n "$UUID" ] || die "blkid 未取得分区 UUID"
+# ---- 9. API token(随机 32 hex, 600) ----
+printf '      生成 /etc/aikernel/api-token (远程AI接口鉴权)...\n'
+TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ ${#TOKEN} -eq 32 ] || TOKEN=$(hexdump -n 16 -v -e '/1 "%02x"' /dev/urandom 2>/dev/null | tr -d ' \n')
+[ ${#TOKEN} -eq 32 ] || die "api-token 生成失败"
+mkdir -p /mnt/newroot/etc/aikernel
+printf '%s\n' "$TOKEN" > /mnt/newroot/etc/aikernel/api-token
+chmod 600 /mnt/newroot/etc/aikernel/api-token
+
+# ---- 10. fstab(UUID) ----
+UUID=$(blkid -s UUID -o value "$PART2" 2>/dev/null)
+[ -n "$UUID" ] || die "blkid 未取得根分区 UUID"
+PARTUUID=$(blkid -s PARTUUID -o value "$PART2" 2>/dev/null)
+[ -n "$PARTUUID" ] || die "blkid 未取得根分区 PARTUUID"
+ESPUUID=$(blkid -s UUID -o value "$PART1" 2>/dev/null)
+[ -n "$ESPUUID" ] || die "blkid 未取得 ESP UUID"
 # 内核无 initramfs 引导: root=UUID= 需读 fs(仅 initramfs 期可做), 必须用
-# 内核原生可解析的 PARTUUID(MBR: <diskid>-01)
-PARTUUID=$(blkid -s PARTUUID -o value "$PART1" 2>/dev/null)
-[ -n "$PARTUUID" ] || die "blkid 未取得分区 PARTUUID"
-printf '[6/7] 写 /etc/fstab (root UUID=%s, cmdline PARTUUID=%s)...\n' "$UUID" "$PARTUUID"
+# 内核原生可解析的 PARTUUID(MBR: <diskid>-02)
+printf '[6/8] 写 /etc/fstab (root UUID=%s, ESP UUID=%s, cmdline PARTUUID=%s)...\n' "$UUID" "$ESPUUID" "$PARTUUID"
+mkdir -p /mnt/newroot/boot/efi
+mount -t vfat "$PART1" /mnt/newroot/boot/efi || die "挂载 ESP $PART1 失败"
 cat > /mnt/newroot/etc/fstab <<EOF
 UUID=$UUID / ext4 defaults 1 1
+UUID=$ESPUUID /boot/efi vfat umask=0077 0 2
 /swapfile none swap sw 0 0
 EOF
 
-# ---- 10. GRUB: 真 grub-install 到目标盘 MBR ----
-printf '[7/7] 安装 GRUB (grub-install --target=i386-pc, MBR)...\n'
+# ---- 11. GRUB 双装: i386-pc -> MBR + x86_64-efi -> ESP (各自 try/catch) ----
+printf '[7/8] 安装 GRUB...\n'
 mkdir -p /mnt/newroot/boot/grub
-/sbin/grub-install --target=i386-pc --boot-directory=/mnt/newroot/boot "$TARGET" > /tmp/grub-install.log 2>&1
-RC=$?
-[ $RC -eq 0 ] || { echo "---- grub-install 日志(尾部) ----"; tail -20 /tmp/grub-install.log; die "grub-install 失败 (rc=$RC)"; }
+GRUB_BIOS_RC=1
+GRUB_EFI_RC=1
+
+printf '      [BIOS] grub-install --target=i386-pc -> %s MBR...\n' "$TARGET"
+/sbin/grub-install --target=i386-pc --boot-directory=/mnt/newroot/boot "$TARGET" > /tmp/grub-bios.log 2>&1
+GRUB_BIOS_RC=$?
+if [ $GRUB_BIOS_RC -eq 0 ]; then
+  printf '      [BIOS] OK\n'
+else
+  printf '      [BIOS] 失败(rc=%d, 不阻塞 EFI 路径), 日志尾部:\n' "$GRUB_BIOS_RC"
+  tail -5 /tmp/grub-bios.log | sed 's/^/        /'
+fi
+
+printf '      [UEFI] grub-install --target=x86_64-efi -> ESP...\n'
+/sbin/grub-install --target=x86_64-efi --efi-directory=/mnt/newroot/boot/efi \
+  --boot-directory=/mnt/newroot/boot --bootloader-id=aikernel --no-nvram \
+  > /tmp/grub-efi.log 2>&1
+GRUB_EFI_RC=$?
+if [ $GRUB_EFI_RC -eq 0 ]; then
+  printf '      [UEFI] OK\n'
+else
+  printf '      [UEFI] 失败(rc=%d, 不阻塞 BIOS 路径), 日志尾部:\n' "$GRUB_EFI_RC"
+  tail -5 /tmp/grub-efi.log | sed 's/^/        /'
+fi
+[ $GRUB_BIOS_RC -eq 0 ] || [ $GRUB_EFI_RC -eq 0 ] || die "grub-install 双路径均失败 (bios rc=$GRUB_BIOS_RC, efi rc=$GRUB_EFI_RC)"
+
+# ---- 12. ESP fallback: \EFI\BOOT\BOOTX64.EFI (无NVRAM时 OVMF 兜底路径) ----
+if [ $GRUB_EFI_RC -eq 0 ]; then
+  printf '      [UEFI] 放置 fallback \\EFI\\BOOT\\BOOTX64.EFI...\n'
+  mkdir -p /mnt/newroot/boot/efi/EFI/BOOT
+  cp /mnt/newroot/boot/efi/EFI/aikernel/grubx64.efi /mnt/newroot/boot/efi/EFI/BOOT/BOOTX64.EFI \
+    || die "ESP fallback BOOTX64.EFI 拷贝失败"
+fi
+
 cat > /mnt/newroot/boot/grub/grub.cfg <<EOF
 set default=0
 set timeout=3
@@ -209,22 +275,27 @@ menuentry 'AIKernel 0.1.0-alpha (serial console)' {
 }
 EOF
 sync
+umount /mnt/newroot/boot/efi 2>/dev/null
 umount /mnt/newroot
 sync
 
-# ---- 11. 完成 ----
+# ---- 13. 完成 ----
 printf '\n==================================================\n'
 printf '   AIKernel 安装完成!\n'
 printf '   目标盘: %s (%s, %d GiB)\n' "$TARGET" "${model:-disk}" "$gib"
-printf '   根分区: %s  UUID=%s\n' "$PART1" "$UUID"
+printf '   ESP   : %s FAT32 UUID=%s -> /boot/efi\n' "$PART1" "$ESPUUID"
+printf '   根分区: %s  UUID=%s\n' "$PART2" "$UUID"
+printf '   引导  : BIOS(MBR)=%s  UEFI(ESP)=%s\n' \
+  "$([ $GRUB_BIOS_RC -eq 0 ] && echo OK || echo FAIL)" \
+  "$([ $GRUB_EFI_RC -eq 0 ] && echo OK || echo FAIL)"
 printf '\n'
 printf '   重启进入 AIKernel，首次开机 AI 将引导你完成初始化。\n'
 printf '==================================================\n'
 if [ "$AUTOREBOOT" = 1 ]; then
   sleep 3
-  /sbin/poweroff -f
+  poweroff -f
 else
   printf '按回车重启... '
   read x
-  /sbin/reboot -f
+  reboot -f
 fi

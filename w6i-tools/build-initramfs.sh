@@ -3,6 +3,9 @@
 # busybox-static 骨架 + 动态工具(mkfs.ext4/sfdisk/blkid/grub-install 工具链) + GRUB i386-pc 模块
 # v2: 补齐 grub-install/grub-probe/grub-bios-setup/grub-mkrelpath/grub-editenv
 #     (安装器 GRUB 步骤改用真 grub-install, 修复手工 dd core.img 的 prefix bug)
+# v3(W12): EFI 工具链 —— x86_64-efi GRUB 模块全集 + mkfs.vfat(dosfstools)
+#     + efibootmgr(grub-install x86_64-efi 内部依赖), 支持安装器双跑
+#     i386-pc/x86_64-efi
 set -e
 W=/home/jack66g/w6i-initramfs
 IMG=/home/jack66g/w6i-initrd.img
@@ -33,18 +36,24 @@ copy_with_libs /usr/sbin/grub-probe
 copy_with_libs /usr/sbin/grub-bios-setup
 copy_with_libs /usr/bin/grub-mkrelpath
 copy_with_libs /usr/bin/grub-editenv
+# W12 EFI 工具链
+copy_with_libs /sbin/mkfs.vfat
+copy_with_libs /usr/bin/efibootmgr
 cp -L /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$W/lib/"
 # glibc ELF 解释器固定路径 /lib64/... — 动态二进制 exec 的硬依赖
 mkdir -p "$W/lib64"
 ln -sf ../lib/ld-linux-x86-64.so.2 "$W/lib64/ld-linux-x86-64.so.2"
 
 # 防 busybox applet 软链遮蔽真实工具(PATH /bin 先于 /sbin)
-for a in mkfs.ext4 sfdisk blkid grub-install grub-probe grub-bios-setup grub-mkimage grub-mkrelpath grub-editenv; do
+# (busybox 自带 mkfs.vfat applet, 必须摘掉让位 dosfstools 真件)
+for a in mkfs.ext4 mkfs.vfat sfdisk blkid grub-install grub-probe grub-bios-setup grub-mkimage grub-mkrelpath grub-editenv efibootmgr; do
   rm -f "$W/bin/$a"
 done
 
 # GRUB BIOS 模块全集(装到目标盘 /boot/grub/i386-pc)
 cp -a /usr/lib/grub/i386-pc "$W/usr/lib/grub/"
+# W12: GRUB EFI 模块全集(x86_64-efi 目标的 grub-install 需要)
+cp -a /usr/lib/grub/x86_64-efi "$W/usr/lib/grub/"
 
 # init 脚本
 cp /home/jack66g/w6i-tools/init "$W/init"

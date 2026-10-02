@@ -1,0 +1,11 @@
+[Unit]
+Description=AIKernel SME Memory Engine (REST 127.0.0.1:8000)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/start-sme.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=AIKernel Remote AI API (127.0.0.1:8761, Bearer auth)
+Documentation=man:aikernel-api(8)
+After=ollama.service aikernel-memory.service
+Wants=ollama.service aikernel-memory.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=TERM=xterm
+Environment=AIKERNEL_TOOLS_JSON=/usr/local/share/aikernel/tools.json
+ExecStart=/usr/bin/python3 /usr/local/sbin/aikernel-api
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
