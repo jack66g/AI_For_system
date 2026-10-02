@@ -740,3 +740,22 @@ oom_kill.c/fair.c/vmscan.c 三处最小侵入（readahead 零 host 改动）。
 运维四件套落地后，系统具备"可挂机"基线（远程 ssh / NTP 真同步 / 日志可回溯 / 防火墙
 默认 drop + 安全自动更新）；完整 ask 闭环的演示依赖云端模型或 7b+ 本地模型（1.5b+TCG
 为已知天花板，非代码缺陷）。
+
+---
+
+## W11-W13 摘要（2026-10-02，详证见 VM ~/w11-evidence ~/w12-evidence ~/w13-evidence 与 GitHub bdcc9cc）
+
+- **W11 网络细控+自愈**：内核 #36（产品线）补 NFT_NAT/MASQ/LIMIT/LOG + conntrack procfs +
+  cls/sch 分类调度 10 符号；exec 白名单 +tc(W2)/ss(R)/ip(R)；procfs.read.net_nf_conntrack
+  工具；SME 语料 157 条（连接/限速/封禁/流量定位/健康检查）；aikernel-health.timer 5 分钟
+  自愈（三服务+根分区检查，journal 取证 5 轮连续 PASS）；ISO v1.3 终装七项验收全过。
+- **W12 EFI+远程 AI API**：安装器 BIOS+UEFI 双路径（ESP 512M + grub 双装 + BOOTX64.EFI
+  fallback，OVMF 从盘引导实证）；aikernel-api 守护（127.0.0.1:8761，POST /ask 走 ai -p、
+  Bearer token 401 鉴权、/health 三服务，真答案 1651B 冒烟）；修 4 个交付链 bug（ESP 漏挂/
+  reboot 路径 panic/API 缺 HOME/出厂缺 80-wired.network）。ISO v1.4。
+- **W13 文件工程重排**：三层定位落地（VM 构建树/GitHub 发布仓库/rescue 交付根）；仓库收编
+  factory/（17 文件出厂系统资产）+ 75 工具注册表 + .config；rescue 根清至 8 项终态；
+  两树 agent 1121 文件、AIKernel+tools 9003 文件 md5 全量核对一致；GitHub bdcc9cc。
+- **复评（W14）**：完善度 3.2→**6.8**（P0 全清、7 修复/7 部分/5 未动/0 砍）；诚实天花板
+  8.5~9.0（17~27 人日：A/B 升级槽/文档四件/ai doctor/onboarding 扩轮/API mTLS/日志转发）；
+  真 10 分需生产年限。终评报告：AIKernel_完善度终评_20261002.md。
