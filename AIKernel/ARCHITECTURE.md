@@ -759,3 +759,106 @@ oom_kill.c/fair.c/vmscan.c 三处最小侵入（readahead 零 host 改动）。
 - **复评（W14）**：完善度 3.2→**6.8**（P0 全清、7 修复/7 部分/5 未动/0 砍）；诚实天花板
   8.5~9.0（17~27 人日：A/B 升级槽/文档四件/ai doctor/onboarding 扩轮/API mTLS/日志转发）；
   真 10 分需生产年限。终评报告：AIKernel_完善度终评_20261002.md。
+
+---
+
+## A/B/C 三波修复 + SME 路由架构 + ISO v1.5（2026-10-03，内核 #37）
+
+三波接续修复（A=agent 消息与执行层，B=TLS 与工具命名，C=SME 路由与上下文工程），
+全部验收有证据后交付 ISO v1.5。详证见 rescue 根 `sme-router-evidence/`、
+`tls-tools-evidence/`、`agent-fix-evidence/` 三目录。
+
+### 交付物：ISO v1.5（版本记录）
+
+- `AIKernel-0.1.0-alpha.5-x86_64.iso`：1.90GB（1903435776B），md5
+  `64407bb510976e6ccd1195f0e15c9d08`，内核 #37。
+- BIOS+UEFI 双引导、运维四件套、aikernel-api、SME 首启种子（193 条）随盘，
+  装机即用口径与 v1.4 一致。
+
+### 工具注册表口径（当前）：75 工具全下划线名
+
+- **口径勘误**：前文 69/73/74 工具均为历史快照；现行注册表 **75 工具**，工具名
+  **全部下划线形态**（`netlink_act_sched_nice` 这类）。内核域名字符串
+  （`netlink.act.sched.nice`）不废弃——作为每个工具 schema 的 `param` 字段显式
+  映射保留：下划线名是对外 API 名，点号名是内核参数名。
+- 改名动机（B 波）：点号工具名（`memory.*` 等 13 个）违反主流 API 工具名规范
+  `^[a-zA-Z0-9_-]+$`，python-ssl 指纹客户端直连 DeepSeek ingress 触发 400
+  （受控复现：点号名 400 / 下划线 200）。
+- **单源**：`agent/ai/tools/gen_registry.py` 一份同时生成 `tools.json` 与
+  `tool_catalog.txt`（目录页 3614B，75 行，与 C 侧 tool_registry_build_catalog
+  逐字一致，diff 为零）；部署 tools.json md5 `88b1dbf7...` × 6 处一致。
+
+### A 波 · agent 修复清单（简列）
+
+- **会话序列化拼接协议修复**——孤儿 tool_calls 触发云端 400 的根因；
+  **并行 tool_calls 响应组语义**（多条 tool 消息与 tool_call_id 正确配对，
+  tests/test_parallel_toolcalls 全绿）。
+- 十连发排队 10/10；4KB 长输入处理；历史裁剪改**预算制且工具对不拆散**
+  （tool_calls 与 tool 结果成对裁剪）。
+- num_predict 1024 可配置；占用指示真实化；工具结果 64KB 截断 + 30s 超时；
+  轮数上限 8。
+- **W2 非终端通道**：`--yes` / `AIKERNEL_ASSUME_YES` / 结构化 NEED_CONFIRM
+  （API 集成可编程确认，不再只有交互式 y/N）；SSE streaming（云端增量）。
+- exec_run 增 **input 参数**（stdin 管道 + SIGPIPE 防护）——写文件能力
+  （tee 配方：`exec_run(tee /tmp/f, input=...)`）。
+
+### B 波 · TLS 根因修正（勘误）
+
+- **此前"T3 mbedTLS 握手失败"系误诊**。抓包 + mbedTLS debug 钩子 + 受控 TLS
+  echo 服务器三路定案，真根因：`http_client.c` 未处理 `mbedtls_ssl_write`
+  **部分写**——mbedTLS 3.6.2 `ssl_write_real()` 对超长缓冲截断到单记录上限
+  16384B 并返回正数，旧代码 `while(w<=0)` 把 ">0" 当全部发完 → 75 工具请求
+  29.5KB 只发出 16KB → 服务端按 Content-Length 等齐 → 15s 断连 → agent 报
+  "Connection closed before HTTP header"。仅 >16384B 请求触发（T3 强化描述后
+  请求变大才暴露；W10 时代 GET/小 body 从未触发）。
+- 修复：`write_all_tls`/`write_all_plain` 循环写满，覆盖 **6 个发送点**；
+  受控复现 `[BODY 16195 / declared 29500]` → 修复后
+  `[BODY 29501 / declared 29501]` 全量到达。
+- **VERIFY_REQUIRED 无降级保持**：自签证书/CN 不匹配仍拒绝，真网
+  `https://api.github.com` 系统 CA 校验回归不破；`AIKERNEL_TLS_DEBUG` 调试钩子
+  环境变量门控，默认零输出。
+
+### C 波 · SME 路由与上下文工程（新架构）
+
+背景：75 工具全量 schema 直进请求（tools 数组 15584B + system 10922B）在小窗口
+模型上挤压有效上下文且检索失焦。本波把"全量工具清单"改为"**SME 空间记忆检索
+驱动的动态工具激活**"：
+
+- **激活集合机制**：会话级默认激活 5 工具（memory_search/exec_run/
+  procfs_read_status/procfs_read_control/netlink_sense，按 12 题命中分布定）；
+  SME 检索命中语料 text/tags 里的工具名（下划线/点号双形态解析）经
+  `router_activate_from_sme` 去重扩入，下一请求 tools 数组重建；激活名单在
+  工具结果回填中以 `[框架提示]` 显式宣告（解决模型对动态扩入无感知，实测
+  金标准 3 轮直达）。
+- **双驱动**：
+  - 云端 **autonomous**：system=身份+目录页（tool_catalog 3614B）+检索指引
+    （543B）+精简约束（652B），模型自主 memory_search 后作答；
+  - 本地 **pre_retrieve**：ask 进来框架先 SME 检索 top5，一次完成命中激活+文本
+    注入，模型无感知；local_catalog=false 缺省不带目录页（system 824B）；
+    检索不中诚实告知（实测模型明示工具不在激活集，未编造）。
+- **模式开关**：model.toml `[routing] mode=auto|autonomous|pre_retrieve`
+  （auto 按 provider：cloud=autonomous、local=pre_retrieve），config_manager
+  解析+写回，向后兼容。
+- **字节账**（syscalc.py 从源码宏提取实测）：system 全量 10922B → autonomous
+  **5016B**（-54%）；请求 tools 数组全量 **15584B → 激活集 1004B**（-94%）。
+- **效果**：
+  - 云端（deepseek 直连，T3 题面 12 题）**12/12 通过**（T3 基线 7/12）；金标准
+    "把 1 号进程 nice 调到 3" 3 轮直达：检索→激活宣告→直接调用
+    `netlink_act_sched_nice(pid=1,value=3)`→W2 确认→内核通道。
+  - 本地（qwen2.5:1.5b + pre_retrieve）：ollama 服务端 prompt_eval_count
+    **8681→1437（-82.5%）**；首轮请求体 30367B→4804B（-84%）；journalctl
+    ollama **keep=4 截断 WARN 消失**；金标准机制 8 轮上限内完整跑完（5s，无
+    死循环无截断）；十连发 10/10、4KB 长输入通过。1.5b 选对内核接口工具仍受
+    模型能力上限（与基线同口径，非代码缺陷）。
+- **SME 语料**：接口语料覆盖 46/75 → 补灌 29 条 → **75/75**（清单
+  corpus_backfill_list.txt）；首启种子 193 条。spatial-memory-engine 仓库全程
+  只读，语料仅灌系统 SME 副本。
+
+### 口径更新（A/B/C 后）
+
+- 完善度：上一轮终评 **6.8/10**；本波后建议口径 **7.5~8/10——云端体验到位，
+  本地受 1.5b 物理上限**（诚实口径，不写 10 分；真 10 分需生产年限）。
+- 可说：75 工具下划线注册表 + SME 路由（空间记忆检索驱动工具激活）、TLS 大请求
+  部分写真修、云端 12/12、本地 prompt -82.5%、ISO v1.5 装机即用。
+- 仍不说："AI 接管调度/OOM 决策"（决策=启发式 v1，挂点预留）；"语义检索"
+  （是 SME 空间记忆检索，能力随插件演进）；10 分；1.5b 完整参数闭环成功率。
