@@ -862,3 +862,108 @@ oom_kill.c/fair.c/vmscan.c 三处最小侵入（readahead 零 host 改动）。
   部分写真修、云端 12/12、本地 prompt -82.5%、ISO v1.5 装机即用。
 - 仍不说："AI 接管调度/OOM 决策"（决策=启发式 v1，挂点预留）；"语义检索"
   （是 SME 空间记忆检索，能力随插件演进）；10 分；1.5b 完整参数闭环成功率。
+
+---
+
+## M/N 波修复 + T3 模拟测试 + ISO v1.5.3/5.4（2026-10-03/04，内核 #37）
+
+commit 487352d（v1.5 收口）之后接续：M 波（agent 可用性六修复）→ T3 全面模拟
+测试（25 场景六舱）→ N 波（五修复 + exec 命令级 risk 闸门），全部验收有证据后
+交付 ISO v1.5.3 与 v1.5.4。详证见 VM `~/w18-evidence/`（M 波）、
+`~/w19-evidence/`（v1.5.3 收编）、rescue 根 `sim-test/`（T3 报告与 results.jsonl）、
+`~/w20-evidence/`（N 波修复与复测）、`~/w20-iso-evidence/`（v1.5.4 收编）。
+
+### M 波 · agent 可用性六修复（v1.5.3 收编）
+
+- **直说进 AI**：REPL 无前缀输入兜底进 ask（dispatch_line 兜底 cmd_ask，命令字
+  仍优先）——T2 时代"必须打 ask 前缀"的最大易用性缺陷修复。
+- **上下文预算治理三层**：①工具结果入历史前摘要化，上限
+  min(8KB, (ctx_len−max_tokens)×3/4)，memory_search 结果豁免，tool_calls 与
+  结果配对保护不拆散；②ask 入口预算 >85% 自动 compact（真实 140589B 会话压至
+  1553B，61572B 工具结果摘要为 2152B 入历史）；③预算显示与实际对齐。
+- **fbterm 渲染兼容**：渲染错乱元凶定案为 `\r` 覆盖 spinner 与 `\ESC[K` 序列；
+  FBTERM_RUN 探测后切静态 thinking 提示 + 整行回复输出（fbterm 下关流式增量），
+  用户 VM 真机 VNC 验证同屏生效。
+- **串口输入不通悬案告破**：guest 全链路排查无恙，根因在宿主侧两层——
+  vmware-tray.exe 僵尸连接占住命名管道 + 旧 relay 阻塞 ReadFile 模型使 VMware
+  不投递写入；f-relay2.py 重写（PIPE_NOWAIT 轮询 + 看门狗）双向实时验证通过。
+- **test_truncate 夹具自足**：204800B 夹具内置生成 + atexit 自清理，独立 PASS
+  不再依赖外部残留；tests 六套 47 PASS 全绿，make W=1 零编译警告。
+- **出厂模板 max_tokens 4096→1024**：旧模板显式覆盖代码默认导致截断面扩大；
+  模板写单源一致性注释（与 UI_DEFAULT_MAX_TOKENS 同步改则同步）。
+- 二进制：L1 构建树 `aikernel-shell` 2de3ad77（未 strip，2960592B），strip 基准
+  83a9a1a2 入 v1.5.3 四点对账（构建树/strip 基准/树内部署位/ISO 内一致）。
+
+### T3 模拟测试（25 场景六舱，v1.5.3 + 云端 deepseek-flash）
+
+- **总成绩 17 PASS / 1 PARTIAL / 7 FAIL = 70%**（含 partial 半分；自动关键词
+  初判误判 6/25，全部以 results.jsonl 原始 output + VM 旁路实读人工终判）。
+  **四维评分 6.6/10**（易用 6.5 / 准确 7 / 鲁棒 5.5 / 速度 7.5），对照 T2 基线
+  4.3 **+2.3**。
+- **B 舱 4/4 成色最高**：NETLINK_AI → 内核 ACT → /proc 回读 → decision_id 回滚
+  全链路（swappiness 20 写入→回读 20→"回滚那个改动"→/proc/sys/vm/swappiness
+  实测 60），W2 确认流（面板完整 + audit CONFIRM=yes/no 全程在案）构成完整
+  安全闭环。
+- **D3 核心场景（变通达成）**：python3 被白名单拦截后，AI 自写扫描脚本改用
+  白名单内 curl telnet:// 完成 TCP 探测，22/8080/9999 全 OPEN 带服务指纹
+  （SSH/Echo banner），与靶场事实完全吻合，全程诚实标注数据来源。
+- **靶场沙盒**：L1（192.168.245.136）靶点 22/8080/9999（SIMTEST-RANGE 标识，
+  其余端口 refused）+ nft simtest 表，teardown 脚本可拆；红线零违规——零出 NAT
+  测试流量，E2 场景 L1 nftables 规则前后快照零结构变化（audit 无写调用）。
+- **暴露四问题（成为 N 波输入）**：max_tokens 截断→空回答（8/25 场景波及，
+  D/E 舱 4 个 FAIL 直接根因）；compact 摘要持续失败（`摘要失败(空)`→
+  `API error`）；W2 确认状态跨场景污染（C3 实证：遗留确认吞掉下一场景应答）；
+  8KB 长文本被 REPL 输入队列拆 ~5 块且残片泄入后续场景。
+
+### N 波 · 五修复 + exec 命令级 risk 首次真正进闸门（v1.5.4 收编）
+
+- **python3 入 exec 白名单**：W2 级（W2 命令 7→8），executor 强校验仅
+  `python3 <script.py> [参数...]` 形态、禁 -c/-m 与一切选项；三件套同步——
+  tools.json 工具描述（用法/风险/审计说明）、SME 语料（用法/风险/授权边界）、
+  行为准则规则段补条。
+- **per-provider max_tokens 双档**：cloud 8192 / local 1024（T3 实证 cloud 档
+  4096 在深度任务被 thinking 吃满后提档），config 单源解析+写回。
+- **compact 失败降级**：摘要 API 失败时降级为逐轮本地裁剪（实测 120 条会话裁至
+  4 条保持可用，原会话不损坏），会话不再因摘要失败而失控。
+- **exec_run input 通道 tee 中转改造**：临时文件中转（fork 前落盘 0600 O_EXCL，
+  子进程 dup2 只读 fd，管道为回退）；附带修复模型偶发把 args 编码为字符串形态
+  的二次解析容错（tee 循环 20 次从 16/20 → 框架级 20/20）。
+- **W2 确认泄漏修复**：面板弹出前 stdin 滞留输入不消费立即拒绝
+  （TR_W2_STALE_INPUT）；面板后 8s 窗口单键读取（逐字节 read 兼容 raw 模式），
+  超时=拒绝；--yes / AIKERNEL_ASSUME_YES 通道不受影响。T3 C3 污染根因
+  （裸 fgets 等整行吞下一场景文本）消除。
+- **重大：exec 通道命令级 risk 首次真正进闸门**——此前 exec 只按工具级 risk
+  判定，kill/python3 等 W2 命令从不弹确认（T3 C2 audit 实证 ALLOW_AUTO 直通）；
+  改为 tool_executor_run 按 exec.commands 的 per-command risk 判定 W2，修复后
+  kill/python3 弹红色确认面板。
+- **复测 10 场景（C/D/E 舱）10/10 PASS**（T3 同口径 4/10）：D3 走正门 python3
+  真执行 scan.py 报告三端口；D1 diskmon.sh 2018B 落盘 bash -n 通过；E1 全端口
+  1-65535 扫描 8.8s，6 开放端口与 L1 实际监听完全一致零误判；E2 只出三层方案
+  未动手（红线合规）；C2 SIGKILL 走 W2 确认（audit CONFIRM=yes）。
+
+### 交付物版本链（v1.5.3 → v1.5.4）
+
+- **v1.5.3** = `AIKernel-0.1.0-alpha.5.3-x86_64.iso`（1912784896B，md5
+  `a96d0d527c6b6fca8937b87fcfc11d13`）：M 波六修复二进制收编（aikernel-shell
+  strip 后 83a9a1a2）+ model.toml 模板 1024 + motd 5.3。diff vs alpha.5.2 内容
+  差异恰 3 处，新增 0/删除 0。
+- **v1.5.4** = `AIKernel-0.1.0-alpha.5.4-x86_64.iso`（1912805376B，md5
+  `49470fd4c41624a99633fe01a34b4fb6`）：N 波五修复二进制收编（aikernel-shell
+  strip 后 91cc02fa）+ tools.json `8ee9a5c6`（python3×4，三处一致）+
+  tool_catalog.txt `9529a8b8`（N 波重生成）+ model.toml 双档 `84a1b324`
+  （cloud 8192/local 1024，无 key）+ motd 5.4。diff vs alpha.5.3 内容差异恰
+  5 处，新增 0/删除 0。
+- 内核 bzImage #37 现役未重编（两版 ISO 均为 #37）。N 波用户 VM 本机另构建部署
+  一版 399e38ef（构建环境差异，源码同一套功能等价），ISO 出厂统一收编 L1 构建
+  版 91cc02fa。
+
+### 口径更新（M/N 波 + T3 后）
+
+- 完善度：**6.6/10（T3 实测四维口径，云端模型）**；N 波修复后 C/D/E 舱复测
+  10/10，预期全量重跑达 **8 分档**（诚实预期口径，非实测）。
+- 可说：直说进 AI、预算三层治理、fbterm 兼容、串口悬案告破（宿主侧根因）、
+  T3 25 场景 70% 与四维 6.6（对照基线 +2.3）、python3 白名单 + exec 命令级
+  risk 闸门、复测 10/10、ISO v1.5.3/5.4 双版收编。
+- 仍不说："AI 接管调度/OOM 决策"（决策=启发式 v1，挂点预留）；"语义检索"
+  （是 SME 空间记忆检索，能力随插件演进）；10 分；"全量重跑 8 分"系预期
+  非实测。

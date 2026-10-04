@@ -1,6 +1,14 @@
 # AIKernel — AI 主体接管 Linux 的控制系统
 
-> 版本：0.1.0-alpha.5 / v1.5（2026-10-03 快照）
+> 版本：0.1.0-alpha.5.4 / v1.5.4（2026-10-04 快照）
+
+## v1.5.3 / v1.5.4 发行说明（2026-10-04）
+
+- **发行物**：`AIKernel-0.1.0-alpha.5.4-x86_64.iso`（1.91GB，md5 `49470fd4c41624a99633fe01a34b4fb6`，内核 #37；前一版 v1.5.3 md5 `a96d0d527c6b6fca8937b87fcfc11d13`），BIOS+UEFI 双引导装机即用；两版相对前版均为内容差异收编、新增 0/删除 0。
+- **M 波六修复（v1.5.3 收编）**：REPL 直说进 AI（无前缀兜底 ask，命令字优先）；上下文预算治理三层（工具结果入历史前摘要化 min(8KB,(ctx_len−max_tokens)×3/4)、memory_search 豁免+工具对配对保护；ask 入口 >85% 自动 compact；显示对齐）；fbterm 渲染兼容（`\r` 覆盖 spinner 元凶定案，FBTERM_RUN 切静态提示+整行回复）；串口输入不通悬案告破（根因在宿主侧：vmware-tray.exe 僵尸管道连接 + relay 阻塞读模型使 VMware 不投递写入，f-relay2.py 重写修复）；test_truncate 夹具自足；出厂模板 max_tokens 4096→1024。
+- **N 波五修复（v1.5.4 收编）**：python3 入 exec 白名单（W2 级，仅 `python3 script.py [参数...]` 形态、禁 -c/-m，工具描述/SME 语料/行为准则三件套）；per-provider max_tokens 双档（cloud 8192 / local 1024）；compact 失败降级逐轮本地裁剪；exec_run input 通道 tee 临时文件中转 + args 字符串形态二次解析；W2 确认状态泄漏修复（滞留输入即拒 + 8s 窗口单键应答）。**重大安全修复：exec 通道命令级 risk 首次真正进闸门**——此前只按工具级判定，kill/python3 等 W2 命令从不弹确认；现按 per-command risk 弹确认面板。
+- **T3 模拟测试（25 场景六舱，v1.5.3 + 云端模型）**：**17 PASS / 1 PARTIAL / 7 FAIL = 70%**，四维评分 **6.6/10**（对照 T2 基线 4.3，+2.3）；B 舱内核写通道 4/4（W2 确认流 + decision_id 回滚实证）；N 波修复后 C/D/E 舱 10 场景复测 **10/10 PASS**（E1 全端口 1-65535 扫描 8.8s 零误判，D3 走正门 python3）。
+- **完善度口径**：6.6/10（T3 实测四维口径，云端模型）；预期全量重跑 **8 分档**（诚实预期，非实测）。决策仍为启发式 v1（"AI 接管调度/OOM 决策"不可说）。详见 `AIKernel/ARCHITECTURE.md` 末章。
 
 ## v1.5 发行说明（2026-10-03）
 
