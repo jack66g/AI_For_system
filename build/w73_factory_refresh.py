@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""W73: refresh the factory rootfs for alpha.11.0 (run as root on L1).
+"""W73/W77f: refresh the factory rootfs for alpha.12.0 (run as root on L1).
 
-Installs the verified kernel-userland artifacts, bumps the release strings,
-raises ctx_len, and records backups outside the factory tree.
+Installs the verified kernel-userland artifacts (shell=784cc0f0, 156 tools,
+9 domains, seed 173), bumps the release strings, raises ctx_len, and records
+backups outside the factory tree.
 """
 import hashlib
 import os
@@ -12,20 +13,21 @@ import sys
 
 SRC = "/home/jack66g/linux-6.18.39/agent/ai"
 ROOT = "/home/jack66g/w7i-rootfs"
-BAK = "/home/jack66g/w73-backup/factory-pre-alpha11"
+BAK = "/home/jack66g/w73-backup/factory-pre-alpha12"
 UPGRADE = "/home/jack66g/aikernel-longterm/aik-upgrade.patched"
 
 EXPECT = {
-    "/usr/local/bin/ai": "adb71f65c7e60fdcba2ce88da9093546",
-    "/usr/local/bin/aikernel-shell": "adb71f65c7e60fdcba2ce88da9093546",
+    "/usr/local/bin/ai": "784cc0f014409cfdd8186f95c557dcd0",
+    "/usr/local/bin/aikernel-shell": "784cc0f014409cfdd8186f95c557dcd0",
     "/usr/local/bin/aik-sandbox": "2fff618051be53bd6187b96ad11c9206",
     "/usr/local/sbin/aikernel-api": "e007a7d9d9e8cd9e81ec977d92bd9056",
-    "/usr/local/share/aikernel/tools.json": "34d5af9ca7279e436690169c9af65873",
-    "/etc/aikernel/tools.json": "34d5af9ca7279e436690169c9af65873",
-    "/usr/local/share/aikernel/tools.openai.json": "ab7656229c60fcebfab20b55952ae2f2",
-    "/usr/local/share/aikernel/tools-sandbox.json": "25f25c255bb75818f0db09fb80855a25",
-    "/usr/local/share/aikernel/sme-seed.jsonl": "f93767385a788bfff1a587f1eea2b321",
-    "/usr/local/share/aikernel/tool_catalog.txt": "ad3e216edad31fb16378329d41c3c777",
+    "/usr/local/share/aikernel/tools.json": "eca2739901173bcf6505420bbf7d186d",
+    "/etc/aikernel/tools.json": "eca2739901173bcf6505420bbf7d186d",
+    "/usr/local/share/aikernel/tools.openai.json": "d5fedb738f5e4e56290dcbe67b26f055",
+    "/usr/local/share/aikernel/tools-sandbox.json": "226233e4d143db8a513bd136a6caae46",
+    "/usr/local/share/aikernel/sme-seed.jsonl": "59e5ee4a87576320750cc05381e9871f",
+    "/usr/local/share/aikernel/tool_catalog.txt": "39be07cec5b3670591838e97a87563b6",
+    "/usr/local/share/aikernel/model-catalog.json": "07fd7274227ff531a71f0bd4fb631de7",
     "/usr/local/sbin/aik-upgrade": "6d3392d26b65201e5151227717d57e8c",
 }
 
@@ -102,8 +104,8 @@ if os.path.exists(ROOT + stray):
 install("/usr/local/sbin/aik-upgrade", UPGRADE, 0o755)
 
 # 4) release strings and context budget
-text_replace("/etc/motd", "0.1.0-alpha.10.0", "0.1.0-alpha.11.0")
-text_replace("/root/README.md", "0.1.0-alpha.10.0", "0.1.0-alpha.11.0")
+text_replace("/etc/motd", "0.1.0-alpha.11.0", "0.1.0-alpha.12.0")
+text_replace("/root/README.md", "0.1.0-alpha.11.0", "0.1.0-alpha.12.0")
 text_replace("/root/.aikernel/model.toml", "ctx_len = 8192", "ctx_len = 32768")
 text_replace("/root/.aikernel/model.toml", "ctx_len=8192", "ctx_len=32768")
 os.chmod(ROOT + "/root/.aikernel/model.toml", 0o600)
@@ -112,10 +114,10 @@ os.chmod(ROOT + "/root/.aikernel/model.toml", 0o600)
 cfg = "/home/jack66g/w6i-tools/grub-iso.cfg"
 with open(cfg, encoding="utf-8") as f:
     s = f.read()
-if "0.1.0-alpha.10.0" in s:
-    shutil.copy2(cfg, "/home/jack66g/w73-backup/grub-iso.cfg.pre-alpha11")
+if "0.1.0-alpha.11.0" in s:
+    shutil.copy2(cfg, "/home/jack66g/w73-backup/grub-iso.cfg.pre-alpha12")
     with open(cfg, "w", encoding="utf-8") as f:
-        f.write(s.replace("0.1.0-alpha.10.0", "0.1.0-alpha.11.0"))
+        f.write(s.replace("0.1.0-alpha.11.0", "0.1.0-alpha.12.0"))
 
 # 6) verify
 bad = []
@@ -125,11 +127,11 @@ for rel, want in EXPECT.items():
     if got != want:
         bad.append((rel, want, got))
 motd = open(ROOT + "/etc/motd", encoding="utf-8").read()
-assert "0.1.0-alpha.11.0" in motd and "0.1.0-alpha.10.0" not in motd
+assert "0.1.0-alpha.12.0" in motd and "0.1.0-alpha.11.0" not in motd
 assert "ctx_len = 32768" in open(ROOT + "/root/.aikernel/model.toml",
                                 encoding="utf-8").read()
 assert stat.S_IMODE(os.stat(ROOT + "/root/.aikernel/model.toml").st_mode) == 0o600
-assert "0.1.0-alpha.11.0" in open(cfg, encoding="utf-8").read()
+assert "0.1.0-alpha.12.0" in open(cfg, encoding="utf-8").read()
 assert os.path.isfile(ROOT + "/etc/systemd/system/aikernel-api.service")
 if bad:
     raise SystemExit("md5 mismatch: %r" % (bad,))
@@ -139,21 +141,22 @@ import json as _json
 _doc = _json.load(open(ROOT + "/usr/local/share/aikernel/tools.json",
                        encoding="utf-8"))
 _names = [t["name"] for t in _doc.get("tools", [])]
-assert _doc.get("tool_count") == 151, _doc.get("tool_count")
-assert len(_names) == 151, len(_names)
+assert _doc.get("tool_count") == 156, _doc.get("tool_count")
+assert len(_names) == 156, len(_names)
 _names_sha = hashlib.sha256(("\n".join(_names) + "\n").encode("utf-8")).hexdigest()
-assert _names_sha == "52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2", _names_sha
+assert _names_sha == "1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81", _names_sha
 assert _doc.get("tool_names_sha256") == _names_sha
 _domains = set()
 for _t in _doc.get("tools", []):
     _sub = _t.get("sub")
     if isinstance(_sub, list) and _sub:
         _domains.add(_sub[0])
-assert len(_domains) == 8, sorted(_domains)
+assert len(_domains) == 9, sorted(_domains)
 assert sum(1 for _n in _names if _n.startswith("desktop_")) == 20
+assert sum(1 for _n in _names if _n.startswith("model_")) == 5
 _seed = [l for l in open(ROOT + "/usr/local/share/aikernel/sme-seed.jsonl",
                          encoding="utf-8").read().splitlines() if l.strip()]
-assert len(_seed) == 167, len(_seed)
+assert len(_seed) == 173, len(_seed)
 print("REGISTRY_OK", len(_names), _names_sha, len(_seed))
 
 # 7) W76b: desktop demo bundle + aik-desktop.service (independent of the

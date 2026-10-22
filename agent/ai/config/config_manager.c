@@ -22,7 +22,7 @@
 
 #define LOCAL_DEFAULT_ENABLED     1
 #define LOCAL_DEFAULT_BASE_URL    "http://127.0.0.1:11434/v1"
-#define LOCAL_DEFAULT_MODEL       "llama3"
+#define LOCAL_DEFAULT_MODEL       ""   /* W77d：无预装模型；空=未配置，绝不伪造本地可用 */
 #define LOCAL_DEFAULT_TIMEOUT_MS  60000
 
 /* ---- [ui] 段：布尔值解析（on/off/true/false/1/0），失败保持原值 ---- */
@@ -224,6 +224,8 @@ struct ai_config *ai_config_init(void)
 
 	/* 填充 [route] 段默认值（W77 模型路由） */
 	route_set_defaults(&cfg->route);
+	/* 填充 [clarify] 段默认值（W77e：过期自动默认，默认开） */
+	cfg->clarify.auto_default = 1;
 	if (!cfg->ui.session || !cfg->ui.lang) {
 		free(cfg->ui.session);
 		free(cfg->ui.lang);
@@ -278,6 +280,7 @@ static int parse_model_toml(struct ai_config *cfg)
 	int in_ui = 0;
 	int in_routing = 0;
 	int in_route = 0;
+	int in_clarify = 0;
 	int in_models = 0;
 	struct ai_model_config *model = NULL;
 
@@ -305,6 +308,7 @@ static int parse_model_toml(struct ai_config *cfg)
 					sizeof(current_section) - 1);
 
 				in_route = 0;
+				in_clarify = 0;
 				if (strcmp(current_section, "default") == 0) {
 					in_default = 1;
 					in_local = 0;
@@ -338,6 +342,14 @@ static int parse_model_toml(struct ai_config *cfg)
 					in_routing = 0;
 					in_route = 1;
 					in_models = 0;
+				} else if (strcmp(current_section, "clarify") == 0) {
+					/* [clarify] 段：W77e 澄清行为 */
+					in_default = 0;
+					in_local = 0;
+					in_ui = 0;
+					in_routing = 0;
+					in_models = 0;
+					in_clarify = 1;
 				} else if (strncmp(current_section, "models.", 7) == 0) {
 					in_default = 0;
 					in_local = 0;
@@ -481,6 +493,14 @@ static int parse_model_toml(struct ai_config *cfg)
 				if (v > 0)
 					model->max_tokens = v;
 			}
+		} else if (in_clarify) {
+			/* [clarify] 段：W77e 澄清行为（过期自动默认） */
+			if (strcmp(key, "clarify_auto_default") == 0 ||
+			    strcmp(key, "auto_default") == 0) {
+				cfg->clarify.auto_default =
+					ui_parse_bool(value,
+						      cfg->clarify.auto_default);
+			}
 		} else if (in_ui) {
 			/* [ui] 段：终端 UI 运行参数 */
 			if (strcmp(key, "ctx_len") == 0) {
@@ -534,6 +554,12 @@ static int parse_model_toml(struct ai_config *cfg)
 					free(cfg->ui.lang);
 					cfg->ui.lang = dup;
 				}
+			} else if (strcmp(key, "clarify_auto_default") == 0) {
+				/* W77e：[ui] 段同名键兼容（独立 [clarify]
+				 * 段的简化写法，见上方 in_clarify 分支） */
+				cfg->clarify.auto_default =
+					ui_parse_bool(value,
+						      cfg->clarify.auto_default);
 			}
 		} else if (in_local) {
 			/* [local] 段：本地 Provider 配置 */
@@ -699,6 +725,14 @@ static void write_model_toml(struct ai_config *cfg)
 	fprintf(fp, "probe_timeout_ms = %d\n", cfg->route.probe_timeout_ms);
 	fprintf(fp, "cloud_down_ttl_ms = %d\n\n",
 		cfg->route.cloud_down_ttl_ms);
+
+	/* 写入 [clarify] 段（W77e 澄清行为；写回避免 model 命令保存时
+	 * 丢失该段。出厂模板注释：clarify_auto_default=on 表示非 TTY
+	 * 澄清 15 分钟过期后按推荐项自动继续（authorization 永不自动），
+	 * AIKERNEL_CLARIFY_AUTO_DEFAULT=0 可临时关闭） */
+	fprintf(fp, "[clarify]\n");
+	fprintf(fp, "clarify_auto_default = %s\n\n",
+		cfg->clarify.auto_default ? "true" : "false");
 
 	/* 写入模型列表 */
 	for (m = cfg->models_head; m; m = m->next) {

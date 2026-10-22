@@ -80,6 +80,7 @@ CH_SYSCTL = "sysctl"        # W48：/proc/sys 通用读写（含崩溃黑名单�
 CH_SYSFS_DYN = "sysfs"      # W48：sysfs/procfs 动态路径读写（cgroup 等）
 CH_DESKTOP = "desktop"      # W76：桌面能力面（127.0.0.1:8091 本机 HTTP）
 CH_CLARIFY = "interaction"  # W77c：结构化澄清（ask 交互层，非授权）
+CH_MODEL = "model"          # W77d：本地模型生命周期（目录/推荐/装/卸/基准）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -92,7 +93,7 @@ RISK_W2 = "W2"      # 高危写
 # sub 仅作为 tools.json 工具对象的顶层字段，不改工具名/风险/参数形状。
 # 语料由本文件单源生成，禁止手工维护 seed。
 # ---------------------------------------------------------------------------
-SUB_DOMAIN_ORDER = ("res", "fs", "netsec", "aicore", "memory",
+SUB_DOMAIN_ORDER = ("res", "fs", "netsec", "aicore", "model", "memory",
                     "sandbox", "sysadmin", "desktop")
 
 SUB_DOMAIN_META = {
@@ -128,6 +129,14 @@ SUB_DOMAIN_META = {
         "neighbors": "res（决策注入落到 sched/mm/OOM）、netsec（安全决策与审计）、memory（SME 接口语料检索）",
         "safety": "W2：procfs_write_telemetry_reset、netlink_act_ai_decision_*；W1：model_load/unload/infer、policy 与 decision per-hook 开关；改前记录当前值，失败用 model_unload/原值回滚。",
     },
+    "model": {
+        "cn": "本地模型生命周期",
+        "duty": "本地大模型目录查询、硬件适配推荐、按需下载安装（含装后验证）、卸载、切换与基准测评（W77d：云端优先，本地按需安装）。",
+        "when": "装个本地模型；离线也能对话；推荐个适合本机的模型；本地模型怎么装/卸载/切换；测一下本地模型速度",
+        "tool_when": "安装/卸载/推荐/查看本地模型、切换云/本地、跑本地基准时",
+        "neighbors": "aicore（内核模型加载/推理是另一层）、sysadmin（ollama 服务）、memory（安装历史沉淀）",
+        "safety": "D0：catalog_list/recommend 只读；D1：benchmark 只做推理与本地 json 落盘；D2：install（多 GB 下载+写盘）/remove（删权重）需确认或租约；安装失败会如实报告并清理半成品，绝不假成功。",
+    },
     "memory": {
         "cn": "长期记忆",
         "duty": "SME 长期记忆的检索、增删改、导入导出、图谱/区域、事实/画像/问答对、巩固压缩与配置观测。",
@@ -162,7 +171,7 @@ SUB_DOMAIN_META = {
     },
 }
 
-# 工具 -> 能力区（第一个为主域，最多两个；共 151 件全覆盖）
+# 工具 -> 能力区（第一个为主域，最多两个；共 156 件全覆盖）
 SUB_MAP = {
     # ---- res 资源与调度（23 主域）----
     "procfs_read_sched_stats": ["res", "aicore"],
@@ -255,6 +264,12 @@ SUB_MAP = {
     "sysfs_write_decision_readahead": ["aicore", "fs"],
     "sysfs_write_decision_reclaim": ["aicore", "res"],
     "procfs_read_decision_stats": ["aicore"],
+    # ---- model 本地模型生命周期（5 主域，W77d）----
+    "model_catalog_list": ["model", "aicore"],
+    "model_recommend": ["model", "aicore"],
+    "model_install": ["model", "sysadmin"],
+    "model_remove": ["model", "sysadmin"],
+    "model_benchmark": ["model", "aicore"],
     # ---- memory 长期记忆（30 主域）----
     "memory_search": ["memory", "aicore"],
     "memory_search_advanced": ["memory", "aicore"],
@@ -690,7 +705,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 151        # 主表 tools.json（W77c：150 + clarify）
+EXPECTED_TOOL_COUNT = 156        # 主表 tools.json（W77d：151 + 5 件 model_*）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -847,9 +862,14 @@ EXPECTED_TOOL_NAMES = [
     "desktop_input_key",
     "desktop_clipboard_set",
     "desktop_power",
+    "model_catalog_list",
+    "model_recommend",
+    "model_install",
+    "model_remove",
+    "model_benchmark",
     "clarify",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2"
+EXPECTED_TOOL_NAMES_SHA256 = "1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81"
 
 
 def manifest_sha256(names):
@@ -2334,6 +2354,7 @@ CHANNEL_RETURN = {
     CH_SYSFS_DYN: "返回受控路径内容或写入回执。",
     CH_DESKTOP: "返回桌面 API 的 JSON（窗口/主题/截图 path+bytes+sha256 等）。",
     CH_CLARIFY: "返回用户选择 JSON；非 TTY 返回 CLARIFY_REQUIRED（本轮结束）。",
+    CH_MODEL: "返回目录/推荐/安装/卸载/基准的文本结果；安装失败含原因与替代建议。",
 }
 
 
@@ -2556,7 +2577,7 @@ def _combo_corpus_record(combo):
 
 
 def inject_sub(tools):
-    """为每件工具注入 sub 顶层字段；151 件必须一一覆盖。"""
+    """为每件工具注入 sub 顶层字段；全部工具必须一一覆盖。"""
     names = [t["name"] for t in tools]
     missing = [n for n in names if n not in SUB_MAP]
     extra = sorted(set(SUB_MAP) - set(names))
@@ -2790,6 +2811,69 @@ def desktop_tools():
 # 走 W74 lease/CONFIRM_REQUIRED。TTY 数字菜单；非 TTY 返回
 # CLARIFY_REQUIRED JSON 并结束本轮 ask（nonce/expires_at 留给 W77c-2）。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# W77d：本地模型生命周期（model 通道，5 件）
+#
+# 后端是 shell/commands/model_lifecycle.c（aik model catalog/recommend/
+# install/remove/switch/rollback/benchmark 同一单源）。executor 经
+# exec_model 分发；install/remove 为 W2/D2（多 GB 下载/删权重），走
+# ai_lease_gate 确认；安装失败如实报告并清理半成品。
+# ---------------------------------------------------------------------------
+def tool_model(name, risk, desc, props=None, required=None):
+    return {
+        "name": name,
+        "channel": CH_MODEL,
+        "risk": risk,
+        "description": desc,
+        "parameters": obj_schema(props or {}, required or []),
+    }
+
+
+def model_tools():
+    return [
+        tool_model(
+            "model_catalog_list", RISK_R,
+            "列出可按需安装的本地模型目录（D0 只读）：名称/参数量/上下文"
+            "窗口/磁盘占用/内存门槛/标签/推荐理由与核对备注。数据源"
+            "/usr/local/share/aikernel/model-catalog.json（ollama_ref 已"
+            "逐条与 ollama.com 核对）。装之前先看它。"),
+        tool_model(
+            "model_recommend", RISK_R,
+            "按本机硬件（内存/磁盘空闲/CPU 核/有无独显，自读 "
+            "/proc/meminfo、statvfs、/sys/class/drm）对目录做门控过滤+"
+            "排序，给 top-3 推荐与理由（D0 只读；低内存机不会推荐 8B 级）。"
+            "用户说「装个本地模型/推荐个模型」先调它。"),
+        tool_model(
+            "model_install", RISK_W2,
+            "按需安装本地模型（D2：多 GB 下载+写盘，需确认或任务租约）。"
+            "name 用 model_catalog_list 的名称；流程：硬件门控预检 → "
+            "ollama /api/pull 流式下载 → 装后验证（manifest + 一次小推理）"
+            "→ 注册 model.toml [local]。失败会如实报告、清理半成品并给"
+            "替代建议，绝不把失败说成成功。装完可用 model switch local 切换。",
+            {"name": {"type": "string",
+                      "description": "目录中的模型名（如 spark-x2.5:4b）"},
+             "bench": {"type": "boolean",
+                       "description": "装完立即跑快速基准（默认 false）"}},
+            ["name"]),
+        tool_model(
+            "model_remove", RISK_W2,
+            "卸载本地模型并注销 [local]（D2：删除多 GB 权重，需确认或"
+            "任务租约）。若是当前活动本地模型会要求再次确认；成功后本地"
+            "provider 禁用、路由回云端优先。",
+            {"name": {"type": "string", "description": "目录中的模型名"}},
+            ["name"]),
+        tool_model(
+            "model_benchmark", RISK_W1,
+            "本地模型基准（D1）：N=3 条固定提示实测 p50/p95 延迟与 "
+            "tok/s，结果落 ~/.aikernel/model-bench.json；recommend 排序"
+            "可参考历史基准。模型缺省取当前 [local].model。",
+            {"name": {"type": "string",
+                      "description": "模型名（缺省用当前本地模型）"},
+             "rounds": {"type": "integer", "minimum": 1, "maximum": 10,
+                        "description": "轮数（默认 3）"}}),
+    ]
+
+
 def tool_clarify():
     option_schema = obj_schema({
         "id": {"type": "string",
@@ -2904,6 +2988,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(data_layer_tools())
     # W76：桌面能力面 20 件（desktop 通道）
     tools.extend(desktop_tools())
+    # W77d：本地模型生命周期（model 通道五件；clarify 仍居末尾）
+    tools.extend(model_tools())
     # W77c：结构化澄清（interaction 通道；追加在清单末尾，锚点同步）
     tools.append(tool_clarify())
     return tools
@@ -3226,7 +3312,7 @@ def main():
     ]
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
-               CH_DESKTOP, CH_CLARIFY):
+               CH_DESKTOP, CH_MODEL, CH_CLARIFY):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

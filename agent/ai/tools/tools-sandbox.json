@@ -1,7 +1,7 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-22T02:30:02",
+  "generated_at": "2026-10-23T04:13:48",
   "purpose": "sandbox-subagent-restricted",
   "source": "tools.json 派生（sandbox 受限面，无 W2，防嵌套派生）",
   "tool_count": 7,

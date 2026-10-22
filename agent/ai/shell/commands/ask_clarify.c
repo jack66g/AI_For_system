@@ -35,6 +35,7 @@
 #include "ask_clarify.h"
 #include "ai_json_util.h"
 #include "ai_trace.h"
+#include "ai_lang.h"			/* W77e：tr() 注记文案 */
 
 /* ---- 小型可增长字符串缓冲（JSON 构造） ---- */
 
@@ -915,6 +916,316 @@ void ask_clarify_state_set_context(struct ask_clarify_state *st,
 				strdup(original_question) : NULL;
 }
 
+/* ---- W77e：跨轮去重 + 答案记忆（answered.jsonl） ---- */
+
+/* 前向声明（定义在 pending 存储区） */
+static int clarify_mkdir_secure(const char *path);
+
+/*
+ * 问题指纹 = FNV-1a 64(kind + '\x1f' + 归一化 question + 每个选项
+ * id 前缀 '\x1f')。归一化 = ASCII 小写 + 去全部空白；CJK 原样保留。
+ * 纯函数：同一意图的重复提问（大小写/空格差异）命中同一指纹。
+ */
+void ask_clarify_normalize_question(const char *in, char *out, size_t n)
+{
+	size_t o = 0;
+
+	if (!out || n == 0)
+		return;
+	out[0] = '\0';
+	if (!in)
+		return;
+	for (; *in && o + 1 < n; in++) {
+		unsigned char c = (unsigned char)*in;
+
+		if (isspace(c))
+			continue;
+		out[o++] = (char)tolower(c);
+	}
+	out[o] = '\0';
+}
+
+unsigned long long ask_clarify_fingerprint(const struct ask_clarify_request *req)
+{
+	unsigned long long h = 1469598103934665603ULL;
+	char norm[ASK_CLARIFY_QUESTION_MAX + 1];
+	char mix[ASK_CLARIFY_KIND_MAX + ASK_CLARIFY_QUESTION_MAX +
+		 ASK_CLARIFY_MAX_OPTIONS * (ASK_CLARIFY_ID_MAX + 2) + 8];
+	size_t off;
+	int i, j;
+
+	if (!req)
+		return 0;
+	ask_clarify_normalize_question(req->question, norm, sizeof(norm));
+	off = (size_t)snprintf(mix, sizeof(mix), "%s\x1f%s", req->kind, norm);
+	for (i = 0; i < req->n_options && i < ASK_CLARIFY_MAX_OPTIONS; i++)
+		off += (size_t)snprintf(mix + off, sizeof(mix) - off,
+					"\x1f%s", req->options[i].id);
+	for (j = 0; j < (int)off && j < (int)sizeof(mix); j++) {
+		h ^= (unsigned char)mix[j];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+/* answered.jsonl 内存缓存：启动后首次访问载入最近 KEEP 条 */
+struct clarify_answered_cache {
+	unsigned long long fp[ASK_CLARIFY_ANSWERED_KEEP];
+	char label[ASK_CLARIFY_ANSWERED_KEEP][ASK_CLARIFY_LABEL_MAX + 1];
+	int n;
+	int loaded;
+};
+
+static struct clarify_answered_cache g_answered;
+
+void ask_clarify_answered_reset(void)
+{
+	memset(&g_answered, 0, sizeof(g_answered));
+}
+
+static int answered_path(char *out, size_t n)
+{
+	const char *home = getenv("HOME");
+
+	if (!home || !home[0])
+		return -1;
+	if (snprintf(out, n, "%s/.aikernel/clarify/answered.jsonl", home) >=
+	    (int)n)
+		return -1;
+	return 0;
+}
+
+static void answered_load(void)
+{
+	char path[PATH_MAX];
+	FILE *fp;
+	char line[1024];
+
+	g_answered.loaded = 1;
+	g_answered.n = 0;
+	if (answered_path(path, sizeof(path)) != 0)
+		return;
+	fp = fopen(path, "r");
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		const char *v = NULL;
+		size_t vl = 0;
+		int vt = 0;
+		char hex[32];
+		char *label;
+		unsigned long long fpv;
+
+		if (ai_json_obj_get(line, strlen(line), "fingerprint",
+				    &v, &vl, &vt) != 1 || vt != AI_JSON_STR)
+			continue;
+		if (vl < 2 || v[0] != '"' || v[vl - 1] != '"')
+			continue;
+		v++;
+		vl -= 2;			/* 去两侧引号（十六进制指纹） */
+		if (vl >= sizeof(hex))
+			continue;
+		memcpy(hex, v, vl);
+		hex[vl] = '\0';
+		fpv = strtoull(hex, NULL, 16);
+		if (ai_json_obj_get(line, strlen(line), "label",
+				    &v, &vl, &vt) != 1 || vt != AI_JSON_STR)
+			continue;
+		label = ai_json_strdup_str(v, vl);
+		if (!label)
+			continue;
+		/* 滚动窗口：只保留最近 KEEP 条 */
+		if (g_answered.n == ASK_CLARIFY_ANSWERED_KEEP) {
+			memmove(&g_answered.fp[0], &g_answered.fp[1],
+				sizeof(g_answered.fp[0]) *
+				(ASK_CLARIFY_ANSWERED_KEEP - 1));
+			memmove(&g_answered.label[0], &g_answered.label[1],
+				sizeof(g_answered.label[0]) *
+				(ASK_CLARIFY_ANSWERED_KEEP - 1));
+			g_answered.n--;
+		}
+		g_answered.fp[g_answered.n] = fpv;
+		copy_cap(g_answered.label[g_answered.n],
+			 sizeof(g_answered.label[0]), label);
+		g_answered.n++;
+		free(label);
+	}
+	fclose(fp);
+}
+
+/* 追加一条答案记忆到 answered.jsonl（0600）并更新内存缓存 */
+void ask_clarify_answered_remember(unsigned long long fp, const char *label,
+				   const char *kind)
+{
+	char path[PATH_MAX];
+	char root[PATH_MAX];
+	char base[PATH_MAX];
+	char *esc;
+	const char *home;
+	int fd;
+
+	if (!label || !label[0] || fp == 0)
+		return;
+	/* 内存缓存滚动更新 */
+	if (g_answered.n == ASK_CLARIFY_ANSWERED_KEEP) {
+		memmove(&g_answered.fp[0], &g_answered.fp[1],
+			sizeof(g_answered.fp[0]) *
+			(ASK_CLARIFY_ANSWERED_KEEP - 1));
+		memmove(&g_answered.label[0], &g_answered.label[1],
+			sizeof(g_answered.label[0]) *
+			(ASK_CLARIFY_ANSWERED_KEEP - 1));
+		g_answered.n--;
+	}
+	g_answered.fp[g_answered.n] = fp;
+	copy_cap(g_answered.label[g_answered.n],
+		 sizeof(g_answered.label[0]), label);
+	g_answered.n++;
+
+	if (answered_path(path, sizeof(path)) != 0)
+		return;
+	home = getenv("HOME");
+	if (!home || !home[0])
+		return;
+	if (snprintf(root, sizeof(root), "%s/.aikernel", home) >=
+	    (int)sizeof(root) ||
+	    snprintf(base, sizeof(base), "%s/clarify", root) >=
+	    (int)sizeof(base))
+		return;
+	if (mkdir(root, 0700) != 0 && errno != EEXIST)
+		return;
+	if (clarify_mkdir_secure(base) != 0)
+		return;
+	fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return;
+	fchmod(fd, 0600);
+	esc = ai_json_escape(label);
+	if (esc) {
+		dprintf(fd,
+			"{\"ts\":%lld,\"fingerprint\":\"%016llx\","
+			"\"kind\":\"%s\",\"label\":\"%s\"}\n",
+			ai_trace_wall_ms(), fp,
+			(kind && kind[0]) ? kind : "", esc);
+		free(esc);
+	}
+	close(fd);
+}
+
+int ask_clarify_already_answered(const struct ask_clarify_state *st,
+				 const struct ask_clarify_request *req,
+				 char *out_label, size_t label_len)
+{
+	unsigned long long fp = ask_clarify_fingerprint(req);
+	int i;
+
+	if (out_label && label_len)
+		out_label[0] = '\0';
+	/* 1) 同一 ask 链内（TTY 多轮） */
+	if (st) {
+		for (i = 0; i < ASK_CLARIFY_MAX_PER_ASK; i++) {
+			if (st->asked_label[i][0] && st->asked_fp[i] == fp) {
+				if (out_label)
+					copy_cap(out_label, label_len,
+						 st->asked_label[i]);
+				return 1;
+			}
+		}
+	}
+	/* 2) 跨会话 answered.jsonl */
+	if (!g_answered.loaded)
+		answered_load();
+	for (i = 0; i < g_answered.n; i++) {
+		if (g_answered.fp[i] == fp) {
+			if (out_label)
+				copy_cap(out_label, label_len,
+					 g_answered.label[i]);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* 由答案构造 "A, B" / "A, [Other] 文本" 形式的 label（同 precheck 展示） */
+static void answer_labels(const struct ask_clarify_request *req,
+			  const struct ask_clarify_answer *ans,
+			  char *out, size_t n)
+{
+	char tmp[ASK_CLARIFY_MAX_OPTIONS * (ASK_CLARIFY_LABEL_MAX + 2) +
+		 ASK_CLARIFY_TEXT_MAX + 16];
+	size_t off = 0;
+	int i;
+
+	if (!out || n == 0)
+		return;
+	out[0] = '\0';
+	if (!req || !ans)
+		return;
+	tmp[0] = '\0';
+	for (i = 0; i < ans->n_selected && i < ASK_CLARIFY_MAX_OPTIONS; i++) {
+		int w = snprintf(tmp + off, sizeof(tmp) - off, "%s%s",
+				 off ? ", " : "",
+				 req->options[ans->selected[i]].label);
+
+		if (w < 0)
+			break;
+		off += (size_t)w;
+		if (off + 1 >= sizeof(tmp)) {
+			off = sizeof(tmp) - 1;
+			break;
+		}
+	}
+	if (ans->text[0] && off + 1 < sizeof(tmp))
+		snprintf(tmp + off, sizeof(tmp) - off, "%s[Other] %s",
+			 off ? ", " : "", ans->text);
+	copy_cap(out, n, tmp);
+}
+
+void ask_clarify_note_answered(struct ask_clarify_state *st,
+			       const struct ask_clarify_request *req,
+			       const struct ask_clarify_answer *ans)
+{
+	unsigned long long fp;
+	char label[ASK_CLARIFY_LABEL_MAX + 1];
+	int i, slot = -1;
+
+	if (!req || !ans || ans->n_selected <= 0)
+		return;
+	fp = ask_clarify_fingerprint(req);
+	answer_labels(req, ans, label, sizeof(label));
+	if (!label[0])
+		return;
+	/* 链内记忆（去重 + 复用答案） */
+	if (st) {
+		for (i = 0; i < ASK_CLARIFY_MAX_PER_ASK; i++) {
+			if (st->asked_fp[i] == fp) {
+				slot = i;
+				break;
+			}
+			if (slot < 0 && st->asked_label[i][0] == '\0')
+				slot = i;
+		}
+		if (slot >= 0) {
+			st->asked_fp[slot] = fp;
+			copy_cap(st->asked_label[slot],
+				 sizeof(st->asked_label[slot]), label);
+		}
+	}
+	/* 跨会话文件记忆（append，0600） */
+	ask_clarify_answered_remember(fp, label, req->kind);
+}
+
+/* ---- W77e：链级提问预算 ---- */
+
+/*
+ * 链级预算 = 一次 ask 任务链（含恢复轮次，AIKERNEL_CLARIFY_ASKED
+ * 跨进程传递）最多 ASK_CLARIFY_MAX_PER_ASK 问；到限后预检停触发，
+ * clarify 工具结果改注入"按最佳理解执行"注记。
+ */
+int ask_clarify_budget_exhausted(const struct ask_clarify_state *st)
+{
+	return st && st->asked >= ASK_CLARIFY_MAX_PER_ASK;
+}
+
 /* ---- 非 TTY JSON ---- */
 
 static void fmt_iso(long long wall_ms, char *buf, size_t n)
@@ -1287,9 +1598,16 @@ static int json_get_ll(const char *obj, size_t len, const char *key,
 	return 1;
 }
 
-int ask_clarify_pending_load(const char *nonce, const char *session_expected,
-			     struct ask_clarify_pending *out,
-			     char *err, size_t errlen)
+/*
+ * pending_load_internal - 读取并校验 pending 记录（不消费）。
+ * W77e：allow_expired=1 时不做过期拒绝（自动默认降级用；TTL 上限
+ * 校验保留）。公开的 ask_clarify_pending_load 语义不变。
+ */
+static int pending_load_internal(const char *nonce,
+				 const char *session_expected,
+				 int allow_expired,
+				 struct ask_clarify_pending *out,
+				 char *err, size_t errlen)
 {
 	char pending_path[PATH_MAX], consumed_path[PATH_MAX];
 	char *text = NULL;
@@ -1367,7 +1685,7 @@ int ask_clarify_pending_load(const char *nonce, const char *session_expected,
 		goto out;
 	}
 	now = ai_trace_wall_ms();
-	if (expires <= now) {
+	if (expires <= now && !allow_expired) {
 		snprintf(err, errlen, "clarify pending 已过期");
 		goto out;
 	}
@@ -1452,6 +1770,111 @@ out:
 		out->original_question = NULL;
 	}
 	return rc;
+}
+
+int ask_clarify_pending_load(const char *nonce, const char *session_expected,
+			     struct ask_clarify_pending *out,
+			     char *err, size_t errlen)
+{
+	return pending_load_internal(nonce, session_expected, 0, out, err,
+				     errlen);
+}
+
+/* ---- W77e：非 TTY 过期自动默认降级 ---- */
+
+int ask_clarify_auto_default_eligible(const struct ask_clarify_request *req)
+{
+	if (!req)
+		return 0;
+	/* authorization 永不自动（澄清不等于授权） */
+	if (req->kind[0] && strcmp(req->kind, "authorization") == 0)
+		return 0;
+	return (req->has_recommended && req->recommended[0]) ||
+	       (req->has_default && req->default_id[0]);
+}
+
+static const char *auto_default_pick(const struct ask_clarify_request *req)
+{
+	int i;
+
+	if (!req)
+		return NULL;
+	if (req->has_recommended && req->recommended[0]) {
+		for (i = 0; i < req->n_options; i++)
+			if (strcmp(req->options[i].id, req->recommended) == 0)
+				return req->options[i].label;
+	}
+	if (req->has_default && req->default_id[0]) {
+		for (i = 0; i < req->n_options; i++)
+			if (strcmp(req->options[i].id, req->default_id) == 0)
+				return req->options[i].label;
+	}
+	return NULL;
+}
+
+int ask_clarify_auto_default(const char *nonce, const char *session_expected,
+			     int enabled,
+			     struct ask_clarify_pending *out,
+			     char *label, size_t label_len,
+			     char *err, size_t errlen)
+{
+	struct ask_clarify_pending p;
+	const char *pick;
+	char ev[512];
+	char *esc;
+
+	if (label && label_len)
+		label[0] = '\0';
+	if (err && errlen)
+		err[0] = '\0';
+	if (!enabled) {
+		snprintf(err, errlen,
+			 "自动默认已关闭（clarify_auto_default=off）");
+		return 0;
+	}
+	memset(&p, 0, sizeof(p));
+	if (pending_load_internal(nonce, session_expected, 1, &p, err,
+				  errlen) != 0)
+		return 0;
+	/* 只有确实已过期才自动；有效窗口内保持等待答复（API 语义不变） */
+	if (p.expires_at_ms > ai_trace_wall_ms()) {
+		snprintf(err, errlen, "pending 未过期（正常等待答复）");
+		ask_clarify_pending_free(&p);
+		return 0;
+	}
+	if (!ask_clarify_auto_default_eligible(&p.req)) {
+		snprintf(err, errlen,
+			 "不满足自动默认条件（authorization 或无 recommended/default）");
+		ask_clarify_pending_free(&p);
+		return 0;
+	}
+	pick = auto_default_pick(&p.req);
+	if (!pick) {
+		snprintf(err, errlen, "recommended/default 引用的选项不存在");
+		ask_clarify_pending_free(&p);
+		return 0;
+	}
+	/* 原子消费（重放/并发失败保持原语义，不自动） */
+	if (ask_clarify_pending_consume(nonce, err, errlen) != 0) {
+		ask_clarify_pending_free(&p);
+		return 0;
+	}
+	if (label)
+		copy_cap(label, label_len, pick);
+	/* 审计：带 tag 的 AIKERNEL_EVENT clarify_auto_default + 轨迹 */
+	esc = ai_json_escape(pick);
+	snprintf(ev, sizeof(ev),
+		 "{\"status\":\"clarify_auto_default\",\"nonce\":\"%s\","
+		 "\"kind\":\"%s\",\"label\":\"%s\",\"auto\":true,\"ts\":%lld}",
+		 nonce, p.req.kind, esc ? esc : "", ai_trace_wall_ms());
+	free(esc);
+	ask_clarify_emit_event(ev);
+	ai_trace_degraded("clarify", "auto_default", pick);
+	if (out)
+		*out = p;
+	else
+		ask_clarify_pending_free(&p);
+	return 1;
 }
 
 int ask_clarify_pending_consume(const char *nonce, char *err, size_t errlen)
@@ -2098,6 +2521,7 @@ int ask_clarify_handle_tool_ex(const char *args_json,
 	struct ask_clarify_request req;
 	struct ask_clarify_answer ans;
 	char err[256];
+	char mem_label[ASK_CLARIFY_LABEL_MAX + 1];
 	char *json = NULL;
 	int rc;
 
@@ -2116,10 +2540,19 @@ int ask_clarify_handle_tool_ex(const char *args_json,
 			*out_text = NULL;
 		return -1;
 	}
+	/* W77e：同一问题已问过（链内/answered.jsonl）→ 不再问，
+	 * 把旧答案作为工具结果注入，模型直接沿用继续执行 */
+	if (ask_clarify_already_answered(st, &req, mem_label,
+					 sizeof(mem_label))) {
+		if (asprintf(out_text, tr(TR_ASK_CLARIFY_MEM_NOTE),
+			     mem_label) < 0)
+			*out_text = NULL;
+		return 0;
+	}
 	if (!ask_clarify_state_begin(st)) {
-		*out_text = strdup("ERROR: clarify limit reached "
-				   "(max 2 per ask); proceed without further "
-				   "clarification.");
+		/* W77e：链级预算到限 → 不再发起提问，注入"按最佳理解
+		 * 执行并声明假设"注记（作为工具结果回给模型） */
+		*out_text = strdup(tr(TR_ASK_CLARIFY_BUDGET_NOTE));
 		return 0;
 	}
 	if (ask_clarify_exec(&req, st, tty, &ans, &json) != 0 || !json) {
@@ -2132,6 +2565,8 @@ int ask_clarify_handle_tool_ex(const char *args_json,
 		*out_text = strdup(json);
 		return 0;
 	}
+	/* W77e：TTY 已作答 → 链内去重 + answered.jsonl 答案记忆 */
+	ask_clarify_note_answered(st, &req, &ans);
 	*out_text = json;
 	return 0;
 }
@@ -2270,6 +2705,265 @@ static int question_blocked(const char *lower)
 	return 0;
 }
 
+/* ---- W77e：detector 2.0 评分制（纯函数，可单测） ---- */
+
+/* 前向声明（定义在本文件后段的目标/候选辅助函数） */
+static int service_target_present(const char *after);
+static int has_path_target(const char *q);
+static void add_candidate(char cands[ASK_CLARIFY_MAX_OPTIONS]
+				       [ASK_CLARIFY_LABEL_MAX + 1],
+			  int *n, const char *path);
+
+int ask_clarify_threshold(void)
+{
+	const char *env = getenv("AIKERNEL_CLARIFY_THRESHOLD");
+	long v;
+	size_t i;
+
+	if (!env || !env[0])
+		return ASK_CLARIFY_THRESHOLD_DEFAULT;
+	/* 仅接受纯数字（0=关）；负数/杂串回落默认，避免误关 */
+	for (i = 0; env[i]; i++)
+		if (!isdigit((unsigned char)env[i]))
+			return ASK_CLARIFY_THRESHOLD_DEFAULT;
+	v = strtol(env, NULL, 10);
+	if (v > 100)
+		return ASK_CLARIFY_THRESHOLD_DEFAULT;
+	return (int)v;
+}
+
+/* 代词/省略指代（"它/这个/那个/再来一次/也"）；ASCII 词按整词匹配 */
+static const char *const PRONOUN_HINTS[] = {
+	"它", "这个", "那个", "它们", "再来一次", "再跑一次", "再来一遍",
+	"同样", "也",
+};
+static const char *const PRONOUN_HINTS_ASCII[] = {
+	"it", "this", "that", "these", "those", "again", "same",
+};
+
+static int pronoun_present(const char *lower)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(PRONOUN_HINTS) / sizeof(PRONOUN_HINTS[0]); i++)
+		if (strstr(lower, PRONOUN_HINTS[i]))
+			return 1;
+	for (i = 0; i < sizeof(PRONOUN_HINTS_ASCII) /
+		    sizeof(PRONOUN_HINTS_ASCII[0]); i++)
+		if (word_at(lower, PRONOUN_HINTS_ASCII[i]))
+			return 1;
+	return 0;
+}
+
+/*
+ * 已知"缺参数"模式：发送/上传无目的地（到/至/->/路径）、
+ * "改配置"无对象（无路径、无 = 赋值目标）。命中 +2。
+ */
+static int missing_param_signal(const char *lower, const char *question)
+{
+	static const char *const send_verbs[] = {
+		"发送", "上传", "推送", "下发文件", "传文件",
+		"send", "upload", "push",
+	};
+	static const char *const cfg_verbs[] = {
+		"改配置", "修改配置", "调整配置", "改一下配置", "更新配置",
+		"change config", "update config", "edit config",
+	};
+	static const char *const dest_marks[] = {
+		"到", "至", "给", "->", "=>", "/", "=",
+	};
+	size_t i;
+	int send = 0, cfg = 0;
+
+	for (i = 0; i < sizeof(send_verbs) / sizeof(send_verbs[0]); i++) {
+		if (isascii((unsigned char)send_verbs[i][0])) {
+			if (word_at(lower, send_verbs[i])) {
+				send = 1;
+				break;
+			}
+		} else if (strstr(lower, send_verbs[i])) {
+			send = 1;
+			break;
+		}
+	}
+	if (send) {
+		for (i = 0; i < sizeof(dest_marks) / sizeof(dest_marks[0]);
+		     i++)
+			if (strstr(question, dest_marks[i]))
+				return 0;
+		return 1;
+	}
+	for (i = 0; i < sizeof(cfg_verbs) / sizeof(cfg_verbs[0]); i++) {
+		if (isascii((unsigned char)cfg_verbs[i][0])) {
+			if (word_at(lower, cfg_verbs[i])) {
+				cfg = 1;
+				break;
+			}
+		} else if (strstr(lower, cfg_verbs[i])) {
+			cfg = 1;
+			break;
+		}
+	}
+	if (cfg) {
+		if (strchr(question, '/') || strchr(question, '='))
+			return 0;
+		return 1;
+	}
+	return 0;
+}
+
+/* 安全根候选（与 build_destructive_request 同源） */
+static int destructive_candidates(const struct ask_clarify_evidence *ev,
+				  char cands[ASK_CLARIFY_MAX_OPTIONS][
+					    ASK_CLARIFY_LABEL_MAX + 1])
+{
+	int n = 0;
+	int i;
+
+	if (!ev)
+		return 0;
+	for (i = 0; i < ev->n_tmp_paths && i < 2; i++)
+		add_candidate(cands, &n, ev->tmp_paths[i]);
+	if (ev->tmp_exists)
+		add_candidate(cands, &n, "/tmp");
+	if (ev->var_ai_exists)
+		add_candidate(cands, &n, "/var/ai");
+	if (ev->root_exists)
+		add_candidate(cands, &n, "/root");
+	return n;
+}
+
+/*
+ * 信号打分（纯函数）：
+ *   动作动词无目标 +3 / 破坏性动词无目标 +4
+ *   证据候选 >=2 +2（每多一个 +1，封顶 +4）
+ *   代词/省略指代且上文实体 >1 +3
+ *   已知缺参数模式 +2
+ *   证据冲突 +3
+ */
+int ask_clarify_score_signals(const char *question,
+			      const struct ask_clarify_evidence *ev,
+			      struct ask_clarify_score *out)
+{
+	char *lower;
+	const char *verb;
+	int which = -1;
+	int svc_no_target = 0;
+	int des_no_target = 0;
+	int n_cand = 0;
+	char cands[ASK_CLARIFY_MAX_OPTIONS][ASK_CLARIFY_LABEL_MAX + 1];
+
+	if (!question || !ev || !out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	lower = lower_dup(question);
+	if (!lower)
+		return -1;
+
+	verb = find_verb(lower, SERVICE_VERBS,
+			 (int)(sizeof(SERVICE_VERBS) /
+			       sizeof(SERVICE_VERBS[0])), &which);
+	if (verb && !service_target_present(verb + strlen(SERVICE_VERBS[which])))
+		svc_no_target = 1;
+	which = -1;
+	verb = find_verb(lower, DESTRUCTIVE_VERBS,
+			 (int)(sizeof(DESTRUCTIVE_VERBS) /
+			       sizeof(DESTRUCTIVE_VERBS[0])), &which);
+	if (verb && !has_path_target(question))
+		des_no_target = 1;
+
+	if (des_no_target)
+		out->verb_no_target = 4;
+	else if (svc_no_target)
+		out->verb_no_target = 3;
+
+	if (des_no_target)
+		n_cand = destructive_candidates(ev, cands);
+	else if (svc_no_target)
+		n_cand = ev->n_services;
+	else if (pronoun_present(lower))
+		n_cand = ev->n_ctx_entities;
+	if (n_cand >= 2)
+		out->candidates = n_cand >= 4 ? 4 : n_cand;
+
+	if (pronoun_present(lower) && ev->n_ctx_entities > 1)
+		out->pronoun_entities = 3;
+
+	if (missing_param_signal(lower, question))
+		out->missing_param = 2;
+
+	if (ev->conflict)
+		out->conflict = 3;
+
+	out->total = out->verb_no_target + out->candidates +
+		     out->pronoun_entities + out->missing_param +
+		     out->conflict;
+	free(lower);
+	return 0;
+}
+
+/* 实体字符：服务名/路径的 ASCII 构成（CJK 字节 >=0x80 自然断词） */
+static int entity_char(int c)
+{
+	return isalnum(c) || c == '_' || c == '-' || c == '@' || c == '.' ||
+	       c == '/';
+}
+
+int ask_clarify_entities_from_history(const char *const *messages, int n,
+				      char *buf, size_t buf_len,
+				      const char *out[], int max_out)
+{
+	size_t boff = 0;
+	int cnt = 0;
+	int i, j;
+
+	if (!messages || !buf || buf_len == 0 || !out || max_out <= 0)
+		return 0;
+	buf[0] = '\0';
+	for (i = 0; i < n; i++) {
+		const char *p = messages[i];
+		const char *start;
+
+		if (!p)
+			continue;
+		while (*p) {
+			while (*p && !entity_char((unsigned char)*p))
+				p++;
+			if (!*p)
+				break;
+			start = p;
+			while (*p && entity_char((unsigned char)*p))
+				p++;
+			{
+				size_t len = (size_t)(p - start);
+				int is_ent = 0;
+
+				if (len >= 8 && len <= 128 &&
+				    strncmp(p - 8, ".service", 8) == 0)
+					is_ent = 1;
+				else if (start[0] == '/' && len >= 2 &&
+					 len <= 128)
+					is_ent = 1;
+				if (!is_ent || len + 1 > buf_len - boff)
+					continue;
+				for (j = 0; j < cnt; j++)
+					if (strlen(out[j]) == len &&
+					    strncmp(out[j], start, len) == 0)
+						break;
+				if (j < cnt)
+					continue;
+				memcpy(buf + boff, start, len);
+				buf[boff + len] = '\0';
+				out[cnt++] = buf + boff;
+				boff += len + 1;
+				if (cnt >= max_out)
+					return cnt;
+			}
+		}
+	}
+	return cnt;
+}
+
 int ask_clarify_question_candidate(const char *question)
 {
 	char *lower;
@@ -2286,7 +2980,9 @@ int ask_clarify_question_candidate(const char *question)
 		       NULL) ||
 	     find_verb(lower, DESTRUCTIVE_VERBS,
 		       (int)(sizeof(DESTRUCTIVE_VERBS) /
-			     sizeof(DESTRUCTIVE_VERBS[0])), NULL)))
+			     sizeof(DESTRUCTIVE_VERBS[0])), NULL) ||
+	     pronoun_present(lower) ||
+	     missing_param_signal(lower, question)))
 		rc = 1;
 	free(lower);
 	return rc;
@@ -2495,19 +3191,12 @@ static int build_destructive_request(const struct ask_clarify_evidence *ev,
 				     struct ask_clarify_request *req)
 {
 	char cands[ASK_CLARIFY_MAX_OPTIONS][ASK_CLARIFY_LABEL_MAX + 1];
-	int n = 0;
+	int n;
 	int i;
 	int added;
 
 	memset(cands, 0, sizeof(cands));
-	for (i = 0; i < ev->n_tmp_paths && i < 2; i++)
-		add_candidate(cands, &n, ev->tmp_paths[i]);
-	if (ev->tmp_exists)
-		add_candidate(cands, &n, "/tmp");
-	if (ev->var_ai_exists)
-		add_candidate(cands, &n, "/var/ai");
-	if (ev->root_exists)
-		add_candidate(cands, &n, "/root");
+	n = destructive_candidates(ev, cands);
 	if (n < 2)
 		return 0;
 
@@ -2539,6 +3228,70 @@ static int build_destructive_request(const struct ask_clarify_evidence *ev,
 	return 1;
 }
 
+/*
+ * W77e：通用目标澄清（代词/省略指代、缺参、证据冲突触发时，无
+ * 服务/破坏动词可挂靠）。选项 = 会话实体（最近消息中的服务/路径
+ * 名词）；候选 <2 时无法构造合法请求，返回 0。
+ */
+static int build_generic_request(const struct ask_clarify_evidence *ev,
+				 struct ask_clarify_request *req)
+{
+	int n = ev->n_ctx_entities < ASK_CLARIFY_MAX_OPTIONS ?
+		ev->n_ctx_entities : ASK_CLARIFY_MAX_OPTIONS;
+	const char *first;
+	int ascii = 1;
+	int i;
+
+	if (!ev->ctx_entities || n < ASK_CLARIFY_MIN_OPTIONS)
+		return 0;
+	first = ev->ctx_entities[0];
+	for (i = 0; first && first[i]; i++)
+		if ((unsigned char)first[i] >= 0x80) {
+			ascii = 0;
+			break;
+		}
+	memset(req, 0, sizeof(*req));
+	snprintf(req->question, sizeof(req->question),
+		 ascii ? "Which target do you mean? (multiple candidates "
+			"in recent context)" :
+			"你指的是哪个目标？（最近对话中出现多个候选）");
+	snprintf(req->header, sizeof(req->header),
+		 ascii ? "Choose the referenced target" : "选择指代目标");
+	copy_cap(req->kind, sizeof(req->kind), "scope");
+	req->multi_select = 0;
+	for (i = 0; i < n; i++) {
+		snprintf(req->options[i].id, sizeof(req->options[i].id),
+			 "%d", i + 1);
+		copy_cap(req->options[i].label,
+			 sizeof(req->options[i].label), ev->ctx_entities[i]);
+		copy_cap(req->options[i].description,
+			 sizeof(req->options[i].description),
+			 ascii ? "Mentioned in recent conversation" :
+				 "最近对话中提到的目标");
+		copy_cap(req->options[i].why, sizeof(req->options[i].why),
+			 ascii ? "Entity appears in recent context" :
+				 "该名词出现在最近的会话消息中");
+		copy_cap(req->options[i].impact,
+			 sizeof(req->options[i].impact),
+			 ascii ? "Action applies to the chosen target only" :
+				 "动作只作用于所选目标");
+		copy_cap(req->options[i].rollback,
+			 sizeof(req->options[i].rollback),
+			 ascii ? "No automatic execution; choice only" :
+				 "不会自动执行，仅确定目标");
+	}
+	req->n_options = n;
+	copy_cap(req->recommended, sizeof(req->recommended), "1");
+	req->has_recommended = 1;
+	return 1;
+}
+
+/*
+ * W77e：检测器 2.0。question_blocked 语境黑名单优先；模糊度总分
+ * >= ask_clarify_threshold()（默认 5，AIKERNEL_CLARIFY_THRESHOLD=0
+ * 关闭）才提问。问题构造优先级：服务缺 unit > 破坏缺目标 > 通用
+ * 指代目标（会话实体候选）。
+ */
 int ask_clarify_detect(const char *question,
 		       const struct ask_clarify_evidence *ev,
 		       struct ask_clarify_request *req,
@@ -2547,6 +3300,8 @@ int ask_clarify_detect(const char *question,
 	char *lower;
 	const char *verb;
 	int which = -1;
+	int thr;
+	struct ask_clarify_score sc;
 	int rc = 0;
 
 	if (!question || !ev || !req) {
@@ -2559,6 +3314,20 @@ int ask_clarify_detect(const char *question,
 		return -1;
 	}
 	if (question_blocked(lower)) {
+		free(lower);
+		return 0;
+	}
+	thr = ask_clarify_threshold();
+	if (thr == 0) {
+		free(lower);
+		return 0;
+	}
+	if (ask_clarify_score_signals(question, ev, &sc) != 0) {
+		snprintf(err, errlen, "内存不足（评分）");
+		free(lower);
+		return -1;
+	}
+	if (sc.total < thr) {
 		free(lower);
 		return 0;
 	}
@@ -2583,7 +3352,12 @@ int ask_clarify_detect(const char *question,
 	if (verb && !has_path_target(question)) {
 		if (build_destructive_request(ev, req))
 			rc = 1;
+		goto out;
 	}
+
+	/* W77e：代词/缺参/冲突触发的通用指代澄清 */
+	if (build_generic_request(ev, req))
+		rc = 1;
 out:
 	free(lower);
 	return rc;
@@ -2641,6 +3415,38 @@ int ask_clarify_collect_evidence(struct ask_clarify_evidence *ev)
 	}
 	ev->services = (const char *const *)svc;
 	ev->n_services = n;
+
+	/* W77e：证据冲突——同一 unit 同时出现在 running 与 failed 列表
+	 * （状态切换瞬间的两种读数不一致；detector 信号 conflict +3） */
+	if (n > 0 &&
+	    asprintf(&cmd, "%s list-units --type=service --state=failed "
+		     "--no-legend --no-pager 2>/dev/null", systemctl) >= 0) {
+		FILE *fp = popen(cmd, "r");
+
+		free(cmd);
+		if (fp) {
+			char fline[1024];
+
+			while (fgets(fline, sizeof(fline), fp) &&
+			       !ev->conflict) {
+				char unit[256];
+				size_t ul, k;
+
+				if (sscanf(fline, " %255s", unit) != 1)
+					continue;
+				ul = strlen(unit);
+				if (ul < 9 ||
+				    strcmp(unit + ul - 8, ".service") != 0)
+					continue;
+				for (k = 0; k < (size_t)n; k++)
+					if (strcmp(svc[k], unit) == 0) {
+						ev->conflict = 1;
+						break;
+					}
+			}
+			pclose(fp);
+		}
+	}
 
 	{
 		DIR *d = opendir("/tmp");

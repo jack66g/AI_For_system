@@ -133,6 +133,8 @@ COMMON_SRCS := \
 	$(CMD_DIR)/ask_compact.c \
 	$(CMD_DIR)/ask_clarify.c \
 	$(CMD_DIR)/cmd_model.c \
+	$(CMD_DIR)/cmd_model_lifecycle.c \
+	$(CMD_DIR)/model_lifecycle.c \
 	$(CMD_DIR)/cmd_network.c \
 	$(CMD_DIR)/cmd_netlink.c \
 	$(CMD_DIR)/cmd_onboarding.c \

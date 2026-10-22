@@ -868,15 +868,19 @@ static void test_max_two(void)
 	struct ask_clarify_state st;
 	char *out = NULL;
 
+	ask_clarify_answered_reset();
 	memset(&st, 0, sizeof(st));
 	expect(ask_clarify_state_begin(&st) == 1 &&
 	       ask_clarify_state_begin(&st) == 1 &&
 	       ask_clarify_state_begin(&st) == 0 &&
 	       st.asked == 2,
 	       "单次 ask 最多 2 个澄清问题");
+	expect(ask_clarify_budget_exhausted(&st) == 1,
+	       "到限后链级预算判定为耗尽");
 	expect(ask_clarify_handle_tool_ex(valid_json, &st, 0, &out) == 0 &&
-	       out && strstr(out, "clarify limit reached") != NULL,
-	       "第 3 次 clarify 返回上限错误（不终止本轮）");
+	       out && strstr(out, "已达提问上限") != NULL &&
+	       strstr(out, "声明假设") != NULL && st.stop == 0,
+	       "第 3 次 clarify 返回预算注记（按最佳理解执行，不终止本轮）");
 	free(out);
 	ask_clarify_state_free(&st);
 }
@@ -1001,9 +1005,503 @@ static void test_trace_events(void)
 		printf("WARN: 临时目录清理失败: %s\n", dir);
 }
 
+/* ---- W77e：detector 2.0 评分制 / 去重记忆 / 链级预算 / 自动默认 ---- */
+
+static void test_threshold_env(void)
+{
+	expect(ask_clarify_threshold() == 5, "阈值默认 5（未设环境变量）");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "0", 1);
+	expect(ask_clarify_threshold() == 0, "AIKERNEL_CLARIFY_THRESHOLD=0 关");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "9", 1);
+	expect(ask_clarify_threshold() == 9, "AIKERNEL_CLARIFY_THRESHOLD=9 生效");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "-3", 1);
+	expect(ask_clarify_threshold() == 5, "负数回落默认 5");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "abc", 1);
+	expect(ask_clarify_threshold() == 5, "非法值回落默认 5");
+	unsetenv("AIKERNEL_CLARIFY_THRESHOLD");
+}
+
+static void test_score_signals(void)
+{
+	static const char *const svc3[] = {
+		"nginx.service", "sshd.service", "cron.service",
+	};
+	static const char *const svc4[] = {
+		"a.service", "b.service", "c.service", "d.service",
+		"e.service",
+	};
+	static const char *const tmp2[] = { "/tmp/a", "/tmp/b" };
+	static const char *const ents2[] = { "nginx.service", "sshd.service" };
+	static const char *const ents1[] = { "nginx.service" };
+	struct ask_clarify_evidence ev;
+	struct ask_clarify_score sc;
+
+	memset(&ev, 0, sizeof(ev));
+	expect(ask_clarify_score_signals("帮我重启服务", &ev, &sc) == 0 &&
+	       sc.verb_no_target == 3 && sc.candidates == 0 &&
+	       sc.total == 3,
+	       "信号：动作动词无目标 +3（无候选不再加分）");
+
+	ev.services = svc3;
+	ev.n_services = 3;
+	expect(ask_clarify_score_signals("帮我重启服务", &ev, &sc) == 0 &&
+	       sc.candidates == 3 && sc.total == 6,
+	       "信号：证据候选 3 个 +3");
+
+	ev.services = svc4;
+	ev.n_services = 5;
+	expect(ask_clarify_score_signals("帮我重启服务", &ev, &sc) == 0 &&
+	       sc.candidates == 4 && sc.total == 7,
+	       "信号：候选封顶 +4（5 个候选仍 +4）");
+
+	memset(&ev, 0, sizeof(ev));
+	expect(ask_clarify_score_signals("删除文件", &ev, &sc) == 0 &&
+	       sc.verb_no_target == 4 && sc.total == 4,
+	       "信号：破坏性动词无目标 +4（无候选）");
+	ev.tmp_paths = tmp2;
+	ev.n_tmp_paths = 2;
+	ev.tmp_exists = 1;
+	ev.root_exists = 1;
+	ev.var_ai_exists = 1;
+	expect(ask_clarify_score_signals("删除文件", &ev, &sc) == 0 &&
+	       sc.verb_no_target == 4 && sc.candidates == 4 &&
+	       sc.total == 8,
+	       "信号：破坏候选 5 个封顶 +4");
+
+	memset(&ev, 0, sizeof(ev));
+	ev.ctx_entities = ents2;
+	ev.n_ctx_entities = 2;
+	expect(ask_clarify_score_signals("重启它", &ev, &sc) == 0 &&
+	       sc.verb_no_target == 3 && sc.pronoun_entities == 3 &&
+	       sc.total == 6,
+	       "信号：代词指代且上文实体>1 +3");
+	ev.ctx_entities = ents1;
+	ev.n_ctx_entities = 1;
+	expect(ask_clarify_score_signals("重启它", &ev, &sc) == 0 &&
+	       sc.pronoun_entities == 0 && sc.total == 3,
+	       "信号：单实体时代词不加分");
+
+	memset(&ev, 0, sizeof(ev));
+	expect(ask_clarify_score_signals("帮我发送", &ev, &sc) == 0 &&
+	       sc.missing_param == 2 && sc.total == 2,
+	       "信号：发送缺目的地 +2");
+	expect(ask_clarify_score_signals("发送到 /tmp/x", &ev, &sc) == 0 &&
+	       sc.missing_param == 0,
+	       "有目的地（/ 路径）不加分");
+	expect(ask_clarify_score_signals("帮我改配置", &ev, &sc) == 0 &&
+	       sc.missing_param == 2,
+	       "信号：改配置无对象 +2");
+	expect(ask_clarify_score_signals("改配置 /etc/app.conf", &ev,
+					 &sc) == 0 &&
+	       sc.missing_param == 0,
+	       "改配置带路径不加分");
+
+	memset(&ev, 0, sizeof(ev));
+	ev.conflict = 1;
+	expect(ask_clarify_score_signals("查看状态", &ev, &sc) == 0 &&
+	       sc.conflict == 3 && sc.total == 3,
+	       "信号：证据冲突 +3");
+}
+
+static void test_detector_scoring(void)
+{
+	static const char *const svc2[] = {
+		"nginx.service", "sshd.service",
+	};
+	static const char *const svc3[] = {
+		"nginx.service", "sshd.service", "cron.service",
+	};
+	static const char *const ents2[] = { "nginx.service", "sshd.service" };
+	static const char *const ents1[] = { "nginx.service" };
+	struct ask_clarify_evidence ev;
+	struct ask_clarify_request req;
+	char err[256];
+
+	memset(&ev, 0, sizeof(ev));
+	ev.services = svc2;
+	ev.n_services = 2;
+	expect(ask_clarify_detect("重启服务", &ev, &req, err,
+				  sizeof(err)) == 1,
+	       "评分边界：总分=阈值(5) 触发（动词3+候选2）");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "6", 1);
+	expect(ask_clarify_detect("重启服务", &ev, &req, err,
+				  sizeof(err)) == 0,
+	       "评分边界：总分 5 < 阈值 6 不触发");
+	setenv("AIKERNEL_CLARIFY_THRESHOLD", "0", 1);
+	memset(&ev, 0, sizeof(ev));
+	ev.services = svc3;
+	ev.n_services = 3;
+	expect(ask_clarify_detect("重启服务", &ev, &req, err,
+				  sizeof(err)) == 0,
+	       "AIKERNEL_CLARIFY_THRESHOLD=0 关闭检测器");
+	unsetenv("AIKERNEL_CLARIFY_THRESHOLD");
+
+	/* 代词 + 多实体触发（通用指代澄清）；单实体不触发 */
+	memset(&ev, 0, sizeof(ev));
+	ev.ctx_entities = ents2;
+	ev.n_ctx_entities = 2;
+	expect(ask_clarify_detect("重启它", &ev, &req, err,
+				  sizeof(err)) == 1 &&
+	       strcmp(req.kind, "scope") == 0 && req.n_options == 2 &&
+	       strcmp(req.options[0].label, "nginx.service") == 0 &&
+	       strcmp(req.options[1].label, "sshd.service") == 0 &&
+	       ask_clarify_validate(&req, err, sizeof(err)) == 0,
+	       "代词+多实体：通用指代澄清（候选=会话实体）");
+	ev.ctx_entities = ents1;
+	ev.n_ctx_entities = 1;
+	expect(ask_clarify_detect("重启它", &ev, &req, err,
+				  sizeof(err)) == 0,
+	       "代词+单实体：评分不足不提问");
+
+	/* 缺参模式：单独 2 分不足；叠加证据冲突达阈值走通用澄清 */
+	memset(&ev, 0, sizeof(ev));
+	expect(ask_clarify_detect("帮我发送", &ev, &req, err,
+				  sizeof(err)) == 0,
+	       "缺参 2 分单独不触发");
+	ev.ctx_entities = ents2;
+	ev.n_ctx_entities = 2;
+	ev.conflict = 1;
+	expect(ask_clarify_detect("帮我发送", &ev, &req, err,
+				  sizeof(err)) == 1 &&
+	       req.n_options == 2,
+	       "缺参 2 + 冲突 3 = 5 达阈值触发");
+}
+
+static void test_fingerprint(void)
+{
+	struct ask_clarify_request a, b;
+	char err[256];
+
+	expect(build_req(valid_json, &a, err, sizeof(err)) == 0, "req 就绪");
+	expect(build_req("{\"question\":\"要对哪个服务执行重启 ？\","
+			 "\"options\":[{\"id\":\"1\","
+			 "\"label\":\"nginx.service\","
+			 "\"why\":\"x\"},{\"id\":\"2\","
+			 "\"label\":\"sshd.service\"}],"
+			 "\"recommended\":\"1\"}", &b, err,
+			 sizeof(err)) == 0,
+	       "空白差异 req 就绪");
+	expect(ask_clarify_fingerprint(&a) == ask_clarify_fingerprint(&b),
+	       "指纹：空白差异同指纹");
+	expect(build_req("{\"question\":\"要对哪个服务执行重启？\","
+			 "\"kind\":\"scope\","
+			 "\"options\":[{\"id\":\"1\","
+			 "\"label\":\"nginx.service\",\"why\":\"x\"},"
+			 "{\"id\":\"2\",\"label\":\"sshd.service\"}],"
+			 "\"recommended\":\"1\"}", &b, err,
+			 sizeof(err)) == 0,
+	       "kind 差异 req 就绪");
+	expect(ask_clarify_fingerprint(&a) != ask_clarify_fingerprint(&b),
+	       "指纹：kind 不同则不同");
+	expect(build_req("{\"question\":\"要对哪个服务执行重启？\","
+			 "\"options\":[{\"id\":\"a\","
+			 "\"label\":\"nginx.service\",\"why\":\"x\"},"
+			 "{\"id\":\"b\",\"label\":\"sshd.service\"}],"
+			 "\"recommended\":\"a\"}", &b, err,
+			 sizeof(err)) == 0,
+	       "选项 id 差异 req 就绪");
+	expect(ask_clarify_fingerprint(&a) != ask_clarify_fingerprint(&b),
+	       "指纹：选项 id 不同则不同");
+	{
+		char n1[64], n2[64];
+
+		ask_clarify_normalize_question("  Restart NGINX\tService\n",
+					       n1, sizeof(n1));
+		ask_clarify_normalize_question("restart nginx service", n2,
+					       sizeof(n2));
+		expect(strcmp(n1, n2) == 0,
+		       "归一化：大小写+空白一致");
+	}
+}
+
+static void test_answered_memory(void)
+{
+	char tmpl[] = "/tmp/w77e-ans-XXXXXX";
+	char *home = mkdtemp(tmpl);
+	struct ask_clarify_request req;
+	struct ask_clarify_answer ans;
+	struct stat st;
+	char path[1024];
+	char label[ASK_CLARIFY_LABEL_MAX + 1];
+	char err[256];
+	char *old;
+
+	if (!home) {
+		expect(0, "创建 answered 临时 HOME");
+		return;
+	}
+	old = save_home();
+	setenv("HOME", home, 1);
+	ask_clarify_answered_reset();
+	expect(build_req(valid_json, &req, err, sizeof(err)) == 0, "req 就绪");
+	memset(&ans, 0, sizeof(ans));
+	ans.selected[0] = 0;
+	ans.n_selected = 1;
+	ask_clarify_note_answered(NULL, &req, &ans);
+	snprintf(path, sizeof(path),
+		 "%s/.aikernel/clarify/answered.jsonl", home);
+	expect(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600,
+	       "answered.jsonl 落盘且 0600");
+	/* 清缓存后跨"会话"（重新载入文件）仍命中 */
+	ask_clarify_answered_reset();
+	expect(ask_clarify_already_answered(NULL, &req, label,
+					    sizeof(label)) == 1 &&
+	       strcmp(label, "nginx.service") == 0,
+	       "跨会话：answered.jsonl 命中并回带 label");
+	expect(build_req("{\"question\":\"另一个问题？\","
+			 "\"options\":[{\"id\":\"1\",\"label\":\"A\","
+			 "\"why\":\"x\"},{\"id\":\"2\",\"label\":\"B\"}],"
+			 "\"recommended\":\"1\"}", &req, err,
+		 sizeof(err)) == 0,
+	       "不同问题 req 就绪");
+	expect(ask_clarify_already_answered(NULL, &req, label,
+					    sizeof(label)) == 0,
+	       "不同问题不命中");
+	ask_clarify_answered_reset();
+	restore_home(old);
+	cleanup_dir(home);
+}
+
+static void test_chain_dedup(void)
+{
+	char tmpl[] = "/tmp/w77e-dedup-XXXXXX";
+	char *home = mkdtemp(tmpl);
+	struct ask_clarify_request req, req2;
+	struct ask_clarify_answer ans;
+	struct ask_clarify_state st;
+	char label[ASK_CLARIFY_LABEL_MAX + 1];
+	char err[256];
+	char *old;
+
+	if (!home) {
+		expect(0, "创建链内去重临时 HOME");
+		return;
+	}
+	old = save_home();
+	setenv("HOME", home, 1);
+	ask_clarify_answered_reset();
+	expect(build_req(valid_json, &req, err, sizeof(err)) == 0, "req 就绪");
+	expect(build_req(valid_json, &req2, err, sizeof(err)) == 0,
+	       "同指纹 req 就绪");
+	memset(&ans, 0, sizeof(ans));
+	ans.selected[0] = 1;
+	ans.n_selected = 1;
+	memset(&st, 0, sizeof(st));
+	ask_clarify_note_answered(&st, &req, &ans);
+	expect(st.asked_label[0][0] != '\0', "链内记忆写入 state");
+	expect(ask_clarify_already_answered(&st, &req2, label,
+					    sizeof(label)) == 1 &&
+	       strcmp(label, "sshd.service") == 0,
+	       "链内去重：同指纹命中回带选择");
+	expect(build_req("{\"question\":\"换一个问题？\","
+			 "\"options\":[{\"id\":\"1\",\"label\":\"A\","
+			 "\"why\":\"x\"},{\"id\":\"2\",\"label\":\"B\"}],"
+			 "\"recommended\":\"1\"}", &req2, err,
+		 sizeof(err)) == 0,
+	       "不同问题 req 就绪");
+	expect(ask_clarify_already_answered(&st, &req2, label,
+					    sizeof(label)) == 0,
+	       "链内不同指纹不命中");
+	ask_clarify_state_free(&st);
+	ask_clarify_answered_reset();
+	restore_home(old);
+	cleanup_dir(home);
+}
+
+static void test_dedup_injection(void)
+{
+	char tmpl[] = "/tmp/w77e-inject-XXXXXX";
+	char *home = mkdtemp(tmpl);
+	struct ask_clarify_state st;
+	char *out = NULL;
+	char *old;
+
+	if (!home) {
+		expect(0, "创建注入临时 HOME");
+		return;
+	}
+	old = save_home();
+	setenv("HOME", home, 1);
+	ask_clarify_answered_reset();
+	/* 预置答案记忆：同指纹 clarify 不再问，注入旧选择 */
+	{
+		struct ask_clarify_request req;
+		struct ask_clarify_answer ans;
+		char err[256];
+
+		memset(&ans, 0, sizeof(ans));
+		ans.selected[0] = 0;
+		ans.n_selected = 1;
+		if (build_req(valid_json, &req, err, sizeof(err)) == 0)
+			ask_clarify_note_answered(NULL, &req, &ans);
+	}
+	memset(&st, 0, sizeof(st));
+	expect(ask_clarify_handle_tool_ex(valid_json, &st, 0, &out) == 0 &&
+	       out && strstr(out, "已按你此前的选择") != NULL &&
+	       strstr(out, "nginx.service") != NULL &&
+	       st.asked == 0 && st.stop == 0,
+	       "已答不再问：注入旧选择且不占预算/不终止");
+	free(out);
+	ask_clarify_state_free(&st);
+	ask_clarify_answered_reset();
+	restore_home(old);
+	cleanup_dir(home);
+}
+
+static void test_auto_default_eligible(void)
+{
+	struct ask_clarify_request req;
+	char err[256];
+
+	expect(build_req(valid_json, &req, err, sizeof(err)) == 0 &&
+	       ask_clarify_auto_default_eligible(&req) == 1,
+	       "自动默认资格：scope+recommended 可自动");
+	memset(&req, 0, sizeof(req));
+	strcpy(req.kind, "authorization");
+	req.has_recommended = 1;
+	strcpy(req.recommended, "1");
+	expect(ask_clarify_auto_default_eligible(&req) == 0,
+	       "自动默认资格：authorization 永不自动");
+	memset(&req, 0, sizeof(req));
+	strcpy(req.kind, "scope");
+	req.has_default = 1;
+	strcpy(req.default_id, "b");
+	expect(ask_clarify_auto_default_eligible(&req) == 1,
+	       "自动默认资格：仅 default 也可自动");
+	memset(&req, 0, sizeof(req));
+	strcpy(req.kind, "scope");
+	expect(ask_clarify_auto_default_eligible(&req) == 0,
+	       "自动默认资格：无 recommended/default 不自动");
+}
+
+static void test_auto_default_flow(void)
+{
+	char tmpl[] = "/tmp/w77e-auto-XXXXXX";
+	char *home = mkdtemp(tmpl);
+	static const char *auth_json =
+		"{\"question\":\"确认执行危险操作？\","
+		"\"kind\":\"authorization\",\"danger\":\"D3\","
+		"\"options\":[{\"id\":\"a\",\"label\":\"确认\","
+		"\"impact\":\"影响\",\"rollback\":\"回滚\"},"
+		"{\"id\":\"b\",\"label\":\"取消\","
+		"\"impact\":\"影响\",\"rollback\":\"回滚\"}]}";
+	struct ask_clarify_request req;
+	struct ask_clarify_pending ap;
+	char path[1024];
+	char label[ASK_CLARIFY_LABEL_MAX + 1];
+	char err[256];
+	char aerr[256];
+	char *old;
+	long long now;
+
+	if (!home) {
+		expect(0, "创建自动默认临时 HOME");
+		return;
+	}
+	old = save_home();
+	setenv("HOME", home, 1);
+	now = ai_trace_wall_ms();
+	expect(build_req(valid_json, &req, err, sizeof(err)) == 0, "req 就绪");
+
+	/* 1) 过期 + 非授权 + 有推荐 → 自动选推荐继续 */
+	expect(ask_clarify_pending_save(&req, "cq-auto01", now - 1000,
+					"sess-a", "重启服务", 1, err,
+					sizeof(err)) == 0,
+	       "过期 pending 写入");
+	memset(&ap, 0, sizeof(ap));
+	label[0] = '\0';
+	expect(ask_clarify_auto_default("cq-auto01", "sess-a", 1, &ap,
+					label, sizeof(label), aerr,
+					sizeof(aerr)) == 1 &&
+	       strcmp(label, "nginx.service") == 0 &&
+	       strcmp(ap.original_question, "重启服务") == 0 &&
+	       ap.asked == 1,
+	       "过期自动默认：选推荐项并回填恢复上下文");
+	expect(ask_clarify_pending_load("cq-auto01", "sess-a", &ap, err,
+					sizeof(err)) != 0 &&
+	       strstr(err, "已被消费") != NULL,
+	       "自动默认后 pending 已原子消费");
+	ask_clarify_pending_free(&ap);
+
+	/* 2) authorization 永不自动（维持挂起） */
+	expect(build_req(auth_json, &req, err, sizeof(err)) == 0,
+	       "authorization req 就绪");
+	expect(ask_clarify_pending_save(&req, "cq-auto02", now - 1000,
+					"sess-a", "危险操作", 1, err,
+					sizeof(err)) == 0,
+	       "authorization 过期 pending 写入");
+	memset(&ap, 0, sizeof(ap));
+	expect(ask_clarify_auto_default("cq-auto02", "sess-a", 1, &ap,
+					label, sizeof(label), aerr,
+					sizeof(aerr)) == 0 &&
+	       strstr(aerr, "不满足") != NULL,
+	       "authorization 永不自动默认");
+	snprintf(path, sizeof(path),
+		 "%s/.aikernel/clarify/pending/cq-auto02.json", home);
+	expect(access(path, F_OK) == 0, "authorization pending 维持挂起");
+
+	/* 3) 未过期不动（有效窗口内语义不变） */
+	expect(build_req(valid_json, &req, err, sizeof(err)) == 0, "req 就绪");
+	expect(ask_clarify_pending_save(&req, "cq-auto03", now + 60000,
+					"sess-a", "重启服务", 1, err,
+					sizeof(err)) == 0,
+	       "未过期 pending 写入");
+	memset(&ap, 0, sizeof(ap));
+	expect(ask_clarify_auto_default("cq-auto03", "sess-a", 1, &ap,
+					label, sizeof(label), aerr,
+					sizeof(aerr)) == 0 &&
+	       strstr(aerr, "未过期") != NULL,
+	       "未过期 pending 不自动（等待答复）");
+	expect(ask_clarify_pending_consume("cq-auto03", err,
+					   sizeof(err)) == 0,
+	       "清理未过期 pending");
+
+	/* 4) 开关关闭不自动 */
+	expect(ask_clarify_pending_save(&req, "cq-auto04", now - 1000,
+					"sess-a", "重启服务", 1, err,
+					sizeof(err)) == 0,
+	       "开关测试 pending 写入");
+	memset(&ap, 0, sizeof(ap));
+	expect(ask_clarify_auto_default("cq-auto04", "sess-a", 0, &ap,
+					label, sizeof(label), aerr,
+					sizeof(aerr)) == 0 &&
+	       strstr(aerr, "已关闭") != NULL,
+	       "clarify_auto_default=off 不自动");
+	expect(ask_clarify_pending_consume("cq-auto04", err,
+					   sizeof(err)) == 0,
+	       "清理开关测试 pending");
+	ask_clarify_pending_free(&ap);
+	restore_home(old);
+	cleanup_dir(home);
+}
+
+static void test_entities_from_history(void)
+{
+	const char *msgs[] = {
+		"刚才看了 nginx.service 的状态",
+		"还有 /tmp/a.log 和 /var/ai/config 的说明",
+		"nginx.service 又提到了一次",
+	};
+	const char *out[4];
+	char buf[512];
+
+	expect(ask_clarify_entities_from_history(msgs, 3, buf, sizeof(buf),
+						  out, 4) == 3 &&
+	       strcmp(out[0], "nginx.service") == 0 &&
+	       strcmp(out[1], "/tmp/a.log") == 0 &&
+	       strcmp(out[2], "/var/ai/config") == 0,
+	       "会话实体提取：*.service 与绝对路径，重复去重");
+	expect(ask_clarify_entities_from_history(msgs, 3, buf, sizeof(buf),
+						  out, 2) == 2,
+	       "会话实体提取：上限截断");
+	expect(ask_clarify_entities_from_history(NULL, 0, buf, sizeof(buf),
+						  out, 4) == 0,
+	       "会话实体提取：空输入返回 0");
+}
+
 int main(void)
 {
-	printf("==== test_clarify: W77c 结构化澄清 ====\n");
+	printf("==== test_clarify: W77c 结构化澄清 + W77e 询问意识 2.0 ====\n");
 	test_parse_valid();
 	test_option_count();
 	test_duplicate_ids();
@@ -1027,6 +1525,17 @@ int main(void)
 	test_detector_service();
 	test_detector_destructive();
 	test_trace_events();
+	/* W77e：评分制 / 去重记忆 / 链级预算 / 自动默认降级 */
+	test_threshold_env();
+	test_score_signals();
+	test_detector_scoring();
+	test_fingerprint();
+	test_entities_from_history();
+	test_answered_memory();
+	test_chain_dedup();
+	test_dedup_injection();
+	test_auto_default_eligible();
+	test_auto_default_flow();
 	printf("RESULT: %s (%d pass / %d fail)\n",
 	       g_fail == 0 ? "PASS" : "FAIL", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;

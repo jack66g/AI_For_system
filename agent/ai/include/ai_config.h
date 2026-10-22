@@ -132,7 +132,8 @@ enum ai_model_route_mode {
 	AI_MODEL_ROUTE_CLOUD = 2,  /* 强制云；失败仍可按 failover 切本地 */
 };
 
-/* 本地模型上下文硬上限（qwen2.5:1.5b 窗口 32768） */
+/* 本地模型上下文硬上限（目录条目保守值 32768；更长窗口由
+ * ollama_native 按模型实际上限钳制，W77d 起本地模型按需安装） */
 #define AI_LOCAL_CTX_MAX  32768
 
 struct ai_route_config {
@@ -149,6 +150,16 @@ struct ai_route_config {
 };
 
 /*
+ * ai_clarify_config - W77e 澄清行为（model.toml 的 [clarify] 段；
+ * [ui] 段同名键兼容）。仅控制非 TTY pending 过期后的自动默认降级，
+ * 不改变 clarify 的 lease/confirm 边界（clarify 永不授权）。
+ */
+struct ai_clarify_config {
+	int auto_default;   /* 1=过期 pending 按推荐项自动继续（默认）；
+			     *   kind=authorization 永不自动 */
+};
+
+/*
  * ai_config - 配置管理器
  */
 struct ai_config {
@@ -160,6 +171,7 @@ struct ai_config {
 	struct ai_ui_config ui;                 /* [ui] 段配置（终端 UI） */
 	struct ai_routing_config routing;       /* [routing] 段配置（SME 路由） */
 	struct ai_route_config route;           /* [route] 段配置（模型路由） */
+	struct ai_clarify_config clarify;       /* [clarify] 段配置（W77e） */
 };
 
 /*

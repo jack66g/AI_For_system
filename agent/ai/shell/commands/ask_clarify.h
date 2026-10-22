@@ -35,6 +35,16 @@
 #define ASK_CLARIFY_RESUMED_MAX      4096
 #define ASK_CLARIFY_TTL_MS           (15 * 60 * 1000)
 
+/*
+ * W77e：模糊度评分阈值（detector 2.0）。默认 5；环境变量
+ * AIKERNEL_CLARIFY_THRESHOLD 覆盖（0=关闭检测器，负数/非法回落默认）。
+ */
+#define ASK_CLARIFY_THRESHOLD_DEFAULT 5
+/* W77e：answered.jsonl 启动载入条数上限 */
+#define ASK_CLARIFY_ANSWERED_KEEP     100
+/* W77e：代词/省略信号的会话回看消息条数 */
+#define ASK_CLARIFY_ENTITY_MSGS       6
+
 struct ask_clarify_option {
 	char id[ASK_CLARIFY_ID_MAX + 1];
 	char label[ASK_CLARIFY_LABEL_MAX + 1];
@@ -79,12 +89,15 @@ struct ask_clarify_input {
 };
 
 struct ask_clarify_state {
-	int asked;              /* 本 ask 已发起的澄清问题数 */
+	int asked;              /* 本 ask（任务链）已发起的澄清问题数 */
 	int stop;               /* 1=结束本轮 ask（非 TTY/取消/重试耗尽） */
 	int event_sent;         /* W77c-2b：本轮已写 tagged event（最多一行） */
 	char *stop_text;        /* 结束时的最终答案 JSON（malloc） */
 	char session[ASK_CLARIFY_SESSION_MAX + 1];	/* W77c-2a 恢复用 */
 	char *original_question;			/* 澄清前的用户问题 */
+	/* W77e：链内已问指纹与答案（同链重复提问直接注入旧答案） */
+	unsigned long long asked_fp[ASK_CLARIFY_MAX_PER_ASK];
+	char asked_label[ASK_CLARIFY_MAX_PER_ASK][ASK_CLARIFY_LABEL_MAX + 1];
 };
 
 /* 非 TTY pending 记录（W77c-2a） */
@@ -100,6 +113,10 @@ struct ask_clarify_pending {
 /*
  * 歧义检测证据。服务列表来自 systemctl list-units（或测试注入）；
  * tmp_paths 是 /tmp 下实测存在的绝对路径。detector 不自行探测。
+ * W77e 新增：ctx_entities 是本会话最近 N 条消息里提到的实体
+ * （*.service / 绝对路径名词，ask_clarify_entities_from_history
+ * 提取，指针指向调用方消息文本）；conflict=同一目标两种状态读数
+ * 不一致（生产采集器对比 running/failed 列表，测试可注入）。
  */
 struct ask_clarify_evidence {
 	const char *const *services;
@@ -109,6 +126,22 @@ struct ask_clarify_evidence {
 	int tmp_exists;
 	int root_exists;
 	int var_ai_exists;
+	const char *const *ctx_entities;	/* W77e：会话实体（可 NULL） */
+	int n_ctx_entities;
+	int conflict;				/* W77e：证据冲突 */
+};
+
+/*
+ * W77e：模糊度评分（detector 2.0）。全部信号为纯函数可单测；
+ * total >= ask_clarify_threshold() 才触发提问。
+ */
+struct ask_clarify_score {
+	int total;              /* 加总分 */
+	int verb_no_target;     /* 动作动词无目标 +3 / 破坏性无目标 +4 */
+	int candidates;         /* 证据候选 >=2 +2，每多一个 +1，封顶 +4 */
+	int pronoun_entities;   /* 代词/省略指代且上文实体>1 +3 */
+	int missing_param;      /* 已知缺参数模式 +2 */
+	int conflict;           /* 证据冲突 +3 */
 };
 
 /* 解析并校验模型给出的 clarify 参数；失败写 err 并返回 <0 */
@@ -199,8 +232,85 @@ int ask_clarify_detect(const char *question,
 		       const struct ask_clarify_evidence *ev,
 		       struct ask_clarify_request *req,
 		       char *err, size_t errlen);
-/* 廉价预判（只做动词/否定/疑问句扫描）：1=可能命中检测器 */
+/* 廉价预判（动词/代词/缺参/否定/疑问句扫描）：1=可能命中检测器 */
 int ask_clarify_question_candidate(const char *question);
+
+/* ---- W77e：detector 2.0 评分制 ---- */
+
+/* 评分阈值：AIKERNEL_CLARIFY_THRESHOLD 覆盖（默认 5，0=关，负数回落） */
+int ask_clarify_threshold(void);
+
+/* 纯信号打分：动词无目标/证据候选/代词省略+多实体/缺参模式/证据冲突 */
+int ask_clarify_score_signals(const char *question,
+			      const struct ask_clarify_evidence *ev,
+			      struct ask_clarify_score *out);
+
+/*
+ * 从最近会话消息提取实体（*.service 名与绝对路径名词）。
+ * 纯函数：实体文本复制进 buf（NUL 结尾、有界），out[i] 指向
+ * buf 内部；返回写入 out 的条数（<= max_out）。
+ */
+int ask_clarify_entities_from_history(const char *const *messages, int n,
+				      char *buf, size_t buf_len,
+				      const char *out[], int max_out);
+
+/* ---- W77e：跨轮去重 + 答案记忆（answered.jsonl） ---- */
+
+/*
+ * 问题指纹 = hash(kind + 归一化 question + option ids)。归一化 =
+ * 小写 + 去空白。纯函数（FNV-1a 64）。
+ */
+unsigned long long ask_clarify_fingerprint(const struct ask_clarify_request *req);
+void ask_clarify_normalize_question(const char *in, char *out, size_t n);
+
+/*
+ * 该问题是否已问过且已有答案：先查链内 st->asked_fp，再查
+ * ~/.aikernel/clarify/answered.jsonl（启动后首次访问载入最近
+ * ASK_CLARIFY_ANSWERED_KEEP 条）。命中返回 1 并把上次选择 label
+ * 写入 out_label。
+ */
+int ask_clarify_already_answered(const struct ask_clarify_state *st,
+				 const struct ask_clarify_request *req,
+				 char *out_label, size_t label_len);
+
+/* 记录一次已回答的澄清：链内 st + answered.jsonl 追加（0600） */
+void ask_clarify_note_answered(struct ask_clarify_state *st,
+			       const struct ask_clarify_request *req,
+			       const struct ask_clarify_answer *ans);
+
+/* 清空 answered.jsonl 内存缓存（测试隔离用；不动文件） */
+void ask_clarify_answered_reset(void);
+
+/* 底层记忆写入：fp+label 直接入缓存与 answered.jsonl（resume 路径用） */
+void ask_clarify_answered_remember(unsigned long long fp, const char *label,
+				   const char *kind);
+
+/* ---- W77e：链级提问预算 ---- */
+
+/* 1=任务链提问预算（ASK_CLARIFY_MAX_PER_ASK）已耗尽 */
+int ask_clarify_budget_exhausted(const struct ask_clarify_state *st);
+
+/* ---- W77e：非 TTY 过期自动默认降级 ---- */
+
+/*
+ * 过期 pending 自动默认资格（纯函数）：kind != authorization 且
+ * 有 recommended 或 default 时返回 1。
+ */
+int ask_clarify_auto_default_eligible(const struct ask_clarify_request *req);
+
+/*
+ * 消费一条已过期的 pending：资格判定 -> 原子 consume -> 发带 tag 的
+ * AIKERNEL_EVENT clarify_auto_default（含 nonce/label）-> 回填
+ * out（original_question/asked/req）与 label 供恢复 ask。
+ * @enabled: 总开关（config clarify_auto_default，默认 on；
+ *   AIKERNEL_CLARIFY_AUTO_DEFAULT=0 强制关）。
+ * 返回 1=已自动默认；0=不适用（原因写 err，保持挂起）；<0=内部错误。
+ */
+int ask_clarify_auto_default(const char *nonce, const char *session_expected,
+			     int enabled,
+			     struct ask_clarify_pending *out,
+			     char *label, size_t label_len,
+			     char *err, size_t errlen);
 
 /* 生产 evidence 采集（固定命令/固定目录；测试可完全绕过） */
 int ask_clarify_collect_evidence(struct ask_clarify_evidence *ev);

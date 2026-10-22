@@ -22,10 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ai_shell.h"
+#include "ai_commands.h"
 #include "ai_runtime.h"
 #include "ai_config.h"
 #include "communication/communication.h"
 #include "local/local_chat.h"
+#include "model_lifecycle.h"
 
 /* 前向声明本地 Provider 的配置入口（名称约定，非 ops 虚接口） */
 void local_provider_configure(struct ai_provider *provider,
@@ -632,12 +634,24 @@ static int model_test(struct ai_shell *shell, const char *name)
 int cmd_model(void *shell_ptr, int argc, char **argv)
 {
 	struct ai_shell *shell = (struct ai_shell *)shell_ptr;
+	int rc;
 
 	if (argc < 2) {
-		printf("Usage: model <add|list|use|remove|test> [args]\n");
-		printf("       model use local|cloud to switch provider\n");
+		printf("Usage: model <add|list|use|switch|remove|install|catalog|recommend|rollback|benchmark|test> [args]\n");
+		printf("       model use|switch local|cloud to switch provider\n");
+		printf("       model install/remove manage local models (on-demand, W77d)\n");
 		printf("       model test [name|local] to check connectivity\n");
 		return AI_ERR_INVALID_ARG;
+	}
+
+	/* W77d 生命周期子命令先行（catalog/recommend/install/switch/
+	 * rollback/benchmark；remove 对目录内模型走 ollama 卸载，
+	 * 目录外名字保持旧的配置条目删除语义）。 */
+	if (strcmp(argv[1], "remove") != 0 ||
+	    (argc > 2 && aik_ml_name_in_catalog(argv[2]))) {
+		rc = cmd_model_lifecycle(shell, argc, argv);
+		if (rc != AI_ERR_NOT_FOUND)
+			return rc;
 	}
 
 	if (strcmp(argv[1], "add") == 0) {

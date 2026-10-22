@@ -61,13 +61,13 @@ from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 
 SCHEMA = "aik-w75-audit/1"
-EXPECTED_TOOLS = 151
+EXPECTED_TOOLS = 156
 EXPECTED_SANDBOX_TOOLS = 7
-EXPECTED_DOMAINS = 8
+EXPECTED_DOMAINS = 9
 EXPECTED_DESKTOP_TOOLS = 20
-EXPECTED_SEED_COUNT = 167
-EXPECTED_SEED_KINDS = {"domain-header": 8, "tool": 151, "combo": 8}
-EXPECTED_TOOL_NAMES_SHA256 = "52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2"
+EXPECTED_SEED_COUNT = 173
+EXPECTED_SEED_KINDS = {"domain-header": 9, "tool": 156, "combo": 8}
+EXPECTED_TOOL_NAMES_SHA256 = "1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81"
 READ_TARGET = 95.0
 SEMANTIC_TARGET = 50.0
 
@@ -77,6 +77,7 @@ CHANNEL_CASE = {
     "netlink-act": "TOOL_CH_NETLINK_ACT",
     "netlink-sense": "TOOL_CH_NETLINK_SENSE",
     "exec": "TOOL_CH_EXEC",
+    "model": "TOOL_CH_MODEL",
     "memory": "TOOL_CH_MEMORY",
     "shell": "TOOL_CH_SHELL",
     "sandbox": "TOOL_CH_SANDBOX",

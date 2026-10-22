@@ -11,7 +11,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 CC=${CC:-cc}
 INC="-I../include -I.. -I../runtime"
-CORE="../tools/executor.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../runtime/netlink/ai_netlink_client.c ../memory/sme_client.c ../local/local_http.c ../trace/ai_trace.c"
+CORE="../tools/executor.c ../tools/tool_registry.c ../config/config_manager.c ../shell/commands/model_lifecycle.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../runtime/netlink/ai_netlink_client.c ../memory/sme_client.c ../local/local_http.c ../trace/ai_trace.c"
 POL="../policy/ai_user_policy.c"
 
 build_run() {
@@ -37,28 +37,30 @@ build_run test_provider_stream -I../include -DCONFIG_AI_STREAM_MODE -I.. -I../lo
 build_run test_parallel_toolcalls -I../include -I.. -I../local ../runtime/ai_json_util.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c ../local/ollama_native.c ../local/local_chat.c ../local/local_http.c ../runtime/ai_types.c -lpthread || FAIL=$((FAIL+1))
 build_run test_toolcall_backfill $INC ../runtime/ai_json_util.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c || FAIL=$((FAIL+1))
 build_run test_toolname_map $INC ../runtime/ai_json_util.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c || FAIL=$((FAIL+1))
-build_run test_sandbox_tools $INC test_sandbox_stubs.c ../tools/executor.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c -lpthread || FAIL=$((FAIL+1))
-build_run test_plan_mode $INC -DW42_REAL_POLICY test_sandbox_stubs.c ../tools/executor.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c $POL -lpthread || FAIL=$((FAIL+1))
+build_run test_sandbox_tools $INC test_sandbox_stubs.c ../tools/executor.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c ../config/config_manager.c ../shell/commands/model_lifecycle.c ../policy/ai_lease.c -lpthread || FAIL=$((FAIL+1))
+build_run test_plan_mode $INC -DW42_REAL_POLICY test_sandbox_stubs.c ../tools/executor.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c $POL ../policy/ai_lease.c ../config/config_manager.c ../shell/commands/model_lifecycle.c -lpthread || FAIL=$((FAIL+1))
 build_run test_sme_degraded -I../include -I.. -I../local ../memory/sme_client.c ../local/local_http.c ../runtime/ai_json_util.c ../runtime/ai_types.c -lpthread || FAIL=$((FAIL+1))
+build_run test_model_lifecycle $INC ../shell/commands/model_lifecycle.c ../config/config_manager.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../local/local_http.c -lpthread || FAIL=$((FAIL+1))
+build_run test_onboarding_cloud $INC -I../runtime -I../shell/commands ../shell/commands/cmd_onboarding.c ../shell/commands/model_lifecycle.c ../config/config_manager.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../local/local_http.c ../i18n/lang.c ../runtime/ai_chat_proto.c -lpthread || FAIL=$((FAIL+1))
 build_run test_export_path -I../include -I.. -I../local ../memory/sme_client.c ../local/local_http.c ../runtime/ai_json_util.c ../runtime/ai_types.c -lpthread || FAIL=$((FAIL+1))
 build_run test_memory_api -I../include -I.. -I../local ../memory/sme_client.c ../local/local_http.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../tools/tool_registry.c ../i18n/lang.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
 
 # W48 new suites
-build_run test_risk_grading $INC $CORE $POL -lpthread || FAIL=$((FAIL+1))
-build_run test_exec_risk_matrix $INC test_sandbox_stubs.c $CORE $POL -lpthread || FAIL=$((FAIL+1))
-build_run test_sysctl_tools $INC $CORE $POL -lpthread || FAIL=$((FAIL+1))
+build_run test_risk_grading $INC $CORE ../policy/ai_lease.c $POL -lpthread || FAIL=$((FAIL+1))
+build_run test_exec_risk_matrix $INC test_sandbox_stubs.c ../tools/executor.c ../tools/tool_registry.c ../config/config_manager.c ../shell/commands/model_lifecycle.c ../policy/ai_lease.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c -lpthread || FAIL=$((FAIL+1))
+build_run test_sysctl_tools $INC $CORE ../policy/ai_lease.c $POL -lpthread || FAIL=$((FAIL+1))
 build_run test_registry_shadow $INC ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../cloud/toolname_map.c || FAIL=$((FAIL+1))
 
 # W55 new suites
-build_run test_router_activation -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
+build_run test_router_activation -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_clarify.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
 build_run test_ask_status_budget -I../include -I.. -I../shell/commands ../shell/commands/ask_context.c ../runtime/ai_json_util.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c ../i18n/lang.c || FAIL=$((FAIL+1))
 
 # W56 new suites
 build_run test_prompt_policy -I../include -I.. -I../shell/commands ../shell/commands/ask_context.c ../i18n/lang.c || FAIL=$((FAIL+1))
-build_run test_ask_autocompact -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
+build_run test_ask_autocompact -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_clarify.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
 
 # W59 new suite: auto-compact loop guard (2 attempts -> truncate)
-build_run test_compact_loop -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
+build_run test_compact_loop -I../include -I.. -I../runtime -I../shell/commands test_ask_stubs.c ../shell/commands/cmd_ask.c ../shell/commands/ask_clarify.c ../shell/commands/ask_context.c ../shell/commands/ask_compact.c ../tools/tool_registry.c ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c ../runtime/ai_chat_proto.c ../cloud/toolname_map.c -lpthread || FAIL=$((FAIL+1))
 
 echo "==== registry manifest self-test ===="
 python3 test_registry_manifest.py

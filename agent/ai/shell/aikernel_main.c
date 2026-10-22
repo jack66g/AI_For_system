@@ -45,7 +45,7 @@ extern void ai_cancel_restore(void);
 extern volatile sig_atomic_t ai_cancel_requested;
 
 /* W65 P3-02：--version 版本口径（与 alpha.8.0 基线一致） */
-#define AIKERNEL_SHELL_VERSION "0.1.0-alpha.11.0"
+#define AIKERNEL_SHELL_VERSION "0.1.0-alpha.12.0"   /* W77d */
 
 /* 外部声明 */
 extern struct ai_provider *openai_compatible_provider_create(void);
@@ -639,7 +639,25 @@ static void print_version(void)
  * 可修正后重试；消费后重放一律失败。澄清不创建租约，D2+ 仍走 W74 gate。
  * 注意：--clarify-select/--clarify-other 经 argv 传入，/proc 可见；
  * 当前可接受，敏感场景后续走文件/环境变量。
+ *
+ * W77e：pending 过期时不再永久挂起——config [clarify]
+ * clarify_auto_default（默认 on）且 kind!=authorization 且有
+ * recommended/default 的，自动选推荐项继续（发带 tag 的
+ * AIKERNEL_EVENT clarify_auto_default 事件）；答复消费成功后写入
+ * answered.jsonl 答案记忆（跨会话不再重复问）。
  */
+static int clarify_auto_default_on(struct ai_shell *shell)
+{
+	const char *env = getenv("AIKERNEL_CLARIFY_AUTO_DEFAULT");
+
+	if (env && env[0] &&
+	    (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0 ||
+	     strcasecmp(env, "off") == 0))
+		return 0;
+	return shell && shell->config ? shell->config->clarify.auto_default
+				       : 1;
+}
+
 static int run_clarify_resume(struct ai_shell *shell, const char *nonce,
 			      const char *select, const char *other,
 			      int session_explicit)
@@ -665,6 +683,55 @@ static int run_clarify_resume(struct ai_shell *shell, const char *nonce,
 				     session_explicit ?
 				     shell->config->ui.session : NULL,
 				     &p, err, sizeof(err)) != 0) {
+		/* W77e：过期自动默认降级（authorization 永不自动；
+		 * 有效窗口内与原语义完全一致） */
+		if (strstr(err, "过期") != NULL) {
+			struct ask_clarify_pending ap;
+			char alabel[ASK_CLARIFY_LABEL_MAX + 1];
+			char aerr[256] = "";
+			char abuf[16];
+			char *aresumed = NULL;
+
+			if (ask_clarify_auto_default(
+				    nonce,
+				    session_explicit ?
+				    shell->config->ui.session : NULL,
+				    clarify_auto_default_on(shell), &ap,
+				    alabel, sizeof(alabel),
+				    aerr, sizeof(aerr)) == 1) {
+				int arc;
+
+				if (asprintf(&aresumed,
+					     "%s\n[clarification answer] "
+					     "%s -> %s [auto-default]",
+					     ap.original_question,
+					     ap.req.question,
+					     alabel) < 0) {
+					ask_clarify_pending_free(&ap);
+					fprintf(stderr, "clarify: 内存不足"
+						"（auto-default）\n");
+					return AI_ERR_MEMORY;
+				}
+				if (!session_explicit) {
+					char *dup = strdup(ap.session);
+
+					if (dup) {
+						free(shell->config->ui.session);
+						shell->config->ui.session = dup;
+					}
+				}
+				snprintf(abuf, sizeof(abuf), "%d", ap.asked);
+				setenv("AIKERNEL_CLARIFY_ASKED", abuf, 1);
+				qargv[0] = (char *)"ask";
+				qargv[1] = aresumed;
+				arc = cmd_ask(shell, 2, qargv);
+				free(aresumed);
+				ask_clarify_pending_free(&ap);
+				return arc;
+			}
+			fprintf(stderr, "clarify: %s（%s）\n", err, aerr);
+			return AI_ERR_INVALID_ARG;
+		}
 		fprintf(stderr, "clarify: %s\n", err);
 		return AI_ERR_INVALID_ARG;
 	}
@@ -691,6 +758,9 @@ static int run_clarify_resume(struct ai_shell *shell, const char *nonce,
 		ask_clarify_pending_free(&p);
 		return AI_ERR_INVALID_ARG;
 	}
+	/* W77e：答复消费成功 → answered.jsonl 答案记忆（跨会话去重） */
+	ask_clarify_answered_remember(ask_clarify_fingerprint(&p.req),
+				      labels, p.req.kind);
 	{
 		char abuf[16];
 

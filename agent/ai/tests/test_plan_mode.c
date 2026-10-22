@@ -164,7 +164,7 @@ int main(void)
 
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "主注册表加载（AIKERNEL_TOOLS_JSON=../tools/tools.json）");
-	CHECK(reg.tool_count == 151, "注册表 151 件（W76 desktop 面接入后口径）");
+	CHECK(reg.tool_count == 156, "注册表 156 件（W77d：151+5 model_*）");
 
 	/* W69 P2-2：plan 拒绝必须写 policy_decision 事件 */
 	setenv("AIKERNEL_TRACE_DIR", tmpdir, 1);
