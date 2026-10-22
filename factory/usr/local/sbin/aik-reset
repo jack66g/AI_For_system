@@ -59,9 +59,10 @@ write_factory_model_toml() {
 model = "cloud"
 
 [local]
-enabled = true
+enabled = false
 base_url = "http://127.0.0.1:11434/v1"
-model = "qwen2.5:1.5b"
+# W77d：本地模型按需安装（aik model install 后自动写入）；出厂不预装
+model = ""
 timeout_ms = 3600000
 api_key = ""
 
@@ -79,11 +80,7 @@ lang = "zh"
 mode = "auto"
 local_catalog = false
 
-[models.local]
-provider_type = "local"
-model_name = "qwen2.5:1.5b"
-base_url = "http://127.0.0.1:11434/v1"
-api_key = ""
+# [models.local] 在本地模型安装（aik model install）后自动生成；出厂无
 EOF
 }
 

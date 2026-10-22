@@ -66,6 +66,8 @@
 #include "netlink/ai_netlink_client.h"
 #include "memory/sme_client.h"
 #include "tools/executor.h"
+#include "ai_config.h"
+#include "shell/commands/model_lifecycle.h"
 #include "local/local_http.h"
 #include <unistd.h>                  /* getuid（P2 权限分级） */
 #include "policy/ai_user_policy.h"   /* P2: uid→档位→W1/W2 闸门 */
@@ -5505,6 +5507,229 @@ static int exec_desktop(const struct ai_tool *tool, const char *args_json,
 	return AI_OK;
 }
 
+
+/* ---- W77d：model 通道（本地模型生命周期，5 件） ---- */
+
+/*
+ * exec_model - model_catalog_list / model_recommend / model_install /
+ * model_remove / model_benchmark 分发。
+ * 单源实现：shell/commands/model_lifecycle.c（aik model 子命令同源）。
+ * install/remove 为 W2/D2：上方 ai_lease_gate 已确认（executor 通用闸门），
+ * 本函数传 force=1 直接执行并如实报告结果；绝不把失败说成成功。
+ */
+static int exec_model(const struct ai_tool *tool, const char *args_json,
+		      char **out)
+{
+	struct ai_config *cfg = NULL;
+	char *name = NULL;
+	char *err = NULL;
+	const char *val;
+	size_t val_len;
+	int type;
+	int rc = AI_ERR_INVALID_ARG;
+
+	*out = NULL;
+
+	/* name 参数（install/remove 必填；benchmark 可选） */
+	if (ai_json_obj_get(args_json, strlen(args_json), "name",
+			    &val, &val_len, &type) == 1 && type == AI_JSON_STR)
+		name = ai_json_strdup_str(val, val_len);
+
+	if (strcmp(tool->name, "model_catalog_list") == 0) {
+		struct aik_ml_entry cat[AIK_ML_CATALOG_MAX];
+		int n = aik_ml_catalog_load(NULL, cat, AIK_ML_CATALOG_MAX,
+					    &err);
+		int i, j, off = 0;
+
+		if (n <= 0) {
+			if (asprintf(out, "model_catalog_list: %s",
+				     err ? err : "no entries") < 0)
+				*out = NULL;
+			free(err);
+			return AI_ERR_CONFIG;
+		}
+		free(err);
+		if (asprintf(out, "catalog %s (%d entries):\n",
+			     aik_ml_catalog_path(), n) < 0) {
+			*out = NULL;
+			return AI_ERR_MEMORY;
+		}
+		off = (int)strlen(*out);
+		for (i = 0; i < n; i++) {
+			char line[512];
+			int w;
+
+			w = snprintf(line, sizeof(line),
+				     "%-18s %-30s %gB ctx=%lldK disk=%gGB ram>=%dGB tags=",
+				     cat[i].name, cat[i].ollama_ref,
+				     cat[i].params_b, cat[i].ctx_tokens / 1000,
+				     cat[i].disk_gb, cat[i].ram_min_gb);
+			for (j = 0; j < cat[i].ntags && w < (int)sizeof(line) - 40; j++)
+				w += snprintf(line + w, sizeof(line) - w,
+					      "%s%s", j ? "," : "",
+					      cat[i].tags[j]);
+			snprintf(line + w, sizeof(line) - w, "\n  why: %s\n",
+				 cat[i].why);
+			{
+				size_t need = off + strlen(line) + 1;
+				char *grow = realloc(*out, need);
+
+				if (!grow) {
+					free(*out);
+					*out = NULL;
+					return AI_ERR_MEMORY;
+				}
+				*out = grow;
+				memcpy(*out + off, line, strlen(line) + 1);
+				off += (int)strlen(line);
+			}
+		}
+		return AI_OK;
+	}
+
+	if (strcmp(tool->name, "model_recommend") == 0) {
+		struct aik_ml_entry cat[AIK_ML_CATALOG_MAX];
+		struct aik_ml_hw hw;
+		struct aik_ml_scored top[AIK_ML_TOP_N];
+		int n = aik_ml_catalog_load(NULL, cat, AIK_ML_CATALOG_MAX,
+					    &err);
+		int cnt, i, off = 0;
+
+		if (n <= 0) {
+			if (asprintf(out, "model_recommend: %s",
+				     err ? err : "no entries") < 0)
+				*out = NULL;
+			free(err);
+			return AI_ERR_CONFIG;
+		}
+		free(err);
+		aik_ml_hw_probe(&hw);
+		cnt = aik_ml_recommend(cat, n, &hw, top, AIK_ML_TOP_N);
+		if (cnt == 0) {
+			*out = strdup("model_recommend: no catalog model "
+				      "fits this host (RAM/disk gates); "
+				      "cloud-first remains.");
+			return AI_OK;
+		}
+		if (asprintf(out,
+			     "hardware: %lldMB RAM, %lldMB disk free, %d cpus%s\n"
+			     "top-%d recommendations:\n",
+			     hw.mem_total_kb / 1024, hw.disk_free_mb,
+			     hw.cpus, hw.gpu ? ", dGPU" : "", cnt) < 0) {
+			*out = NULL;
+			return AI_ERR_MEMORY;
+		}
+		off = (int)strlen(*out);
+		for (i = 0; i < cnt; i++) {
+			char line[640];
+			int w;
+
+			w = snprintf(line, sizeof(line),
+				     "%d. %s (%s)\n   why: %s\n   fit: %s\n",
+				     i + 1, top[i].e->name,
+				     top[i].e->ollama_ref, top[i].e->why,
+				     top[i].reason);
+			(void)w;
+			{
+				size_t need = off + strlen(line) + 1;
+				char *grow = realloc(*out, need);
+
+				if (!grow) {
+					free(*out);
+					*out = NULL;
+					return AI_ERR_MEMORY;
+				}
+				*out = grow;
+				memcpy(*out + off, line, strlen(line) + 1);
+				off += (int)strlen(line);
+			}
+		}
+		return AI_OK;
+	}
+
+	/* install/remove/benchmark 需要 model.toml 配置上下文 */
+	cfg = ai_config_init();
+	if (!cfg) {
+		*out = strdup("model tool: ai_config_init failed");
+		return AI_ERR_CONFIG;
+	}
+	if (ai_config_load(cfg) != AI_OK) {
+		/* 首次运行无 model.toml：[local] 段仍有编译期默认 base_url */
+	}
+
+	if (strcmp(tool->name, "model_install") == 0) {
+		if (!name || !name[0]) {
+			*out = strdup("model_install: 'name' required "
+				      "(see model_catalog_list)");
+			rc = AI_ERR_INVALID_ARG;
+			goto out_cfg;
+		}
+		if (aik_ml_install(cfg, name, 1, &err) == 0) {
+			if (asprintf(out, "install OK: %s verified "
+				     "(manifest + inference ping); registered "
+				     "[local]; 'model switch local' to use it",
+				     name) < 0)
+				*out = NULL;
+			rc = AI_OK;
+		} else {
+			if (asprintf(out, "install FAILED (honest report): %s",
+				     err ? err : "unknown") < 0)
+				*out = NULL;
+			rc = AI_ERR_API;
+		}
+		free(err);
+		goto out_cfg;
+	}
+
+	if (strcmp(tool->name, "model_remove") == 0) {
+		if (!name || !name[0]) {
+			*out = strdup("model_remove: 'name' required");
+			rc = AI_ERR_INVALID_ARG;
+			goto out_cfg;
+		}
+		/* D2 确认已由 lease gate 完成；force=1 跳过交互二次确认 */
+		if (aik_ml_remove(cfg, name, 1, &err) == 0) {
+			if (asprintf(out, "removed %s; local provider "
+				     "disabled (cloud-first)", name) < 0)
+				*out = NULL;
+			rc = AI_OK;
+		} else {
+			if (asprintf(out, "remove FAILED (honest report): %s",
+				     err ? err : "unknown") < 0)
+				*out = NULL;
+			rc = AI_ERR_API;
+		}
+		free(err);
+		goto out_cfg;
+	}
+
+	if (strcmp(tool->name, "model_benchmark") == 0) {
+		char bj[512];
+
+		if (aik_ml_benchmark(cfg, name, 0, bj, sizeof(bj),
+				     &err) == 0) {
+			if (asprintf(out, "benchmark: %s", bj) < 0)
+				*out = NULL;
+			rc = AI_OK;
+		} else {
+			if (asprintf(out, "benchmark FAILED: %s",
+				     err ? err : "unknown") < 0)
+				*out = NULL;
+			rc = AI_ERR_API;
+		}
+		free(err);
+		goto out_cfg;
+	}
+
+	*out = strdup("ERROR: unknown model tool (registry data bug)");
+	rc = AI_ERR_INVALID_ARG;
+
+out_cfg:
+	free(name);
+	ai_config_destroy(cfg);
+	return rc;
+}
+
 /* ---- 统一入口 ---- */
 
 int tool_executor_run(const struct ai_tool *tool, const char *args_json,
@@ -5750,6 +5975,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_DESKTOP:
 		rc = exec_desktop(tool, args_json, out);
 		break;
+	case TOOL_CH_MODEL:
+		rc = exec_model(tool, args_json, out);
+		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调
 		 * 也绝不提问/建租约/执行动作。 */
@@ -5777,7 +6005,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   "sandbox（隔离区+子智能体）" :
 		   tool->channel == TOOL_CH_SYSCTL ? "sysctl" :
 		   tool->channel == TOOL_CH_SYSFS_DYN ? "sysfs" :
-		   tool->channel == TOOL_CH_DESKTOP ? "desktop" : "memory",
+		   tool->channel == TOOL_CH_DESKTOP ? "desktop" :
+		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
 		   args_json,
 		   g_mem_degraded ? "degraded" :
 		   (rc == AI_OK ? "ok" : "fail"));

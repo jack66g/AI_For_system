@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-22T02:30:02",
+  "generated_at": "2026-10-23T04:13:48",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 151,
-  "tool_names_sha256": "52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2",
+  "tool_count": 156,
+  "tool_names_sha256": "1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -17,12 +17,13 @@
     "sysctl": 3,
     "sysfs": 2,
     "desktop": 20,
+    "model": 5,
     "interaction": 1
   },
   "risk_counts": {
-    "R": 69,
-    "W1": 37,
-    "W2": 44,
+    "R": 71,
+    "W1": 38,
+    "W2": 46,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -4584,6 +4585,110 @@
       },
       "sub": [
         "desktop"
+      ]
+    },
+    {
+      "name": "model_catalog_list",
+      "channel": "model",
+      "risk": "R",
+      "description": "列出可按需安装的本地模型目录（D0 只读）：名称/参数量/上下文窗口/磁盘占用/内存门槛/标签/推荐理由与核对备注。数据源/usr/local/share/aikernel/model-catalog.json（ollama_ref 已逐条与 ollama.com 核对）。装之前先看它。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "model",
+        "aicore"
+      ]
+    },
+    {
+      "name": "model_recommend",
+      "channel": "model",
+      "risk": "R",
+      "description": "按本机硬件（内存/磁盘空闲/CPU 核/有无独显，自读 /proc/meminfo、statvfs、/sys/class/drm）对目录做门控过滤+排序，给 top-3 推荐与理由（D0 只读；低内存机不会推荐 8B 级）。用户说「装个本地模型/推荐个模型」先调它。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "model",
+        "aicore"
+      ]
+    },
+    {
+      "name": "model_install",
+      "channel": "model",
+      "risk": "W2",
+      "description": "按需安装本地模型（D2：多 GB 下载+写盘，需确认或任务租约）。name 用 model_catalog_list 的名称；流程：硬件门控预检 → ollama /api/pull 流式下载 → 装后验证（manifest + 一次小推理）→ 注册 model.toml [local]。失败会如实报告、清理半成品并给替代建议，绝不把失败说成成功。装完可用 model switch local 切换。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "目录中的模型名（如 spark-x2.5:4b）"
+          },
+          "bench": {
+            "type": "boolean",
+            "description": "装完立即跑快速基准（默认 false）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "model",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "model_remove",
+      "channel": "model",
+      "risk": "W2",
+      "description": "卸载本地模型并注销 [local]（D2：删除多 GB 权重，需确认或任务租约）。若是当前活动本地模型会要求再次确认；成功后本地provider 禁用、路由回云端优先。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "目录中的模型名"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "model",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "model_benchmark",
+      "channel": "model",
+      "risk": "W1",
+      "description": "本地模型基准（D1）：N=3 条固定提示实测 p50/p95 延迟与 tok/s，结果落 ~/.aikernel/model-bench.json；recommend 排序可参考历史基准。模型缺省取当前 [local].model。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "模型名（缺省用当前本地模型）"
+          },
+          "rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "轮数（默认 3）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "model",
+        "aicore"
       ]
     },
     {

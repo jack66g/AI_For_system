@@ -3,7 +3,7 @@
 # 产物: /home/jack66g/aikernel-root.raw (8G raw ext4, 无分区表, root=/dev/vda)
 #
 # W4A 启动参数建议（qemu 命令行，出厂 ISO 打包波参照）:
-#   -m 4096   —— guest 内置 ollama+qwen2.5:1.5b（986MB 权重），
+#   -m 4096   —— guest 内置 ollama 引擎（W77d 起不预装模型），
 #                2G 实测 OOM 连环 panic（连 systemd PID1 都被杀）；
 #                3G 临界；4G 稳定。另须挂载镜像内 /swapfile（2G，已含）。
 #   加速提示: TCG 纯软件模拟下 1.5b prefill ~10min 级（大 prompt），
@@ -221,14 +221,12 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 U
 
-echo "=== [7.5] W4A: 拷入本地 AI 栈 (ollama + qwen2.5:1.5b) ==="
-# VM 宿主 ollama 二进制与模型目录整体进 guest，出厂自含 AI 栈
+echo "=== [7.5] W77d: 装入 ollama 引擎（不预装模型，按需 aik model install） ==="
+# W77d: 出厂不捆绑任何模型权重；目录留空，安装 service 供按需 pull
 install -D -m755 /usr/local/bin/ollama "$MNT/usr/local/bin/ollama"
 OLLAMA_SRC_DIR="${OLLAMA_SRC_DIR:-/usr/share/ollama/.ollama}"
 mkdir -p "$MNT/var/lib/ollama/models"
-cp -a "$OLLAMA_SRC_DIR/models/." "$MNT/var/lib/ollama/models/"
-chown -R root:root "$MNT/var/lib/ollama/models"   # guest 侧由 ollama 用户运行时读
-du -sh "$MNT/var/lib/ollama/models"
+# W77d: 预装 qwen2.5:1.5b 已移除；如需本地模型用 aik model install（D2 确认后 ollama pull）
 cat > "$MNT/etc/systemd/system/ollama.service" <<'U'
 [Unit]
 Description=Ollama Local LLM Engine (AIKernel built-in)
@@ -249,27 +247,21 @@ WantedBy=multi-user.target
 U
 chroot "$MNT" useradd -r -d /var/lib/ollama -s /usr/sbin/nologin ollama 2>/dev/null || true
 chroot "$MNT" chown -R ollama:ollama /var/lib/ollama
-ls -la "$MNT/var/lib/ollama/models/manifests/registry.ollama.ai/library/" 2>/dev/null || true
+# W77d: 无预装模型，manifests 目录为空
 
 echo "=== [8] guest root 的 aikernel-shell LLM 配置 (127.0.0.1:11434 guest 本地栈) ==="
 mkdir -p "$MNT/root/.aikernel"
 cat > "$MNT/root/.aikernel/model.toml" <<'M'
 # AIKernel Model Configuration (guest: aikernel)
-# 出厂链路: guest 内置 ollama (systemd 自启, Restart=always) -> qwen2.5:1.5b
+# W77d: 出厂云端优先——本地模型未配置；onboarding 引导填云端，或 aik model install 后启用
 [default]
-model = "local"
+model = "cloud"
 
 [local]
-enabled = true
+enabled = false
 base_url = "http://127.0.0.1:11434/v1"
-model = "qwen2.5:1.5b"
+model = ""
 timeout_ms = 120000
-api_key = ""
-
-[models.local]
-provider_type = "local"
-model_name = "qwen2.5:1.5b"
-base_url = "http://127.0.0.1:11434/v1"
 api_key = ""
 
 # W4A: 出厂显式 ctx_len=8192 —— 默认 262144 会被钳到模型上限 32768，

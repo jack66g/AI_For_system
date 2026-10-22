@@ -20,6 +20,9 @@ mock_ollama.py - E2E 确定性 mock 推理服务（OpenAI /v1/chat/completions �
   降级       纯文本 {"tool":...} -> {"answer":...}（文本 JSON 约定降级协议）
   回忆       memory.search("NETLINK_AI netlink 接口") -> 最终回答（SME 命中）
 
+W77d：另含 ollama 原生生命周期端点（/api/pull 流式+失败分支、
+/api/show、/api/generate、GET /api/tags、DELETE /api/delete），
+供 model install/remove/benchmark 测试。
 用法：python3 mock_ollama.py [port]   （默认 11434；请求原文记 /tmp/mock_ollama.log）
 注意：宿主机真实 Ollama 常驻 11434 时，请用 11435 起 mock
 （如 `python3 mock_ollama.py 11435`），两端口语义仅在配置层区分。
@@ -88,9 +91,47 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def do_GET(self):
+        """W77d：GET /api/tags —— 已装模型清单（固定 mock 列表）"""
+        if self.path.endswith("/api/tags"):
+            data = json.dumps({"models": [
+                {"name": "SparkLLM/Spark-X2.5-4B:latest",
+                 "model": "SparkLLM/Spark-X2.5-4B", "size": 8598323200},
+                {"name": "qwen3:8b", "model": "qwen3:8b",
+                 "size": 5368709120},
+            ]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_DELETE(self):
+        """W77d：DELETE /api/delete —— 卸载（读 body，恒成功）"""
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n).decode("utf-8", "replace")
+        LOG.write("DELETE %s %s\n===\n" % (self.path, body))
+        LOG.flush()
+        if self.path.endswith("/api/delete"):
+            data = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n).decode("utf-8", "replace")
+        path = self.path
         LOG.write(body + "\n===\n")
         LOG.flush()
 
@@ -107,6 +148,51 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        # ---- W77d：ollama 原生生命周期端点（/api/pull|show|generate） ----
+        if path.endswith("/api/pull"):
+            try:
+                want = json.loads(body).get("name", "")
+            except Exception:
+                want = ""
+            if "fail" in want.lower():
+                ndjson = ('{"status":"pulling manifest"}\n'
+                          '{"error":"pull failed: manifest not found"}\n')
+            else:
+                ndjson = ('{"status":"pulling manifest"}\n'
+                          '{"status":"downloading digest",'
+                          '"digest":"sha256:aa",'
+                          '"completed":1048576,"total":8598323200}\n'
+                          '{"status":"verifying sha256 digest"}\n'
+                          '{"status":"success"}\n')
+            data = ndjson.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path.endswith("/api/show"):
+            data = json.dumps({"license": "apache-2.0",
+                               "modelfile": "# mock",
+                               "parameters": ""}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path.endswith("/api/generate"):
+            data = json.dumps({"model": "mock",
+                               "response": "OK",
+                               "eval_count": 8,
+                               "eval_duration": 16000000000}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
 
         # 场景三（内核遥测，QEMU guest）：procfs.read.status → 最终回答
         if "遥测" in question:

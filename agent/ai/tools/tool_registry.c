@@ -59,6 +59,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_DESKTOP;
 	if (strcmp(s, "interaction") == 0)
 		return TOOL_CH_CLARIFY;
+	if (strcmp(s, "model") == 0)
+		return TOOL_CH_MODEL;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -67,7 +69,7 @@ static const char *channel_str(enum tool_channel ch)
 	static const char *const names[] = {
 		"procfs-read", "sysfs-write", "netlink-act", "netlink-sense",
 		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
-		"desktop", "interaction", "unknown",
+		"desktop", "interaction", "model", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)

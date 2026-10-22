@@ -17,6 +17,7 @@ int cmd_config(void *shell, int argc, char **argv);
 int cmd_chat(void *shell, int argc, char **argv);
 int cmd_ask(void *shell, int argc, char **argv);
 int cmd_model(void *shell, int argc, char **argv);
+int cmd_model_lifecycle(void *shell, int argc, char **argv);
 int cmd_network(void *shell, int argc, char **argv);
 int cmd_netlink(void *shell, int argc, char **argv);
 int cmd_session(void *shell, int argc, char **argv);

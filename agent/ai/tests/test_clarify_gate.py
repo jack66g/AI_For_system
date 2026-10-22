@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""W77c clarify gate: real ai + mock model + API, 5 controlled scenarios.
+"""W77c/W77e clarify gate: real ai + mock model + API, 9 controlled scenarios.
 
-Scenarios:
+Scenarios (W77c):
   1 restart-service (ambiguous)  -> must clarify; accept recommended; success
   2 restart-nginx   (unique)     -> must NOT clarify
   3 delete          (no target)  -> must clarify; accept recommended; success
   4 memory          (normal)     -> must NOT clarify
   5 same-round clarify+exec_run  -> clarify; exec_run suppressed; success
+Scenarios (W77e):
+  6 self-answerable question     -> read-only tool first, NO clarify
+  7 pronoun ambiguity            -> must clarify, then resume
+  8 already-answered re-ask      -> second identical clarify intercepted by
+                                    answered.jsonl memory (mem-note injected)
+  9 question budget exhausted    -> 3rd clarify blocked with budget note;
+                                    final answer declares assumption
 
 Metrics: missed questions 0, unnecessary questions 0, recommendation
 acceptance 3/3, post-clarify success 3/3, average questions per task <= 2.
@@ -39,28 +46,35 @@ def check(name, cond, detail=""):
           (("  [" + str(detail) + "]") if not cond and detail else ""))
 
 
-CLARIFY_SERVICE = {
-    "kind": "scope", "header": "选择要重启的服务",
-    "question": "要重启哪个服务？",
-    "options": [
-        {"id": "nginx", "label": "nginx.service", "why": "Web 入口",
-         "impact": "Web 短暂中断", "rollback": "systemctl start nginx"},
-        {"id": "sshd", "label": "sshd.service", "why": "远程入口",
-         "impact": "会断开 SSH", "rollback": "systemctl start sshd"},
-    ],
-    "recommended": "nginx", "multi_select": False,
-}
-CLARIFY_DELETE = {
-    "kind": "scope", "header": "选择要删除的路径",
-    "question": "要删除哪个路径？",
-    "options": [
-        {"id": "a", "label": "/tmp/a", "why": "候选路径",
-         "impact": "删除该路径", "rollback": "无法回滚"},
-        {"id": "b", "label": "/tmp/b", "why": "候选路径",
-         "impact": "删除该路径", "rollback": "无法回滚"},
-    ],
-    "recommended": "a", "multi_select": False,
-}
+def svc_clarify(tag):
+    """场景专属服务澄清载荷：question/option ids 含 tag，保证跨场景
+    指纹不同（W77e 跨会话答案记忆会拦截相同指纹的重复提问）。"""
+    return {
+        "kind": "scope", "header": "选择要重启的服务",
+        "question": "要重启哪个服务？（%s）" % tag,
+        "options": [
+            {"id": "a-" + tag, "label": "nginx.service", "why": "Web 入口",
+             "impact": "Web 短暂中断", "rollback": "systemctl start nginx"},
+            {"id": "b-" + tag, "label": "sshd.service", "why": "远程入口",
+             "impact": "会断开 SSH", "rollback": "systemctl start sshd"},
+        ],
+        "recommended": "a-" + tag, "multi_select": False,
+    }
+
+
+def del_clarify(tag):
+    """场景专属删除澄清载荷（同上，跨场景指纹唯一）。"""
+    return {
+        "kind": "scope", "header": "选择要删除的路径",
+        "question": "要删除哪个路径？（%s）" % tag,
+        "options": [
+            {"id": "x-" + tag, "label": "/tmp/a", "why": "候选路径",
+             "impact": "删除该路径", "rollback": "无法回滚"},
+            {"id": "y-" + tag, "label": "/tmp/b", "why": "候选路径",
+             "impact": "删除该路径", "rollback": "无法回滚"},
+        ],
+        "recommended": "x-" + tag, "multi_select": False,
+    }
 
 
 def tool_call(cid, name, args):
@@ -103,6 +117,72 @@ class Handler(BaseHTTPRequestHandler):
                           "CLARIFY_ANSWER" in str(m.get("content") or "")
                           for m in msgs))
         suppressed = "not executed (clarify pending)" in joined
+        tool_notes = [str(m.get("content") or "") for m in msgs
+                      if m.get("role") == "tool"]
+
+        # ---- W77e 场景（关键词命中优先于下方通用逻辑） ----
+        if "预算" in user_text:
+            # 预算到限：第 1/2 问正常 CLARIFY_REQUIRED；第 3 问被
+            # 拦截并把"已达提问上限"注记作为工具结果回给模型
+            if any("已达提问上限" in t for t in tool_notes):
+                return self._final("budget-ok 已达提问上限，"
+                                   "按最佳理解执行并声明假设")
+            n_ans = user_text.count("[clarification answer]")
+            need = (del_clarify("budget-2") if n_ans == 1 else
+                               svc_clarify("budget-3" if n_ans >= 2 else "budget-1"))
+            calls = [tool_call("call_clarify_budget", "clarify", need)]
+            return self._send({"id": "gate", "object": "chat.completion",
+                               "model": "mock", "choices": [{
+                                   "index": 0, "message": {
+                                       "role": "assistant", "content": "",
+                                       "tool_calls": calls},
+                                   "finish_reason": "tool_calls"}],
+                               "usage": {"prompt_tokens": 1,
+                                         "completion_tokens": 1}})
+        if "去重" in user_text:
+            # 已答不再问：重复的相同 clarify 被 answered.jsonl 记忆
+            # 拦截，旧选择以"已按你此前的选择"注记回给模型
+            if any("已按你此前的选择" in t for t in tool_notes):
+                return self._final("dedup-ok 已答不再问，沿用旧选择")
+            calls = [tool_call("call_clarify_dup", "clarify",
+                               svc_clarify("dedup"))]
+            return self._send({"id": "gate", "object": "chat.completion",
+                               "model": "mock", "choices": [{
+                                   "index": 0, "message": {
+                                       "role": "assistant", "content": "",
+                                       "tool_calls": calls},
+                                   "finish_reason": "tool_calls"}],
+                               "usage": {"prompt_tokens": 1,
+                                         "completion_tokens": 1}})
+        if "代词" in user_text:
+            # 代词歧义必问；答案回填后收尾
+            if has_answer:
+                return self._final("pronoun-ok")
+            calls = [tool_call("call_clarify_pron", "clarify",
+                               svc_clarify("pronoun"))]
+            return self._send({"id": "gate", "object": "chat.completion",
+                               "model": "mock", "choices": [{
+                                   "index": 0, "message": {
+                                       "role": "assistant", "content": "",
+                                       "tool_calls": calls},
+                                   "finish_reason": "tool_calls"}],
+                               "usage": {"prompt_tokens": 1,
+                                         "completion_tokens": 1}})
+        if "自答" in user_text:
+            # 可自答不问：先用只读 exec_run 查，再直接回答
+            if tool_notes:
+                return self._final("self-answer-ok")
+            calls = [tool_call("call_exec_self", "exec_run",
+                               {"command": "echo",
+                                "args": ["w77e-self-check"]})]
+            return self._send({"id": "gate", "object": "chat.completion",
+                               "model": "mock", "choices": [{
+                                   "index": 0, "message": {
+                                       "role": "assistant", "content": "",
+                                       "tool_calls": calls},
+                                   "finish_reason": "tool_calls"}],
+                               "usage": {"prompt_tokens": 1,
+                                         "completion_tokens": 1}})
 
         if has_answer:
             if "同轮" in user_text:
@@ -113,11 +193,11 @@ class Handler(BaseHTTPRequestHandler):
 
         need = None
         if "同轮" in user_text and "重启服务" not in user_text:
-            need = CLARIFY_SERVICE
+            need = svc_clarify("same-round")
         elif "重启服务" in user_text:
-            need = CLARIFY_SERVICE
+            need = svc_clarify("main")
         elif "删除" in user_text and "/tmp/" not in user_text:
-            need = CLARIFY_DELETE
+            need = del_clarify("del")
         if need is None:
             return self._final("no-clarify-ok")
 
@@ -323,6 +403,71 @@ def main():
               "recommendation=%d/%d post_clarify=%d/%d avg_questions=%.2f" %
               (asked, len(scenarios), unnecessary, missed,
                rec_ok, rec_total, post_ok, post_total, avg))
+
+        # ---- W77e 场景 6：可自答（只读工具能查到）不问 ----
+        code, body = http(port, "/ask", {"question": "自答场景 当前环境自检"})
+        check("self_answer.no_clarify",
+              code == 200 and body.get("status") == "ok", body)
+        check("self_answer.answer",
+              "self-answer-ok" in body.get("answer", ""), body)
+
+        # ---- W77e 场景 7：代词歧义必问，答复后收尾 ----
+        code, body = http(port, "/ask",
+                          {"question": "代词场景 它指的是哪个服务"})
+        check("pronoun_ambiguity.must_clarify",
+              code == 200 and body.get("status") == "clarify_required", body)
+        pronoun_done = False
+        if body.get("status") == "clarify_required":
+            clar = body.get("clarify") or {}
+            session = body.get("session")
+            rec = clar.get("recommended")
+            code2, body2 = http(port, "/clarify", {
+                "nonce": clar.get("nonce"),
+                "session": session,
+                "selection": [rec] if rec else [1],
+            })
+            pronoun_done = (code2 == 200 and body2.get("status") == "ok"
+                            and "pronoun-ok" in body2.get("answer", ""))
+            check("pronoun_ambiguity.resume_ok", pronoun_done, body2)
+
+        # ---- W77e 场景 8：已答不再问（answered.jsonl 拦截重复问题） ----
+        code, body = http(port, "/ask", {"question": "去重场景 重启服务"})
+        check("dedup_no_reask.first_clarify",
+              code == 200 and body.get("status") == "clarify_required", body)
+        dedup_done = False
+        if body.get("status") == "clarify_required":
+            clar = body.get("clarify") or {}
+            session = body.get("session")
+            rec = clar.get("recommended")
+            code2, body2 = http(port, "/clarify", {
+                "nonce": clar.get("nonce"),
+                "session": session,
+                "selection": [rec] if rec else [1],
+            })
+            dedup_done = (code2 == 200 and body2.get("status") == "ok" and
+                          "dedup-ok" in body2.get("answer", ""))
+            check("dedup_no_reask.answered_not_reasked",
+                  dedup_done, body2)
+
+        # ---- W77e 场景 9：预算到限后声明假设继续 ----
+        code, body = http(port, "/ask", {"question": "预算场景 重启服务"})
+        budget_rounds = 0
+        while (code == 200 and body.get("status") == "clarify_required"
+               and budget_rounds < 4):
+            budget_rounds += 1
+            clar = body.get("clarify") or {}
+            session = body.get("session")
+            rec = clar.get("recommended")
+            code, body = http(port, "/clarify", {
+                "nonce": clar.get("nonce"),
+                "session": session,
+                "selection": [rec] if rec else [1],
+            })
+        check("budget_limit.two_questions_only", budget_rounds == 2,
+              budget_rounds)
+        check("budget_limit.assumes_and_declares",
+              code == 200 and body.get("status") == "ok" and
+              "budget-ok" in body.get("answer", ""), body)
     finally:
         srv.shutdown()
         th.join(2)

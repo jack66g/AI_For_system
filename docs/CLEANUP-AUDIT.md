@@ -60,7 +60,7 @@
 - `agent/ai`、`AIKernel/`、factory、desktop、构建脚本均从正典树导出，未改生产 VM
 - 干净导出构建：`aikernel-shell --version` = `0.1.0-alpha.11.0`，`aik-sandbox` md5 与发布件一致；`tests/Makefile` 35 个测试目标全部编译
 - 测试：C 单元 **33/33**（clarify 121、lease 89、lease_gate 98、w77 53/31/18、desktop 56、trace 75 等）、API mock **33/33**、clarify gate **23/23**、E2E **21/21**、审计 PASS
-- 旧 `run-w48-tests.sh` 的 `CORE` 列表未包含后来的 `local/` 依赖，对 `test_ask_autocompact`/`test_compact_loop` 报 BUILD-FAIL；这是 runner 过时，不是产品代码。当前 runner 为 `tests/run_all.sh`；`test_sysctl_tools` 需要 root。
+- 旧 `run-w48-tests.sh` 的 `CORE` 列表未包含后来的 `local/` 依赖，对 `test_ask_autocompact`/`test_compact_loop` 报 BUILD-FAIL；这是 runner 过时，不是产品代码。当前 runner 为 `agent/ai/tests/run_all.sh`；`test_sysctl_tools` 需要 root。
 
 ## 6. 建议
 
@@ -68,3 +68,13 @@
 2. 死代码清理单独成波，不与功能波混合；每次删除都留 `orig/` 与 `nm` 证据。
 3. `agent/ai/third_party/mbedtls` 保留 library/include 与许可证（9.6 MiB）；上游生成的 `tests/seedfile`（64B）不入库，避免把生成数据当源码。
 4. 不要把 L1 的构建产物或 `longterm/` 证据复制进源码仓库；发布件（ISO/factory tar）只放发布存储。
+
+## 7. W77f 工厂树残渣清理（2026-10-23）
+
+- 移除出厂 root/ 的 W2-W7 开发残渣：rafile(209MB)、ssh_hog/ssh_dd/ai_act_flip 测试二进制、
+  t3-* 证据、01_oom~07_reclaim 演示脚本、w4a-* 时代脚本、root/ 下陈旧 tools.json 副本、
+  乱名垃圾文件（"复位/写盘/），"等）、persistence-proof、aikctl 重复副本、aik2 旧二进制。
+- 安全修复：出厂树不再携带 root/.ssh/authorized_keys（此前随 ISO 分发同一把 key）；
+  qsmoke contentcheck 新增 root_authkeys=0 断言。
+- 工厂树 1.6G → 692M；ISO 1.94G → 706MB（模型 941M + 残渣 212M 移除）。
+- run_all.sh 收敛到 agent/ai/tests/（删除仓库根 tests/ 重复副本）。

@@ -301,6 +301,13 @@ static int route_cloud_base_url(const struct ai_config *cfg,
  *
  * `model use local` 会持久化该镜像；自动路由不写用户配置，只在内存
  * 中补一个条目，进程退出即消失（下次仍由 route 自动补）。
+ *
+ * W77d（契约 E）：预装 qwen2.5:1.5b 已移除，本地模型改为按需安装
+ * （aik model install，装后验证 + 注册 [local]）。本函数只镜像用户
+ * 显式配置过的 [local]（enabled && base_url && model 非空）；
+ * 无本地模型时返回不可用（AI_ERR_CONFIG），路由保持 cloud，
+ * 离线由确定性意图层（offline_intent.c）应答——绝不探测某个
+ * 硬编码模型名、绝不伪造本地可用。
  */
 int ai_route_ensure_local_model(struct ai_config *cfg)
 {

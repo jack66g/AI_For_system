@@ -148,4 +148,9 @@ desktop_input_type text≤4096，追加到
 desktop_input_key key 为单字符或 Ente
 desktop_clipboard_set text≤65536
 desktop_power action=lock|logout|reboo
+model_catalog_list 名称/参数量/上下
+model_recommend 按本机硬件（内存
+model_install 多 GB 下载+写盘，
+model_remove 删除多 GB 权重，
+model_benchmark N=3 条固定提示实
 clarify 一次只问一个问题

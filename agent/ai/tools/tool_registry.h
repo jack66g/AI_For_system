@@ -36,6 +36,7 @@ enum tool_channel {
 	TOOL_CH_SYSFS_DYN,	/* W48：sysfs/procfs 动态路径读写（cgroup 等） */
 	TOOL_CH_DESKTOP,	/* W76：桌面能力面（127.0.0.1:8091 本机 HTTP） */
 	TOOL_CH_CLARIFY,	/* W77c：结构化澄清（ask 交互层，非授权） */
+	TOOL_CH_MODEL,		/* W77d：本地模型生命周期（目录/推荐/装/卸/基准） */
 	TOOL_CH_UNKNOWN,
 };
 

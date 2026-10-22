@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "schema": "aikernel-model-catalog/1",
+  "updated": "2026-10-23",
+  "notes": "本地模型目录（aik model catalog / model_catalog_list 的数据源）。ollama_ref 与大小已于 2026-10-23 逐条与 ollama.com 官方页面核对；核对不到的字段在 notes 如实标注。ram_min_gb 为最小可用内存（Q4 量化 + 运行开销的经验下限），disk_gb 为 ollama pull 下载体积。",
+  "entries": [
+    {
+      "name": "spark-x2.5:4b",
+      "ollama_ref": "SparkLLM/Spark-X2.5-4B",
+      "params_b": 4,
+      "ctx_tokens": 1048576,
+      "disk_gb": 8.2,
+      "ram_min_gb": 8,
+      "gpu_hint": "optional",
+      "tags": ["long-context", "agent", "recommended-first", "zh-strong"],
+      "why": "端侧首个原生 100 万 token 上下文：一本书一个 prompt；agent/工具调用与中文能力强，Apache-2.0。词元星火（讯飞）2026-09-01 开源。",
+      "notes": "spark2_5 自定义架构（1 层全注意力 + 3 层滑窗混合），需较新 ollama 才能加载；install 时预检（/api/show 探测），失败如实报告。2026-10-23 ollama.com 核对：存在，下载 8.2GB，上下文 1M。"
+    },
+    {
+      "name": "spark-x2.5:1.7b",
+      "ollama_ref": "SparkLLM/Spark-X2.5-1.7B",
+      "params_b": 1.7,
+      "ctx_tokens": 1048576,
+      "disk_gb": 3.4,
+      "ram_min_gb": 4,
+      "gpu_hint": "optional",
+      "tags": ["long-context", "low-ram", "agent"],
+      "why": "低配长上下文：4GB 内存即可跑百万级上下文，轻量设备离线首选。",
+      "notes": "同 spark2_5 架构，需较新 ollama。2026-10-23 ollama.com 核对：存在，下载 3.4GB，上下文 1M。"
+    },
+    {
+      "name": "qwen3:8b",
+      "ollama_ref": "qwen3:8b",
+      "params_b": 8.19,
+      "ctx_tokens": 32768,
+      "disk_gb": 5.2,
+      "ram_min_gb": 8,
+      "gpu_hint": "optional",
+      "tags": ["general", "flagship", "tools", "thinking"],
+      "why": "7B 级通用旗舰：多语言/代码/工具调用均衡，思考模式可开关，生态成熟。",
+      "notes": "2026-10-23 ollama.com 核对：存在，下载 5.2GB（Q4_K_M，8.19B）；页面未标注上下文长度，ctx_tokens 按 Qwen3 官方原生 32K 记（ollama 模型页信息不全，如实标注）。"
+    },
+    {
+      "name": "qwen2.5:7b",
+      "ollama_ref": "qwen2.5:7b",
+      "params_b": 7.62,
+      "ctx_tokens": 128000,
+      "disk_gb": 4.7,
+      "ram_min_gb": 8,
+      "gpu_hint": "optional",
+      "tags": ["general", "stable", "json"],
+      "why": "稳定通用款：128K 上下文、结构化/JSON 输出可靠，久经验证。",
+      "notes": "2026-10-23 ollama.com 核对：存在，下载 4.7GB，上下文 128K。"
+    },
+    {
+      "name": "llama3.1:8b",
+      "ollama_ref": "llama3.1:8b",
+      "params_b": 8.03,
+      "ctx_tokens": 131072,
+      "disk_gb": 4.9,
+      "ram_min_gb": 8,
+      "gpu_hint": "optional",
+      "tags": ["general", "western", "stable"],
+      "why": "西文生态备选：英文语料与社区工具链最广，128K 上下文。",
+      "notes": "2026-10-23 ollama.com 核对：存在，下载 4.9GB，上下文 128K；License 为 Llama 3.1 Community（非 OSI 开源）。"
+    },
+    {
+      "name": "spark-x2.6:4b",
+      "ollama_ref": "SparkLLM/Spark-X2.6-4B",
+      "params_b": 4,
+      "ctx_tokens": 1048576,
+      "disk_gb": 8.2,
+      "ram_min_gb": 8,
+      "gpu_hint": "optional",
+      "tags": ["long-context", "agent", "newer"],
+      "why": "X2.5 下一代（2026-10 更新）：三档可调思考，官方称对标 9B 级。",
+      "notes": "2026-10-23 ollama.com 核对：存在，下载 8.2GB，上下文 1M；发布较新、社区实测少于 X2.5，默认推荐仍以 spark-x2.5:4b 为第一。"
+    }
+  ]
+}

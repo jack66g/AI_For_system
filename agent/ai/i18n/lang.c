@@ -201,8 +201,8 @@ static const char *const t_zh[TR__COUNT] = {
 					  "可稍后 'model use cloud' 重试。\n",
 	[TR_OB_MARK_FAIL]		= "onboarding: 无法写入 %s（%s）。\n",
 	[TR_OB_HEAD]			= "\n=== AIKernel 初始化引导 (onboarding) ===\n",
-	[TR_OB_HINT1]			= "提示：此流程将引导你设置 root 密码并选择 "
-					  "AI 模型。\n",
+	[TR_OB_HINT1]			= "提示：此流程将引导你设置 root 密码、配置云端"
+					  "大模型（必经，含真实连通测试）；本地模型可选。\n",
 	[TR_OB_HINT2]			= "      输入 help 可查看引导命令；"
 					  "密码绝不经过 AI。\n\n",
 	[TR_OB_WELCOME_ASK]		= "请向用户做开场自我介绍，并告诉他第一步是"
@@ -224,13 +224,10 @@ static const char *const t_zh[TR__COUNT] = {
 					  "  其他任意文字    与引导 AI 对话\n",
 	[TR_OB_PW_FIRST]		= "onboarding: 请先完成 root 密码设置"
 					  "（输入 setup-password），再选择模型。\n",
-	[TR_OB_PW_DONE_ASK]		= "用户已成功设置 root 密码。"
-					  "请祝贺他，并引导第二步："
-					  "选择 AI 模型来源，回复 1 用本地模型，"
-					  "回复 2 用云端 API。",
-	[TR_OB_PW_DONE_FALLBACK]	= "[AI] root 密码已设置。第二步：选择 "
-					  "AI 模型来源——输入 1 使用本地模型"
-					  "（内置 ollama），输入 2 使用云端 API。",
+	[TR_OB_PW_DONE_ASK]		= "用户已成功设置 root 密码。请引导进入第二步："
+					  "配置云端大模型（输入 2 或 cloud 开始）。",
+	[TR_OB_PW_DONE_FALLBACK]	= "[AI] root 密码已设置。第二步：配置云端"
+					  "大模型（输入 2 或 cloud 开始；本地模型可稍后安装）。",
 	[TR_OB_PW_FAIL_ASK]		= "用户的密码设置失败了（为空/不足6位/"
 					  "两次不一致/chpasswd 出错）。请提醒他"
 					  "重新输入 setup-password 再试。",
@@ -238,17 +235,15 @@ static const char *const t_zh[TR__COUNT] = {
 					  "请重新输入 setup-password 再试一次。",
 	[TR_OB_STEP1_CHAT_FALLBACK]	= "[AI] 现在请先输入 setup-password "
 					  "设置 root 密码。",
-	[TR_OB_STEP2_HELP]		= "输入 1 或 local 选择本地模型；"
-					  "输入 2 或 cloud 选择云端 API；"
-					  "输入 shell 进入维护 bash。\n",
+	[TR_OB_STEP2_HELP]		= "输入 2 或 cloud 配置云端大模型（必经，真实"
+					  "连通测试通过才算完成）；输入 shell 进入维护 bash。\n",
 	[TR_OB_LOCAL_FAIL_ASK]		= "本地模型服务当前不可达。请告诉用户"
 					  "可以先改用云端（输入 2），或稍后重启"
 					  "机器等 ollama 就绪后重试（输入 1）。",
 	[TR_OB_LOCAL_FAIL_FALLBACK]	= "[AI] 本地模型暂时不可用。"
 					  "你可以输入 2 改用云端 API，"
 					  "或稍后重试输入 1。",
-	[TR_OB_STEP2_CHAT_FALLBACK]	= "[AI] 请输入 1（本地模型）或 2"
-					  "（云端 API）继续。",
+	[TR_OB_STEP2_CHAT_FALLBACK]	= "[AI] 请输入 2 或 cloud 配置云端大模型。",
 	[TR_OB_DONE_ASK]		= "初始化全部完成。请简短祝贺用户，"
 					  "说明接下来就进入正常控制台，"
 					  "可以直接输入 ask 向你提问。",
@@ -256,6 +251,37 @@ static const char *const t_zh[TR__COUNT] = {
 					  "输入 help 查看命令，ask 后跟问题即可"
 					  "向我提问。",
 	[TR_OB_DONE]			= "\n=== 初始化完成，进入 AI 控制台 ===\n\n",
+	[TR_OB_LANG_ASK]		= "界面语言 Interface language: "
+					  "1=中文 2=English [1]: ",
+	[TR_OB_CLOUD_PRESETS]		= "云端服务商预设（只预填地址，不内置任何 key）：\n"
+					  "  1) deepseek      https://api.deepseek.com/v1\n"
+					  "  2) qwen(dashscope) https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+					  "  3) doubao(ark)   https://ark.cn-beijing.volces.com/api/v3\n"
+					  "  4) glm(zhipu)    https://open.bigmodel.cn/api/paas/v4\n"
+					  "  5) openai 兼容/自定义\n",
+	[TR_OB_CLOUD_PRESET_PROMPT]	= "选择服务商编号 [5]: ",
+	[TR_OB_CLOUD_ASK_URL_DFLT]	= "请输入云端 API base_url [%s]: ",
+	[TR_OB_CLOUD_LIVE_TEST]		= "onboarding: 正在真实连通测试"
+					  "（发送 1-token 补全请求）...\n",
+	[TR_OB_CLOUD_LIVE_OK]		= "onboarding: 连通测试通过，正在写入配置...\n",
+	[TR_OB_CLOUD_LIVE_FAIL]		= "onboarding: 连通测试失败：%s\n",
+	[TR_OB_CLOUD_RETRY_MENU]	= "重试请回车或输入 1；输入 2 跳过"
+					  "（跳过则本次引导未完成，下次启动重新引导） [1]: ",
+	[TR_OB_CLOUD_SKIPPED]		= "onboarding: 已跳过云端配置。引导未完成"
+					  "（不写 %s），下次启动将再次引导。\n",
+	[TR_OB_LOCAL_OPTIONAL]		= "本地模型是可选步骤：可稍后用 aik model "
+					  "recommend/install，或直接在对话里让 AI 帮你安装。\n"
+					  "现在安装请输入 1，跳过请回车 [跳过]: ",
+	[TR_OB_LOCAL_TOP3]		= "本机推荐（硬件门控后的 top-3）：\n",
+	[TR_OB_LOCAL_PICK]		= "选择要安装的编号 [1]: ",
+	[TR_OB_LOCAL_INSTALL_CONFIRM]	= "将下载 %s（约 %gGB，写入磁盘）。确认继续？[y/N]: ",
+	[TR_OB_LOCAL_INSTALL_FAIL]	= "安装失败（如实报告）：%s\n",
+	[TR_OB_LOCAL_RETRY_MENU]	= "重试请输入 1；回车或输入 2 跳过本地步骤"
+					  "（不影响引导完成） [2]: ",
+	[TR_OB_LOCAL_SWITCH_ASK]	= "是否切换到本地模型？[y/N]: ",
+	[TR_OB_LOCAL_INSTALLED_OK]	= "onboarding: %s 已安装并通过装后验证。\n",
+	[TR_OB_LOCAL_NO_FIT]		= "onboarding: 本机内存/磁盘不满足目录中任何"
+					  "模型的最低要求，可稍后 aik model catalog 查看。\n",
 
 	/* ask 主流程 */
 	[TR_ASK_SYS_IDENTITY] =
@@ -292,6 +318,19 @@ static const char *const t_zh[TR__COUNT] = {
 	"8. 排查内核错误、服务失败或“最近 N 分钟”日志时，必须先用 exec_run 执行 dmesg、journalctl 或 systemctl --failed，再结合遥测下结论；procfs/netlink 短窗口遥测不能替代日志，不得据此断言最近 N 分钟无错误。\n"
 	"9. sysfs_get 只读 /sys、/proc/sys、/proc/irq、/proc/ai、/proc/pressure、/proc/net；/proc/<pid>/* 与 /etc/* 请用 exec_run（如 ps、cat）或对应专用工具，不要反复用 sysfs_get 试路径。\n"
 	"10. 路径类任务必须严格使用用户给出的绝对路径（包括子目录），不要擅自改写到父目录或另起名字；写文件前先创建目标目录。\n"
+	"\n询问纪律（何时问用户、何时不问）：\n"
+	"1. 先查后问：答案能用只读工具（D0）自己查到的，禁止问用户。\n"
+	"2. 只问影响结果的关键歧义：意图/目标/范围不明确、且不同理解会"
+	"导致不同动作时才问；影响小或纯偏好的选合理默认并在回答中声明。\n"
+	"3. 问必带推荐：每次 clarify 必须带 recommended 与 why；一次只问"
+	"一个问题。\n"
+	"4. 提问预算：单次任务链最多 2 问；到限后按最佳理解执行，并在"
+	"回答开头声明假设（如「我按 X 理解执行，如不符请纠正」）。\n"
+	"5. 不重复问：本会话已问过/用户已回答的不再问；用户表达过的偏好"
+	"直接沿用。\n"
+	"6. 澄清不等于授权：D2+ 危险动作一律走 lease/confirm，绝不用"
+	"clarify 替代。\n"
+	"7. 明确就执行：指令明确、证据唯一、或紧急诊断中，直接执行不问。\n"
 ,
 	[TR_ASK_SYS_RULES] =
 	"\n约束：\n"
@@ -317,6 +356,19 @@ static const char *const t_zh[TR__COUNT] = {
 	"9. 排查内核错误、服务失败或“最近 N 分钟”日志时，必须先用 exec_run 执行 dmesg、journalctl 或 systemctl --failed，再结合遥测下结论；procfs/netlink 短窗口遥测不能替代日志，不得据此断言最近 N 分钟无错误。\n"
 	"10. sysfs_get 只读 /sys、/proc/sys、/proc/irq、/proc/ai、/proc/pressure、/proc/net；/proc/<pid>/* 与 /etc/* 请用 exec_run（如 ps、cat）或对应专用工具，不要反复用 sysfs_get 试路径。\n"
 	"11. 路径类任务必须严格使用用户给出的绝对路径（包括子目录），不要擅自改写到父目录或另起名字；写文件前先创建目标目录。\n"
+	"\n询问纪律（何时问用户、何时不问）：\n"
+	"1. 先查后问：答案能用只读工具（D0）自己查到的，禁止问用户。\n"
+	"2. 只问影响结果的关键歧义：意图/目标/范围不明确、且不同理解会"
+	"导致不同动作时才问；影响小或纯偏好的选合理默认并在回答中声明。\n"
+	"3. 问必带推荐：每次 clarify 必须带 recommended 与 why；一次只问"
+	"一个问题。\n"
+	"4. 提问预算：单次任务链最多 2 问；到限后按最佳理解执行，并在"
+	"回答开头声明假设（如「我按 X 理解执行，如不符请纠正」）。\n"
+	"5. 不重复问：本会话已问过/用户已回答的不再问；用户表达过的偏好"
+	"直接沿用。\n"
+	"6. 澄清不等于授权：D2+ 危险动作一律走 lease/confirm，绝不用"
+	"clarify 替代。\n"
+	"7. 明确就执行：指令明确、证据唯一、或紧急诊断中，直接执行不问。\n"
 ,
 	[TR_ASK_FALLBACK_RULES] =
 	"\n输出格式（重要，必须严格遵守）：\n"
@@ -428,6 +480,14 @@ static const char *const t_zh[TR__COUNT] = {
 					  "任何工具；请基于以上已有结果给出最终"
 					  "结论：已完成什么、未完成什么、关键证据"
 					  "或文件路径。若任务未完成，明确说明缺口。",
+	[TR_ASK_CLARIFY_MEM_NOTE]	= "[clarify] 已按你此前的选择：%s。"
+					  "不再重复提问，请直接沿用该选择继续执行。",
+	[TR_ASK_CLARIFY_BUDGET_NOTE]	= "[clarify] 已达提问上限：请按最佳理解"
+					  "执行并在回答开头声明假设（如「我按 X "
+					  "理解执行，如不符请纠正」）；不要再调用"
+					  " clarify。",
+	[TR_ASK_CLARIFY_AUTO_NOTE]	= "[clarify] 该澄清已过期，已按推荐项自动"
+					  "选择：%s。请按该选择继续执行并声明该假设。",
 
 	/* status */
 	[TR_ST_STREAMING_FMT]		= "  streaming   : built-in (delta 逐段"
@@ -855,8 +915,9 @@ static const char *const t_en[TR__COUNT] = {
 					  " later.\n",
 	[TR_OB_MARK_FAIL]		= "onboarding: cannot write %s (%s).\n",
 	[TR_OB_HEAD]			= "\n=== AIKernel onboarding ===\n",
-	[TR_OB_HINT1]			= "This flow guides you through setting the"
-					  " root password and choosing an AI model.\n",
+	[TR_OB_HINT1]			= "This flow guides you through: root password, "
+					  "cloud model config (required, live-tested), optional "
+					  "local model.\n",
 	[TR_OB_HINT2]			= "      Type 'help' for onboarding commands;"
 					  " the password never goes through the AI.\n\n",
 	[TR_OB_WELCOME_ASK]		= "Give the user a brief self-introduction and"
@@ -899,9 +960,9 @@ static const char *const t_en[TR__COUNT] = {
 					  " setup-password and try again.",
 	[TR_OB_STEP1_CHAT_FALLBACK]	= "[AI] Please type setup-password first to"
 					  " set the root password.",
-	[TR_OB_STEP2_HELP]		= "Type 1 or local for the local model; type 2"
-					  " or cloud for the cloud API; type shell"
-					  " for the maintenance bash.\n",
+	[TR_OB_STEP2_HELP]		= "Type 2 or cloud to configure the cloud model "
+					  "(required; must pass the live connectivity test); type "
+					  "shell for the maintenance bash.\n",
 	[TR_OB_LOCAL_FAIL_ASK]		= "The local model service is currently"
 					  " unreachable. Tell the user they can"
 					  " switch to cloud for now (type 2), or"
@@ -911,8 +972,8 @@ static const char *const t_en[TR__COUNT] = {
 					  " unavailable. You can type 2 to use the"
 					  " cloud API instead, or retry with 1"
 					  " later.",
-	[TR_OB_STEP2_CHAT_FALLBACK]	= "[AI] Please type 1 (local model) or"
-					  " 2 (cloud API) to continue.",
+	[TR_OB_STEP2_CHAT_FALLBACK]	= "[AI] Please type 2 or cloud to configure "
+					  "the cloud model.",
 	[TR_OB_DONE_ASK]		= "Initialization is fully complete. Congratulate"
 	" the user briefly, explain that the normal console starts now, and that"
 	" they can type 'ask' followed by a question at any time.",
@@ -921,6 +982,30 @@ static const char *const t_en[TR__COUNT] = {
 					  " 'ask' followed by your question.",
 	[TR_OB_DONE]			= "\n=== Onboarding complete, entering AI"
 					  " console ===\n\n",
+	[TR_OB_LANG_ASK]		= "Interface language: 1=中文 2=English [1]: ",
+	[TR_OB_CLOUD_PRESETS]		= "Cloud provider presets (URL prefilled only, no keys embedded):\n"
+					  "  1) deepseek      https://api.deepseek.com/v1\n"
+					  "  2) qwen(dashscope) https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+					  "  3) doubao(ark)   https://ark.cn-beijing.volces.com/api/v3\n"
+					  "  4) glm(zhipu)    https://open.bigmodel.cn/api/paas/v4\n"
+					  "  5) openai-compatible / custom\n",
+	[TR_OB_CLOUD_PRESET_PROMPT]	= "Choose provider number [5]: ",
+	[TR_OB_CLOUD_ASK_URL_DFLT]	= "Enter the cloud API base_url [%s]: ",
+	[TR_OB_CLOUD_LIVE_TEST]		= "onboarding: running live connectivity test (real 1-token completion)...\n",
+	[TR_OB_CLOUD_LIVE_OK]		= "onboarding: live test passed, writing config...\n",
+	[TR_OB_CLOUD_LIVE_FAIL]		= "onboarding: live test FAILED: %s\n",
+	[TR_OB_CLOUD_RETRY_MENU]	= "Enter or 1 = retry; 2 = skip (skip means onboarding incomplete, reruns next boot) [1]: ",
+	[TR_OB_CLOUD_SKIPPED]		= "onboarding: cloud config skipped. Onboarding NOT complete (%s not written); it will rerun next boot.\n",
+	[TR_OB_LOCAL_OPTIONAL]		= "Local model is OPTIONAL: install later with aik model recommend/install, or just ask the AI to do it.\n"
+					  "Type 1 to install now, or press Enter to skip [skip]: ",
+	[TR_OB_LOCAL_TOP3]		= "Recommendations for this host (hardware-gated top-3):\n",
+	[TR_OB_LOCAL_PICK]		= "Pick a number to install [1]: ",
+	[TR_OB_LOCAL_INSTALL_CONFIRM]	= "Will download %s (~%gGB to disk). Continue? [y/N]: ",
+	[TR_OB_LOCAL_INSTALL_FAIL]	= "install FAILED (reported honestly): %s\n",
+	[TR_OB_LOCAL_RETRY_MENU]	= "Type 1 to retry; Enter or 2 to skip the local step (onboarding still completes) [2]: ",
+	[TR_OB_LOCAL_SWITCH_ASK]	= "Switch to the local model now? [y/N]: ",
+	[TR_OB_LOCAL_INSTALLED_OK]	= "onboarding: %s installed and verified.\n",
+	[TR_OB_LOCAL_NO_FIT]		= "onboarding: no catalog model meets this host's RAM/disk minimums; see aik model catalog later.\n",
 
 	/* ask 主流程 */
 	[TR_ASK_SYS_IDENTITY] =
@@ -967,6 +1052,14 @@ static const char *const t_en[TR__COUNT] = {
 	"\n8. To diagnose kernel errors, service failures, or \"last N minutes\" logs, first use exec_run with dmesg, journalctl, or systemctl --failed, then combine with telemetry; a short procfs/netlink telemetry window is not a substitute for logs — never claim there were no errors in the last N minutes based on it."
 	"\n9. sysfs_get only reads /sys, /proc/sys, /proc/irq, /proc/ai, /proc/pressure, /proc/net; for /proc/<pid>/* and /etc/* use exec_run (e.g. ps, cat) or the dedicated tool; do not retry sysfs_get with paths outside its scope."
 	"\n10. For path tasks, use the exact absolute path the user gave (including subdirectories); do not rewrite it to a parent directory or a different name; create the target directory before writing."
+	"\nAsking discipline (when to ask the user, when not to):\n"
+	"1. Search before asking: if a read-only tool (D0) can find the answer, never ask the user.\n"
+	"2. Ask only about result-changing ambiguity: ask only when intent/target/scope is unclear AND different readings lead to different actions; for minor issues or pure preferences pick a sensible default and state it in the answer.\n"
+	"3. Always recommend: every clarify must carry recommended and why; ask one question at a time.\n"
+	"4. Question budget: at most 2 questions per task chain; after that act on your best reading and state assumptions at the top of the answer (\"I proceeded assuming X; correct me if wrong\").\n"
+	"5. Never re-ask: do not re-ask what was already asked or answered in this session; reuse preferences the user has already expressed.\n"
+	"6. Clarify is not authorization: D2+ dangerous actions always go through lease/confirm; never use clarify as a substitute.\n"
+	"7. When clear, act: if the instruction is clear, the evidence is unique, or it is an urgent diagnosis, execute without asking.\n"
 ,
 	[TR_ASK_SYS_RULES] =
 	"\nRules:\n"
@@ -997,6 +1090,14 @@ static const char *const t_en[TR__COUNT] = {
 	"\n9. To diagnose kernel errors, service failures, or \"last N minutes\" logs, first use exec_run with dmesg, journalctl, or systemctl --failed, then combine with telemetry; a short procfs/netlink telemetry window is not a substitute for logs — never claim there were no errors in the last N minutes based on it."
 	"\n10. sysfs_get only reads /sys, /proc/sys, /proc/irq, /proc/ai, /proc/pressure, /proc/net; for /proc/<pid>/* and /etc/* use exec_run (e.g. ps, cat) or the dedicated tool; do not retry sysfs_get with paths outside its scope."
 	"\n11. For path tasks, use the exact absolute path the user gave (including subdirectories); do not rewrite it to a parent directory or a different name; create the target directory before writing."
+	"\nAsking discipline (when to ask the user, when not to):\n"
+	"1. Search before asking: if a read-only tool (D0) can find the answer, never ask the user.\n"
+	"2. Ask only about result-changing ambiguity: ask only when intent/target/scope is unclear AND different readings lead to different actions; for minor issues or pure preferences pick a sensible default and state it in the answer.\n"
+	"3. Always recommend: every clarify must carry recommended and why; ask one question at a time.\n"
+	"4. Question budget: at most 2 questions per task chain; after that act on your best reading and state assumptions at the top of the answer (\"I proceeded assuming X; correct me if wrong\").\n"
+	"5. Never re-ask: do not re-ask what was already asked or answered in this session; reuse preferences the user has already expressed.\n"
+	"6. Clarify is not authorization: D2+ dangerous actions always go through lease/confirm; never use clarify as a substitute.\n"
+	"7. When clear, act: if the instruction is clear, the evidence is unique, or it is an urgent diagnosis, execute without asking.\n"
 ,
 	[TR_ASK_FALLBACK_RULES] =
 	"\nOutput format (important, must be followed strictly):\n"
@@ -1134,6 +1235,19 @@ static const char *const t_en[TR__COUNT] = {
 					  " was not, and key evidence/file paths."
 					  " Clearly state any gaps if the task is"
 					  " incomplete.",
+	[TR_ASK_CLARIFY_MEM_NOTE]	= "[clarify] Continuing with your earlier"
+					  " choice: %s. Do not re-ask; reuse that"
+					  " choice and proceed.",
+	[TR_ASK_CLARIFY_BUDGET_NOTE]	= "[clarify] Question budget reached: act"
+					  " on your best understanding and state"
+					  " assumptions at the top of the answer"
+					  " (e.g. \"I proceeded assuming X; correct"
+					  " me if wrong\"); do not call clarify"
+					  " again.",
+	[TR_ASK_CLARIFY_AUTO_NOTE]	= "[clarify] That clarification expired and"
+					  " the recommended option was auto-selected"
+					  ": %s. Proceed with it and state this"
+					  " assumption.",
 
 	/* status */
 	[TR_ST_STREAMING_FMT]		= "  streaming   : built-in (delta live"

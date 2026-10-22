@@ -1,5 +1,5 @@
 #!/bin/bash
-# AIKernel agent current test runner (alpha.11.0 baseline).
+# AIKernel agent current test runner (alpha.12.0 baseline).
 # Run from agent/ai:  bash tests/run_all.sh
 # Builds the full tests/Makefile suite and runs the non-root unit tests.
 set -u

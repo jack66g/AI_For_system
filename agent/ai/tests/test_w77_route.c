@@ -157,6 +157,34 @@ int main(void)
 	       strcmp(ai_route_mode_name(AI_MODEL_ROUTE_CLOUD), "cloud") == 0,
 	       "mode: names");
 
+	/* ---- W77d：ensure_local_model 无本地模型 = 不可用（契约 E） ---- */
+	memset(&cfg, 0, sizeof(cfg));
+	setenv("AIKERNEL_LOCAL_UP", "1", 1);
+	setenv("AIKERNEL_LOCAL_DOWN", "", 1);
+	unsetenv("AIKERNEL_LOCAL_DOWN");
+	cfg.local.enabled = 0;                  /* 出厂态：未启用 */
+	cfg.local.base_url = "http://127.0.0.1:18978/v1";
+	cfg.local.model = "";                   /* W77d：无预装模型 */
+	expect(ai_route_ensure_local_model(&cfg) == AI_ERR_CONFIG,
+	       "ensure_local: no local model -> unavailable");
+	cfg.local.enabled = 1;
+	cfg.local.model = "";                   /* 启用但未装：仍不可用 */
+	expect(ai_route_ensure_local_model(&cfg) == AI_ERR_CONFIG,
+	       "ensure_local: enabled-but-empty -> unavailable");
+	cfg.local.model = "qwen3:8b";           /* 已安装并注册 */
+	{
+		char *pt = NULL;
+		int rc_ = ai_route_ensure_local_model(&cfg);
+
+		expect(rc_ == AI_OK, "ensure_local: configured -> ok");
+		ai_config_get_model(&cfg, "local", &pt, NULL, NULL, NULL);
+		expect(pt && strcmp(pt, "local") == 0,
+		       "ensure_local: mirror [models.local] added");
+		free(pt);
+		ai_config_remove_model(&cfg, "local");
+	}
+	unsetenv("AIKERNEL_LOCAL_UP");
+
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.route.mode = AI_MODEL_ROUTE_CLOUD;
 	setenv("AIKERNEL_ROUTE", "local", 1);

@@ -7,8 +7,9 @@
 #   - busybox + 常用符号链接（/bin）
 #   - 静态链接的 aikernel-shell + tools.json（工具注册表）
 #   - /root/.aikernel/model.toml：provider 指向宿主机推理服务
-#     （10.0.2.2:$GUEST_LLM_PORT，默认 11434=真实 Ollama qwen2.5:1.5b；
-#     传 GUEST_LLM_PORT=11435 时指向 mock_ollama.py 确定性脚本）
+#     （10.0.2.2:$GUEST_LLM_PORT；W77d 起无预装模型，guest 测试统一走
+#     mock_ollama.py 确定性脚本——传 GUEST_LLM_PORT=11435；11434 为
+#     宿主真实 Ollama，模型需已按需安装）
 #   - /init：挂载 proc/sys/dev → 配置 slirp 网络（10.0.2.15/24 网关 10.0.2.2，
 #     无此步骤 guest 访问不到宿主服务，"Network is unreachable"）→ 采集
 #     /proc/ai、/sys/kernel/ai 清单（注册表生成器的 QEMU dump 来源）→
@@ -36,19 +37,20 @@ cp "$AI_DIR/aikernel-shell" "$ROOT/bin/"
 cp "$AI_DIR/tools.json" "$ROOT/tools.json"
 
 # guest 内模型配置：走宿主机（slirp 10.0.2.2 = 宿主 127.0.0.1）上的推理服务
+# W77d：预装 qwen2.5:1.5b 已移除；mock 服务按任务文本路由，模型名仅占位
 cat > "$ROOT/root/.aikernel/model.toml" <<EOF
 model = "local"
 
 [local]
 enabled = 1
 base_url = "http://10.0.2.2:${LLM_PORT}/v1"
-model = "qwen2.5:1.5b"
+model = "mock"
 timeout_ms = 120000
 api_key = ""
 
 [models.local]
 provider_type = "local"
-model_name = "qwen2.5:1.5b"
+model_name = "mock"
 base_url = "http://10.0.2.2:${LLM_PORT}/v1"
 api_key = ""
 EOF

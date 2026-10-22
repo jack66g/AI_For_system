@@ -1,6 +1,6 @@
 # 构建与验证
 
-本文描述如何从**干净 Linux 6.18.39** 重建 alpha.11.0 的源码树。发布 ISO/rootfs 的完整重建还涉及构建机路径和 root 权限，脚本在 `build/`、`w6i-tools/` 中作为参考保留。
+本文描述如何从**干净 Linux 6.18.39** 重建 alpha.12.0 的源码树。发布 ISO/rootfs 的完整重建还涉及构建机路径和 root 权限，脚本在 `build/`、`w6i-tools/` 中作为参考保留。
 
 ## 1. 环境
 
@@ -57,7 +57,7 @@ make -j1          # Makefile 已设置 .NOTPARALLEL，禁止并发构建
 
 产物：
 
-- `aikernel-shell`（静态链接，`--version` 应为 `0.1.0-alpha.11.0`）
+- `aikernel-shell`（静态链接，`--version` 应为 `0.1.0-alpha.12.0`）
 - `ai`（指向 `aikernel-shell` 的符号链接）
 - `aik-sandbox`（沙箱子智能体二进制）
 
@@ -73,7 +73,7 @@ sudo make install
 
 ```bash
 make -C tests -j1                       # 构建 35 个测试目标
-bash tests/run_all.sh                   # 当前全量 runner（C 33 + Python + audit）
+bash agent/ai/tests/run_all.sh          # 当前全量 runner（C + Python + audit，SUMMARY 全绿）
 
 # 或单独运行：
 python3 tests/test_api_clarify.py
@@ -82,11 +82,11 @@ python3 tests/test_api_clarify_e2e.py --agent-dir .
 python3 tools/audit_capabilities.py --check
 ```
 
-期望：注册表 **151 工具 / 8 域 / 20 desktop**，sandbox **7 工具 / 57 命令**，seed **167**；`audit_capabilities.py --check` PASS。
+期望：注册表 **156 工具 / 9 域 / 20 desktop**，sandbox **7 工具 / 57 命令**，seed **173**；`audit_capabilities.py --check` PASS。
 
 2026-10-23 干净导出验证结果：C 单元测试 **33/33**（clarify 121、lease 89、lease_gate 98、w77 53/31/18、desktop 56、trace 75 等），API mock **33/33**，clarify gate **23/23**，真 shell API E2E **21/21**，`audit_capabilities.py --check` PASS。
 
-注意：`run-w48-tests.sh` 是 W48 时代的历史 runner，其 `CORE` 源列表没有包含后来新增的 `local/` 依赖，会在 `test_ask_autocompact`/`test_compact_loop` 上出现 BUILD-FAIL；当前全量构建/运行以 `tests/Makefile` + `tests/run_all.sh` 为准。`test_sysctl_tools` 需要 root，非 root 环境会跳过。
+注意：`run-w48-tests.sh` 是 W48 时代的历史 runner，其 `CORE` 源列表没有包含后来新增的 `local/` 依赖，会在 `test_ask_autocompact`/`test_compact_loop` 上出现 BUILD-FAIL；当前全量构建/运行以 `agent/ai/tests/Makefile` + `agent/ai/tests/run_all.sh` 为准。`test_sysctl_tools` 需要 root，非 root 环境会跳过。
 
 50 场景 / workday 运行器依赖生产 VM 的 cloud key 与模型，不在仓库内提供。场景文件在 `agent/ai/tests/usage/scenarios.json`；运行方法见该目录 `README.md`。
 
@@ -101,11 +101,11 @@ factory/usr/...      -> guest /usr/...
 
 `desktop/` 是 Web 桌面 demo 源码；安装到 `/opt/aikdesktop`，unit 在 `factory/etc/systemd/system/aik-desktop.service`。
 
-ISO 打包线在 `w6i-tools/`（`init` 安装器、`grub-iso.cfg`、`build-iso.sh`、`export-rootfs.sh`）。`build/w73-build-iso.sh`、`build/w73_factory_refresh.py` 是 alpha.11.0 的发布脚本，含构建机绝对路径（`/home/jack66g/...`）和 root 操作，移植时按环境改路径，不要直接在生产 VM 上运行。
+ISO 打包线在 `w6i-tools/`（`init` 安装器、`grub-iso.cfg`、`build-iso.sh`、`export-rootfs.sh`）。`build/w73-build-iso.sh`、`build/w73_factory_refresh.py` 是 alpha.12.0 的发布脚本，含构建机绝对路径（`/home/jack66g/...`）和 root 操作，移植时按环境改路径，不要直接在生产 VM 上运行。
 
 ## 6. 发布校验清单
 
-- [ ] `agent/ai/aikernel-shell --version` = `0.1.0-alpha.11.0`
+- [ ] `agent/ai/aikernel-shell --version` = `0.1.0-alpha.12.0`
 - [ ] `tools.json` 151 工具、8 域、20 desktop；`tools-sandbox.json` 7 工具
 - [ ] `sme-seed.jsonl` 167 行
 - [ ] `agent/ai/api/aikernel-api` 为 v3（tagged stderr event + `/clarify`）

@@ -125,6 +125,25 @@ enum ai_tr_key {
 	TR_OB_DONE_ASK,			/* 完成祝贺指令（模型面） */
 	TR_OB_DONE_FALLBACK,		/* 完成降级文案 */
 	TR_OB_DONE,			/* === 初始化完成 === */
+	/* W77d：云端优先 onboarding（契约 B 节） */
+	TR_OB_LANG_ASK,		/* 界面语言选择 */
+	TR_OB_CLOUD_PRESETS,	/* 云端服务商预设列表 */
+	TR_OB_CLOUD_PRESET_PROMPT,	/* 选择服务商编号 */
+	TR_OB_CLOUD_ASK_URL_DFLT,	/* base_url 提示（默认 %s） */
+	TR_OB_CLOUD_LIVE_TEST,	/* 正在真实连通测试 */
+	TR_OB_CLOUD_LIVE_OK,	/* 连通测试通过 */
+	TR_OB_CLOUD_LIVE_FAIL,	/* 连通测试失败 %s */
+	TR_OB_CLOUD_RETRY_MENU,	/* 重试/跳过菜单 */
+	TR_OB_CLOUD_SKIPPED,	/* 跳过云端：未完成 %s */
+	TR_OB_LOCAL_OPTIONAL,	/* 本地模型可选步骤 */
+	TR_OB_LOCAL_TOP3,	/* 本机推荐 top-3 */
+	TR_OB_LOCAL_PICK,	/* 选择编号 */
+	TR_OB_LOCAL_INSTALL_CONFIRM,	/* 下载确认 %s %gGB */
+	TR_OB_LOCAL_INSTALL_FAIL,	/* 安装失败 %s */
+	TR_OB_LOCAL_RETRY_MENU,	/* 重试/跳过本地步骤 */
+	TR_OB_LOCAL_SWITCH_ASK,	/* 是否切换到本地 */
+	TR_OB_LOCAL_INSTALLED_OK,	/* 安装并验证成功 %s */
+	TR_OB_LOCAL_NO_FIT,	/* 本机无可装条目 */
 
 	/* ---- ask 主流程（cmd_ask.c） ---- */
 	TR_ASK_SYS_IDENTITY,		/* system：身份（模型面） */
@@ -186,6 +205,9 @@ enum ai_tr_key {
 	TR_ASK_COMPACT_COOLDOWN,	/* W72 压缩冷却 %s%d%d%s */
 	TR_ASK_MAX_ROUNDS_FINAL,	/* W72 触顶后收尾请求 %d */
 	TR_ASK_FINAL_HINT,		/* W72 收尾提示（模型面，无参数） */
+	TR_ASK_CLARIFY_MEM_NOTE,	/* W77e 已答注入（模型面）%s=label */
+	TR_ASK_CLARIFY_BUDGET_NOTE,	/* W77e 提问上限注记（模型面） */
+	TR_ASK_CLARIFY_AUTO_NOTE,	/* W77e 自动默认续行 %s=label */
 
 	/* ---- status（cmd_status.c） ---- */
 	TR_ST_STREAMING_FMT,		/* streaming 行 %s */

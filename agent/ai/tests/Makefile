@@ -24,7 +24,8 @@ TESTS   := test_utf8_body test_http_retry test_cloud_stream test_provider_stream
 	   test_sandbox_programming test_compact_20turns test_lease test_lease_gate \
 	   test_sysctl_tools \
 	   test_desktop_tools test_w77_route test_w77_offline \
-	   test_w77_offline_gate test_clarify
+	   test_w77_offline_gate test_model_lifecycle \
+	   test_onboarding_cloud test_clarify
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -101,6 +102,8 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
 SB_EXEC_SRCS := ../tools/executor.c ../tools/tool_registry.c \
+	 ../config/config_manager.c \
+	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
 		 ../i18n/lang.c ../runtime/ai_json_util.c ../runtime/ai_types.c \
 		 ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c
@@ -250,6 +253,8 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
 MEM_ALL_SRCS := ../tools/executor.c ../tools/tool_registry.c \
+	 ../config/config_manager.c \
+	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \
 		../i18n/lang.c ../runtime/ai_json_util.c \
 		../runtime/ai_types.c ../cloud/toolname_map.c \
@@ -273,6 +278,20 @@ CLARIFY_SRCS := ../shell/commands/ask_clarify.c ../trace/ai_trace.c \
 test_clarify: test_clarify.c $(CLARIFY_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../shell/commands -o $@ test_clarify.c \
 		$(CLARIFY_SRCS) -lpthread
+
+# W77d：本地模型生命周期（真引擎+真 config+mock ollama HTTP）
+ML_SRCS := ../shell/commands/model_lifecycle.c ../config/config_manager.c \
+	   ../runtime/ai_json_util.c ../runtime/ai_types.c \
+	   ../cloud/toolname_map.c ../local/local_http.c
+test_model_lifecycle: test_model_lifecycle.c $(ML_SRCS)
+	$(CC) $(CFLAGS) -I.. -o $@ test_model_lifecycle.c $(ML_SRCS) -lpthread
+
+# W77d：云端优先 onboarding（cmd_onboarding 真实现 + mock stdin + mock 云）
+OB_SRCS := ../shell/commands/cmd_onboarding.c $(ML_SRCS) \
+	   ../i18n/lang.c ../runtime/ai_chat_proto.c
+test_onboarding_cloud: test_onboarding_cloud.c $(OB_SRCS)
+	$(CC) $(CFLAGS) -I.. -I../runtime -I../shell/commands -o $@ \
+		test_onboarding_cloud.c $(OB_SRCS) -lpthread
 
 test: all
 	@for t in $(TESTS); do ./$$t || exit 1; done

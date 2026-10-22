@@ -1128,6 +1128,13 @@ static void print_tool_exchange(int color, int verbose,
  * 不提问；TTY 把用户选择追加到 question 供模型使用；非 TTY 生成
  * CLARIFY_REQUIRED 并停止本轮 ask。可用 AIKERNEL_CLARIFY_DETECT=0 关闭。
  *
+ * W77e：检测器升级评分制（阈值 AIKERNEL_CLARIFY_THRESHOLD）；新增
+ *  - 链级预算到限：预检停触发，向 question 注入"按最佳理解执行"注记；
+ *  - 跨轮/跨会话去重：已问过的问题不再问，注入"已按你此前的选择"；
+ *  - 会话实体采集（最近 ASK_CLARIFY_ENTITY_MSGS 条消息中的服务/路径
+ *    名词），供代词/省略指代信号评分；
+ *  - TTY 答复写入答案记忆（链内 + answered.jsonl）。
+ *
  * 返回 1=已停止（st->stop_text 为最终答案）；0=继续。
  */
 static int ask_clarify_precheck(char **question, int route_mode,
@@ -1138,6 +1145,8 @@ static int ask_clarify_precheck(char **question, int route_mode,
 	struct ask_clarify_answer ans;
 	char err[256];
 	char chosen[ASK_CLARIFY_LABEL_MAX + ASK_CLARIFY_TEXT_MAX + 16];
+	char note[ASK_CLARIFY_LABEL_MAX + 256];
+	char mem_label[ASK_CLARIFY_LABEL_MAX + 1];
 	char *out = NULL;
 	char *nq = NULL;
 	const char *env;
@@ -1151,15 +1160,74 @@ static int ask_clarify_precheck(char **question, int route_mode,
 	env = getenv("AIKERNEL_CLARIFY_DETECT");
 	if (env && strcmp(env, "0") == 0)
 		return 0;
+	/* W77e：链级预算到限 → 预检不再触发；注入预算注记 */
+	if (ask_clarify_budget_exhausted(st)) {
+		if (asprintf(&nq, "%s\n%s", *question,
+			     tr(TR_ASK_CLARIFY_BUDGET_NOTE)) >= 0) {
+			free(*question);
+			*question = nq;
+		}
+		return 0;
+	}
 	if (!ask_clarify_question_candidate(*question))
 		return 0;
 
 	memset(&ev, 0, sizeof(ev));
 	if (ask_clarify_collect_evidence(&ev) != 0)
 		return 0;
+	/* W77e：最近会话消息中的实体（*.service/绝对路径），供代词指代
+	 * 评分与通用指代澄清使用；消息/池在本块内即取即放
+	 * （collect_evidence 会重置 ev，实体在采集之后回填） */
+	{
+		struct ai_chat_msg *hm = NULL;
+		char **hpool = NULL;
+		int hpool_n = 0;
+		int nh = 0;
+		int nlast = 0;
+		const char *last[ASK_CLARIFY_ENTITY_MSGS];
+		const char *ents[ASK_CLARIFY_MAX_OPTIONS];
+		char ent_buf[ASK_CLARIFY_MAX_OPTIONS *
+			    (ASK_CLARIFY_LABEL_MAX + 1)];
+		int n_ents;
+
+		if (st->session[0] &&
+		    ui_session_load(st->session, &hm, &nh, &hpool,
+				    &hpool_n) == AI_OK) {
+			for (i = nh - 1; i >= 0 &&
+			     nlast < ASK_CLARIFY_ENTITY_MSGS; i--)
+				if (hm[i].content && hm[i].content[0])
+					last[nlast++] = hm[i].content;
+			n_ents = ask_clarify_entities_from_history(
+				last, nlast, ent_buf, sizeof(ent_buf),
+				ents, ASK_CLARIFY_MAX_OPTIONS);
+			for (i = 0; i < hpool_n; i++)
+				free(hpool[i]);
+			free(hpool);
+			free(hm);
+			if (n_ents > 0) {
+				ev.ctx_entities = (const char *const *)ents;
+				ev.n_ctx_entities = n_ents;
+			}
+		}
+	}
 	if (ask_clarify_detect(*question, &ev, &req, err, sizeof(err)) != 1 ||
-	    ask_clarify_validate(&req, err, sizeof(err)) != 0 ||
-	    !ask_clarify_state_begin(st)) {
+	    ask_clarify_validate(&req, err, sizeof(err)) != 0) {
+		ask_clarify_evidence_free(&ev);
+		return 0;
+	}
+	/* W77e：已问过（链内/answered.jsonl）→ 不再问，注入旧选择 */
+	if (ask_clarify_already_answered(st, &req, mem_label,
+					 sizeof(mem_label))) {
+		snprintf(note, sizeof(note), tr(TR_ASK_CLARIFY_MEM_NOTE),
+			 mem_label);
+		if (asprintf(&nq, "%s\n%s", *question, note) >= 0) {
+			free(*question);
+			*question = nq;
+		}
+		ask_clarify_evidence_free(&ev);
+		return 0;
+	}
+	if (!ask_clarify_state_begin(st)) {
 		ask_clarify_evidence_free(&ev);
 		return 0;
 	}
@@ -1177,6 +1245,8 @@ static int ask_clarify_precheck(char **question, int route_mode,
 		ask_clarify_evidence_free(&ev);
 		return 1;
 	}
+	/* W77e：TTY 已作答 → 答案记忆（链内去重 + answered.jsonl） */
+	ask_clarify_note_answered(st, &req, &ans);
 
 	chosen[0] = '\0';
 	for (i = 0; i < ans.n_selected; i++) {
