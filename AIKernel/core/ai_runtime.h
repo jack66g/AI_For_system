@@ -179,7 +179,9 @@ int ai_runtime_callback_register(ai_runtime_callback_t cb, void *priv);
  * ai_runtime_callback_unregister() - 注销推理完成回调
  * @cb: 之前注册的回调函数
  *
- * 返回 AI_OK 或负错误码。
+ * W63：返回前等待所有已持有该回调快照的在途 ai_runtime_chat() 完成回调
+ * 执行（SRCU），因此返回后调用方即可安全释放 @priv。不得在回调内部注销
+ * 自身（会等待自己造成死锁）。返回 AI_OK 或负错误码。
  */
 int ai_runtime_callback_unregister(ai_runtime_callback_t cb);
 

@@ -1,11 +1,15 @@
 [Unit]
 Description=AIKernel SME Memory Engine (REST 127.0.0.1:8000)
+Documentation=man:aikernel-memory(8)
 After=network.target
 
 [Service]
-Type=oneshot
-ExecStart=/usr/local/bin/start-sme.sh
-RemainAfterExit=yes
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/sme-rest-server.py
+StandardOutput=append:/tmp/sme.log
+StandardError=append:/tmp/sme.log
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

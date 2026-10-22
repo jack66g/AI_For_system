@@ -1,0 +1,9 @@
+[Unit]
+Description=AIKernel 数据备份（.aikernel + /etc/aikernel → /var/backups，保留 7 份）
+Documentation=file:///usr/local/sbin/aik-backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aik-backup
+RemainAfterExit=no

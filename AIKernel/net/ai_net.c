@@ -417,6 +417,213 @@ static int ai_net_cwnd_apply(struct ai_control_param *p, s32 pid,
 #endif /* CONFIG_INET */
 
 
+/* ---- net.qdisc 运行时 graft（w21 接线） ----
+ * 值域 0=回滚快照 kind（无快照 no-op）/1=codel/2=fq/3=fq_codel。
+ * 历史教训（2026-09-29，~/w1k-evidence/07_qdisc.txt）：ACT 执行上下文直接
+ * dev_graft_qdisc 使 guest 网络栈整体冻结（rtnl/qdisc 锁冲突）。本次：
+ *   - apply 回调（netlink ACT 上下文）只写 pending + queue_work，绝不持 rtnl；
+ *   - 独立 singlethread workqueue 持 rtnl 后按 sch_api.c
+ *     qdisc_graft(parent=NULL) 标准序列换根（create→deactivate→per-txq
+ *     graft→dev->qdisc→activate，全部 EXPORT 符号）。
+ * 作用范围：init_net 内 IFF_UP 非回环且 num_tx_queues==1 的设备；多队列
+ * 设备诚实跳过（mq leaf graft 超本次语义边界）。首目标设备 root kind 快照，
+ * 值 0 按快照 kind 经白名单重建回滚（pfifo_fast/noqueue/codel/fq/fq_codel）。
+ * dryrun（KUnit 护栏）：apply 正常钳制/提交/current 更新但不调度 worker。 */
+#if IS_ENABLED(CONFIG_NET_SCHED) && defined(CONFIG_INET)
+#include <linux/workqueue.h>
+#include <linux/rtnetlink.h>
+#include <net/net_namespace.h>
+
+extern struct Qdisc_ops codel_qdisc_ops;
+extern struct Qdisc_ops fq_qdisc_ops;
+extern struct Qdisc_ops fq_codel_qdisc_ops;
+
+#define AI_QDISC_NONE 0xFFu
+
+static u8 ai_qdisc_pending = AI_QDISC_NONE;
+static bool ai_qdisc_dryrun;
+static s32 ai_qdisc_last_err;
+static char ai_qdisc_saved_kind[32];
+static bool ai_qdisc_saved_valid;
+static DEFINE_MUTEX(ai_qdisc_lock);
+static struct workqueue_struct *ai_qdisc_wq;
+static struct work_struct ai_qdisc_work;
+
+/* 值→qdisc ops（各 sch_*.c 去 static 后全局可见；CONFIG 缺失返回 NULL） */
+static const struct Qdisc_ops *ai_qdisc_ops_for(s64 value)
+{
+	switch (value) {
+	case 1:
+#ifdef CONFIG_NET_SCH_CODEL
+		return &codel_qdisc_ops;
+#else
+		return NULL;
+#endif
+	case 2:
+#ifdef CONFIG_NET_SCH_FQ
+		return &fq_qdisc_ops;
+#else
+		return NULL;
+#endif
+	case 3:
+#ifdef CONFIG_NET_SCH_FQ_CODEL
+		return &fq_codel_qdisc_ops;
+#else
+		return NULL;
+#endif
+	default:
+		return NULL;
+	}
+}
+
+/* 快照 kind→ops（回滚白名单；未收录 kind 返回 NULL=诚实失败不 graft） */
+static const struct Qdisc_ops *ai_qdisc_ops_for_kind(const char *kind)
+{
+	if (!kind || !kind[0])
+		return NULL;
+	if (!strcmp(kind, "pfifo_fast"))
+		return &pfifo_fast_ops;
+	if (!strcmp(kind, "noqueue"))
+		return &noqueue_qdisc_ops;
+	if (!strcmp(kind, "codel")) {
+#ifdef CONFIG_NET_SCH_CODEL
+		return &codel_qdisc_ops;
+#else
+		return NULL;
+#endif
+	}
+	if (!strcmp(kind, "fq")) {
+#ifdef CONFIG_NET_SCH_FQ
+		return &fq_qdisc_ops;
+#else
+		return NULL;
+#endif
+	}
+	if (!strcmp(kind, "fq_codel")) {
+#ifdef CONFIG_NET_SCH_FQ_CODEL
+		return &fq_codel_qdisc_ops;
+#else
+		return NULL;
+#endif
+	}
+	return NULL;
+}
+
+/* 换根单个设备（调用方持 rtnl；单队列已由遍历守卫保证） */
+static int ai_qdisc_graft_dev(struct net_device *dev,
+			      const struct Qdisc_ops *ops)
+{
+	struct netdev_queue *txq = netdev_get_tx_queue(dev, 0);
+	struct Qdisc *newq, *old;
+
+	newq = qdisc_create_dflt(txq, ops, TC_H_ROOT, NULL);
+	if (!newq)
+		return -EINVAL;
+
+	if (dev->flags & IFF_UP)
+		dev_deactivate(dev);
+
+	old = dev_graft_qdisc(txq, newq);
+	if (old)
+		qdisc_put(old);
+
+	old = rtnl_dereference(dev->qdisc);
+	qdisc_refcount_inc(newq);
+	rcu_assign_pointer(dev->qdisc, newq);
+	if (old)
+		qdisc_put(old);
+
+	if (dev->flags & IFF_UP)
+		dev_activate(dev);
+	return 0;
+}
+
+static void ai_qdisc_work_fn(struct work_struct *w)
+{
+	u8 mode = xchg(&ai_qdisc_pending, AI_QDISC_NONE);
+	struct net_device *dev;
+	int grafted = 0, skipped_mq = 0, failed = 0;
+	const struct Qdisc_ops *ops;
+
+	mutex_lock(&ai_qdisc_lock);
+	if (mode == AI_QDISC_NONE || mode > 3) {
+		mutex_unlock(&ai_qdisc_lock);
+		return;
+	}
+
+	rtnl_lock();
+	for_each_netdev(&init_net, dev) {
+		if ((dev->flags & IFF_LOOPBACK) || !(dev->flags & IFF_UP))
+			continue;
+		if (dev->num_tx_queues != 1) {
+			skipped_mq++;
+			continue;
+		}
+		if (mode != 0 && !ai_qdisc_saved_valid) {
+			struct Qdisc *root = rtnl_dereference(dev->qdisc);
+
+			strscpy(ai_qdisc_saved_kind,
+				root && root->ops ? root->ops->id : "unknown",
+				sizeof(ai_qdisc_saved_kind));
+			ai_qdisc_saved_valid = true;
+			pr_info("AIKernel: net.qdisc snapshot kind=%s (%s)\n",
+				ai_qdisc_saved_kind, dev->name);
+		}
+		if (mode == 0) {
+			if (!ai_qdisc_saved_valid)
+				continue; /* 无快照：回滚 no-op（诚实） */
+			ops = ai_qdisc_ops_for_kind(ai_qdisc_saved_kind);
+			if (!ops) {
+				pr_warn("AIKernel: net.qdisc rollback kind=%s not in whitelist\n",
+					ai_qdisc_saved_kind);
+				failed++;
+				continue;
+			}
+		} else {
+			ops = ai_qdisc_ops_for(mode);
+		}
+		if (ai_qdisc_graft_dev(dev, ops) == 0)
+			grafted++;
+		else
+			failed++;
+	}
+	rtnl_unlock();
+	WRITE_ONCE(ai_qdisc_last_err, failed ? -1 : 0);
+	pr_info("AIKernel: net.qdisc mode=%u done (grafted=%d skipped_mq=%d failed=%d)\n",
+		mode, grafted, skipped_mq, failed);
+	mutex_unlock(&ai_qdisc_lock);
+}
+
+void ai_net_qdisc_dryrun_set(bool on)
+{
+	WRITE_ONCE(ai_qdisc_dryrun, on);
+}
+EXPORT_SYMBOL_GPL(ai_net_qdisc_dryrun_set);
+
+u8 ai_net_qdisc_pending_get(void)
+{
+	return READ_ONCE(ai_qdisc_pending);
+}
+EXPORT_SYMBOL_GPL(ai_net_qdisc_pending_get);
+
+static int ai_net_qdisc_apply(struct ai_control_param *p, s32 pid,
+			      s64 value, s64 *eff)
+{
+	if (value < 0 || value > 3)
+		return AI_ERR_INVALID_ARG;
+	if (!ai_qdisc_wq)
+		return AI_ERR_DISABLED;
+	WRITE_ONCE(ai_qdisc_pending, (u8)value);
+	if (!READ_ONCE(ai_qdisc_dryrun))
+		queue_work(ai_qdisc_wq, &ai_qdisc_work);
+	*eff = value;
+	pr_info("AIKernel: net.qdisc request mode=%lld (pid=%d%s)\n",
+		value, pid, READ_ONCE(ai_qdisc_dryrun) ? ", dryrun" : "");
+	return AI_OK;
+}
+#endif /* CONFIG_NET_SCHED && CONFIG_INET */
+
+
 #if IS_ENABLED(CONFIG_NETFILTER)
 /* ---- net.nftables 开关（AIKernel 自有 netfilter LOCAL_OUT 采集钩子） ----
  * 语义如实（不虚标 nft chain）：nft chain 内核侧编程需模拟 netlink
@@ -518,12 +725,26 @@ static int __init ai_net_init(void)
 	ai_control_register("net.rto", AI_POLICY_DOMAIN_NET, 0,
 			    1, 10000, 200, NULL);
 #endif
-	/* net.qdisc 诚实保留 [reserved]（2026-09-29 实测）：dev_graft_qdisc
-	 * 运行时 graft 在 AI 策略执行上下文实测使 guest 网络栈整体冻结
-	 * （rtnl/qdisc 锁冲突，证据 ~/w1k-evidence/07_qdisc.txt）；graft
-	 * 代码已移除，恢复需独立线程+mq 守卫，超参数接口安全边界。 */
+	/* net.qdisc 运行时 graft（w21 接线）：值域 0=回滚/1=codel/2=fq/
+	 * 3=fq_codel；apply 回调只提交 pending+queue_work（ACT 上下文不持
+	 * rtnl——2026-09-29 直接 graft 冻结网络栈的教训），真换根在独立
+	 * ai_qdisc_wq worker。wq 分配失败则诚实退回 [reserved]。 */
+#if IS_ENABLED(CONFIG_NET_SCHED) && defined(CONFIG_INET)
+	ai_qdisc_wq = create_singlethread_workqueue("ai_qdisc_wq");
+	if (ai_qdisc_wq) {
+		INIT_WORK(&ai_qdisc_work, ai_qdisc_work_fn);
+		ai_control_register("net.qdisc", AI_POLICY_DOMAIN_NET,
+				    AI_CTRL_F_REAL, 0, 3, 0,
+				    ai_net_qdisc_apply);
+	} else {
+		pr_warn("AIKernel: net.qdisc workqueue alloc failed; kept reserved\n");
+		ai_control_register("net.qdisc", AI_POLICY_DOMAIN_NET, 0,
+				    0, 3, 0, NULL);
+	}
+#else
 	ai_control_register("net.qdisc", AI_POLICY_DOMAIN_NET, 0,
-				    0, 2, 0, NULL);
+			    0, 3, 0, NULL);
+#endif
 
 #if IS_ENABLED(CONFIG_NETFILTER)
 	ai_control_register("net.nftables", AI_POLICY_DOMAIN_NET,

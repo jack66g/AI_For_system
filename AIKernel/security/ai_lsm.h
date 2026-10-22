@@ -264,6 +264,8 @@ struct ai_sec_stack_overflow_payload {
  * @action:    seccomp 动作（AI 可修改，默认原样）
  *
  * 由 kernel/seccomp.c __seccomp_filter() 调用；本步空实现只更新行为模型。
+ * 该调用点仅在任务已挂 seccomp 过滤器时执行且不消费 action，故本 Hook
+ * 不是 sec.seccomp 参数的执行面（该参数 W49 已降级 reserved）。
  */
 void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 			 u32 *action);

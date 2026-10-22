@@ -20,8 +20,9 @@
 #include "ai_types.h"
 #include "ai_stream.h"
 
-/* max_tokens 缺省值（请求级参数 <=0 时使用；实际值来自 [ui].max_tokens） */
-#define LOCAL_DEFAULT_MAX_TOKENS  4096
+/* max_tokens 缺省值（请求级参数 <=0 时使用；实际值来自 [ui].max_tokens）。
+ * 修复 6：默认 1024（云端同样保证所有请求都带生成上限） */
+#define LOCAL_DEFAULT_MAX_TOKENS  1024
 
 /* ---- 简易 JSON 值提取器 ---- */
 

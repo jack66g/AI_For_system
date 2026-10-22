@@ -27,7 +27,8 @@
 
 #define AI_CMD_SENSE		16	/* 读感知数据（遥测记录流） */
 #define AI_CMD_ACT		17	/* 下发决策指令 */
-#define AI_CMD_REG		18	/* 注册回调（异步事件通知预留） */
+#define AI_CMD_REG		18	/* 注册/注销异步事件推送（CAP_SYS_ADMIN） */
+#define AI_CMD_EVENT		19	/* 内核 → 用户异步事件通知（推送，非请求） */
 
 /* ---- 常量 ---- */
 
@@ -93,9 +94,33 @@ struct ai_nl_act_ack {
 
 /* ---- REG 请求载荷 ---- */
 
+#define AI_NL_REG_F_UNREG	(1U << 0)	/* 置位=注销（默认 0=注册） */
+
 struct ai_nl_reg {
-	__u32 flags;		/* 0=仅登记（预留位） */
+	__u32 flags;		/* AI_NL_REG_F_UNREG；其余位必须为 0 */
+	__u32 reserved;		/* 必须为 0（前向兼容） */
+};
+
+/* ---- 异步事件（AI_CMD_EVENT，内核主动推送给已注册 portid） ---- */
+
+/* 事件大类（category）：只追加不重排 */
+#define AI_NL_EV_POLICY		1	/* 策略执行结果（event_id=decision_id） */
+#define AI_NL_EV_MODEL		2	/* 模型装载/卸载（event_id=model id） */
+#define AI_NL_EV_MAX		2
+
+/* 严重级 */
+#define AI_NL_EV_SEV_INFO	0
+#define AI_NL_EV_SEV_WARN	1
+#define AI_NL_EV_SEV_ERROR	2
+
+struct ai_nl_event {
+	__u64 ts;		/* 事件时间（ktime_get_ns） */
+	__u64 event_id;		/* 事件 ID：策略=decision_id，模型=model id */
+	__u32 category;		/* AI_NL_EV_* */
+	__u32 severity;		/* AI_NL_EV_SEV_* */
+	__s32 code;		/* 策略=executed 数；模型=1 装载 / 0 卸载 */
 	__u32 reserved;
+	char  param[AI_NL_ACT_PARAM_LEN];	/* 关联参数名/模型名（NUL 结尾） */
 };
 
 #endif /* _UAPI_LINUX_AI_NETLINK_H */

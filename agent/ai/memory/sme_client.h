@@ -145,4 +145,159 @@ int sme_export(const char *save_path, char *out, size_t n);
  */
 int sme_metrics(char *out, size_t n);
 
+/* ---- W50：完整记忆管理面（增删改查/批量导入/图谱/Region/事实/配置） ----
+ *
+ * 通用约定与 v2 相同：memory_id 白名单 [A-Za-z0-9_.-]；metadata_json /
+ * tags_json / memories_json 由调用者提供**合法 JSON**（客户端做括号
+ * 配平与注入校验后原样嵌入，不做字段级重组）；所有文本字段内部经
+ * ai_json_escape 转义；out 始终收到原始响应体或人可读错误说明。
+ */
+
+/* 写入选项：任意字段为 NULL/0 表示省略（服务端保持默认）。 */
+struct sme_add_opts {
+	const char *text;            /* 必填 */
+	const char *metadata_json;   /* JSON object 字符串，可 NULL */
+	const char *tags_json;       /* JSON array 字符串，可 NULL */
+	int has_importance;          /* 非 0 时携带 importance */
+	double importance;
+	const char *source;          /* 如 "user"/"llm"/"system"，可 NULL */
+	const char *link_to;         /* 写入后链接到既有记忆 id，可 NULL */
+	const char *link_kind;       /* link_to 的关系类型，默认 reference */
+	const char *ns;              /* 命名空间（多用户隔离），可 NULL */
+};
+
+/* sme_add_ex - POST /memories（扩展字段；risk=W1） */
+int sme_add_ex(const struct sme_add_opts *o, char *out, size_t n);
+
+/* 高级检索选项（SearchRequest 全字段）。text 必填；top_k<=0 省略；
+ * top_regions<=0 省略；*_json 为 NULL 省略；has_include_archived 非 0
+ * 时才发送 include_archived；graph_expand<=0 省略；ns 为 NULL 省略。 */
+struct sme_search_opts {
+	const char *text;
+	int top_k;
+	int top_regions;
+	const char *metadata_filters_json;  /* JSON object 字符串 */
+	const char *tags_json;              /* JSON array 字符串 */
+	const char *region_retrieval;       /* 区域检索策略字符串 */
+	int has_include_archived;
+	int include_archived;
+	int graph_expand;
+	const char *ns;
+};
+
+/* sme_search_ex - POST /memories/search（带过滤/图谱扩展/ns；risk=R） */
+int sme_search_ex(const struct sme_search_opts *o, char *out, size_t n);
+
+/* 更新选项：至少提供一个字段（NULL 且 has_*=0 表示不修改）。 */
+struct sme_update_opts {
+	const char *text;
+	const char *metadata_json;
+	const char *tags_json;
+	int has_importance;
+	double importance;
+	int has_weight;
+	double weight;
+	const char *summary;
+};
+
+/*
+ * sme_memory_update - PATCH /memories/{id} 更新记忆（risk=W1）
+ * 改 text 会触发重新向量化；返回更新后的记忆 dict。
+ */
+int sme_memory_update(const char *memory_id,
+		      const struct sme_update_opts *o, char *out, size_t n);
+
+/*
+ * sme_memory_delete - DELETE /memories/{id} 永久删除（risk=W2）
+ * 响应 {"deleted": "<id>"}；不可恢复（保留历史请用 archive）。
+ */
+int sme_memory_delete(const char *memory_id, char *out, size_t n);
+
+/*
+ * sme_memories_batch - POST /memories/batch 批量新增（risk=W1）
+ * @memories_json: JSON 数组字符串；每条走完整 add 管线（抽取/去噪）。
+ * 每条生成新 id，**非幂等**：重试会产生重复记忆。
+ */
+int sme_memories_batch(const char *memories_json, char *out, size_t n);
+
+/*
+ * sme_import - POST /import 无损导入（risk=W1）
+ * @memories_json: JSON 数组（导出格式条目：id/text/metadata/weight/...）。
+ * 条目带 id 时按 id 覆盖恢复（可重试幂等）；缺 id 的条目每次生成新
+ * id（重试会重复）。
+ */
+int sme_import(const char *memories_json, char *out, size_t n);
+
+/*
+ * sme_import_path - 从本地文件读取后 POST /import（risk=W1）
+ * @path: 绝对路径，realpath 必须落在 /tmp 或 /var/ai 下；文件内容为
+ *        JSON 数组，或含 "memories" 键的导出对象；最大 8MB。
+ */
+int sme_import_path(const char *path, char *out, size_t n);
+
+/* sme_graph - GET /graph 记忆图（edge_count + edges，risk=R） */
+int sme_graph(char *out, size_t n);
+
+/*
+ * sme_graph_link - POST /graph/link 建立记忆间链接（risk=W1）
+ * @a/@b: 记忆 id（均须存在）；@kind: 关系类型（默认 reference）；
+ * @has_weight 非 0 时携带 weight；@note 可 NULL。
+ * 注意：服务端没有 unlink 端点，边只能随记忆删除/图重建移除。
+ */
+int sme_graph_link(const char *a, const char *b, const char *kind,
+		   int has_weight, double weight, const char *note,
+		   char *out, size_t n);
+
+/* sme_regions - GET /regions 列出全部空间 Region（risk=R） */
+int sme_regions(char *out, size_t n);
+
+/* sme_regions_evolve - POST /regions/evolve 触发 Region 演化（risk=W1） */
+int sme_regions_evolve(char *out, size_t n);
+
+/* sme_facts - GET /facts 事实图谱/双时态事实（risk=R） */
+int sme_facts(char *out, size_t n);
+
+/*
+ * sme_facts_history - GET /facts/history 单事实版本链（risk=R）
+ * @text/@memory_id 至少一个非空；均会做 URL 百分号编码。
+ */
+int sme_facts_history(const char *text, const char *memory_id,
+		      char *out, size_t n);
+
+/* sme_profile - GET /profile 用户画像事实与快照（risk=R） */
+int sme_profile(char *out, size_t n);
+
+/* sme_qapairs - GET /qapairs 问答对清单（risk=R） */
+int sme_qapairs(char *out, size_t n);
+
+/*
+ * sme_metrics_report - GET /metrics/report 完整遥测报告落盘（risk=R）
+ * @save_path: NULL 时 /tmp/sme-metrics-report.json；realpath 必须在
+ *             /tmp 或 /var/ai 下。telemetry 未启用时服务端 404。
+ */
+int sme_metrics_report(const char *save_path, char *out, size_t n);
+
+/* sme_config - GET /config 配置中心（服务端已对 api_key 掩码，risk=R） */
+int sme_config(char *out, size_t n);
+
+/*
+ * sme_config_check - POST /config/check 配置校验（risk=R，只读诊断）
+ * @ping: 非 0 时额外探测 LLM/Embedding 连通性（可能产生外部调用）。
+ */
+int sme_config_check(int ping, char *out, size_t n);
+
+/* ---- W43：失忆降级标记 ----
+ * SME 不可达属正常场景（记忆是增强能力，不是硬依赖）：调用方
+ * （ask 循环/工具结果回填/UI）据原因码附注降级说明，不再静默
+ * 空结果或裸报错；/session 的可达性显示亦据此判定。
+ */
+enum sme_degrade_reason {
+	SME_DEGRADED_NONE = 0,	/* 未降级 */
+	SME_DEGRADED_UNAVAILABLE = 1,	/* 连接失败/超时（服务未启动或不可达） */
+	SME_DEGRADED_HTTP = 2,	/* 服务返回非 2xx */
+};
+
+/* sme_degrade_reason_of - 把 sme_* 返回码映射为降级原因码 */
+int sme_degrade_reason_of(int rc);
+
 #endif /* _AI_SME_CLIENT_H */

@@ -1,0 +1,57 @@
+{
+  "current": "dark",
+  "themes": {
+    "dark": {
+      "display": "暗色",
+      "bg": "#0b0f14",
+      "bg2": "#111823",
+      "panel": "rgba(17,24,35,0.86)",
+      "panel_solid": "#141c28",
+      "text": "#e6edf3",
+      "text_dim": "#8b98a5",
+      "accent": "#4f8cff",
+      "accent_soft": "rgba(79,140,255,0.16)",
+      "accent2": "#7ee787",
+      "border": "rgba(255,255,255,0.08)",
+      "shadow": "0 18px 50px rgba(0,0,0,0.5)",
+      "wallpaper": "linear-gradient(135deg,#0b0f14 0%,#14202e 45%,#1d2f42 100%)",
+      "bubble_ai": "#182230",
+      "bubble_user": "#2a4d8f"
+    },
+    "light": {
+      "display": "亮色",
+      "bg": "#f4f6f9",
+      "bg2": "#e9edf3",
+      "panel": "rgba(255,255,255,0.88)",
+      "panel_solid": "#ffffff",
+      "text": "#1c2733",
+      "text_dim": "#5c6b7a",
+      "accent": "#2563eb",
+      "accent_soft": "rgba(37,99,235,0.12)",
+      "accent2": "#059669",
+      "border": "rgba(28,39,51,0.12)",
+      "shadow": "0 18px 50px rgba(30,50,80,0.18)",
+      "wallpaper": "linear-gradient(135deg,#dfe7f0 0%,#eef3f9 50%,#dbe7f5 100%)",
+      "bubble_ai": "#ffffff",
+      "bubble_user": "#2563eb"
+    },
+    "pink": {
+      "display": "粉色",
+      "bg": "#fff0f5",
+      "bg2": "#ffe1ec",
+      "panel": "rgba(255,240,246,0.9)",
+      "panel_solid": "#fff7fa",
+      "text": "#4a2438",
+      "text_dim": "#a86b87",
+      "accent": "#ff5fa2",
+      "accent_soft": "rgba(255,95,162,0.14)",
+      "accent2": "#b36bff",
+      "border": "rgba(255,120,180,0.28)",
+      "shadow": "0 18px 50px rgba(255,95,162,0.25)",
+      "wallpaper": "linear-gradient(135deg,#ffd6e8 0%,#ffeff6 45%,#f3d9ff 100%)",
+      "bubble_ai": "#ffe4ef",
+      "bubble_user": "#ff5fa2"
+    }
+  },
+  "wallpaper": "gradient"
+}

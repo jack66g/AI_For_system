@@ -1,0 +1,88 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# ============================================================
+# aik-token —— 轮换 aikernel-api Bearer token
+#
+# 生成 32 字节随机（64 hex）-> 写入 token 存储位 -> 即时生效
+# （api 守护每请求现读 token，无需重启；旧 token 立即失效）。
+#
+# token 存储位与优先级（aikernel-api v2 语义）:
+#   1. ~/.aikernel/model.toml [api] token   （默认写入位，--toml）
+#   2. /etc/aikernel/api-token (600)        （--file；基线兼容位）
+# 高位有值时低位被忽略。
+#
+# 用法:
+#   aik-token            # 轮换，默认写 model.toml [api] token
+#   aik-token --file     # 轮换，写 /etc/aikernel/api-token（基线位）
+#   aik-token --show     # 只显示当前生效 token（运维核对用）
+#
+# 红线: 轮换前先 `aik-token --show` 或备份旧值，避免把自己锁在门外。
+# ============================================================
+set -e
+
+TOML="$HOME/.aikernel/model.toml"
+TOKEN_FILE="/etc/aikernel/api-token"
+
+new_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    else
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+    fi
+}
+
+current_effective() {
+    # 与 api 同优先级：model.toml [api] token > TOKEN_FILE
+    t="$(awk '/^\[api\]/{f=1;next} /^\[/{f=0} f && $1=="token"{gsub(/"/,"",$3);print $3;exit}' "$TOML" 2>/dev/null || true)"
+    if [ -n "$t" ]; then echo "$t"; return; fi
+    [ -f "$TOKEN_FILE" ] && cat "$TOKEN_FILE"
+}
+
+MODE_TOML=1
+case "${1:-}" in
+    --show) current_effective; exit 0 ;;
+    --file) MODE_TOML=0 ;;
+    "")     ;;
+    *) echo "用法: aik-token [--file|--show]" >&2; exit 2 ;;
+esac
+
+OLD="$(current_effective)"
+NEW="$(new_token)"
+
+if [ "$MODE_TOML" = 1 ]; then
+    [ -f "$TOML" ] || { echo "[aik-token] 错误: $TOML 不存在" >&2; exit 1; }
+    cp "$TOML" "$TOML.bak-aik-token-$(date +%Y%m%d-%H%M%S)"
+    if awk '/^\[api\]/{found=1} END{exit !found}' "$TOML"; then
+        # [api] 段存在：段内已有 token 行则替换，否则段首插入
+        if awk '/^\[api\]/{f=1;next} /^\[/{f=0} f && $1=="token"{found=1} END{exit !found}' "$TOML"; then
+            awk -v t="$NEW" '
+                /^\[api\]/{f=1;print;next}
+                /^\[/{f=0}
+                f && $1=="token"{print "token = \"" t "\""; done_flag=1; next}
+                {print}
+                END{}' "$TOML" > "$TOML.tmp"
+        else
+            awk -v t="$NEW" '
+                /^\[api\]/{print; print "token = \"" t "\""; next}
+                {print}' "$TOML" > "$TOML.tmp"
+        fi
+    else
+        # 无 [api] 段：追加
+        { echo ""; echo "[api]"; echo "token = \"$NEW\""; } >> "$TOML"
+        rm -f "$TOML.tmp"
+    fi
+    if [ -f "$TOML.tmp" ]; then
+        mv "$TOML.tmp" "$TOML"
+    fi
+    chmod 600 "$TOML"
+    echo "[aik-token] 旧 token: $OLD"
+    echo "[aik-token] 新 token 已写入 $TOML [api] token（即时生效，旧值已失效）"
+else
+    umask 077
+    printf '%s\n' "$NEW" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    echo "[aik-token] 旧 token: $OLD"
+    echo "[aik-token] 新 token 已写入 $TOKEN_FILE（即时生效，旧值已失效）"
+fi
+echo "[aik-token] 新 token: $NEW"
+echo "[aik-token] 提醒：更新所有客户端（aikctl 配置/Web/CI）中的 token。"

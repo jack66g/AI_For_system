@@ -1,0 +1,1148 @@
+#!/usr/bin/python3
+# ============================================================
+# AIKernel 远程 AI API 守护 (aikernel-api) v2 —— 可编程控制面
+# 「AI 即系统」——把本机 AI(ollama + aikernel-shell) 以 HTTP
+# 接口暴露给本机进程 / SSH 隧道 / Web / 语音 / CI 插件。
+#
+# v1（基线，行为保持）:
+#   POST /ask    {"question": "...", "session": "api-?"}
+#                -> {"status":"ok","session":"api-...","answer":"..."}
+#                -> {"status":"clarify_required","session":...,
+#                    "answer":...,"clarify":{nonce/options/...}}
+#                问题经 AIKERNEL_PROMPT 传给 `ai -p -`（不进 argv）；
+#                每次请求生成 128-bit tag，只解析匹配的 stderr 事件。
+#                超时上限 300s；同一 session 串行。
+#   POST /clarify {"nonce":"cq-...","session":"api-...",
+#                  "selection":["id 或序号"],"other":"..."}
+#                -> 同一 envelope；未知 404/过期 410/已消费 409/非法 400
+#                shell pending store 为权威（原子消费、15min TTL）
+#   GET  /health {"status": "ok", "services": {...}}
+#
+# v2 新增（E 波，结构化端点；全部 JSON + 结构化错误码 + 审计）:
+#   GET  /tools            78 工具清单（name/channel/risk/描述摘要，
+#                          可 ?channel= ?risk= 过滤；数据源 tools.json）
+#   GET  /params           /proc/ai/control 27 参数表
+#                          （current/min/max/default/task_scoped，可 ?name=）
+#   GET  /sense?what=X     /proc/ai 只读快照（status/telemetry/latency/
+#                          hitrate/sched/chains/decisions/vfs/control，
+#                          截断上限默认 8KB，?limit= 最大 64KB）
+#   POST /act              受控参数写（NETLINK_AI v2 定向 apply；body 必须
+#                          confirm=true 才执行，否则 409 NEED_CONFIRM——
+#                          对齐 REPL W2 确认语义；范围限 control 27 参数，
+#                          不开放 exec；task 参数需带 pid）
+#
+# 鉴权: Bearer token。token 来源优先级：model.toml [api] token >
+#       /etc/aikernel/api-token (600)。无 token -> 401；token 错 -> 403。
+#       每请求现读（token 轮换即时生效，无需重启）。
+# 绑定: model.toml [api] bind，默认 127.0.0.1:8761（仅本机/SSH 隧道）；
+#       对外暴露（0.0.0.0/具体 IP）须管理员显式改配置并自担风险，
+#       且必须配 TLS+token——启动时与 health.sh 都会 WARN 提示。
+# TLS:  model.toml [api] tls = true + cert/key 路径才启用；默认明文
+#       （本机/SSH 隧道场景不受影响）。
+# 审计: /var/log/ai-audit.log，沿用 REPL audit 通道行格式
+#       （ISO8601+0000 uid= user= mode=api tool=api_* args={...} result=）。
+# ============================================================
+import hmac
+import json
+import os
+import re
+import secrets
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import threading
+import time
+from collections import OrderedDict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+BIND_HOST = "127.0.0.1"
+BIND_PORT = 8761
+TOKEN_FILE = "/etc/aikernel/api-token"
+TOML_FILE = os.path.expanduser("~/.aikernel/model.toml")
+# 测试可覆盖；生产始终 /usr/local/bin/ai
+AI_BIN = os.environ.get("AIKERNEL_AI_BIN", "/usr/local/bin/ai")
+ASK_TIMEOUT = int(os.environ.get("AIKERNEL_API_ASK_TIMEOUT", "300"))
+HEALTH_SERVICES = ["ollama", "aikernel-memory", "ssh"]
+TOOLS_JSON = os.environ.get("AIKERNEL_TOOLS_JSON",
+                            "/usr/local/share/aikernel/tools.json")
+CONTROL_PROC = "/proc/ai/control"
+AUDIT_LOG = "/var/log/ai-audit.log"
+
+API_VERSION = 3
+EVENT_PREFIX = "AIKERNEL_EVENT"
+SESSION_PREFIX = "api-"
+SESSION_RE = re.compile(r"^api-[A-Za-z0-9._-]{1,96}$")
+NONCE_RE = re.compile(r"^cq-[A-Za-z0-9._-]{1,60}$")
+CLARIFY_MAX_OPTIONS = 4
+CLARIFY_MAX_TEXT = 512
+# /clarify 的 per-session 串行锁；上限防止任意 session 名无限堆积
+SESSION_LOCK_MAX = 256
+SESSION_LOCKS = OrderedDict()
+SESSION_LOCKS_GUARD = threading.Lock()
+SENSE_WHAT = {
+    "status":    "/proc/ai/status",
+    "telemetry": "/proc/ai/telemetry",
+    "latency":   "/proc/ai/latency",
+    "hitrate":   "/proc/ai/hitrate",
+    "sched":     "/proc/ai/sched",
+    "chains":    "/proc/ai/chains",
+    "decisions": "/proc/ai/decisions",
+    "vfs":       "/proc/ai/vfs",
+    "control":   "/proc/ai/control",
+}
+SENSE_DEFAULT_LIMIT = 8192
+SENSE_MAX_LIMIT = 65536
+TOOLS_DESC_MAX = 160
+
+# task 作用域参数（AI_CTRL_F_TASK：data[0]=pid、data[1]=值），
+# 与 AIKernel/core/ai_control.c / ai_proc_sampler.c 注册处一致
+TASK_PARAMS = {
+    "sched.nice", "sched.affinity", "sched.oom_score",
+    "proc.signal", "proc.freeze", "proc.rlimit",
+}
+
+# ---- NETLINK_AI（协议族 31 / AI_CMD_ACT=17，见 include/uapi/linux/ai_netlink.h）
+NETLINK_AI = 31
+AI_CMD_ACT = 17
+NLM_F_REQUEST = 0x01
+NLMSG_ERROR = 0x2
+AI_NL_ACT_PARAM_LEN = 24
+AI_NL_ACT_FMT = "<QIBBHI4x8Q24s"       # struct ai_nl_act v2（112B，LE/x86_64）
+AI_NL_ACT_SIZE = struct.calcsize(AI_NL_ACT_FMT)   # == 112
+AI_NL_ACT_ACK_FMT = "<IIiI"            # struct ai_nl_act_ack（executed/hit/ai_err/reserved）
+
+_CONTROL_RE = re.compile(
+    r"^(\S+)\s+domain=(\d+)\s+\[real\]\s+min=(-?\d+)\s+max=(-?\d+)"
+    r"\s+current=(-?\d+)\s+default=(-?\d+)\s*$")
+
+
+# ============================================================
+# 纯函数区（可单测：userspace unittest，tests/test_api_units.py；
+# 内核 KUnit 不适用——API 是用户态 Python，内核零改动）
+# ============================================================
+
+def parse_api_section(text):
+    """从 model.toml 提取 [api] 段键值（最小 TOML：字符串/布尔/整数）。
+    REPL C 解析器对未知段逐键跳过（config_manager.c flag 门控），
+    故 [api] 段对 REPL 零影响。"""
+    out = {}
+    in_api = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_api = (line[1:-1].strip() == "api")
+            continue
+        if not in_api or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+            out[key] = val[1:-1]
+        elif val == "true":
+            out[key] = True
+        elif val == "false":
+            out[key] = False
+        else:
+            try:
+                out[key] = int(val, 0)
+            except ValueError:
+                out[key] = val
+    return out
+
+
+def load_api_config():
+    """读 [api] 段；文件缺失/无段 -> {}（全默认）。"""
+    try:
+        with open(TOML_FILE, "r", encoding="utf-8", errors="replace") as f:
+            return parse_api_section(f.read())
+    except OSError:
+        return {}
+
+
+def effective_token(cfg=None):
+    """token 优先级：model.toml [api] token > /etc/aikernel/api-token。"""
+    if cfg is None:
+        cfg = load_api_config()
+    tok = cfg.get("token")
+    if isinstance(tok, str) and tok.strip():
+        return tok.strip()
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            t = f.read().strip()
+        return t or None
+    except OSError:
+        return None
+
+
+def parse_control(text):
+    """解析 /proc/ai/control 文本 -> 参数表（含 task_scoped 推断）。"""
+    params = []
+    for line in text.splitlines():
+        m = _CONTROL_RE.match(line.strip())
+        if not m:
+            continue
+        params.append({
+            "name": m.group(1),
+            "domain": int(m.group(2)),
+            "min": int(m.group(3)),
+            "max": int(m.group(4)),
+            "current": int(m.group(5)),
+            "default": int(m.group(6)),
+            "task_scoped": m.group(1) in TASK_PARAMS,
+        })
+    return params
+
+
+def validate_act(pdef, value, pid):
+    """校验 act 请求 -> (errcode, message)。errcode None=通过。
+    范围限 27 参数；超范围 400；未知参数 404；task 参数缺 pid 400。"""
+    if pdef is None:
+        return 404, "unknown param（范围限 /proc/ai/control 27 参数，不开放 exec）"
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 400, "value 必须是整数"
+    if value < pdef["min"] or value > pdef["max"]:
+        return 400, "value 超出 [%d, %d]" % (pdef["min"], pdef["max"])
+    if pdef["task_scoped"]:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return 400, "task 作用域参数需带正整数 pid（data[0]=pid）"
+    return None, None
+
+
+def nl_pack_act(domain, confidence, param, data0, data1=0):
+    """打包 v2 ai_nl_act（112B）：param 定向 apply。
+    TASK 参数 data0=pid/data1=值；全局参数 data0=值。"""
+    pb = param.encode("utf-8")[:AI_NL_ACT_PARAM_LEN - 1]
+    data = [0] * 8
+    data[0] = data0
+    data[1] = data1
+    return struct.pack(AI_NL_ACT_FMT, 0, 0, domain, confidence, 0, 0,
+                       *data, pb)
+
+
+def nl_unpack_act_ack(payload):
+    """解包 ai_nl_act_ack -> {"executed","hit","ai_err"}。"""
+    if len(payload) < struct.calcsize(AI_NL_ACT_ACK_FMT):
+        return None
+    executed, hit, ai_err, _res = struct.unpack(AI_NL_ACT_ACK_FMT,
+                                                payload[:struct.calcsize(
+                                                    AI_NL_ACT_ACK_FMT)])
+    return {"executed": executed, "hit": hit, "ai_err": ai_err}
+
+
+def nl_act(param, value, pid, timeout=5.0):
+    """发 AI_CMD_ACT v2 定向 apply，返回 (ack_dict 或 None, errmsg 或 None)。
+    需 CAP_SYS_ADMIN（API 以 root 运行）。"""
+    pdef = None
+    for p in read_control_params():
+        if p["name"] == param:
+            pdef = p
+            break
+    if pdef is None:
+        return None, "param vanished from control table"
+    if pdef["task_scoped"]:
+        payload = nl_pack_act(pdef["domain"], 90, param, pid, value)
+    else:
+        payload = nl_pack_act(pdef["domain"], 90, param, value, 0)
+
+    try:
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_AI)
+    except OSError as e:
+        return None, "netlink socket: %s" % e
+    try:
+        sock.bind((0, 0))
+        portid = sock.getsockname()[0]
+        seq = int(time.time()) & 0x7fffffff
+        hdr = struct.pack("=IHHII", 16 + len(payload), AI_CMD_ACT,
+                          NLM_F_REQUEST, seq, portid)
+        sock.settimeout(timeout)
+        sock.sendto(hdr + payload, (0, 0))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                resp, src = sock.recvfrom(65536)
+            except socket.timeout:
+                return None, "netlink reply timeout"
+            if len(resp) < 16 or src[0] != 0:
+                continue
+            rlen, rtype, _rflags, rseq, _rpid = struct.unpack("=IHHII",
+                                                              resp[:16])
+            if rseq != seq:
+                continue
+            body = resp[16:16 + max(rlen - 16, 0)]
+            if rtype == AI_CMD_ACT:
+                return nl_unpack_act_ack(body), None
+            if rtype == NLMSG_ERROR:
+                if len(body) >= 4:
+                    err = struct.unpack("<i", body[:4])[0]
+                    if err == 0:
+                        return None, "netlink ack(0) 未携带 act 应答"
+                    import errno as _errno
+                    return None, "kernel errno %d (%s)" % (
+                        -err, _errno.errorcode.get(-err, "?"))
+                return None, "malformed netlink error"
+        return None, "netlink reply timeout"
+    except OSError as e:
+        return None, "netlink io: %s" % e
+    finally:
+        sock.close()
+
+
+def read_control_params():
+    try:
+        with open(CONTROL_PROC, "r", encoding="utf-8", errors="replace") as f:
+            return parse_control(f.read())
+    except OSError:
+        return []
+
+
+def truncate_sample(content, cap, tail=False):
+    """只读快照截断：telemetry 取尾部（最新），其余取头部。
+    返回 (content, truncated, total_bytes)。"""
+    total = len(content)
+    if total <= cap:
+        return content, False, total
+    kept = content[-cap:] if tail else content[:cap]
+    return kept, True, total
+
+
+def route_get(path, query):
+    """GET 路由 -> (endpoint, kwargs)；未知 -> (None, {})。"""
+    if path == "/health":
+        return "health", {}
+    if path == "/tools":
+        return "tools", {"channel": query.get("channel", [None])[0],
+                         "risk": query.get("risk", [None])[0]}
+    if path == "/params":
+        return "params", {"name": query.get("name", [None])[0]}
+    if path == "/sense":
+        return "sense", {"what": query.get("what", [None])[0],
+                         "limit": query.get("limit", [None])[0]}
+    return None, {}
+
+
+def tools_summary(doc, channel=None, risk=None):
+    """tools.json -> 端点输出（描述截断摘要 + 可选过滤）。"""
+    tools = []
+    for t in doc.get("tools", []):
+        if channel and t.get("channel") != channel:
+            continue
+        if risk and t.get("risk") != risk:
+            continue
+        desc = t.get("description", "")
+        tools.append({
+            "name": t.get("name"),
+            "channel": t.get("channel"),
+            "risk": t.get("risk"),
+            "description": desc[:TOOLS_DESC_MAX],
+        })
+    return {"version": doc.get("version"), "tool_count":
+            doc.get("tool_count", len(doc.get("tools", []))),
+            "count": len(tools), "tools": tools}
+
+
+def err_body(err, message, **extra):
+    """结构化错误体：{"error","message",...}。"""
+    body = {"error": err, "message": message}
+    body.update(extra)
+    return body
+
+
+# ---- W77c-2b：澄清事件通道 / 会话锁 / pending 只读探针 ----
+
+def _aik_home():
+    """与 shell 相同的 HOME；systemd 未设置时为 /root。"""
+    return os.environ.get("HOME") or "/root"
+
+
+def valid_session(session):
+    return isinstance(session, str) and bool(SESSION_RE.match(session))
+
+
+def new_session():
+    return SESSION_PREFIX + secrets.token_hex(16)
+
+
+def valid_nonce(nonce):
+    return isinstance(nonce, str) and bool(NONCE_RE.match(nonce))
+
+
+def session_lock(session):
+    """同一 API 会话串行执行；不同会话并发。锁表有上限。"""
+    with SESSION_LOCKS_GUARD:
+        lk = SESSION_LOCKS.get(session)
+        if lk is None:
+            lk = threading.Lock()
+            SESSION_LOCKS[session] = lk
+        else:
+            SESSION_LOCKS.move_to_end(session)
+        if len(SESSION_LOCKS) > SESSION_LOCK_MAX:
+            for old, oldlk in list(SESSION_LOCKS.items()):
+                if old != session and not oldlk.locked():
+                    SESSION_LOCKS.pop(old, None)
+                    break
+        return lk
+
+
+def parse_tagged_event(stderr_text, tag):
+    """只解析匹配本次 128-bit tag 的 stderr 行。
+
+    返回 (event 或 None, error 或 None)。多行=协议错误（shell 只允许
+    恰好一行）；其他 stderr 内容忽略。tag 由 API 生成，模型/工具输出
+    无法预知（shell 在启动时已 unsetenv，工具子进程不可见）。
+    """
+    if not isinstance(tag, str) or not tag:
+        return None, "missing_tag"
+    prefix = "%s %s " % (EVENT_PREFIX, tag)
+    hits = []
+    for line in (stderr_text or "").splitlines():
+        if not line.startswith(prefix):
+            continue
+        raw = line[len(prefix):].strip()
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return None, "invalid_event_json"
+        hits.append(obj)
+    if not hits:
+        return None, None
+    if len(hits) > 1:
+        return None, "multiple_events"
+    return hits[0], None
+
+
+def clarify_order(clarify):
+    """显示顺序：推荐项置顶（与 TTY 菜单一致），其余保持模型顺序。"""
+    opts = clarify.get("options") if isinstance(clarify, dict) else None
+    if not isinstance(opts, list):
+        return []
+    order = list(range(len(opts)))
+    rec = clarify.get("recommended")
+    if isinstance(rec, str):
+        for i, o in enumerate(opts):
+            if isinstance(o, dict) and o.get("id") == rec:
+                order.remove(i)
+                order.insert(0, i)
+                break
+    return order
+
+
+def validate_clarify_event(ev):
+    """校验 shell 事件；返回错误字符串或 None（API 只接受规范事件）。"""
+    if not isinstance(ev, dict):
+        return "event 不是对象"
+    if ev.get("status") != "CLARIFY_REQUIRED":
+        return "event status 非法"
+    if not valid_nonce(ev.get("nonce")):
+        return "event nonce 非法"
+    q = ev.get("question")
+    if not isinstance(q, str) or not q.strip() or len(q) > 1024:
+        return "event question 非法"
+    opts = ev.get("options")
+    if not isinstance(opts, list) or not (2 <= len(opts) <= CLARIFY_MAX_OPTIONS):
+        return "event options 数量非法"
+    ids = set()
+    for o in opts:
+        if not isinstance(o, dict):
+            return "event option 非法"
+        oid = o.get("id")
+        label = o.get("label")
+        if not isinstance(oid, str) or not oid or oid in ids:
+            return "event option id 非法"
+        if not isinstance(label, str) or not label:
+            return "event option label 非法"
+        ids.add(oid)
+        for k in ("description", "why", "impact", "rollback", "danger"):
+            v = o.get(k)
+            if v is not None and not isinstance(v, str):
+                return "event option %s 非法" % k
+    rec = ev.get("recommended")
+    if rec is not None and rec not in ids:
+        return "event recommended 非法"
+    default = ev.get("default")
+    if default is not None and default not in ids:
+        return "event default 非法"
+    dangers = [ev.get("danger")]
+    dangers.extend(o.get("danger") for o in opts)
+    if default is not None and any(d in ("D3", "D4")
+                                   for d in dangers if isinstance(d, str)):
+        return "D3/D4 事件不得带 default"
+    return None
+
+
+def render_clarify_answer(ev, session):
+    """把事件渲染成人类可读 answer；不把原始 JSON 塞给旧客户端。"""
+    lines = []
+    header = ev.get("header")
+    if isinstance(header, str) and header.strip():
+        lines.append("【%s】" % header.strip())
+    else:
+        lines.append("需要澄清：")
+    lines.append(ev.get("question", ""))
+    opts = ev.get("options") or []
+    for n, idx in enumerate(clarify_order(ev), 1):
+        o = opts[idx] if 0 <= idx < len(opts) else {}
+        mark = "（推荐）" if o.get("id") == ev.get("recommended") else ""
+        lines.append("%d. %s%s" % (n, o.get("label", ""), mark))
+        desc = o.get("description")
+        if isinstance(desc, str) and desc:
+            lines.append("   " + desc)
+    if ev.get("multi_select"):
+        lines.append("可多选。")
+    rec = ev.get("recommended")
+    if isinstance(rec, str):
+        for o in opts:
+            if (isinstance(o, dict) and o.get("id") == rec and
+                    isinstance(o.get("why"), str) and o["why"]):
+                lines.append("推荐理由：%s" % o["why"])
+                break
+    lines.append('回复：POST /clarify {"nonce":"%s","session":"%s",'
+                 '"selection":["<选项 id 或序号>"]}' %
+                 (ev.get("nonce", ""), session))
+    return "\n".join(lines)
+
+
+def clarify_paths(nonce):
+    base = os.path.join(_aik_home(), ".aikernel", "clarify")
+    return (os.path.join(base, "pending", nonce + ".json"),
+            os.path.join(base, "consumed", nonce + ".json"))
+
+
+def read_pending(nonce):
+    """只读探针：pending/consumed/expired/invalid/unknown。
+
+    只用于 HTTP 状态码与 session 取锁；shell 的 C 端 pending_load/consume
+    仍是权威（原子 rename、TTL、session、选项集校验）。
+    """
+    if not valid_nonce(nonce):
+        return "invalid", None
+    pending, consumed = clarify_paths(nonce)
+    if not os.path.exists(pending):
+        if os.path.exists(consumed):
+            return "consumed", None
+        return "unknown", None
+    try:
+        fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                     getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return "unknown", None
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or
+                st.st_size > 65536 or (st.st_mode & 0o077) != 0):
+            return "invalid", None
+        chunks = []
+        remaining = st.st_size
+        while remaining > 0:
+            buf = os.read(fd, remaining)
+            if not buf:
+                break
+            chunks.append(buf)
+            remaining -= len(buf)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return "invalid", None
+    if (not isinstance(doc, dict) or doc.get("status") != "CLARIFY_PENDING" or
+            doc.get("version") != 1 or doc.get("nonce") != nonce or
+            not isinstance(doc.get("session"), str) or
+            not isinstance(doc.get("expires_at_ms"), int) or
+            not isinstance(doc.get("clarify"), dict)):
+        return "invalid", None
+    if doc["expires_at_ms"] <= int(time.time() * 1000):
+        return "expired", doc
+    return "pending", doc
+
+
+def normalize_selection(doc, selection, other):
+    """校验并归一化到选项 id（支持 id 或菜单序号）。
+
+    返回 (tokens, other, error)。tokens 为按选择顺序去重的 id 列表；
+    shell 的 ask_clarify_resolve_selection 再做一次权威校验。
+    """
+    clar = doc.get("clarify") if isinstance(doc, dict) else None
+    opts = clar.get("options") if isinstance(clar, dict) else None
+    if not isinstance(opts, list) or not opts:
+        return None, None, "pending options 非法"
+    ids = [o.get("id") for o in opts
+           if isinstance(o, dict) and isinstance(o.get("id"), str)]
+    if selection is None:
+        selection = []
+    if not isinstance(selection, list):
+        return None, None, "selection 必须是数组"
+    if other is not None and not isinstance(other, str):
+        return None, None, "other 必须是字符串"
+    other = (other or "").strip()
+    if len(other) > CLARIFY_MAX_TEXT or "\n" in other or "\r" in other:
+        return None, None, "other 非法（单行、≤%d 字符）" % CLARIFY_MAX_TEXT
+    order = clarify_order(clar)
+    chosen = []
+    seen = set()
+    for item in selection:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            return None, None, "selection 元素必须是字符串或整数"
+        tok = str(item).strip()
+        if not tok:
+            continue
+        if tok in ids:
+            oid = tok
+        elif tok.isdigit() and 1 <= int(tok) <= len(opts):
+            idx = order[int(tok) - 1]
+            oid = opts[idx].get("id")
+        else:
+            return None, None, "未知选项 %s" % tok
+        if oid not in seen:
+            seen.add(oid)
+            chosen.append(oid)
+    if not chosen and not other:
+        return None, None, "需要 selection 或 other"
+    if len(chosen) > 1 and not clar.get("multi_select"):
+        return None, None, "单选澄清只能选择一个选项"
+    return chosen, other, None
+
+
+def clarify_state_error(state):
+    """pending 探针状态 -> (HTTP code, error code, message)；pending 无错。"""
+    if state == "unknown":
+        return 404, "unknown_nonce", "未知或已过期的 clarify nonce"
+    if state == "consumed":
+        return 409, "already_consumed", "clarify 已被消费（重放被拒绝）"
+    if state == "expired":
+        return 410, "expired", "clarify 已过期，请重新发起 /ask"
+    if state == "invalid":
+        return 500, "invalid_pending", "clarify pending 记录非法"
+    return None, None, None
+
+
+def audit_line(tool, args, result):
+    """沿用 REPL audit 通道行格式追加 /var/log/ai-audit.log。"""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S+0000", time.gmtime())
+    line = "%s uid=%d user=%s mode=api tool=%s args=%s result=%s\n" % (
+        ts, os.getuid(), "root", tool,
+        json.dumps(args, ensure_ascii=False), result)
+    try:
+        fd = os.open(AUDIT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+# ============================================================
+# HTTP 层
+# ============================================================
+
+def ai_env():
+    """aikernel-shell 按 $HOME 找模型配置(~/.aikernel)、按
+    AIKERNEL_TOOLS_JSON 或 CWD 找 tools.json —— systemd 环境无 HOME
+    且 CWD=/ 时会 rc=1(No models configured / 无法读取 tools.json)，
+    故强制注入。
+
+    W77c-2b：API 从不继承预授权/确认 nonce；每次请求的事件 tag 与
+    澄清回答也由调用方显式注入，避免跨请求泄漏。"""
+    env = dict(os.environ)
+    env.setdefault("HOME", "/root")
+    env.setdefault("TERM", "xterm")
+    env.setdefault("AIKERNEL_TOOLS_JSON", TOOLS_JSON)
+    for k in ("AIKERNEL_ASSUME_YES", "AIKERNEL_CONFIRM_NONCE",
+              "AIKERNEL_EVENT_TAG", "AIKERNEL_PROMPT",
+              "AIKERNEL_CLARIFY_SELECT", "AIKERNEL_CLARIFY_OTHER"):
+        env.pop(k, None)
+    return env
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "AIKernelAPI/3.0"
+    protocol_version = "HTTP/1.1"
+
+    def _json(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _err(self, http_code, err, message, **extra):
+        # 形参名避开 code/param 等业务键：extra 可携带 "code": "NEED_CONFIRM"
+        self._json(http_code, err_body(err, message, **extra))
+
+    def _auth_error(self):
+        """无 Authorization -> 401；token 不对 -> 403。均审计。"""
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer ") or not hdr[7:].strip():
+            audit_line("api_auth", {"path": self.path,
+                                    "op": self.command}, "DENY_NO_TOKEN")
+            self._err(401, "unauthorized",
+                      "缺少 Bearer token（GET /health 探活除外亦需鉴权）")
+            return False
+        tok = effective_token()
+        if not tok or not hmac.compare_digest(hdr[7:].strip(), tok):
+            audit_line("api_auth", {"path": self.path,
+                                    "op": self.command}, "DENY_BAD_TOKEN")
+            self._err(403, "forbidden", "Bearer token 不正确或已轮换失效")
+            return False
+        return True
+
+    def _read_json(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 1 << 20:
+                return None, "request body too large"
+            raw = self.rfile.read(n).decode("utf-8") if n else "{}"
+            return json.loads(raw), None
+        except (ValueError, UnicodeDecodeError):
+            return None, "invalid json"
+
+    # ---- GET ----
+    def do_GET(self):
+        url = urlparse(self.path)
+        ep, kw = route_get(url.path, parse_qs(url.query))
+        if ep is None:
+            known = {"/ask": "POST", "/act": "POST", "/clarify": "POST"}
+            if url.path in known:
+                return self._err(405, "method_not_allowed",
+                                 "%s 只支持 %s" % (url.path, known[url.path]))
+            return self._err(404, "not found",
+                             "未知端点（可用：/health /tools /params /sense "
+                             "/ask /clarify /act）")
+        if not self._auth_error():
+            return
+
+        if ep == "health":
+            return self._do_health()
+        if ep == "tools":
+            return self._do_tools(**kw)
+        if ep == "params":
+            return self._do_params(**kw)
+        if ep == "sense":
+            return self._do_sense(**kw)
+
+    def _do_health(self):
+        services = {}
+        for svc in HEALTH_SERVICES:
+            try:
+                r = subprocess.run(
+                    ["systemctl", "is-active", svc + ".service"],
+                    capture_output=True, text=True, timeout=10)
+                services[svc] = (r.stdout or "").strip() or "unknown"
+            except Exception as e:
+                services[svc] = "error: %s" % e
+        audit_line("api_health", {}, "OK")
+        return self._json(200, {
+            "status": "ok", "services": services,
+            "api_version": API_VERSION,
+            "endpoints": ["/health", "/tools", "/params", "/sense",
+                          "/ask", "/clarify", "/act"],
+        })
+
+    def _do_tools(self, channel=None, risk=None):
+        try:
+            with open(TOOLS_JSON, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError) as e:
+            return self._err(500, "tools_json_unreadable", str(e))
+        out = tools_summary(doc, channel=channel, risk=risk)
+        audit_line("api_tools", {"channel": channel, "risk": risk,
+                                 "count": out["count"]}, "OK")
+        return self._json(200, out)
+
+    def _do_params(self, name=None):
+        params = read_control_params()
+        if not params:
+            return self._err(500, "control_unreadable",
+                             "无法读取 /proc/ai/control")
+        if name:
+            for p in params:
+                if p["name"] == name:
+                    audit_line("api_params", {"name": name}, "OK")
+                    return self._json(200, p)
+            return self._err(404, "unknown_param",
+                             "未知参数 %s（27 参数见 GET /params）" % name)
+        audit_line("api_params", {"count": len(params)}, "OK")
+        return self._json(200, {"count": len(params), "params": params})
+
+    def _do_sense(self, what=None, limit=None):
+        if not what or what not in SENSE_WHAT:
+            return self._err(404, "unknown_what",
+                             "what 取值：%s" % ", ".join(sorted(SENSE_WHAT)))
+        cap = SENSE_DEFAULT_LIMIT
+        if limit is not None:
+            try:
+                cap = int(limit)
+            except ValueError:
+                return self._err(400, "invalid_limit", "limit 须为整数")
+            if cap < 1 or cap > SENSE_MAX_LIMIT:
+                return self._err(400, "invalid_limit",
+                                 "limit 取值 1..%d" % SENSE_MAX_LIMIT)
+        try:
+            with open(SENSE_WHAT[what], "r",
+                      encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as e:
+            return self._err(500, "sense_unreadable", str(e))
+        kept, truncated, total = truncate_sample(content, cap,
+                                                 tail=(what == "telemetry"))
+        audit_line("api_sense", {"what": what, "limit": cap,
+                                 "truncated": truncated}, "OK")
+        return self._json(200, {"what": what, "node": SENSE_WHAT[what],
+                                "truncated": truncated,
+                                "total_bytes": total,
+                                "content": kept})
+
+    # ---- POST ----
+    def do_POST(self):
+        if self.path == "/ask":
+            return self._do_ask()
+        if self.path == "/clarify":
+            return self._do_clarify()
+        if self.path == "/act":
+            return self._do_act()
+        known = {"/health": "GET", "/tools": "GET", "/params": "GET",
+                 "/sense": "GET"}
+        if self.path in known:
+            return self._err(405, "method_not_allowed",
+                             "%s 只支持 %s" % (self.path, known[self.path]))
+        return self._err(404, "not found",
+                         "未知端点（可用：/health /tools /params /sense "
+                         "/ask /clarify /act）")
+
+    def _run_ai(self, argv, extra_env, timeout):
+        """stdin=DEVNULL：防止 API 进程在 TTY 中被 clarify/lease 阻塞。"""
+        env = ai_env()
+        env.update(extra_env)
+        return subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, env=env)
+
+    def _do_ask(self):
+        if not self._auth_error():
+            return
+        req, err = self._read_json()
+        if err:
+            return self._err(400, "invalid json", err)
+        req = req or {}
+        q = req.get("question")
+        if not isinstance(q, str) or not q.strip():
+            return self._err(400, "question required", "question 不能为空")
+        # env 传递上限：避免 execve E2BIG；NUL 无法进入环境变量
+        if len(q) > 65536 or "\x00" in q:
+            return self._err(400, "invalid_question",
+                             "question 过长（>64KiB）或含 NUL")
+        session = req.get("session") or new_session()
+        if not valid_session(session):
+            return self._err(400, "invalid_session",
+                             "session 必须以 api- 开头且只含 "
+                             "[A-Za-z0-9._-]（≤100）")
+        tag = secrets.token_hex(16)
+        lk = session_lock(session)
+        if not lk.acquire(timeout=ASK_TIMEOUT + 30):
+            return self._err(503, "session_busy",
+                             "同一 session 有请求在处理，请稍后重试")
+        try:
+            try:
+                # 问题经 AIKERNEL_PROMPT 传入，不进入 argv；stdin=DEVNULL
+                r = self._run_ai(
+                    [AI_BIN, "-p", "-", "-s", session],
+                    {"AIKERNEL_EVENT_TAG": tag, "AIKERNEL_PROMPT": q},
+                    ASK_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return self._err(504, "ai timeout",
+                                 "ai 超时（上限 %ds）" % ASK_TIMEOUT)
+            except FileNotFoundError:
+                return self._err(502, "ai binary missing",
+                                 "%s 不存在" % AI_BIN)
+            stdout = r.stdout or ""
+            if r.returncode != 0:
+                return self._err(502, "ai failed",
+                                 "ai rc=%d" % r.returncode,
+                                 detail=(r.stderr or "")[-400:])
+            ev, eerr = parse_tagged_event(r.stderr or "", tag)
+            if eerr:
+                return self._err(502, "clarify_protocol_error", eerr)
+            if ev is not None:
+                verr = validate_clarify_event(ev)
+                if verr:
+                    return self._err(502, "clarify_protocol_error", verr)
+                st, doc = read_pending(ev["nonce"])
+                if st != "pending" or (doc or {}).get("session") != session:
+                    return self._err(502, "clarify_state_mismatch",
+                                     "事件 nonce 与 pending/session 不一致")
+                answer = render_clarify_answer(ev, session)
+                clar = dict(ev)
+                clar["session"] = session
+                audit_line("api_ask_clarify",
+                           {"len": len(q), "nonce": ev["nonce"][:12],
+                            "n_options": len(ev.get("options") or []),
+                            "danger": ev.get("danger", "")},
+                           "CLARIFY_REQUIRED")
+                return self._json(200, {
+                    "status": "clarify_required",
+                    "session": session,
+                    "answer": answer,
+                    "clarify": clar,
+                })
+            # 旧 shell/事件丢失时 fail closed：绝不把裸 JSON 当最终答案
+            if "CLARIFY_REQUIRED" in stdout:
+                return self._err(502, "clarify_event_missing",
+                                 "shell 未发出 tagged 事件（协议错误）")
+            audit_line("api_ask", {"len": len(q)}, "OK")
+            return self._json(200, {"status": "ok", "session": session,
+                                    "answer": stdout.strip()})
+        finally:
+            lk.release()
+
+    def _do_clarify(self):
+        if not self._auth_error():
+            return
+        req, err = self._read_json()
+        if err:
+            return self._err(400, "invalid json", err)
+        req = req or {}
+        nonce = req.get("nonce")
+        session = req.get("session")
+        if not valid_nonce(nonce):
+            return self._err(400, "invalid_nonce",
+                             "nonce 必须以 cq- 开头且只含 [A-Za-z0-9._-]")
+        if not valid_session(session):
+            return self._err(400, "invalid_session",
+                             "session 必须是 /ask 返回的 api-... 会话")
+        state, doc = read_pending(nonce)
+        code, ecode, emsg = clarify_state_error(state)
+        if code:
+            audit_line("api_clarify", {"nonce": nonce[:12],
+                                       "session": session[:24]}, ecode)
+            return self._err(code, ecode, emsg)
+        if doc.get("session") != session:
+            return self._err(409, "session_mismatch",
+                             "session 与 pending 记录不一致")
+        tokens, other, nerr = normalize_selection(
+            doc, req.get("selection", []), req.get("other"))
+        if nerr:
+            return self._err(400, "invalid_selection", nerr)
+        lk = session_lock(session)
+        if not lk.acquire(timeout=ASK_TIMEOUT + 30):
+            return self._err(503, "session_busy",
+                             "同一 session 有请求在处理，请稍后重试")
+        try:
+            # 取锁后重查：防止与并发 /clarify、过期或消费竞态
+            state, doc = read_pending(nonce)
+            code, ecode, emsg = clarify_state_error(state)
+            if code:
+                return self._err(code, ecode, emsg)
+            if doc.get("session") != session:
+                return self._err(409, "session_mismatch",
+                                 "session 与 pending 记录不一致")
+            tag = secrets.token_hex(16)
+            extra = {"AIKERNEL_EVENT_TAG": tag}
+            if tokens:
+                extra["AIKERNEL_CLARIFY_SELECT"] = ",".join(tokens)
+            if other:
+                extra["AIKERNEL_CLARIFY_OTHER"] = other
+            try:
+                # 回答经环境变量传入，不进入 argv；stdin=DEVNULL
+                r = self._run_ai(
+                    [AI_BIN, "--clarify-answer", nonce, "-s", session],
+                    extra, ASK_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return self._err(504, "ai timeout",
+                                 "ai 超时（上限 %ds）" % ASK_TIMEOUT)
+            except FileNotFoundError:
+                return self._err(502, "ai binary missing",
+                                 "%s 不存在" % AI_BIN)
+            stdout = r.stdout or ""
+            if r.returncode != 0:
+                state2, _ = read_pending(nonce)
+                if state2 == "consumed":
+                    return self._err(409, "already_consumed",
+                                     "clarify 已被消费（重放被拒绝）")
+                return self._err(502, "ai failed",
+                                 "ai rc=%d" % r.returncode,
+                                 detail=(r.stderr or "")[-400:])
+            ev, eerr = parse_tagged_event(r.stderr or "", tag)
+            if eerr:
+                return self._err(502, "clarify_protocol_error", eerr)
+            if ev is not None:
+                verr = validate_clarify_event(ev)
+                if verr:
+                    return self._err(502, "clarify_protocol_error", verr)
+                st2, doc2 = read_pending(ev["nonce"])
+                if st2 != "pending" or (doc2 or {}).get("session") != session:
+                    return self._err(502, "clarify_state_mismatch",
+                                     "事件 nonce 与 pending/session 不一致")
+                answer = render_clarify_answer(ev, session)
+                clar = dict(ev)
+                clar["session"] = session
+                audit_line("api_clarify",
+                           {"nonce": nonce[:12], "n_selection": len(tokens),
+                            "danger": (doc.get("clarify") or {}).get(
+                                "danger", "")},
+                           "CLARIFY_REQUIRED")
+                return self._json(200, {
+                    "status": "clarify_required",
+                    "session": session,
+                    "answer": answer,
+                    "clarify": clar,
+                })
+            if "CLARIFY_REQUIRED" in stdout:
+                return self._err(502, "clarify_event_missing",
+                                 "shell 未发出 tagged 事件（协议错误）")
+            audit_line("api_clarify",
+                       {"nonce": nonce[:12], "n_selection": len(tokens),
+                        "danger": (doc.get("clarify") or {}).get(
+                            "danger", "")}, "OK")
+            return self._json(200, {"status": "ok", "session": session,
+                                    "answer": stdout.strip()})
+        finally:
+            lk.release()
+
+    def _do_act(self):
+        if not self._auth_error():
+            return
+        req, err = self._read_json()
+        if err:
+            return self._err(400, "invalid json", err)
+        req = req or {}
+        param = req.get("param")
+        value = req.get("value")
+        pid = req.get("pid")
+        confirm = req.get("confirm") is True
+
+        if not isinstance(param, str) or not param.strip():
+            return self._err(400, "param required",
+                             'body 需 {"param": "...", "value": N}')
+        param = param.strip()
+        if isinstance(value, str):
+            try:
+                value = int(value, 0)
+            except ValueError:
+                value = None
+        if isinstance(pid, str):
+            try:
+                pid = int(pid)
+            except ValueError:
+                pid = None
+
+        params = read_control_params()
+        pdef = None
+        for p in params:
+            if p["name"] == param:
+                pdef = p
+                break
+        code, msg = validate_act(pdef, value, pid)
+        if code == 404:
+            return self._err(404, "unknown_param", msg,
+                             allowed="GET /params")
+        if code == 400:
+            extra = {}
+            if pdef is not None:
+                extra = {"min": pdef["min"], "max": pdef["max"]}
+            return self._err(400, "invalid_value", msg, **extra)
+
+        if not confirm:
+            audit_line("api_act", {"param": param, "value": value,
+                                   "pid": pid, "confirm": False},
+                       "NEED_CONFIRM")
+            return self._err(409, "need_confirm",
+                             "受控写需显式确认：重发并带 \"confirm\": true",
+                             code="NEED_CONFIRM", param=param, value=value,
+                             pid=pid, current=pdef["current"],
+                             min=pdef["min"], max=pdef["max"],
+                             default=pdef["default"],
+                             task_scoped=pdef["task_scoped"])
+
+        ack, nerr = nl_act(param, value, pid)
+        if ack is None:
+            audit_line("api_act", {"param": param, "value": value,
+                                   "pid": pid, "confirm": True},
+                       "ERR: %s" % nerr)
+            return self._err(502, "kernel_rejected", nerr)
+        if ack["ai_err"] != 0:
+            audit_line("api_act", {"param": param, "value": value,
+                                   "pid": pid, "confirm": True},
+                       "ERR: ai_err=%d" % ack["ai_err"])
+            return self._err(502, "kernel_rejected",
+                             "内核 ai_err=%d（策略未执行）" % ack["ai_err"],
+                             executed=ack["executed"], hit=ack["hit"])
+        if ack["executed"] == 0:
+            audit_line("api_act", {"param": param, "value": value,
+                                   "pid": pid, "confirm": True},
+                       "NOT_APPLIED")
+            return self._err(409, "not_applied",
+                             "策略未命中（0 条执行）：参数未注册或被安全策略过滤",
+                             executed=0, hit=0)
+        after = pdef["current"]
+        for p in read_control_params():
+            if p["name"] == param:
+                after = p["current"]
+                break
+        audit_line("api_act", {"param": param, "value": value, "pid": pid,
+                               "confirm": True, "current_after": after}, "OK")
+        return self._json(200, {"ok": True, "param": param, "value": value,
+                                "pid": pid, "executed": ack["executed"],
+                                "hit": ack["hit"], "current_before":
+                                    pdef["current"], "current_after": after})
+
+    def log_message(self, fmt, *args):
+        print("[aikernel-api] %s %s" % (self.address_string(), fmt % args),
+              flush=True)
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def main():
+    cfg = load_api_config()
+    bind = cfg.get("bind") if isinstance(cfg.get("bind"), str) else BIND_HOST
+    port = cfg.get("port") if isinstance(cfg.get("port"), int) else BIND_PORT
+    tls = cfg.get("tls") is True
+    cert = cfg.get("cert") if isinstance(cfg.get("cert"), str) else ""
+    key = cfg.get("key") if isinstance(cfg.get("key"), str) else ""
+
+    loopback = bind in ("127.0.0.1", "localhost", "::1")
+    if not loopback:
+        warn = ("api 绑定非回环地址 %s —— 对外暴露必须配 TLS+token，"
+                "并确认防火墙（nft 默认 drop 仅放行 22）" % bind)
+        print("[aikernel-api] WARN: %s" % warn, flush=True)
+        audit_line("api_bind", {"bind": bind, "tls": tls},
+                   "WARN_NON_LOOPBACK")
+
+    if tls:
+        if not cert or not key or not (os.path.exists(cert) and
+                                       os.path.exists(key)):
+            print("[aikernel-api] FATAL: tls=true 但证书/私钥缺失"
+                  "（model.toml [api] cert/key），拒绝以半配置启动",
+                  flush=True)
+            sys.exit(1)
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+
+    srv = Server((bind, port), Handler)
+    if tls:
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    print("[aikernel-api] v%d listening on %s:%d (%s, Bearer token: "
+          "model.toml [api] token > %s)"
+          % (API_VERSION, bind, port,
+             "TLS" if tls else "明文（本机/SSH 隧道场景）", TOKEN_FILE),
+          flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

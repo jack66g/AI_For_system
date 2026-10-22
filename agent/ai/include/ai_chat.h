@@ -82,6 +82,8 @@ char *ai_chat_build_request_json(const char *model_name,
  * @stream: 1=请求 SSE 流式响应，并携带
  *          stream_options.include_usage（末帧回传 usage 真值）；
  *          0=与 ai_chat_build_request_json 完全一致
+ * 不变式（T2 P0-1 兜底）：凡不紧跟在 assistant(tool_calls) 之后的
+ * role:tool 消息一律不序列化进请求体（孤儿剔除，防会话毒化 400）。
  */
 char *ai_chat_build_request_json_ex(const char *model_name,
 				    const struct ai_chat_msg *msgs,

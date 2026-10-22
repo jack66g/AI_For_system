@@ -15,6 +15,8 @@
 
 #include "ai_types.h"
 #include <linux/types.h>
+#include <linux/refcount.h>
+#include <linux/completion.h>
 
 /* ---- 模型来源 ---- */
 
@@ -30,6 +32,7 @@ enum ai_model_state {
 	AI_MODEL_STATE_UNLOADED = 0,  /* 未加载 */
 	AI_MODEL_STATE_LOADED   = 1,  /* 已加载可用 */
 	AI_MODEL_STATE_ERROR    = 2,  /* 加载失败/出错 */
+	AI_MODEL_STATE_LOADING  = 3,  /* 已入册但 ops->load 未完成（读侧拒见） */
 };
 
 /* ---- 模型操作抽象（加载器接口） ---- */
@@ -69,6 +72,9 @@ struct ai_model {
 	void                    *private_data;          /* 模型私有数据 */
 	u32                     id;                     /* runtime 分配句柄（load 时回填，1 起） */
 	enum ai_model_state     state;                  /* 模型状态 */
+	refcount_t              refcount;               /* 引用计数：注册表 1 + 在途读者 */
+	bool                    dying;                  /* 已退册：拒绝新引用，等待旧引用归零 */
+	struct completion       ref_done;               /* 引用归零完成量（unload 等待用） */
 };
 
 /* ---- 模型注册/注销（实现于 ai_runtime.c） ---- */
@@ -79,8 +85,11 @@ struct ai_model {
  * ai_model_load() - 注册并加载一个模型到 AI Runtime
  * @model: 模型描述符（name/source/ops 必须有效）
  *
- * 将模型挂入 runtime 模型注册表并回填 model->id；若 ops->load 存在则调用之。
- * 返回 AI_OK 或负错误码。
+ * 先将模型以 LOADING 状态入册并回填 model->id，随后执行 ops->load；
+ * 只有 ops->load 成功后状态才转 LOADED，此时才允许被 chat/infer/find 看到。
+ * 任何读者看到 LOADED 时模型内部初始化已完成。ops->load 可睡眠，调用时
+ * 不持自旋锁（仅持可睡眠的模型生命周期互斥量）。返回 AI_OK 或负错误码；
+ * 失败时注册表项移除、model->state=ERROR，ops->load 的失败清理由 loader 负责。
  */
 int ai_model_load(struct ai_model *model);
 
@@ -88,7 +97,9 @@ int ai_model_load(struct ai_model *model);
  * ai_model_unload() - 从 AI Runtime 注销并卸载一个模型
  * @model: 之前 ai_model_load() 注册过的描述符
  *
- * 返回 AI_OK 或负错误码。
+ * 退册（拒绝新引用）→ 等待在途引用归零 → 调用 ops->unload。可能睡眠；
+ * 不得在原子上下文调用。ops->unload 可释放 model 本身，返回后不可再解引用。
+ * 返回 AI_OK 或负错误码（LOADING 中返回 AI_ERR_BUSY）。
  */
 int ai_model_unload(struct ai_model *model);
 

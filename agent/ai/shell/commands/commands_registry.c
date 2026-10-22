@@ -84,9 +84,9 @@ static struct ai_command command_table[] = {
 	{
 		.name        = "session",
 		.description = "Manage persistent chat sessions",
-		.usage       = "session <new|list|switch|save|delete|show> [args]",
+		.usage       = "session [<new|list|switch|save|delete|show>] [args]",
 		.handler     = cmd_session,
-		.min_args    = 1,
+		.min_args    = 0,
 		.max_args    = -1,
 	},
 	{
@@ -108,11 +108,68 @@ static struct ai_command command_table[] = {
 	{
 		.name        = "shell",
 		.description = "Escape to bash maintenance shell (exit to "
-			       "return), or just ask the AI: 帮我打开一个 shell",
+			       "return), or just ask the AI: open a shell "
+			       "for me",
 		.usage       = "shell",
 		.handler     = cmd_shell,
 		.min_args    = 0,
 		.max_args    = 0,
+	},
+	{
+		.name        = "lang",
+		.description = "Show/switch UI language (zh|en, persisted)",
+		.usage       = "lang [zh|en]",
+		.handler     = cmd_lang,
+		.min_args    = 0,
+		.max_args    = 1,
+	},
+	{
+		.name        = "plan",
+		.description = "Enter plan (read-only research) mode",
+		.usage       = "plan",
+		.handler     = cmd_plan,
+		.min_args    = 0,
+		.max_args    = 0,
+	},
+	{
+		.name        = "unplan",
+		.description = "Exit plan mode (full tool access restored)",
+		.usage       = "unplan",
+		.handler     = cmd_unplan,
+		.min_args    = 0,
+		.max_args    = 0,
+	},
+	{
+		.name        = "tools",
+		.description = "List tool registry (filter by channel/keyword)",
+		.usage       = "tools [channel|keyword]",
+		.handler     = cmd_tools,
+		.min_args    = 0,
+		.max_args    = 1,
+	},
+	{
+		.name        = "sandbox",
+		.description = "Manage sandboxes (status/create/destroy)",
+		.usage       = "sandbox <status|create|destroy> [name]",
+		.handler     = cmd_sandbox,
+		.min_args    = 1,
+		.max_args    = 2,
+	},
+	{
+		.name        = "trace",
+		.description = "AI trajectory logs (stats/dump/export)",
+		.usage       = "trace <stats|dump|export> [options]",
+		.handler     = cmd_trace,
+		.min_args    = 0,
+		.max_args    = -1,
+	},
+	{
+		.name        = "lease",
+		.description = "Manage authority leases (list/show/issue/revoke/pending/confirm)",
+		.usage       = "lease <list|show|issue|revoke|pending|confirm> [args]",
+		.handler     = cmd_lease,
+		.min_args    = 1,
+		.max_args    = -1,
 	},
 	/* 哨兵 */
 	{

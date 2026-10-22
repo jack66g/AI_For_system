@@ -27,8 +27,12 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/select.h>
+#include <sys/time.h>
 
 #include "policy/ai_user_policy.h"
+#include "ai_lang.h"
+#include "ai_trace.h"   /* W48B：策略判定轨迹 */
 
 /* ---- 模块内状态 ---- */
 
@@ -128,8 +132,7 @@ static int parse_conf(FILE *fp)
 			char *end = strchr(s, ']');
 
 			if (!end) {
-				fprintf(stderr,
-					"ai_policy: %s:%d 段头缺少 ']'，忽略\n",
+				fprintf(stderr, tr(TR_POLICY_CONF_NO_BRACKET),
 					g_conf_path, lineno);
 				continue;
 			}
@@ -143,8 +146,7 @@ static int parse_conf(FILE *fp)
 			char *eq = strchr(s, '=');
 
 			if (!eq) {
-				fprintf(stderr,
-					"ai_policy: %s:%d 缺少 '='，忽略\n",
+				fprintf(stderr, tr(TR_POLICY_CONF_NO_EQ),
 					g_conf_path, lineno);
 				continue;
 			}
@@ -204,8 +206,8 @@ int ai_policy_init(const char *conf_path)
 
 	fp = fopen(path, "r");
 	if (!fp) {
-		fprintf(stderr, "ai_policy: 配置 %s 不可读（%s），"
-			"回落 restricted 兜底\n", path, strerror(errno));
+		fprintf(stderr, tr(TR_POLICY_CONF_UNREAD), path,
+			strerror(errno));
 		return 1;
 	}
 	snprintf(g_conf_path, sizeof(g_conf_path), "%s", path);
@@ -405,12 +407,24 @@ static void sanitize(char *buf, size_t cap, const char *src)
 int ai_policy_audit(uid_t uid, enum ai_policy_mode mode,
 		    const char *tool, const char *args, const char *result)
 {
+	return ai_policy_audit_ex(uid, mode, tool, args, result,
+				  NULL, NULL, NULL);
+}
+
+int ai_policy_audit_ex(uid_t uid, enum ai_policy_mode mode,
+		       const char *tool, const char *args, const char *result,
+		       const char *lease_id, const char *danger,
+		       const char *confirm_source)
+{
 	char path[600];
 	char tstamp[40];
 	char args_1l[256];
 	char tool_1l[128];
 	char result_1l[32];
-	char line[1024];
+	char lease_1l[80];
+	char danger_1l[16];
+	char confirm_1l[32];
+	char line[1600];
 	struct ai_pw_ent pw_ent;
 	int have_pw;
 	const char *home = getenv("HOME");
@@ -429,44 +443,51 @@ int ai_policy_audit(uid_t uid, enum ai_policy_mode mode,
 	sanitize(tool_1l, sizeof(tool_1l), tool);
 	sanitize(args_1l, sizeof(args_1l), args);
 	sanitize(result_1l, sizeof(result_1l), result);
+	sanitize(lease_1l, sizeof(lease_1l), lease_id && lease_id[0] ?
+		 lease_id : "-");
+	sanitize(danger_1l, sizeof(danger_1l), danger && danger[0] ?
+		 danger : "-");
+	sanitize(confirm_1l, sizeof(confirm_1l), confirm_source &&
+		 confirm_source[0] ? confirm_source : "none");
 
 	/* 审计落盘到目标用户家目录：优先 HOME，其次 passwd */
 	if (!home || !home[0])
 		home = have_pw ? pw_ent.dir : NULL;
 	if (!home || !home[0]) {
-		fprintf(stderr, "ai_policy: 无家目录可写审计\n");
+		fprintf(stderr, "%s", tr(TR_POLICY_AUDIT_NO_HOME));
 		return -1;
 	}
 	snprintf(path, sizeof(path), "%s/.aikernel", home);
 	if (mkdir(path, 0700) != 0 && errno != EEXIST) {
-		fprintf(stderr, "ai_policy: mkdir %s: %s\n",
-			path, strerror(errno));
+		fprintf(stderr, tr(TR_POLICY_AUDIT_MKDIR), path,
+			strerror(errno));
 		return -1;
 	}
 	snprintf(path, sizeof(path), "%s/.aikernel/audit.log", home);
 
 	fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
 	if (fd < 0) {
-		fprintf(stderr, "ai_policy: open %s: %s\n",
-			path, strerror(errno));
+		fprintf(stderr, tr(TR_POLICY_AUDIT_OPEN), path,
+			strerror(errno));
 		return -1;
 	}
 
 	/* flock 防多进程写交错；单次 write 保证行原子 */
 	if (flock(fd, LOCK_EX) != 0) {
-		fprintf(stderr, "ai_policy: flock %s: %s\n",
-			path, strerror(errno));
+		fprintf(stderr, tr(TR_POLICY_AUDIT_FLOCK), path,
+			strerror(errno));
 		/* 拿不到锁也继续写（O_APPEND 仍尽量原子） */
 	}
 	n = snprintf(line, sizeof(line),
-		     "%s uid=%u user=%s mode=%s tool=%s args=%s result=%s\n",
+		     "%s uid=%u user=%s mode=%s tool=%s args=%s result=%s"
+		     " lease=%s danger=%s confirm=%s\n",
 		     tstamp, (unsigned)uid,
 		     have_pw ? pw_ent.name : "?",
 		     ai_policy_mode_name(mode),
-		     tool_1l, args_1l, result_1l);
+		     tool_1l, args_1l, result_1l,
+		     lease_1l, danger_1l, confirm_1l);
 	if (n > 0 && write(fd, line, (size_t)n) != (ssize_t)n) {
-		fprintf(stderr, "ai_policy: write 审计失败: %s\n",
-			strerror(errno));
+		fprintf(stderr, tr(TR_POLICY_AUDIT_WRITE), strerror(errno));
 		rc = -1;
 	}
 	flock(fd, LOCK_UN);
@@ -476,36 +497,207 @@ int ai_policy_audit(uid_t uid, enum ai_policy_mode mode,
 
 /* ---- W2 二次确认交互 ---- */
 
+/* 预授权开关（修复 10：--yes / AIKERNEL_ASSUME_YES，无人值守通道） */
+static int g_assume_yes;
+static int g_plan_mode;	/* W43：plan 只读模式（会话级，不落盘） */
+
+/*
+ * W20 修4：确认应答读取（单键 + 窗口超时 + 陈旧输入防护）
+ *
+ * T3 C3 根因：原实现用裸 fgets 在确认面板里等整行——确认挂起期间
+ * 到达的任何输入（执行器错位发出的下一场景文本）都被当作应答消费，
+ * 而执行器随后补发的 y 又成了 REPL 的新输入行，形成"确认状态跨
+ * 场景泄漏"（C2 的确认面板吞掉 C3 的任务文本，C3 完全未执行）。
+ * 三重防护：
+ *   1. 陈旧输入防护——面板弹出前 stdin 已滞留的可读字节不是本确认
+ *      的应答（应答只能晚于面板），绝不消费，立即拒绝；输入留给
+ *      REPL 排队层按正常指令处理；
+ *   2. 窗口超时——面板显示后最多等 W2_CONFIRM_WAIT_MS，超时视为
+ *      拒绝（确认未明 = 不执行，安全缺省）；
+ *   3. 单键语义——只认 y/Y（首字符），与原"只认 y/yes"判定等价；
+ *      逐字节 read，兼容 REPL 执行期关闭 ICANON 的 raw 模式。
+ */
+#define W2_CONFIRM_WAIT_MS   8000
+
+static long w2_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* stdin 是否已有可读字节（只探测，不消费） */
+static int w2_stdin_readable(void)
+{
+	fd_set rf;
+	struct timeval tv;
+
+	FD_ZERO(&rf);
+	FD_SET(STDIN_FILENO, &rf);
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+	return select(STDIN_FILENO + 1, &rf, NULL, NULL, &tv) > 0;
+}
+
+/* 丢弃本行剩余字节（到 '\n' 为止；防残行串扰后续输入） */
+static void w2_drain_line(void)
+{
+	char c;
+
+	while (read(STDIN_FILENO, &c, 1) == 1 && c != '\n')
+		;
+}
+
+/*
+ * w2_confirm_read - 窗口内读确认应答（单键）
+ * 返回: 1=确认(y/Y)，0=拒绝/超时/EOF。读到应答字符后吞掉行尾。
+ */
+static int w2_confirm_read(void)
+{
+	long deadline = w2_now_ms() + W2_CONFIRM_WAIT_MS;
+
+	for (;;) {
+		long remain = deadline - w2_now_ms();
+		fd_set rf;
+		struct timeval tv;
+		ssize_t rr;
+		char c;
+
+		if (remain <= 0)
+			return 0;           /* 超时：确认未明 = 拒绝 */
+		FD_ZERO(&rf);
+		FD_SET(STDIN_FILENO, &rf);
+		tv.tv_sec = (long)(remain / 1000);
+		tv.tv_usec = (long)((remain % 1000) * 1000);
+		{
+			int sr = select(STDIN_FILENO + 1, &rf, NULL, NULL,
+					&tv);
+
+			if (sr < 0) {
+				if (errno == EINTR)
+					continue;
+				return 0;
+			}
+			if (sr == 0)
+				return 0;   /* 窗口耗尽 */
+		}
+		rr = read(STDIN_FILENO, &c, 1);
+		if (rr <= 0)
+			return 0;           /* EOF */
+		if (c == '\n' || c == '\r')
+			continue;           /* 空行：继续等 */
+		w2_drain_line();
+		return c == 'y' || c == 'Y';
+	}
+}
+
+/*
+ * w2_take_stale_reply - W20 修4b：消费面板前滞留的"单键应答形态"行
+ *
+ * T3 C3 修复（陈旧输入绝不消费）在编排场景暴露误伤面：执行器检测
+ * 到 AI 回答文字里的"确认"字样会提前发出 y（W20 D3 四轮实测：滞留
+ * y → 真实面板被陈旧防护拒绝 → CONFIRM=no ×2）。折中语义：
+ *   - 滞留行首字节为 y/Y/n/N（确认应答形态）→ 消费整行并按其意图
+ *     判定（编排方提前应答视作预授权/预拒绝；审计由 gate 层以
+ *     CONFIRM=yes/no 落盘，语义真实）；
+ *   - 其他形态（用户下一条指令文本，T3 C3 场景）→ 整行忽略并明确
+ *     提示（行边界完整，不吞半个字），本次确认按拒绝处理。
+ * 返回: 1=滞留 y（确认），0=滞留 n 或非应答形态（拒绝）。
+ */
+static int w2_take_stale_reply(void)
+{
+	char c;
+	ssize_t rr = read(STDIN_FILENO, &c, 1);
+
+	if (rr <= 0)
+		return 0;
+	w2_drain_line();
+	return c == 'y' || c == 'Y';
+}
+
+void ai_policy_set_assume_yes(int on)
+{
+	g_assume_yes = on ? 1 : 0;
+}
+
+int ai_policy_get_assume_yes(void)
+{
+	return g_assume_yes;
+}
+
+/*
+ * ai_policy_set_plan_mode / ai_policy_get_plan_mode（W43）
+ * plan（规划）只读模式开关：生效点在 executor.c 工具闸门
+ * （非 R 级一律拒绝）与 cmd_ask.c 系统提示注入；本模块只持状态位。
+ */
+void ai_policy_set_plan_mode(int on)
+{
+	g_plan_mode = on ? 1 : 0;
+}
+
+int ai_policy_get_plan_mode(void)
+{
+	return g_plan_mode;
+}
+
 int ai_policy_confirm_interactive(const char *tool, const char *args,
 				  const char *impact_desc)
 {
-	char answer[32];
+	/* 修复 10：预授权（--yes / AIKERNEL_ASSUME_YES）下自动确认。
+	 * 这是调用方的显式授权决定，审计仍全量落盘（CONFIRM=yes(auto)） */
+	if (g_assume_yes) {
+		fprintf(stderr, tr(TR_W2_AUTO_YES), tool ? tool : "?");
+		return 1;
+	}
 
 	/* 无人值守（非 tty）不可确认：安全兜底拒绝 */
 	if (!isatty(STDIN_FILENO)) {
-		fprintf(stderr,
-			"ai_policy: NEED_CONFIRM 但 stdin 非终端，拒绝\n");
+		fprintf(stderr, "%s", tr(TR_W2_NO_TTY));
 		return 0;
 	}
 
-	/* 红色 ANSI：完整影响面（工具/参数/影响描述） */
-	fprintf(stderr,
-		"\033[1;31m[W2 高影响操作 需要确认]\033[0m\n"
-		"\033[1;31m  工具: %s\033[0m\n"
-		"\033[1;31m  参数: %s\033[0m\n"
-		"\033[1;31m  影响: %s\033[0m\n",
-		tool ? tool : "?", args && args[0] ? args : "{}",
-		impact_desc && impact_desc[0] ? impact_desc : "(见工具描述)");
-	fprintf(stderr, "确认执行? [y/N] ");
+	/* W20 修4/4b：面板弹出前 stdin 已滞留的输入——单键应答形态
+	 * （y/n，编排方提前发出）消费并按意图判定；其他形态（用户
+	 * 下一条指令）忽略整行，本次确认按拒绝处理，绝不吞用户指令 */
+	if (w2_stdin_readable()) {
+		int stale = w2_take_stale_reply();
+
+		fprintf(stderr, "%s", tr(TR_W2_STALE_INPUT));
+		return stale;
+	}
+
+	/* 红色 ANSI：完整影响面（工具/参数/影响描述）。
+	 * W20：参数超长时截断显示（exec input 可达 60KB，面板不可刷屏） */
+	{
+		char args_show[280];
+
+		if (args && args[0]) {
+			size_t al = strlen(args);
+
+			if (al >= sizeof(args_show)) {
+				memcpy(args_show, args,
+				       sizeof(args_show) - 4);
+				args_show[sizeof(args_show) - 4] = '\0';
+				strcat(args_show, "...");
+			} else {
+				memcpy(args_show, args, al + 1);
+			}
+		} else {
+			args_show[0] = '\0';
+		}
+		fprintf(stderr, tr(TR_W2_PANEL),
+			tool ? tool : "?",
+			args_show[0] ? args_show : "{}",
+			impact_desc && impact_desc[0] ? impact_desc :
+			tr(TR_W2_IMPACT_FALLBACK));
+	}
+	fprintf(stderr, "%s", tr(TR_W2_CONFIRM));
 	fflush(stderr);
 
-	if (!fgets(answer, sizeof(answer), stdin))
-		return 0;
-	/* 只认 y/yes（任意大小写），其余（含回车）一律不执行 */
-	for (char *p = answer; *p; p++)
-		*p = (char)tolower((unsigned char)*p);
-	return !strcmp(str_trim(answer), "y") ||
-	       !strcmp(str_trim(answer), "yes");
+	/* W20 修4：窗口内单键应答（超时=拒绝），替代裸 fgets——
+	 * 后者在确认挂起期间会吞掉用户/执行器的下一行输入 */
+	return w2_confirm_read();
 }
 
 /* ---- 一站式闸门 ---- */
@@ -532,24 +724,45 @@ int ai_policy_gate_reason(uid_t uid, const char *tool_name,
 	case AI_POLICY_ALLOW_AUTO:
 		ai_policy_audit(uid, mode, tool_name, args_json,
 				ai_policy_verdict_name(v));
+		ai_trace_policy_decision(risk == AI_RISK_W2 ? "W2" : "W1",
+					 "ALLOW", "policy_allow",
+					 tool_name, "auto", args_json);
 		return 1;
 	case AI_POLICY_NEED_CONFIRM: {
+		int unattended;
 		int ok = ai_policy_confirm_interactive(tool_name, args_json,
 						       impact_desc);
 
+		unattended = !ok && !g_assume_yes &&
+			     !isatty(STDIN_FILENO);
 		ai_policy_audit(uid, mode, tool_name, args_json,
-				ok ? "CONFIRM=yes" : "CONFIRM=no");
+				ok ? (g_assume_yes ? "CONFIRM=yes(auto)" :
+				      "CONFIRM=yes") :
+				     (unattended ? "CONFIRM=unattended" :
+				      "CONFIRM=no"));
+		ai_trace_policy_decision("W2",
+			ok ? "ALLOW" : (unattended ? "CONFIRM" : "DENY"),
+			ok ? "policy_allow" :
+			(unattended ? "needs_confirmation_no_tty" :
+			 "user_refused"),
+			tool_name,
+			ok ? (g_assume_yes ? "assume_yes" : "interactive") :
+			"none", args_json);
 		if (!ok && result)
-			*result = AI_GATE_USER_REFUSED;
+			*result = unattended ? AI_GATE_NEED_NO_TTY :
+					       AI_GATE_USER_REFUSED;
 		return ok;
 	}
 	case AI_POLICY_DENY:
 	default:
 		if (result)
 			*result = AI_GATE_POLICY_DENY;
-		fprintf(stderr, "权限不足：该操作需要 root（sudo ai）\n");
+		fprintf(stderr, "%s", tr(TR_W2_DENY));
 		ai_policy_audit(uid, mode, tool_name, args_json,
 				ai_policy_verdict_name(AI_POLICY_DENY));
+		ai_trace_policy_decision(risk == AI_RISK_W2 ? "W2" : "W1",
+					 "DENY", "policy_tier", tool_name,
+					 "none", args_json);
 		return 0;
 	}
 }

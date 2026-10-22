@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "ai_shell.h"
+#include "ai_lang.h"
 
 int cmd_status(void *shell_ptr, int argc, char **argv)
 {
@@ -121,12 +122,12 @@ int cmd_status(void *shell_ptr, int argc, char **argv)
 	printf("  local       : not compiled (CONFIG_AIKERNEL_LOCAL_PROVIDER=n)\n");
 #endif
 #ifdef CONFIG_AI_STREAM_MODE
-	printf("  streaming   : built-in (delta 逐段实时交付; config stream=%s)\n",
+	printf(tr(TR_ST_STREAMING_FMT),
 	       shell->config->ui.stream ? "on" : "off");
 #else
 	printf("  streaming   : not compiled (CONFIG_AIKERNEL_STREAM_MODE=n)\n");
 #endif
-	printf("  memory(SME) : external service 127.0.0.1:8760 (启用与否见工具描述)\n");
+	printf("%s", tr(TR_ST_SME));
 	printf("  kernel link : %s\n",
 	       access("/proc/aikernel", F_OK) == 0 ?
 	       "/proc/aikernel present" : "host kernel without AIKernel (reserved)");

@@ -22,6 +22,7 @@
 #include "ai_shell.h"
 #include "ai_ui.h"
 #include "ai_config.h"
+#include "ai_lang.h"
 #include "local/ollama_native.h"
 
 /* config set 的布尔键表 */
@@ -56,17 +57,23 @@ static void do_show(struct ai_shell *shell)
 
 	printf("%sconfig / UI%s\n", ui_c(color, UI_C_CYAN),
 	       ui_c(color, UI_C_RESET));
-	show_line(shell, "模型        ", "%s（默认 %s）",
-		  rt->current_model ? rt->current_model : "(未加载)",
-		  cfg->default_model ? cfg->default_model : "(未设置)");
+	show_line(shell, tr(TR_CFG_MODEL_LABEL), tr(TR_CFG_MODEL_FMT),
+		  rt->current_model ? rt->current_model : tr(TR_CFG_NOTLOADED),
+		  cfg->default_model ? cfg->default_model :
+		  tr(TR_CFG_NOTSET));
 	show_line(shell, "ctx_len     ", "%d", cfg->ui.ctx_len);
-	show_line(shell, "max_tokens  ", "%d", cfg->ui.max_tokens);
+	/* W20 修1：显示两档生效值（云端档/本地档），[ui] 档保留为本地兜底 */
+	show_line(shell, "max_tokens  ", "%d (cloud %d / local %d)",
+		  cfg->ui.max_tokens,
+		  ai_config_effective_max_tokens(cfg, "openai_compatible"),
+		  ai_config_effective_max_tokens(cfg, "local"));
 	show_line(shell, "stream      ", "%s", cfg->ui.stream ? "on" : "off");
 	show_line(shell, "local_api   ", "%s",
 		  cfg->ui.local_native ? "native (/api/chat)" : "v1 (/v1)");
 	show_line(shell, "color       ", "%s", cfg->ui.color ? "on" : "off");
 	show_line(shell, "verbose     ", "%s", cfg->ui.verbose ? "on" : "off");
 	show_line(shell, "session     ", "%s", cfg->ui.session);
+	show_line(shell, "lang        ", "%s", cfg->ui.lang);
 
 	/* usage：优先服务端真值，估算兜底（标记标注来源） */
 	ui_fmt_tokens(buf_in, sizeof(buf_in), rt->token_last_in);
@@ -78,10 +85,9 @@ static void do_show(struct ai_shell *shell)
 	pct = ui_ctx_percent(session_total, cfg->ui.ctx_len);
 
 	printf("  %susage%s\n", ui_c(color, UI_C_CYAN), ui_c(color, UI_C_RESET));
-	printf("  上次: %s in / %s out %s| 会话累计: %s tok"
-	       " | ctx 预算 %s%d%%%s（%s / %s）\n",
+	printf(tr(TR_CFG_USAGE_FMT),
 	       buf_in, buf_out,
-	       rt->usage_is_real ? "" : "(估算) ",
+	       rt->usage_is_real ? "" : tr(TR_CFG_EST),
 	       buf_total,
 	       pct > 80 ? ui_c(color, UI_C_YELLOW) : "",
 	       pct, pct > 80 ? ui_c(color, UI_C_RESET) : "",
@@ -126,9 +132,8 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 		int ret = AI_OK;
 
 		if (argc < 4) {
-			printf("Usage: config set <key> <value>\n");
-			printf("Keys: ctx_len max_tokens stream local_api "
-			       "color verbose session\n");
+			printf("%s", tr(TR_CFG_SET_USAGE));
+			printf("%s", tr(TR_CFG_KEYS_HINT));
 			return AI_ERR_INVALID_ARG;
 		}
 
@@ -136,7 +141,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 			int v = atoi(argv[3]);
 
 			if (v <= 0) {
-				printf("config: ctx_len 需为正整数\n");
+				printf("%s", tr(TR_CFG_CTX_POSINT));
 				return AI_ERR_INVALID_ARG;
 			}
 			/* 本地原生通道：按模型实际上限钳制（/api/show，
@@ -153,8 +158,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 					shell->runtime.model_name, v);
 
 				if (cap < v) {
-					printf("config: 模型 %s 窗口上限 %d，"
-					       "ctx_len %d 被钳制为 %d\n",
+					printf(tr(TR_CFG_CTX_CLAMP),
 					       shell->runtime.model_name,
 					       cap, v, cap);
 					v = cap;
@@ -168,7 +172,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 			int v = atoi(argv[3]);
 
 			if (v <= 0 || v > 131072) {
-				printf("config: max_tokens 需在 1-131072 之间\n");
+				printf("%s", tr(TR_CFG_MT_RANGE));
 				return AI_ERR_INVALID_ARG;
 			}
 			ui->max_tokens = v;
@@ -183,15 +187,13 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 				   strcmp(argv[3], "0") == 0);
 
 			if (!on && !off) {
-				printf("config: stream 取值 on|off\n");
+				printf("%s", tr(TR_CFG_STREAM_VAL));
 				return AI_ERR_INVALID_ARG;
 			}
 #ifndef CONFIG_AI_STREAM_MODE
 			/* 编译开关未编入流式：如实拒绝，不静默假开 */
 			if (on) {
-				printf("config: stream 未编译进本二进制"
-				       "（CONFIG_AIKERNEL_STREAM_MODE=n），"
-				       "保持 off\n");
+				printf("%s", tr(TR_CFG_STREAM_NOCOMP));
 				return AI_ERR_INVALID_ARG;
 			}
 #endif
@@ -204,7 +206,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 			} else if (strcmp(argv[3], "v1") == 0) {
 				ui->local_native = 0;
 			} else {
-				printf("config: local_api 取值 native|v1\n");
+				printf("%s", tr(TR_CFG_LOCALAPI_VAL));
 				return AI_ERR_INVALID_ARG;
 			}
 			printf("local_api = %s\n",
@@ -220,7 +222,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 				   strcmp(argv[3], "0") == 0);
 
 			if (!on && !off) {
-				printf("config: %s 取值 on|off\n", argv[2]);
+				printf(tr(TR_CFG_BOOL_VAL), argv[2]);
 				return AI_ERR_INVALID_ARG;
 			}
 			if (argv[2][0] == 'c')
@@ -231,7 +233,7 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 			dirty = 1;
 		} else if (strcmp(argv[2], "session") == 0) {
 			if (!ui_session_valid_name(argv[3])) {
-				printf("config: 非法会话名 '%s'\n", argv[3]);
+				printf(tr(TR_CFG_BAD_SESSION), argv[3]);
 				return AI_ERR_INVALID_ARG;
 			}
 			{
@@ -242,8 +244,27 @@ int cmd_config(void *shell_ptr, int argc, char **argv)
 				free(ui->session);
 				ui->session = dup;
 			}
-			printf("session = %s（%d 条历史消息）\n", argv[3],
+			printf(tr(TR_CFG_SESSION_NMSG), argv[3],
 			       ui_session_count(argv[3]));
+			dirty = 1;
+		} else if (strcmp(argv[2], "lang") == 0) {
+			/* config set lang zh|en：与 lang 命令同语义
+			 * （运行时切换 + [ui] lang 持久化） */
+			if (strcmp(argv[3], "zh") != 0 &&
+			    strcmp(argv[3], "en") != 0) {
+				printf(tr(TR_LANG_INVALID), argv[3]);
+				return AI_ERR_INVALID_ARG;
+			}
+			{
+				char *dup = strdup(argv[3]);
+
+				if (!dup)
+					return AI_ERR_MEMORY;
+				free(ui->lang);
+				ui->lang = dup;
+			}
+			lang_set(argv[3]);
+			printf("lang = %s\n", argv[3]);
 			dirty = 1;
 		} else {
 			printf("Unknown key: %s\n", argv[2]);

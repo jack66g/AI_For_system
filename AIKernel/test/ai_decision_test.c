@@ -15,6 +15,7 @@
  */
 #include <kunit/test.h>
 #include <linux/sched.h>
+#include <linux/delay.h>
 
 #include "../core/ai_types.h"
 #include "../core/ai_proc.h"
@@ -34,11 +35,28 @@ static pid_t self_pid(void)
  * （/bin/grep 不在表内：未命中模式会保留原分类，kunit 线程=KERNEL）。 */
 static void mark_self(struct kunit *test, enum ai_proc_class cls)
 {
+	int got = -2;
+	unsigned int i;
+
 	if (cls == AI_PROC_CLASS_INTERACTIVE)
 		ai_proc_exec_hook(current, "/bin/sh");
 	else
 		ai_proc_exec_hook(current, "/usr/bin/grep");
-	KUNIT_ASSERT_TRUE(test, ai_proc_class_peek(self_pid()) == (int)cls);
+
+	/*
+	 * W63：ai_proc_class_peek() 是决策热路径的 spin_trylock 查询，
+	 * 锁争用时返回 -1（设计语义，不是槽值）。测试需要确定值，短暂
+	 * 重试（最多约 100ms）；非 -1 的异常值立即失败。
+	 * 此前直接断言导致 KUnit 偶发失败（W63 全量回归中观察到两次，
+	 * 分别落在 decision_source_clamp/decision_oom_bias）。
+	 */
+	for (i = 0; i < 1000; i++) {
+		got = ai_proc_class_peek(self_pid());
+		if (got != -1)
+			break;
+		usleep_range(50, 100);
+	}
+	KUNIT_ASSERT_TRUE(test, got == (int)cls);
 }
 
 static void enable_all(u8 on)
@@ -209,6 +227,39 @@ static void decision_accounting_test(struct kunit *test)
 	enable_all(0);
 }
 
+/* ---- 单 hook 粒度：只开 OOM 时其他 hook 不注入且不计 queries ---- */
+static void decision_single_hook_test(struct kunit *test)
+{
+	struct ai_decision_stats st0, st1;
+	struct ai_hook_ctx ctx = { .pid = self_pid() };
+
+	enable_all(0);
+	ai_decision_set_master(1);
+	ai_decision_set_hook_enable(AI_HOOK_OOM_BADNESS, 1);
+	mark_self(test, AI_PROC_CLASS_BATCH);
+
+	ai_decision_stats_get(&st0);
+	KUNIT_EXPECT_EQ(test, ai_decision_query(AI_HOOK_OOM_BADNESS, &ctx),
+			AI_DEC_OOM_BIAS_MAX);
+	KUNIT_EXPECT_EQ(test, ai_decision_query(AI_HOOK_SCHED_VRUNTIME, &ctx), 0);
+	KUNIT_EXPECT_EQ(test, ai_decision_query(AI_HOOK_MM_READAHEAD, &ctx), 0);
+	ai_decision_stats_get(&st1);
+
+	/* 只有 OOM 挂点计数增长；其余挂点零查询（逐 hook 独立） */
+	KUNIT_EXPECT_EQ(test,
+			(int)(st1.hook[AI_HOOK_OOM_BADNESS].queries -
+			      st0.hook[AI_HOOK_OOM_BADNESS].queries), 1);
+	KUNIT_EXPECT_EQ(test,
+			(int)(st1.hook[AI_HOOK_SCHED_VRUNTIME].queries -
+			      st0.hook[AI_HOOK_SCHED_VRUNTIME].queries), 0);
+	KUNIT_EXPECT_EQ(test,
+			(int)(st1.hook[AI_HOOK_MM_READAHEAD].queries -
+			      st0.hook[AI_HOOK_MM_READAHEAD].queries), 0);
+	KUNIT_EXPECT_EQ(test, (int)ai_decision_get_hook_enable(AI_HOOK_SCHED_VRUNTIME),
+			0);
+	enable_all(0);
+}
+
 /* ---- ACT 参数族存在性：REAL 标志 + 默认 0 ---- */
 static void decision_act_params_test(struct kunit *test)
 {
@@ -253,6 +304,7 @@ static struct kunit_case ai_decision_test_cases[] = {
 	KUNIT_CASE(decision_fallback_test),
 	KUNIT_CASE(decision_source_clamp_test),
 	KUNIT_CASE(decision_accounting_test),
+	KUNIT_CASE(decision_single_hook_test),
 	KUNIT_CASE(decision_act_params_test),
 	{}
 };

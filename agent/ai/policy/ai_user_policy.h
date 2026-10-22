@@ -92,13 +92,49 @@ int ai_policy_audit(uid_t uid, enum ai_policy_mode mode,
 		    const char *tool, const char *args, const char *result);
 
 /*
+ * W74：审计行尾追加 lease=<id> danger=<D> confirm=<source>
+ * （旧 ai_policy_audit 等价于 lease="-"/danger="-"/confirm="none"）。
+ */
+int ai_policy_audit_ex(uid_t uid, enum ai_policy_mode mode,
+		       const char *tool, const char *args, const char *result,
+		       const char *lease_id, const char *danger,
+		       const char *confirm_source);
+
+/*
  * ai_policy_confirm_interactive - W2 二次确认交互
  * 红色 ANSI 输出影响面（工具名/参数/影响描述）后读 stdin 的 y/N；
- * stdin 非 tty（无人值守）一律拒绝（安全兜底）。
- * 返回: 1 = 用户确认；0 = 拒绝/非 tty/读入失败。
+ * stdin 非 tty（无人值守）一律拒绝（安全兜底）——除非调用方通过
+ * ai_policy_set_assume_yes() 预授权（--yes / AIKERNEL_ASSUME_YES）。
+ * 返回: 1 = 用户确认（或预授权自动确认）；0 = 拒绝/非 tty/读入失败。
  */
 int ai_policy_confirm_interactive(const char *tool, const char *args,
 				  const char *impact_desc);
+
+/*
+ * ai_policy_set_assume_yes - W2 确认预授权开关（修复 10）
+ * 无人值守通道（API/脚本/管道）执行 W2 工具的显式授权入口：
+ *   - CLI 全局参数 --yes / --assume-yes；
+ *   - 环境变量 AIKERNEL_ASSUME_YES（"1"/"true"/"yes"/"on"）。
+ * 开启后 NEED_CONFIRM 一律自动放行（审计记 CONFIRM=yes(auto)），
+ * 预授权是明确的人工决定，不改变 restricted 档位 DENY 的判定。
+ */
+void ai_policy_set_assume_yes(int on);
+
+/* ai_policy_get_assume_yes - 当前预授权状态 */
+int ai_policy_get_assume_yes(void);
+
+/*
+ * ai_policy_set_plan_mode - plan（规划）只读模式开关（W43）
+ * plan 态：工具执行闸门（executor.c）对非 R 级工具一律拒绝
+ * （W1/W2 全拒、R 放行；exec 通道按命令级 risk 含 args0 动词细化），
+ * ask 系统提示注入只读约束，REPL 提示符带 "|plan" 标记。
+ * 会话级状态（不落盘），默认关闭；只影响工具闸门与提示词，
+ * 不改变 uid 档位判定本身。
+ */
+void ai_policy_set_plan_mode(int on);
+
+/* ai_policy_get_plan_mode - 当前 plan 模式状态（1=只读调研态） */
+int ai_policy_get_plan_mode(void);
 
 /*
  * ai_policy_gate - executor 一站式闸门（check + 确认交互 + 拒绝提示 + 审计）
@@ -119,6 +155,9 @@ enum ai_policy_gate_result {
 	AI_GATE_ALLOW = 0,        /* 放行（自动或用户确认） */
 	AI_GATE_USER_REFUSED = 1, /* 用户在 W2 y/N 再校验中选择拒绝 */
 	AI_GATE_POLICY_DENY = 2,  /* 策略档位不足（权限错误） */
+	AI_GATE_NEED_NO_TTY = 3,  /* 需人工确认但 stdin 非终端且未预授权
+				   * （修复 10：结构化信号，调用方/API 可
+				   *  据此给出明确指引而不是静默拒绝） */
 };
 
 /*

@@ -1,5 +1,5 @@
-# 构建产物
-build/
+# 构建产物（仓库只含源码；构建目录与中间件不入库）
+/agent/ai/build/
 *.o
 *.o.*
 *.a
@@ -10,63 +10,73 @@ build/
 *.mod
 *.mod.c
 *.symvers
-*.bin
-*.elf
-*.map
 *.su
-*.d
 *.i
-*.s
 .tmp_versions/
 modules.builtin*
 Module.symvers
 vmlinux
-vmlinux.gz
+vmlinux.*
 System.map
 bzImage
 zImage
 Image
 
-# 测试编译出的可执行文件
-agent/ai/aikernel-shell
-agent/ai/t2fix_utf8_test
-agent/ai/ai
-*.test
+# 可执行文件/测试编译产物（保留 .c/.h/.py/.sh/.tsv/.json 测试源码）
+/agent/ai/aikernel-shell
+/agent/ai/aik-sandbox
+/agent/ai/ai
+/agent/ai/tests/test_*
+!/agent/ai/tests/test_*.c
+!/agent/ai/tests/test_*.h
+!/agent/ai/tests/test_*.py
+!/agent/ai/tests/test_*.sh
+!/agent/ai/tests/test_*.tsv
+!/agent/ai/tests/test_*.json
+/agent/ai/tests/w10b_tls_probe
+/agent/ai/tests/w10b_tls_probe_asan
+/agent/ai/tests/demo_sandbox_chain
+/agent/ai/sandbox/tests/aik-sandbox
 
-# 磁盘镜像与虚拟机产物
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 镜像/打包产物
 *.iso
 *.raw
 *.qcow2
 *.img
 *.vmdk
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.zip
 initramfs/
 initrd*
 rootfs/
 w6i-isodir/
 w6i-rootfs/
 
-# 大体积打包文件
-*.tar
-*.tar.gz
-*.tgz
-*.tar.xz
-*.zip
-
-# 日志与临时文件
+# 运行时/本地产物（密钥绝不入库）
+.aikernel/
+model.toml
+api-token
+*.pem
+*.key
+id_rsa*
+known_hosts
 *.log
 *.tmp
 *.swp
 *~
 .DS_Store
 Thumbs.db
-docs/.docs-done
 
-# W10-B 清理补充（2026-10-02）：可再生 artifact 与本地产物不入库
-agent/ai/tests/test_utf8_body
-agent/ai/tests/test_http_retry
-agent/ai/tests/test_provider_stream
-agent/ai/tests/test_cloud_stream
-agent/ai/tests/w10b_tls_probe
-agent/ai/tools/tools_report.txt
-__pycache__/
-*.pyc
+# 证据/报告/临时工作区（不属于源码基线）
+longterm/
+fix-w*/
+.tmp/
+*.bundle

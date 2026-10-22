@@ -31,6 +31,7 @@
 #include "ai_control.h"
 #include "ai_telemetry.h"
 #include "ai_causal.h"
+#include "../net/ai_netlink.h"
 
 #define AI_POLICY_MAX_COUNT  64   /* 注册表容量 */
 
@@ -354,6 +355,16 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 			  &tp, sizeof(tp));
 
 	mutex_unlock(&ai_policy_lock);
+
+	/* W49 ai-6/7：决策结果异步推送（已注册 NETLINK_AI 的 AI 主体免轮询）。
+	 * 协议族未创建/无注册者时为廉价空操作；GFP_ATOMIC 路径不睡眠。 */
+	ai_netlink_push_event(AI_NL_EV_POLICY,
+		rec.outcome == AI_OUTCOME_FAILED ? AI_NL_EV_SEV_ERROR :
+		rec.outcome == AI_OUTCOME_PARTIAL ? AI_NL_EV_SEV_WARN :
+		AI_NL_EV_SEV_INFO,
+		rec.decision_id, executed,
+		ctx->param[0] ? ctx->param : NULL);
+
 	return executed;
 }
 EXPORT_SYMBOL_GPL(ai_policy_execute);

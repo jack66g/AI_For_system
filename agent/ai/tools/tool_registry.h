@@ -4,7 +4,7 @@
  *
  * 工具清单由 tools/gen_registry.py 离线生成（tools.json），来源按优先级：
  *   a. QEMU 实测采集（/proc/ai、/sys/kernel/ai 实际节点）；
- *   b. 内核源码静态梳理（AIKernel/vfs、core/ai_control.c 等 23 个可控参数）。
+ *   b. 内核源码静态梳理（AIKernel/vfs、core/ai_control.c 等 27 个可控参数）。
  * C 侧运行时加载 tools.json：
  *   - 组 system prompt（工具名+描述+参数）；
  *   - 生成 OpenAI function-calling 的 tools 数组（请求体用）；
@@ -12,7 +12,9 @@
  *
  * tools.json 中每个工具：{name, description, channel, risk, parameters(schema),
  * 加通道专属字段(path/param/domain/...)}。channel 取值：
- *   procfs-read | sysfs-write | netlink-act | netlink-sense | exec | memory
+ *   procfs-read | sysfs-write | netlink-act | netlink-sense | exec | memory |
+ *   sandbox | sysctl | sysfs | desktop（W76：桌面能力面，本机 HTTP） |
+ *   interaction（W77c：clarify 结构化澄清，由 cmd_ask 交互层拦截）
  * v2 起每个工具必带 "risk"（R/W1/W2），exec 工具内嵌 "exec" 单源白名单。
  */
 #ifndef _AI_TOOL_REGISTRY_H
@@ -29,6 +31,11 @@ enum tool_channel {
 	TOOL_CH_EXEC,
 	TOOL_CH_MEMORY,
 	TOOL_CH_SHELL,		/* v3：AI 应用户请求降入维护 shell（交互） */
+	TOOL_CH_SANDBOX,	/* W42：隔离区 + 子智能体（aik-sandbox） */
+	TOOL_CH_SYSCTL,		/* W48：/proc/sys 通用读写（含崩溃黑名单） */
+	TOOL_CH_SYSFS_DYN,	/* W48：sysfs/procfs 动态路径读写（cgroup 等） */
+	TOOL_CH_DESKTOP,	/* W76：桌面能力面（127.0.0.1:8091 本机 HTTP） */
+	TOOL_CH_CLARIFY,	/* W77c：结构化澄清（ask 交互层，非授权） */
 	TOOL_CH_UNKNOWN,
 };
 
@@ -62,6 +69,8 @@ struct tool_exec_cmd {
 	char **args0_risk;      /* 与 args0_enum 一一对应的风险级（可 NULL） */
 	int   args0_count;
 	int   path_check;       /* 1=W1 文件类：绝对路径目标限 /root /tmp /var/ai */
+	char **path_roots;      /* 非空时覆盖 path_check 的允许根（如 gcc 仅 /tmp） */
+	int   path_root_count;
 };
 
 /* 工具参数（来自 parameters.properties 的成员） */
@@ -81,7 +90,7 @@ struct tool_param {
 
 /* 单个工具 */
 struct ai_tool {
-	char *name;             /* 工具名（注册表唯一，如 procfs.read.status） */
+	char *name;             /* 工具名（注册表唯一，如 procfs_read_status） */
 	char *desc;             /* 描述 */
 	enum tool_channel channel;
 
@@ -96,10 +105,22 @@ struct ai_tool {
 
 	char *risk;             /* v2: R/W1/W2（exec 通道按命令另查 exec_cmds） */
 
+	/* W51/W74：工具所属能力域（tools.json 顶层 "sub" 数组，1-2 个）。
+	 * 租约 scope 按"任一 sub 域"匹配；解析失败时 sub_count=0。 */
+	char **sub;
+	int sub_count;
+
+	/* W65 P2-05：能力探测。probe 为依赖路径（如 /proc/pressure）；
+	 * 加载时探测一次，不存在则 available=0：请求 tools 数组、目录页、
+	 * 清单都排除该工具；executor 直接调用时返回明确 unavailable。 */
+	char *probe;            /* tools.json "probe"（可 NULL） */
+	int   available;        /* 1=可用（无 probe 恒 1） */
+
 	/* v2: exec 通道单源白名单（tools.json 内嵌，见 struct tool_exec_cmd） */
 	struct tool_exec_cmd *exec_cmds;
 	int   exec_cmd_count;
 	int   exec_default_timeout;     /* 秒；0 = executor 缺省 30 */
+	int   exec_input_max;           /* input 字节上限；0 = 缺省 60000 */
 
 	struct tool_param *params;
 	int param_count;
@@ -138,11 +159,48 @@ const struct ai_tool *tool_registry_find(const struct tool_registry *reg,
 char *tool_registry_build_tools_json(const struct tool_registry *reg);
 
 /*
+ * tool_registry_build_tools_json_filtered - 按工具名子集生成 tools 数组
+ * （SME 路由：请求 tools 数组 = 会话级"已激活工具集合"，SME 检索命中
+ *  的工具由框架动态扩入下一请求；OpenAI 严格模式下模型只能调用请求
+ *  tools 列表里的工具，"补全 schema"因此必须是框架行为）
+ * @names:      工具名数组（NULL 或 n<=0 时等价全量 build_tools_json）
+ * @name_count: 数组长度
+ * 返回: malloc 字符串（调用者需 free），失败返回 NULL
+ */
+char *tool_registry_build_tools_json_filtered(const struct tool_registry *reg,
+					      const char *const *names,
+					      int name_count);
+
+/*
+ * tool_registry_build_catalog - 生成 system prompt 常驻"目录页"文本
+ * 每行: <name> <核心短语>（核心短语 = description 冒号后文本，无冒号取
+ * 首句，句读截断，UTF-8 边界安全截 24 字节；与 gen_registry.py 的
+ * tool_catalog.txt 生成规则逐字一致，单一权威在 gen_registry.py）。
+ * 目录页不是 tools 数组成员（模型不直接调"目录"），放 system prompt
+ * 作为可点名清单：检索未命中时模型翻目录页点名，框架补全 schema。
+ * 返回: malloc 字符串（调用者需 free），失败返回 NULL
+ */
+char *tool_registry_build_catalog(const struct tool_registry *reg);
+
+/*
  * tool_registry_summarize - 生成 system prompt 用的工具清单文本
  * 每行：- <name> [<channel>] <描述> | 参数: <p1>(<type>,必填) ...
  * 返回: malloc 字符串（调用者需 free），失败返回 NULL
  */
 char *tool_registry_summarize(const struct tool_registry *reg);
+
+/*
+ * tool_registry_summarize_filtered - 按工具名子集生成清单文本
+ * （降级路径专用：文本 JSON 协议没有 tools 数组，工具名+参数只能
+ * 从 system 拿——但清单同样按会话激活集合裁剪，避免本地通道降级
+ * 循环时全量 10KB 清单把 token 吃回去）
+ * @names:      工具名数组（NULL 或 n<=0 时等价全量 summarize）
+ * @name_count: 数组长度
+ * 返回: malloc 字符串（调用者需 free），失败返回 NULL
+ */
+char *tool_registry_summarize_filtered(const struct tool_registry *reg,
+				       const char *const *names,
+				       int name_count);
 
 /*
  * tool_registry_count_by_channel - 分通道计数

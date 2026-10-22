@@ -38,6 +38,27 @@ int local_http_post(const char *url, const char *api_key,
 		    char **response, char **error_message, int *status_code);
 
 /*
+ * local_http_request - 任意方法（POST/PATCH/PUT/DELETE 等）的本地 HTTP
+ * 请求：与 local_http_post 同一建连/发送/接收路径，请求体原样发送
+ * （仍带 Content-Type: application/json）。SME 的 PATCH /memories/{id}
+ * 使用本入口。
+ * @method:        HTTP 方法（非空，长度 < 16）
+ * 其余参数与 local_http_post 相同。
+ */
+int local_http_request(const char *method, const char *url,
+		       const char *api_key, const char *json_body,
+		       int timeout_ms, char **response,
+		       char **error_message, int *status_code);
+
+/*
+ * local_http_delete - DELETE 请求（空请求体，无认证头）
+ * 供 SME DELETE /memories/{id} 使用。
+ * 返回: 同 local_http_post
+ */
+int local_http_delete(const char *url, int timeout_ms,
+		      char **response, char **error_message, int *status_code);
+
+/*
  * local_http_post_stream - POST 并以回调方式增量交付响应体（流式）
  * 与 local_http_post 同一条建连/发送路径，但收到 body 字节即经
  * @body_cb 交付（不等收完）。增量解码 chunked transfer-encoding。

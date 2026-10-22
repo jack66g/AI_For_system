@@ -12,9 +12,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "ai_runtime.h"
 #include "ai_config.h"
 #include "communication/communication.h"
+#include "ai_trace.h"
 
 /* 前向声明 cloud provider 的配置函数（保留用于 Provider 注册） */
 struct ai_provider *openai_compatible_provider_create(void);
@@ -22,6 +24,77 @@ void openai_provider_configure(struct ai_provider *provider,
 			       const char *model_name,
 			       const char *base_url,
 			       const char *api_key);
+
+/*
+ * runtime_status_code - 从响应取 HTTP 状态码
+ *
+ * cloud backend 在错误路径只把 "HTTP status N" 拼进 error_message，
+ * 不填 resp.status_code；这里解析出来供 W77 路由失败归类使用
+ * （500/429 走云→本切换，400/422 走文本工具协议降级）。
+ */
+static int runtime_status_code(const struct comm_response *resp)
+{
+	static const char *const codes[] = {
+		"400", "401", "403", "404", "408", "422", "429",
+		"500", "502", "503", "504", NULL
+	};
+	const char *p;
+	int i;
+
+	if (!resp)
+		return 0;
+	if (resp->status_code > 0)
+		return resp->status_code;
+	if (!resp->error_message)
+		return 0;
+	p = strstr(resp->error_message, "HTTP status ");
+	if (p)
+		return atoi(p + strlen("HTTP status "));
+	/* 非流式云通道不填 status_code，只把服务端 error.message 带回来
+	 * （如 "mock failure 429"）。按独立数字边界识别常见状态码，供
+	 * 路由区分 429/5xx（切本地）与 400/422（文本工具降级）。 */
+	for (i = 0; codes[i]; i++) {
+		const char *q = resp->error_message;
+		size_t cl = strlen(codes[i]);
+
+		while ((q = strstr(q, codes[i])) != NULL) {
+			int left_ok = (q == resp->error_message ||
+				       !isdigit((unsigned char)q[-1]));
+			int right_ok = !isdigit((unsigned char)q[cl]);
+
+			if (left_ok && right_ok)
+				return atoi(codes[i]);
+			q += cl;
+		}
+	}
+	return 0;
+}
+
+/*
+ * runtime_num_ctx - W77 本地上下文上限
+ *
+ * 本地模型（qwen2.5:1.5b）窗口 32768；[ui].ctx_len 是云端 262144 级别的
+ * 预算，不能原样下发给本地服务（会触发服务端截断/显存溢出）。本地通道
+ * 一律钳到 [route].local_ctx（默认/最大 32768）。
+ */
+static int runtime_num_ctx(const struct ai_runtime *rt)
+{
+	int n;
+
+	if (!rt || !rt->config)
+		return 0;
+	n = rt->config->ui.ctx_len;
+	if (rt->model_provider_type &&
+	    strcmp(rt->model_provider_type, "local") == 0) {
+		int cap = rt->config->route.local_ctx;
+
+		if (cap <= 0 || cap > AI_LOCAL_CTX_MAX)
+			cap = AI_LOCAL_CTX_MAX;
+		if (n <= 0 || n > cap)
+			n = cap;
+	}
+	return n;
+}
 
 int ai_runtime_init(struct ai_runtime *rt, struct ai_config *cfg,
 		    struct ai_provider_registry *reg)
@@ -45,6 +118,9 @@ int ai_runtime_init(struct ai_runtime *rt, struct ai_config *cfg,
 	rt->token_session_in = 0;
 	rt->token_session_out = 0;
 	rt->usage_is_real = 0;
+	rt->last_error = AI_OK;
+	rt->last_status_code = 0;
+	rt->last_was_local = 0;
 
 	/* 初始化通信层 */
 	communication_init();
@@ -177,9 +253,13 @@ int ai_runtime_chat(struct ai_runtime *rt, const char *message,
 		req.api_key       = rt->model_api_key;
 		req.prompt        = message;
 		/* UI Phase：请求级参数（命令行 > 环境变量 > TOML 的最终权值）；
-		 * stream 同样受 CONFIG_AI_STREAM_MODE 门控 */
-		req.max_tokens    = rt->config->ui.max_tokens;
-		req.num_ctx       = rt->config->ui.ctx_len;
+		 * stream 同样受 CONFIG_AI_STREAM_MODE 门控。
+		 * W20 修1：max_tokens 按 provider 分档（云 4096/本地 1024），
+		 * 不再吃 [ui] 全局单档——云端 reasoning 模型 thinking token
+		 * 计入输出预算，1024 会把正文挤空（T3 P0-1 根因） */
+		req.max_tokens    = ai_config_effective_max_tokens(
+					rt->config, rt->model_provider_type);
+		req.num_ctx       = runtime_num_ctx(rt);
 #ifdef CONFIG_AI_STREAM_MODE
 		req.stream        = rt->config->ui.stream;
 #else
@@ -190,6 +270,11 @@ int ai_runtime_chat(struct ai_runtime *rt, const char *message,
 		rt->state = AI_SESSION_CHATTING;
 		ret = communication_send(&req, &resp);
 		rt->state = AI_SESSION_IDLE;
+		rt->last_error = ret;
+		rt->last_status_code = runtime_status_code(&resp);
+		rt->last_was_local = rt->model_provider_type &&
+				     strcmp(rt->model_provider_type,
+					    "local") == 0;
 
 		if (ret == AI_OK && resp.body) {
 			*response = resp.body;
@@ -260,9 +345,11 @@ int ai_runtime_chat_ex(struct ai_runtime *rt,
 		/* UI Phase：请求级参数（max_tokens/num_ctx/stream/协议开关）；
 		 * stream 受 CONFIG_AI_STREAM_MODE 编译开关门控（Kconfig
 		 * AIKERNEL_STREAM_MODE，见 agent/ai/Makefile）：未编入流式
-		 * 时强制非流式，配置值不越权 */
-		req.max_tokens    = rt->config->ui.max_tokens;
-		req.num_ctx       = rt->config->ui.ctx_len;
+		 * 时强制非流式，配置值不越权。
+		 * W20 修1：max_tokens 按 provider 分档（见上条注释） */
+		req.max_tokens    = ai_config_effective_max_tokens(
+					rt->config, rt->model_provider_type);
+		req.num_ctx       = runtime_num_ctx(rt);
 #ifdef CONFIG_AI_STREAM_MODE
 		req.stream        = rt->config->ui.stream;
 #else
@@ -272,17 +359,43 @@ int ai_runtime_chat_ex(struct ai_runtime *rt,
 		req.on_delta      = on_delta;
 		req.on_delta_ud   = on_delta_ud;
 
-		rt->state = AI_SESSION_CHATTING;
-		ret = communication_send(&req, &resp);
-		rt->state = AI_SESSION_IDLE;
+		{
+			long long trace_t0 = ai_trace_now_ms();
+			char *trace_req_id = ai_trace_model_request(
+				rt->model_provider_type, rt->model_name,
+				msgs, nmsgs, tools_json, req.stream);
 
-		if (ret == AI_OK && resp.chat) {
-			*result = resp.chat;
-		} else {
-			if (resp.error_message) {
-				printf("Error: %s\n", resp.error_message);
-				free(resp.error_message);
+			rt->state = AI_SESSION_CHATTING;
+			ret = communication_send(&req, &resp);
+			rt->state = AI_SESSION_IDLE;
+			rt->last_error = ret;
+			rt->last_status_code = runtime_status_code(&resp);
+			rt->last_was_local = rt->model_provider_type &&
+					     strcmp(rt->model_provider_type,
+						    "local") == 0;
+
+			if (ret == AI_OK && resp.chat) {
+				*result = resp.chat;
+				resp.chat->http_status =
+					rt->last_status_code;
+				ai_trace_model_response(trace_req_id,
+					resp.chat,
+					(long)(ai_trace_now_ms() - trace_t0));
+			} else {
+				ai_trace_error("model_request",
+					       ai_error_string(ret),
+					       resp.error_message);
+				if (ret == AI_ERR_NETWORK)
+					ai_trace_degraded("cloud",
+						"unreachable",
+						resp.error_message);
+				if (resp.error_message) {
+					printf("Error: %s\n",
+					       resp.error_message);
+					free(resp.error_message);
+				}
 			}
+			free(trace_req_id);
 		}
 	}
 

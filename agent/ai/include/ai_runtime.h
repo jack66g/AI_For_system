@@ -49,6 +49,10 @@ struct ai_runtime {
 	int token_session_in;                   /* 会话累计 prompt_tokens */
 	int token_session_out;                  /* 会话累计 completion_tokens */
 	int usage_is_real;                      /* 1=上次为服务端 usage 真值 */
+	/* ---- W77 路由/失败语义（ask 据此决定云→本切换/降级） ---- */
+	int last_error;                         /* 上次请求 AI_ERR_* */
+	int last_status_code;                   /* 上次 HTTP 状态码（0=未知） */
+	int last_was_local;                     /* 1=上次请求走本地 */
 };
 
 /*
@@ -118,5 +122,103 @@ int ai_runtime_get_token_usage(struct ai_runtime *rt, int *used, int *limit);
  * @rt: Runtime
  */
 void ai_runtime_destroy(struct ai_runtime *rt);
+
+/* ====================================================================
+ * W77 模型路由（runtime/ai_route.c）
+ *
+ * 与 SME 工具路由（AI_ROUTE_*）区分：这里决定“本地 or 云端模型”。
+ * 路由决策只读配置/探测结果，不改变 D 级/租约语义。
+ * ==================================================================== */
+
+/* 路由目标 */
+enum ai_model_route_target {
+	AI_ROUTE_TARGET_LOCAL = 1,   /* 本地模型 */
+	AI_ROUTE_TARGET_CLOUD = 2,   /* 云端模型 */
+	AI_ROUTE_TARGET_OFFLINE = 3, /* 两者均不可用：明确降级到离线意图 */
+};
+
+/* 任务分类 */
+enum ai_route_task_class {
+	AI_ROUTE_TASK_OPERATIONAL = 0, /* 状态/诊断/文件/服务/沙箱/记忆 */
+	AI_ROUTE_TASK_CHAT = 1,        /* 普通对话 */
+	AI_ROUTE_TASK_REASONING = 2,   /* 代码/方案/分析等重推理 */
+};
+
+/* 决策事实（纯函数输入，供单测） */
+struct ai_route_facts {
+	int mode;            /* AI_MODEL_ROUTE_* */
+	int task;            /* ai_route_task_class */
+	int privacy;         /* 1=隐私任务 */
+	int prefer_local;    /* 1=运维/短任务优先本地 */
+	int failover;        /* 1=云失败可切本地 */
+	int cloud_down;      /* 1=云不可用（探测/失败记忆） */
+	int local_up;        /* 1=本地可用 */
+	int local_slow;      /* 1=本地近期延迟超预算 */
+	int tokens;          /* 估算 prompt token */
+};
+
+/* 决策输出 */
+struct ai_route_choice {
+	int target;              /* AI_ROUTE_TARGET_* */
+	int mode;                /* 生效模式 */
+	int task_class;
+	int privacy;
+	const char *reason;      /* 静态原因串（可写 trace） */
+	long long decide_ms;     /* 决策耗时 */
+	int cloud_known_down;
+	int local_available;
+	int local_probe_ms;
+	int tokens_est;
+};
+
+/* 模式名字/解析（非法返回 -1）；生效模式 = env > [route].mode */
+const char *ai_route_mode_name(int mode);
+int ai_route_mode_parse(const char *s);
+int ai_route_effective_mode(const struct ai_config *cfg);
+int ai_route_offline_intents_enabled(const struct ai_config *cfg);
+
+/* 任务分类/纯决策（无 IO，便于单测） */
+int ai_route_classify_task(const char *question);
+void ai_route_decide_facts(const struct ai_route_facts *f,
+			   struct ai_route_choice *out);
+
+/* 完整决策（含本地/云端 TCP 探测与失败记忆） */
+int ai_route_decide(const struct ai_config *cfg, const char *question,
+		    struct ai_route_choice *out);
+
+/* 应用目标/云→本切换（返回 AI_OK；elapsed 输出切换耗时毫秒） */
+int ai_route_current_target(const struct ai_runtime *rt);
+int ai_route_apply(struct ai_runtime *rt, int target, long long *elapsed_ms);
+int ai_route_failover(struct ai_runtime *rt, int from, int to,
+		      const char *reason, long long *switch_ms);
+
+/* 失败归类/健康记忆 */
+int ai_route_should_failover(const struct ai_config *cfg, int from_target,
+			     int ret, int status_code, int already_failed);
+void ai_route_note_cloud(int ok, int status_code, int ret);
+void ai_route_note_local(int ok, int status_code, int ret,
+			 long long latency_ms);
+long long ai_route_last_switch_ms(void);
+
+/* 探测/状态 */
+int ai_route_probe_url(const char *url, int timeout_ms);
+int ai_route_local_available(const struct ai_config *cfg);
+int ai_route_ensure_local_model(struct ai_config *cfg);
+int ai_route_status_text(const struct ai_config *cfg,
+			 const struct ai_runtime *rt,
+			 char *buf, size_t n);
+
+/* 路由 trace（route.jsonl；不含 base_url/api_key） */
+int ai_route_trace_decision(const struct ai_config *cfg,
+			    const struct ai_runtime *rt,
+			    const struct ai_route_choice *choice,
+			    long long apply_ms);
+int ai_route_trace_switch(const struct ai_runtime *rt, int from, int to,
+			  const char *reason, long long switch_ms);
+int ai_route_trace_offline(const char *intent, const char *source,
+			   long long cache_age_ms, long long latency_ms);
+
+/* 测试/诊断：清零进程内健康缓存 */
+void ai_route_reset_state(void);
 
 #endif /* _AI_RUNTIME_H */

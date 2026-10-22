@@ -16,8 +16,9 @@
 #include "ai_chat.h"
 #include "ai_stream.h"
 
-/* max_tokens 缺省值（请求级参数 <=0 时使用；实际值来自 [ui].max_tokens） */
-#define LOCAL_CHAT_DEFAULT_MAX_TOKENS  4096
+/* max_tokens 缺省值（请求级参数 <=0 时使用；实际值来自 [ui].max_tokens）。
+ * 修复 6：默认 1024（原 4096 对 8192 窗口过奢侈，提示预算被腰斩） */
+#define LOCAL_CHAT_DEFAULT_MAX_TOKENS  1024
 
 /*
  * local_chat_stream_messages - 流式 messages 模式聊天（SSE/NDJSON）

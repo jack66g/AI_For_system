@@ -1,0 +1,75 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# aik-backup - AIKernel 数据备份（W27/B 波，W28/C 波打包面扩展）
+#
+# 打包 /root/.aikernel（配置/会话/审计）与 /etc/aikernel（策略/令牌）
+# 到 /var/backups/aikernel-<UTC 时间戳>.tar.gz，保留最近 7 份。
+# 由 aikernel-backup.timer（每周日 03:00）自动执行；也可经 exec 白名单
+# （W2 红色确认）由 AI 一句话手动触发。
+#
+# W28 扩展（升级与恢复配套，恢复面 = 数据面 + 引导面 + 防火墙/SSH 基线）：
+#   + /etc/systemd/system/aik*.service|timer（含 upgrade-commit/backup/health 等）
+#   + /etc/ssh/sshd_config.d/50-aik-hardening.conf（B 波 SSH 防爆破基线）
+#   + /boot/aik-slot-state（A/B 槽状态机）
+#   + /boot/grub/grub.cfg（引导配置，含 one-shot 逻辑与 try 项）
+#   + /etc/nftables.conf（防火墙基线）
+#
+# 约定：本脚本只允许执行不允许改——不在任何写路径白名单内，
+# root:root 0755；恢复口：tar -xzf <包> -C /（先停 aikernel-api）。
+set -euo pipefail
+
+SRC1="/root/.aikernel"
+SRC2="/etc/aikernel"
+BACKUP_DIR="/var/backups"
+KEEP=7
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="${BACKUP_DIR}/aikernel-${STAMP}.tar.gz"
+
+mkdir -p "${BACKUP_DIR}"
+
+SRCS=()
+[ -d "${SRC1}" ] && SRCS+=("${SRC1}")
+[ -d "${SRC2}" ] && SRCS+=("${SRC2}")
+
+# W28 扩展打包面（存在才打包；glob 逐个存在性过滤，防字面量入列）
+W28_EXTRAS=(
+    /etc/systemd/system/aik*.service /etc/systemd/system/aik*.timer
+    /etc/systemd/system/aikernel*.service /etc/systemd/system/aikernel*.timer
+    /etc/ssh/sshd_config.d/50-aik-hardening.conf
+    /boot/aik-slot-state
+    /boot/grub/grub.cfg
+    /etc/nftables.conf
+)
+for f in "${W28_EXTRAS[@]}"; do
+    [ -e "$f" ] && SRCS+=("$f")
+done
+
+if [ "${#SRCS[@]}" -eq 0 ]; then
+    echo "aik-backup: no source dirs found (${SRC1}, ${SRC2}), abort" >&2
+    exit 1
+fi
+
+# rc=1 容忍：会话文件正在被写入（file changed as we read it）不算失败
+rc=0
+tar -czf "${OUT}" -C / "${SRCS[@]#\/}" 2>/tmp/aik-backup.tar.err || rc=$?
+if [ "${rc}" -gt 1 ]; then
+    echo "aik-backup: tar failed rc=${rc}" >&2
+    cat /tmp/aik-backup.tar.err >&2 || true
+    rm -f "${OUT}"
+    exit "${rc}"
+fi
+
+# 保留最近 KEEP 份，超出删除（按修改时间倒序）
+deleted=0
+while [ "$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz 2>/dev/null | wc -l)" -gt "${KEEP}" ]; do
+    oldest="$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz | tail -1)"
+    rm -f "${oldest}"
+    deleted=$((deleted + 1))
+done
+
+remain="$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz 2>/dev/null | wc -l)"
+size="$(du -h "${OUT}" | cut -f1)"
+entries="$(tar -tzf "${OUT}" | wc -l)"
+echo "aik-backup: OK ${OUT} (${size}; kept=${remain} deleted=${deleted} entries=${entries})"
+[ -s /tmp/aik-backup.tar.err ] && { echo "aik-backup: tar notes:"; cat /tmp/aik-backup.tar.err; }
+exit 0

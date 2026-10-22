@@ -112,6 +112,7 @@ static int local_set_defaults(struct ai_local_config *local)
 {
 	local->enabled = LOCAL_DEFAULT_ENABLED;
 	local->timeout_ms = LOCAL_DEFAULT_TIMEOUT_MS;
+	local->max_tokens = 0;          /* W20 修1：0=未显式配置（生效值走兜底链） */
 	local->base_url = NULL;
 	local->model = NULL;
 	local->api_key = NULL;
@@ -134,6 +135,24 @@ static int local_set_defaults(struct ai_local_config *local)
 }
 
 /*
+ * route_set_defaults - 填充 [route] 段默认值（W77 模型路由）
+ */
+static void route_set_defaults(struct ai_route_config *r)
+{
+	memset(r, 0, sizeof(*r));
+	r->mode = AI_MODEL_ROUTE_AUTO;
+	r->privacy = 0;
+	r->prefer_local = 1;
+	r->failover = 1;
+	r->offline_intents = 1;
+	r->local_ctx = AI_LOCAL_CTX_MAX;
+	r->local_p95_ms = 8000;
+	r->switch_budget_ms = 2000;
+	r->probe_timeout_ms = 400;
+	r->cloud_down_ttl_ms = 60000;
+}
+
+/*
  * ai_ui_set_defaults - 填充 [ui] 段默认值
  * 来源优先级最低层；TOML/环境变量/命令行依次覆盖。
  */
@@ -147,6 +166,7 @@ void ai_ui_set_defaults(struct ai_ui_config *ui)
 	ui->color = 1;
 	ui->verbose = 0;
 	ui->session = strdup(UI_DEFAULT_SESSION);
+	ui->lang = strdup(UI_DEFAULT_LANG);
 }
 
 /*
@@ -201,7 +221,12 @@ struct ai_config *ai_config_init(void)
 
 	/* 填充 [ui] 段默认值（终端 UI 参数） */
 	ai_ui_set_defaults(&cfg->ui);
-	if (!cfg->ui.session) {
+
+	/* 填充 [route] 段默认值（W77 模型路由） */
+	route_set_defaults(&cfg->route);
+	if (!cfg->ui.session || !cfg->ui.lang) {
+		free(cfg->ui.session);
+		free(cfg->ui.lang);
 		free(cfg->config_dir);
 		free(cfg->local.base_url);
 		free(cfg->local.model);
@@ -251,6 +276,8 @@ static int parse_model_toml(struct ai_config *cfg)
 	int in_default = 0;
 	int in_local = 0;
 	int in_ui = 0;
+	int in_routing = 0;
+	int in_route = 0;
 	int in_models = 0;
 	struct ai_model_config *model = NULL;
 
@@ -277,25 +304,45 @@ static int parse_model_toml(struct ai_config *cfg)
 				strncpy(current_section, trimmed + 1,
 					sizeof(current_section) - 1);
 
+				in_route = 0;
 				if (strcmp(current_section, "default") == 0) {
 					in_default = 1;
 					in_local = 0;
 					in_ui = 0;
+					in_routing = 0;
 					in_models = 0;
 				} else if (strcmp(current_section, "local") == 0) {
 					in_default = 0;
 					in_local = 1;
 					in_ui = 0;
+					in_routing = 0;
 					in_models = 0;
 				} else if (strcmp(current_section, "ui") == 0) {
 					in_default = 0;
 					in_local = 0;
 					in_ui = 1;
+					in_routing = 0;
+					in_models = 0;
+				} else if (strcmp(current_section, "routing") == 0) {
+					/* [routing] 段：SME 路由模式 */
+					in_default = 0;
+					in_local = 0;
+					in_ui = 0;
+					in_routing = 1;
+					in_models = 0;
+				} else if (strcmp(current_section, "route") == 0) {
+					/* [route] 段：W77 本地/云端模型路由 */
+					in_default = 0;
+					in_local = 0;
+					in_ui = 0;
+					in_routing = 0;
+					in_route = 1;
 					in_models = 0;
 				} else if (strncmp(current_section, "models.", 7) == 0) {
 					in_default = 0;
 					in_local = 0;
 					in_ui = 0;
+					in_routing = 0;
 					in_models = 1;
 					/* 创建新模型配置 */
 					model = calloc(1, sizeof(*model));
@@ -327,8 +374,98 @@ static int parse_model_toml(struct ai_config *cfg)
 		if (in_default && strcmp(key, "model") == 0) {
 			strncpy(default_model_buf, value,
 				sizeof(default_model_buf) - 1);
-		} else if (in_models && model) {
-			if (strcmp(key, "provider_type") == 0) {
+		} else if (in_routing) {
+			/* [routing] 段：SME 路由（AI_ROUTE_* 见 ai_config.h）。
+			 * 注意写在 in_models 之前：值可能带引号（TOML 字符串），
+			 * 与 [ui] 的裸值解析同款宽松处理 */
+			if (strcmp(key, "mode") == 0) {
+				char *v = value;
+				size_t vl = strlen(v);
+
+				if (vl >= 2 && v[0] == '"' &&
+				    v[vl - 1] == '"') {
+					v[vl - 1] = '\0';
+					v++;
+				}
+				if (strcasecmp(v, "autonomous") == 0)
+					cfg->routing.mode =
+						AI_ROUTE_AUTONOMOUS;
+				else if (strcasecmp(v, "pre_retrieve") == 0)
+					cfg->routing.mode =
+						AI_ROUTE_PRE_RETRIEVE;
+				else
+					cfg->routing.mode = AI_ROUTE_AUTO;
+			} else if (strcmp(key, "local_catalog") == 0) {
+				cfg->routing.local_catalog =
+					ui_parse_bool(value,
+						      cfg->routing.local_catalog);
+			}
+			} else if (in_route) {
+				/* [route] 段：W77 模型路由（auto|local|cloud） */
+				if (strcmp(key, "mode") == 0) {
+					char *v = value;
+					size_t vl = strlen(v);
+
+					if (vl >= 2 && v[0] == '"' &&
+					    v[vl - 1] == '"') {
+						v[vl - 1] = '\0';
+						v++;
+					}
+					if (strcasecmp(v, "local") == 0)
+						cfg->route.mode =
+							AI_MODEL_ROUTE_LOCAL;
+					else if (strcasecmp(v, "cloud") == 0)
+						cfg->route.mode =
+							AI_MODEL_ROUTE_CLOUD;
+					else
+						cfg->route.mode =
+							AI_MODEL_ROUTE_AUTO;
+				} else if (strcmp(key, "privacy") == 0) {
+					cfg->route.privacy =
+						ui_parse_bool(value,
+							      cfg->route.privacy);
+				} else if (strcmp(key, "prefer_local") == 0) {
+					cfg->route.prefer_local =
+						ui_parse_bool(value,
+							      cfg->route.prefer_local);
+				} else if (strcmp(key, "failover") == 0) {
+					cfg->route.failover =
+						ui_parse_bool(value,
+							      cfg->route.failover);
+				} else if (strcmp(key, "offline_intents") == 0) {
+					cfg->route.offline_intents =
+						ui_parse_bool(value,
+							      cfg->route.offline_intents);
+				} else if (strcmp(key, "local_ctx") == 0) {
+					int v = atoi(value);
+
+					if (v > 0)
+						cfg->route.local_ctx =
+							v > AI_LOCAL_CTX_MAX ?
+							AI_LOCAL_CTX_MAX : v;
+				} else if (strcmp(key, "local_p95_ms") == 0) {
+					int v = atoi(value);
+
+					if (v > 0)
+						cfg->route.local_p95_ms = v;
+				} else if (strcmp(key, "switch_budget_ms") == 0) {
+					int v = atoi(value);
+
+					if (v > 0)
+						cfg->route.switch_budget_ms = v;
+				} else if (strcmp(key, "probe_timeout_ms") == 0) {
+					int v = atoi(value);
+
+					if (v > 0)
+						cfg->route.probe_timeout_ms = v;
+				} else if (strcmp(key, "cloud_down_ttl_ms") == 0) {
+					int v = atoi(value);
+
+					if (v > 0)
+						cfg->route.cloud_down_ttl_ms = v;
+				}
+			} else if (in_models && model) {
+				if (strcmp(key, "provider_type") == 0) {
 				model->provider_type = strdup(value);
 			} else if (strcmp(key, "model_name") == 0) {
 				model->model_name = strdup(value);
@@ -336,6 +473,13 @@ static int parse_model_toml(struct ai_config *cfg)
 				model->base_url = strdup(value);
 			} else if (strcmp(key, "api_key") == 0) {
 				model->api_key = strdup(value);
+			} else if (strcmp(key, "max_tokens") == 0) {
+				/* W20 修1：模型档生成上限（云端 reasoning
+				 * 模型需大于 thinking+正文总预算） */
+				int v = atoi(value);
+
+				if (v > 0)
+					model->max_tokens = v;
 			}
 		} else if (in_ui) {
 			/* [ui] 段：终端 UI 运行参数 */
@@ -370,6 +514,26 @@ static int parse_model_toml(struct ai_config *cfg)
 					goto oom;
 				free(cfg->ui.session);
 				cfg->ui.session = dup;
+			} else if (strcmp(key, "lang") == 0) {
+				/* [ui] lang = "zh"|"en"（i18n，ai_lang.h）。
+				 * 值可能带引号，与 routing mode 同款宽松处理 */
+				char *v = value;
+				size_t vl = strlen(v);
+
+				if (vl >= 2 && v[0] == '"' &&
+				    v[vl - 1] == '"') {
+					v[vl - 1] = '\0';
+					v++;
+				}
+				if (strcmp(v, "zh") == 0 ||
+				    strcmp(v, "en") == 0) {
+					char *dup = strdup(v);
+
+					if (!dup)
+						goto oom;
+					free(cfg->ui.lang);
+					cfg->ui.lang = dup;
+				}
 			}
 		} else if (in_local) {
 			/* [local] 段：本地 Provider 配置 */
@@ -399,6 +563,12 @@ static int parse_model_toml(struct ai_config *cfg)
 
 				if (v > 0)
 					cfg->local.timeout_ms = v;
+			} else if (strcmp(key, "max_tokens") == 0) {
+				/* W20 修1：本地档生成上限（覆盖 [ui] 兜底） */
+				int v = atoi(value);
+
+				if (v > 0)
+					cfg->local.max_tokens = v;
 			}
 		}
 	}
@@ -425,8 +595,17 @@ int ai_config_load(struct ai_config *cfg)
 	/* TOML 先行，环境变量覆盖（命令行参数由入口 getopt 最后覆盖） */
 	{
 		int ret = parse_model_toml(cfg);
+		const char *route_env = getenv("AIKERNEL_ROUTE");
 
 		ui_apply_env(&cfg->ui);
+		if (route_env && route_env[0]) {
+			if (strcasecmp(route_env, "local") == 0)
+				cfg->route.mode = AI_MODEL_ROUTE_LOCAL;
+			else if (strcasecmp(route_env, "cloud") == 0)
+				cfg->route.mode = AI_MODEL_ROUTE_CLOUD;
+			else if (strcasecmp(route_env, "auto") == 0)
+				cfg->route.mode = AI_MODEL_ROUTE_AUTO;
+		}
 		return ret;
 	}
 }
@@ -467,6 +646,9 @@ static void write_model_toml(struct ai_config *cfg)
 	fprintf(fp, "timeout_ms = %d\n",
 		cfg->local.timeout_ms > 0 ? cfg->local.timeout_ms
 					  : LOCAL_DEFAULT_TIMEOUT_MS);
+	/* W20 修1：本地档生成上限（显式配置过才写出，保持文件精简） */
+	if (cfg->local.max_tokens > 0)
+		fprintf(fp, "max_tokens = %d\n", cfg->local.max_tokens);
 	fprintf(fp, "api_key = \"%s\"\n\n",
 		cfg->local.api_key ? cfg->local.api_key : "");
 
@@ -482,8 +664,41 @@ static void write_model_toml(struct ai_config *cfg)
 		cfg->ui.local_native ? "native" : "v1");
 	fprintf(fp, "color = %s\n", cfg->ui.color ? "true" : "false");
 	fprintf(fp, "verbose = %s\n", cfg->ui.verbose ? "true" : "false");
-	fprintf(fp, "session = \"%s\"\n\n",
+	fprintf(fp, "session = \"%s\"\n",
 		cfg->ui.session ? cfg->ui.session : UI_DEFAULT_SESSION);
+	fprintf(fp, "lang = \"%s\"\n\n",
+		cfg->ui.lang ? cfg->ui.lang : UI_DEFAULT_LANG);
+
+	/* 写入 [routing] 段（SME 路由；放最后：旧版解析器遇到未知段
+	 * 保持 in_* 原值，本段 key 名（mode/local_catalog）在旧解析
+	 * 分支中无匹配被忽略，向后兼容） */
+	fprintf(fp, "[routing]\n");
+	fprintf(fp, "mode = \"%s\"\n",
+		cfg->routing.mode == AI_ROUTE_AUTONOMOUS ? "autonomous" :
+		cfg->routing.mode == AI_ROUTE_PRE_RETRIEVE ?
+		"pre_retrieve" : "auto");
+	fprintf(fp, "local_catalog = %s\n\n",
+		cfg->routing.local_catalog ? "true" : "false");
+
+	/* 写入 [route] 段（W77 模型路由） */
+	fprintf(fp, "[route]\n");
+	fprintf(fp, "mode = \"%s\"\n",
+		cfg->route.mode == AI_MODEL_ROUTE_LOCAL ? "local" :
+		cfg->route.mode == AI_MODEL_ROUTE_CLOUD ? "cloud" : "auto");
+	fprintf(fp, "privacy = %s\n", cfg->route.privacy ? "true" : "false");
+	fprintf(fp, "prefer_local = %s\n",
+		cfg->route.prefer_local ? "true" : "false");
+	fprintf(fp, "failover = %s\n", cfg->route.failover ? "true" : "false");
+	fprintf(fp, "offline_intents = %s\n",
+		cfg->route.offline_intents ? "true" : "false");
+	fprintf(fp, "local_ctx = %d\n",
+		cfg->route.local_ctx > 0 ? cfg->route.local_ctx :
+					  AI_LOCAL_CTX_MAX);
+	fprintf(fp, "local_p95_ms = %d\n", cfg->route.local_p95_ms);
+	fprintf(fp, "switch_budget_ms = %d\n", cfg->route.switch_budget_ms);
+	fprintf(fp, "probe_timeout_ms = %d\n", cfg->route.probe_timeout_ms);
+	fprintf(fp, "cloud_down_ttl_ms = %d\n\n",
+		cfg->route.cloud_down_ttl_ms);
 
 	/* 写入模型列表 */
 	for (m = cfg->models_head; m; m = m->next) {
@@ -496,6 +711,9 @@ static void write_model_toml(struct ai_config *cfg)
 			m->base_url ? m->base_url : "");
 		fprintf(fp, "api_key = \"%s\"\n",
 			m->api_key ? m->api_key : "");
+		/* W20 修1：模型档生成上限（显式配置过才写出） */
+		if (m->max_tokens > 0)
+			fprintf(fp, "max_tokens = %d\n", m->max_tokens);
 		fprintf(fp, "\n");
 	}
 
@@ -703,6 +921,38 @@ int ai_config_get_local(struct ai_config *cfg, int *enabled, char **base_url,
 	return AI_OK;
 }
 
+int ai_config_effective_max_tokens(const struct ai_config *cfg,
+				   const char *provider_type)
+{
+	int is_cloud = provider_type &&
+		       strcmp(provider_type, "openai_compatible") == 0;
+
+	if (is_cloud) {
+		/* 云端档：生效模型（default_model 对应 [models.X]）显式
+		 * 配置优先，缺省 8192（T3 P0-1：thinking token 计入输出
+		 * 预算，1024 会让正文见底；W20 复测 E1 实测 4096
+		 * 在深度思考型任务仍可被 thinking 吃满，提到 8192） */
+		if (cfg && cfg->default_model) {
+			const struct ai_model_config *m;
+
+			for (m = cfg->models_head; m; m = m->next) {
+				if (m->name && m->max_tokens > 0 &&
+				    strcmp(m->name, cfg->default_model) == 0)
+					return m->max_tokens;
+			}
+		}
+		return AI_CFG_CLOUD_MAX_TOKENS_DEFAULT;
+	}
+
+	/* 本地档：[local].max_tokens > [ui].max_tokens（旧配置兼容
+	 * 兜底，含 AIKERNEL_MAX_TOKENS 覆盖链）> 1024 */
+	if (cfg && cfg->local.max_tokens > 0)
+		return cfg->local.max_tokens;
+	if (cfg && cfg->ui.max_tokens > 0)
+		return cfg->ui.max_tokens;
+	return AI_CFG_LOCAL_MAX_TOKENS_DEFAULT;
+}
+
 int ai_config_exists(void)
 {
 	char path[AI_PATH_MAX];
@@ -735,6 +985,7 @@ void ai_config_destroy(struct ai_config *cfg)
 	free(cfg->local.api_key);
 	memset(&cfg->local, 0, sizeof(cfg->local));
 	free(cfg->ui.session);
+	free(cfg->ui.lang);
 	memset(&cfg->ui, 0, sizeof(cfg->ui));
 	free(cfg);
 }

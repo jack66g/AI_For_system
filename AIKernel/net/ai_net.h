@@ -110,6 +110,17 @@ bool ai_net_xdp_hook(struct net_device *dev, struct xdp_buff *xdp);
 void ai_net_qdisc_hook(struct net_device *dev, struct Qdisc *sch);
 
 /**
+ * w21 net.qdisc 运行时 graft 的 KUnit 测试钩子（实现在 ai_net.c 的
+ * CONFIG_NET_SCHED && CONFIG_INET 门控段；声明同门控，避免 n 配置链接错）。
+ * dryrun=true 时 net.qdisc apply 正常钳制/提交/current 更新但不调度
+ * worker（不碰真实网卡）；pending_get 读未消费的提交值（确定性断言）。
+ */
+#if IS_ENABLED(CONFIG_NET_SCHED) && defined(CONFIG_INET)
+void ai_net_qdisc_dryrun_set(bool on);
+u8 ai_net_qdisc_pending_get(void);
+#endif
+
+/**
  * ai_net_neigh_hook() - AI 预测邻居条目过期
  * @n: 邻居条目
  * @refresh: 置 true 可刷新条目避免 GC 删除（AI 预测其仍活跃）

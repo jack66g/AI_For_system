@@ -22,6 +22,7 @@
 
 #include "ai_shell.h"
 #include "ai_commands.h"
+#include "ai_lang.h"
 #include "netlink/ai_netlink_client.h"
 
 /* 决策域名称（对齐 AIKernel/core/ai_policy.h enum ai_policy_domain 0~12） */
@@ -41,15 +42,15 @@ static void netlink_usage(void)
 {
     printf("Usage:\n");
     printf("  netlink sense [all|<cpu>] [count] [raw|human]");
-    printf("   拉取内核 AI 遥测记录\n");
+    printf("%s", tr(TR_NL_HELP_SENSE));
     printf("  netlink act <domain> <decision_type> [confidence] [hexdata]\n");
-    printf("                                                  下发决策指令（需 CAP_SYS_ADMIN）\n");
-    printf("  netlink reg                                     登记本进程 portid（需 CAP_SYS_ADMIN）\n");
+    printf("%s", tr(TR_NL_HELP_ACT));
+    printf("%s", tr(TR_NL_HELP_REG));
     printf("\n");
     printf("domain: 0=general 1=sched 2=mm 3=io 4=net 5=security 6=power\n");
     printf("        7=vfs 8=interrupt 9=lock 10=time 11=virt 12=proc\n");
-    printf("count:  1~4096（默认 32）\n");
-    printf("hexdata: 最多 64 字节，如 \"aabbcc\" 或 \"aa bb cc\"\n");
+    printf("%s", tr(TR_NL_HELP_COUNT));
+    printf("%s", tr(TR_NL_HELP_HEXDATA));
 }
 
 /* 解析无符号整数参数（0 进制，支持 0x 前缀；全串消费 + 上限校验） */
@@ -124,19 +125,19 @@ static void netlink_print_error(int rc, int kern_err)
 
     switch (rc) {
     case AI_ERR_API:
-        printf("内核拒绝: errno=%d (%s)\n", kern_err, strerror(kern_err));
+        printf(tr(TR_NL_KERN_REJECT), kern_err, strerror(kern_err));
         hint = ai_nl_errno_hint(kern_err);
         if (hint)
-            printf("提示: %s\n", hint);
+            printf(tr(TR_NL_HINT), hint);
         break;
     case AI_ERR_NETWORK:
-        printf("传输失败: %s\n", strerror(errno));
+        printf(tr(TR_NL_SEND_FAIL), strerror(errno));
         break;
     case AI_ERR_PARSE:
-        printf("应答解析失败（与内核协议不一致？请核对 ai_netlink.h）\n");
+        printf("%s", tr(TR_NL_PARSE_FAIL));
         break;
     default:
-        printf("错误: %s\n", ai_error_string(rc));
+        printf(tr(TR_NL_ERR), ai_error_string(rc));
         break;
     }
 }
@@ -144,9 +145,9 @@ static void netlink_print_error(int rc, int kern_err)
 /* socket 初始化失败输出 */
 static void netlink_print_open_fail(int rc)
 {
-    printf("NETLINK_AI socket 初始化失败: %s\n", ai_error_string(rc));
+    printf(tr(TR_NL_INIT_FAIL), ai_error_string(rc));
     if (rc == AI_ERR_NETWORK)
-        printf("提示: %s\n", strerror(errno));
+        printf(tr(TR_NL_HINT), strerror(errno));
 }
 
 /* raw 记录流十六进制转储（16 字节/行，带偏移与 ASCII 栏） */
@@ -224,7 +225,7 @@ static int netlink_sense_cmd(int argc, char **argv)
     /* 内核单次应答（头+记录流）不超过 AI_NL_PAYLOAD_MAX */
     stream = malloc(AI_NL_PAYLOAD_MAX);
     if (!stream) {
-        printf("内存分配失败 (%u 字节)\n", (unsigned)AI_NL_PAYLOAD_MAX);
+        printf(tr(TR_NL_ALLOC_FAIL), (unsigned)AI_NL_PAYLOAD_MAX);
         return AI_ERR_MEMORY;
     }
 
@@ -252,7 +253,7 @@ static int netlink_sense_cmd(int argc, char **argv)
             printf("ai_err:   %d\n", ack.ai_err);
         printf("\n");
         if (ack.records == 0) {
-            printf("(无记录)\n");
+            printf("%s", tr(TR_NL_NO_RECORDS));
         } else if (format == AI_NL_FORMAT_HUMAN) {
             /* 内核 human 格式为按 \n 结尾的文本行，原样输出 */
             fwrite(stream, 1, stream_len, stdout);
@@ -325,15 +326,15 @@ static int netlink_act_cmd(int argc, char **argv)
     }
 
     /* ACT 直接影响系统行为且需 CAP_SYS_ADMIN：先确认再下发 */
-    printf("即将向内核下发决策:\n");
-    printf("  domain=%u (%s)  decision_type=%u  confidence=%u  data=%zu 字节\n",
+    printf("%s", tr(TR_NL_ACT_CONFIRM1));
+    printf(tr(TR_NL_ACT_CONFIRM2),
            req.domain, domain_name(req.domain),
            req.decision_type, req.confidence, data_bytes);
-    printf("该操作需要 CAP_SYS_ADMIN（root/sudo），并会直接影响系统行为。确认执行? [y/N] ");
+    printf("%s", tr(TR_NL_ACT_CONFIRM3));
     fflush(stdout);
     if (!fgets(confirm, sizeof(confirm), stdin) ||
         (confirm[0] != 'y' && confirm[0] != 'Y')) {
-        printf("已取消\n");
+        printf("%s", tr(TR_NL_CANCELLED));
         return AI_OK;
     }
 
@@ -355,9 +356,9 @@ static int netlink_act_cmd(int argc, char **argv)
         printf("Executed:      %u\n", ack.executed);
         printf("Hit:           %s\n", ack.hit ? "yes" : "no");
         if (ack.ai_err != 0)
-            printf("ai_err:        %d（策略层报错）\n", ack.ai_err);
+            printf(tr(TR_NL_ACK_AIERR), ack.ai_err);
         if (ack.executed == 0 && ack.ai_err == 0)
-            printf("未命中任何策略（executed=0）\n");
+            printf("%s", tr(TR_NL_ACK_NO_POLICY));
         printf("\n");
     }
 
@@ -385,10 +386,10 @@ static int netlink_reg_cmd(void)
         netlink_print_error(rc, kern_err);
     } else {
         printf("\n=== NETLINK_AI REG ===\n\n");
-        printf("Portid:           %u（内核分配，同进程固定）\n", cli.portid);
+        printf(tr(TR_NL_REG_PORTID), cli.portid);
         printf("ai_err:           %d\n", ai_err);
-        printf("已登记 portid 数:  %u/32\n", count);
-        printf("重复执行 reg 幂等（内核按 portid 去重）\n");
+        printf(tr(TR_NL_REG_COUNT), count);
+        printf("%s", tr(TR_NL_REG_IDEMPOTENT));
         printf("\n");
     }
 
@@ -411,7 +412,7 @@ int cmd_netlink(void *shell_ptr, int argc, char **argv)
         return netlink_act_cmd(argc - 2, argv + 2);
     if (strcmp(argv[1], "reg") == 0) {
         if (argc > 2) {
-            printf("netlink reg 不接受参数\n");
+            printf("%s", tr(TR_NL_REG_NOARGS));
             netlink_usage();
             return AI_ERR_INVALID_ARG;
         }

@@ -20,6 +20,7 @@
 #include <string.h>
 #include "ai_types.h"
 #include "ai_json_util.h"
+#include "ai_toolname_map.h"
 #include "ai_stream.h"
 
 /* 单行上限（防御失控帧；正常 chunk 远小于此） */
@@ -185,9 +186,10 @@ static void parse_openai_tool_deltas(struct ai_stream_agg *ag,
 							    &nv, &nl,
 							    &nt_) == 1 &&
 					    nt_ == AI_JSON_STR && !slot->name)
-						slot->name =
-							ai_json_strdup_str(nv,
-									   nl);
+						/* W41 bug2: 流式入站名查表还原本名（表外透传） */
+							slot->name =
+								ai_toolname_map_restore_alloc(
+									ai_json_strdup_str(nv, nl));
 					/* arguments 为字符串碎片 → 顺序拼接 */
 					if (ai_json_obj_get(fv, fvl,
 							    "arguments", &av,

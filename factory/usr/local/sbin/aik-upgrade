@@ -1,0 +1,620 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# aik-upgrade - AIKernel A/B 升级通道（W28/C 波）
+#
+# 设计（zero-brick by construction）：
+#   - grub 默认项永远是"稳定槽"：稳定项由 grubenv 变量 stable_entry 指向
+#     （菜单项 --id），未设置时落回菜单第一项（set default=0 的静态兜底）。
+#   - 试运行用 one-shot：grubenv next_entry=aik-try 只对下一次引导生效，
+#     GRUB 引导 try 项时消费并清空 next_entry（save_env）；之后任何一次
+#     重启都自然落回稳定项，无需人工干预。
+#   - 试运行槽文件固定为 /boot/vmlinuz-aikernel-next；try 菜单项 cmdline
+#     带 ai.tryboot=1 标记，userspace 读 /proc/cmdline 即可判定"本次引导
+#     是 try 引导"，零 GRUB 写依赖。
+#   - commit 转正 = 只写 grubenv stable_entry=<id> + 槽状态登记，内核文件
+#     永不移动；旧稳定项天然降为回退项（它仍在菜单里，只是不再被
+#     stable_entry 指向）。保持回退生命线 ≤3 个版本由 status 提示人工清理。
+#   - 为什么自写 grubenv 读写器而不是 apt 安装 grub2-common：本机为
+#     自包含 OS，避免引入外部包依赖；grubenv 格式稳定（1024 字节、
+#     "# GRUB Environment Block" 签名、name=value 行、'#' 填充），纯
+#     bash/dd/sed 可严格实现；且写坏 grubenv 的失败模式是安全的
+#     （GRUB load_env 失败 → 打印错误 → default 落静态 0 = 稳定项）。
+#   - 槽状态机持久化 /boot/aik-slot-state（kv）；每次 install/boot/
+#     commit/rollback 追加审计行到 /var/log/aik-upgrade.log。
+#
+# 用法：
+#   aik-upgrade status
+#   aik-upgrade install kernel <bzImage路径> <版本号，如 38>
+#   aik-upgrade install shell <二进制路径>
+#   aik-upgrade boot [--yes]          # one-shot 指向 try 项并重启
+#   aik-upgrade commit [--force]      # 健康检查通过后转正（要求 try 引导中）
+#   aik-upgrade auto-commit           # 开机提交器内部用（含等待/回退判定）
+#   aik-upgrade rollback [原因]       # 手工回退（清 try，稳定项本就未动）
+#   aik-upgrade healthcheck           # /proc/ai 九项 + 四服务 active
+#   aik-upgrade export <tar路径> [--no-sme]
+#   aik-upgrade import <tar路径> [--no-sme]
+#   aik-upgrade grubenv get|set|del|dump [args]
+#
+# 红线：本脚本不改 grub.cfg（W28 一次性改造除外，已备份 .bak-w28）；
+#       nft/sshd/主控 SSH 通道不动；root:root 0755。
+# 旗标语义（C2 波拆分，U3 实测驱动）：--yes 仅跳过交互确认（REPL 确认后
+#       传入）；--force 才放行防呆门（可疑小镜像）与 commit 的 tryboot 豁免。
+#       二者绝不共用一个变量，否则 REPL 确认路径会旁路防呆门。
+set -euo pipefail
+
+GRUBENV=/boot/grub/grubenv
+SLOT_STATE=/boot/aik-slot-state
+AUDIT_LOG=/var/log/aik-upgrade.log
+TRY_KERNEL=/boot/vmlinuz-aikernel-next
+SHELL_BIN=/usr/local/bin/ai
+SHELL_REAL=/usr/local/bin/aikernel-shell
+SHELL_BAK_DIR=/root/w28-backup
+TRY_MENU_ID=aik-try
+TRYBOOT_MARK=ai.tryboot=1
+GRUB_CFG=/boot/grub/grub.cfg
+
+log() {
+    printf '[aik-upgrade] %s\n' "$*" >&2
+}
+
+audit() {
+    # audit <action> <detail...>
+    local action="$1"; shift
+    mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
+    printf '%s action=%s rc=%s %s\n' "$(date '+%F %T')" "$action" "${AUDIT_RC:-0}" "$*" >> "$AUDIT_LOG" 2>/dev/null || true
+    logger -t aik-upgrade "$action: $*" 2>/dev/null || true
+}
+
+die() {
+    log "ERROR: $*"
+    audit "error" "msg=\"$*\""
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# grubenv 读写（1024 字节固定格式：签名 "# GRUB Environment Block\n" 恰
+# 25 字节 + name=value 行 + '#' 填充；条目区从第 26 字节开始）
+# ---------------------------------------------------------------------------
+grubenv_get() {
+    local key="$1" line
+    [ -f "$GRUBENV" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            '#'*)	return 1 ;;
+            "$key="*)	printf '%s\n' "${line#*=}"; return 0 ;;
+        esac
+    done < <(tail -c +26 "$GRUBENV" 2>/dev/null | tr -d '\0')
+    return 1
+}
+
+grubenv_entries_except() {
+    local skip="$1" line
+    while IFS= read -r line; do
+        case "$line" in
+            '#'*)	break ;;
+            "$skip="*)	;;
+            *=*)	[ -n "$line" ] && printf '%s\n' "$line" ;;
+        esac
+    done < <(tail -c +26 "$GRUBENV" 2>/dev/null | tr -d '\0')
+}
+
+grubenv_write() {
+    # grubenv_write <entries-from-stdin>：重建 1024 字节环境块（保 inode 原地覆写）
+    local tmp body used
+    tmp="$(mktemp /boot/grub/grubenv.w28.XXXXXX)"
+    body="$(cat)"
+    {
+        printf '# GRUB Environment Block\n'
+        if [ -n "$body" ]; then
+            printf '%s\n' "$body"
+        fi
+    } > "$tmp"
+    used="$(stat -c%s "$tmp")"
+    if [ "$used" -gt 1024 ]; then
+        rm -f "$tmp"
+        die "grubenv entries exceed 1024 bytes (size=$used)"
+    fi
+    # 尾部 '#' 填充补足 1024（追加而非覆盖）
+    head -c $((1024 - used)) /dev/zero | tr '\0' '#' >> "$tmp"
+    cat "$tmp" > "$GRUBENV"
+    rm -f "$tmp"
+    [ "$(stat -c%s "$GRUBENV")" = "1024" ] || die "grubenv size corrupted"
+}
+
+grubenv_set() {
+    local key="$1" val="$2"
+    [ -n "$key" ] || die "grubenv_set: empty key"
+    # 值域收紧到安全字符（md5/菜单 id/数字均满足），避免破坏 grubenv 解析
+    case "$val" in
+        *[!a-zA-Z0-9._:-]*)	die "grubenv_set: invalid value '$val'" ;;
+    esac
+    case "$key" in
+        ''|*[!a-zA-Z0-9._-]*)	die "grubenv_set: invalid key '$key'" ;;
+    esac
+    {
+        grubenv_entries_except "$key"
+        printf '%s=%s' "$key" "$val"
+    } | grubenv_write
+}
+
+grubenv_del() {
+    local key="$1"
+    grubenv_entries_except "$key" | grubenv_write
+}
+
+cmd_grubenv() {
+    local op="${1:-}"; shift || true
+    case "$op" in
+        get)	grubenv_get "$1" ;;
+        set)	grubenv_set "$1" "$2"; log "grubenv: set $1=$2" ;;
+        del)	grubenv_del "$1"; log "grubenv: del $1" ;;
+        dump)	tail -c +26 "$GRUBENV" | tr -d '\0' | sed -n '/^#/q;p' ;;
+        *)		die "grubenv: usage: get|set|del|dump" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# 槽状态（kv）
+# ---------------------------------------------------------------------------
+slot_get() {
+    local key="$1" line
+    [ -f "$SLOT_STATE" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            '#'*)	;;
+            "$key="*)	printf '%s\n' "${line#*=}"; return 0 ;;
+        esac
+    done < "$SLOT_STATE"
+    return 1
+}
+
+slot_set() {
+    # slot_set key=value...（增量更新，不存在的 key 追加）
+    local kv k v key line found tmp
+    tmp="$(mktemp /boot/aik-slot-state.new.XXXXXX)"
+    touch "$SLOT_STATE"
+    cp "$SLOT_STATE" "$tmp"
+    for kv in "$@"; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        found=0
+        while IFS= read -r line; do
+            if [ "${line%%=*}" = "$k" ]; then
+                printf '%s=%s\n' "$k" "$v"
+                found=1
+            else
+                printf '%s\n' "$line"
+            fi
+        done < "$tmp" > "${tmp}.out"
+        [ "$found" = 1 ] || printf '%s=%s\n' "$k" "$v" >> "${tmp}.out"
+        mv "${tmp}.out" "$tmp"
+    done
+    cat "$tmp" > "$SLOT_STATE"
+    rm -f "$tmp"
+}
+
+# ---------------------------------------------------------------------------
+# 健康检查（/proc/ai 九项 + 四服务）
+# ---------------------------------------------------------------------------
+cmd_healthcheck() {
+    local fail=0 f s n
+    for f in chains control decisions hitrate latency sched status telemetry vfs; do
+        if [ -r "/proc/ai/$f" ]; then
+            log "[ok]   /proc/ai/$f"
+        else
+            log "[fail] /proc/ai/$f missing"
+            fail=1
+        fi
+    done
+    for s in ollama aikernel-memory ssh aikernel-api; do
+        if [ "$(systemctl is-active "$s.service" 2>/dev/null || true)" = "active" ]; then
+            log "[ok]   $s active"
+        else
+            log "[fail] $s not active"
+            fail=1
+        fi
+    done
+    return "$fail"
+}
+
+# 服务宽限等待（TCG 冷启动慢，auto-commit 用）
+wait_health() {
+    local tries="${1:-6}" n=1
+    while [ "$n" -le "$tries" ]; do
+        if cmd_healthcheck >/dev/null 2>&1; then
+            return 0
+        fi
+        log "health not ready yet ($n/$tries), wait 5s"
+        sleep 5
+        n=$((n + 1))
+    done
+    cmd_healthcheck
+}
+
+# ---------------------------------------------------------------------------
+# install kernel
+# ---------------------------------------------------------------------------
+cmd_install_kernel() {
+    local src="${1:-}" label="${2:-}" force="${FORCE:-0}"
+    [ -n "$src" ] && [ -n "$label" ] || die "usage: aik-upgrade install kernel <bzImage> <版本号如 38>"
+    [ -f "$src" ] || die "no such file: $src"
+
+    local src_md5 size stable_md5
+    src_md5="$(md5sum "$src" | awk '{print $1}')"
+    size="$(stat -c%s "$src")"
+
+    # 防呆：远小于现役稳定内核的镜像八成是坏包（破坏演练用 --force 放行）
+    local stable_file
+    stable_file="$(ls /boot/vmlinuz-aikernel-* 2>/dev/null | grep -v next | head -1 || true)"
+    if [ -n "$stable_file" ]; then
+        stable_md5=""
+        local stable_size
+        stable_size="$(stat -c%s "$stable_file")"
+        if [ "$size" -lt $((stable_size / 2)) ]; then
+            if [ "$force" = "1" ]; then
+                log "WARN: ${src} (${size}B) is much smaller than ${stable_file} (${stable_size}B) — forced by --force"
+            else
+                die "refusing suspicious kernel image ${src} (${size}B << stable ${stable_size}B); pass --force to override"
+            fi
+        fi
+    fi
+
+    # 校验 label 可登记：grub.cfg 必须存在对应菜单 id（aik-<label>）
+    grep -q "aik-${label}" "$GRUB_CFG" || die "no menu id aik-${label} in grub.cfg; label must match an existing versioned menu entry"
+
+    local tmp="/boot/.vmlinuz-aikernel-next.tmp.$$"
+    install -m 644 "$src" "$tmp"
+    local dst_md5
+    dst_md5="$(md5sum "$tmp" | awk '{print $1}')"
+    [ "$dst_md5" = "$src_md5" ] || { rm -f "$tmp"; die "md5 mismatch after copy ($src_md5 -> $dst_md5)"; }
+    mv -f "$tmp" "$TRY_KERNEL"
+
+    slot_set slot=trying try_label="$label" try_md5="$dst_md5" \
+             try_size="$size" try_ts="$(date +%s)" result=boot_requested
+    audit "install-kernel" "label=$label md5=$dst_md5 size=$size src=$src"
+    log "installed try kernel: $TRY_KERNEL (label=$label md5=$dst_md5)"
+    log "next: aik-upgrade boot --yes  (one-shot -> try slot)"
+}
+
+# ---------------------------------------------------------------------------
+# install shell（二进制热更收编进统一通道）
+# ---------------------------------------------------------------------------
+cmd_install_shell() {
+    local src="${1:-}"
+    [ -n "$src" ] || die "usage: aik-upgrade install shell <binary>"
+    [ -f "$src" ] || die "no such file: $src"
+
+    local src_md5 cur_md5
+    src_md5="$(md5sum "$src" | awk '{print $1}')"
+    cur_md5="$(md5sum "$SHELL_REAL" 2>/dev/null | awk '{print $1}')"
+    if [ "$src_md5" = "$cur_md5" ]; then
+        # 主入口已一致：仍收敛次入口(/usr/local/bin/ai)防止双入口漂移
+        local ai_md5
+        ai_md5="$(md5sum /usr/local/bin/ai 2>/dev/null | awk '{print $1}')"
+        if [ -e /usr/local/bin/ai ] && [ ! -L /usr/local/bin/ai ] && \
+           [ "$ai_md5" != "$src_md5" ]; then
+            local tmp0="/usr/local/bin/ai.tmp.$$"
+            install -m 755 "$src" "$tmp0"
+            mv -f "$tmp0" /usr/local/bin/ai
+            log "entry /usr/local/bin/ai drifted (md5=$ai_md5), synced to $src_md5"
+            audit "install-shell" "note=secondary-entry-synced md5=$src_md5"
+        fi
+        log "shell binary identical to current ($src_md5), nothing to do"
+        return 0
+    fi
+
+    mkdir -p "$SHELL_BAK_DIR"
+    local bak="$SHELL_BAK_DIR/aikernel-shell.${cur_md5:0:8}.bak"
+    cp -p "$SHELL_REAL" "$bak"
+    log "backed up current shell -> $bak (md5=$cur_md5)"
+
+    local tmp="$SHELL_REAL.tmp.$$"
+    install -m 755 "$src" "$tmp"
+    local dst_md5
+    dst_md5="$(md5sum "$tmp" | awk '{print $1}')"
+    [ "$dst_md5" = "$src_md5" ] || { rm -f "$tmp"; die "md5 mismatch after copy"; }
+    mv -f "$tmp" "$SHELL_REAL"
+
+    # 双入口同步：/usr/local/bin/ai 与 aikernel-shell 同为 REPL 入口
+    # （Makefile install-ui-link 语义；B 波现役为两个独立实体文件）。
+    # 实体文件 -> 同步原子替换；软链 -> 已随 SHELL_REAL 生效，跳过。
+    if [ -L /usr/local/bin/ai ]; then
+        log "entry /usr/local/bin/ai is a symlink -> already updated"
+    elif [ -e /usr/local/bin/ai ]; then
+        local tmp2="/usr/local/bin/ai.tmp.$$"
+        install -m 755 "$src" "$tmp2"
+        mv -f "$tmp2" /usr/local/bin/ai
+        log "entry /usr/local/bin/ai synced (md5=$dst_md5)"
+    fi
+
+    slot_set last_shell_md5="$dst_md5" last_shell_ts="$(date +%s)"
+    audit "install-shell" "md5=$dst_md5 prev=$cur_md5 backup=$bak"
+    log "installed shell: $SHELL_REAL (md5=$dst_md5)"
+    log "note: running REPL keeps old code; new REPL sessions pick up the new binary"
+}
+
+# ---------------------------------------------------------------------------
+# boot（one-shot 指向 try 并重启）
+# ---------------------------------------------------------------------------
+cmd_boot() {
+    [ "$(slot_get slot || true)" = "trying" ] || die "slot is not 'trying' — run install kernel first"
+    [ -f "$TRY_KERNEL" ] || die "missing $TRY_KERNEL"
+    # 早期死亡断电风险提示（R5 事故驱动，C2 波补；--yes 也打印。
+    # 语义见 docs/upgrade-recovery.md §3.1：try 内核若触发断电级故障，
+    # 内核态无法自救，"回退"依赖有人/有机制把机器再开起来。）
+    log "RISK-NOTE: try 内核若触发早期死亡/断电级故障（R5 形态），重启闭环失效，无人开机将瘫痪"
+    log "RISK-NOTE: 断电兜底 — VMware 宿主机: vmrun start <vmx路径> .gui|nogui ; 实体机: 看门狗复位（D 波交付）"
+    if [ "${FORCE_YES:-0}" != "1" ] && [ -t 0 ]; then
+        local ans
+        printf 'Set one-shot boot to try slot (label=%s) and REBOOT? [y/N] ' "$(slot_get try_label || true)"
+        read -r ans || ans=""
+        case "$ans" in y|Y) ;; *) log "cancelled"; return 0 ;; esac
+    fi
+    grubenv_set next_entry "$TRY_MENU_ID"
+    [ "$(grubenv_get next_entry || true)" = "$TRY_MENU_ID" ] || die "grubenv next_entry verification failed"
+    slot_set result=boot_requested boot_ts="$(date +%s)"
+    audit "boot" "next_entry=$TRY_MENU_ID try_label=$(slot_get try_label || true)"
+    log "one-shot armed: next boot -> $TRY_MENU_ID (stable default untouched)"
+    log "rebooting in 3s..."
+    sleep 3
+    systemctl reboot
+}
+
+# ---------------------------------------------------------------------------
+# commit（转正）
+# ---------------------------------------------------------------------------
+cmd_commit() {
+    local force="${FORCE:-0}"
+    [ "$(slot_get slot || true)" = "trying" ] || die "slot is not 'trying' — nothing to commit"
+    if [ "$force" != "1" ]; then
+        grep -q "$TRYBOOT_MARK" /proc/cmdline || die "current boot is not the try slot (no $TRYBOOT_MARK in /proc/cmdline); use commit --force to override"
+    fi
+
+    local label prev stable_file tmp want got bak try_md5
+    label="$(slot_get try_label || true)"
+    prev="$(slot_get stable_id || echo "aik-0")"
+    grep -q "aik-${label}" "$GRUB_CFG" || die "menu id aik-${label} not in grub.cfg — cannot promote"
+
+    log "health check before commit:"
+    if ! cmd_healthcheck; then
+        slot_set slot=rollback-failed result=health-failed
+        audit "commit-failed" "label=$label reason=health-failed"
+        die "health check FAILED — try slot NOT promoted; next reboot falls back to stable"
+    fi
+
+    # W64 FIX: promote the *tested* try image into the versioned slot before
+    # pointing stable_entry at it. The old flow only rewrote grubenv, so the
+    # stable menu entry kept booting the pre-try file (silent downgrade on
+    # the next reboot, while status claimed "committed").
+    try_md5="$(slot_get try_md5 || true)"
+    want="$(md5sum "$TRY_KERNEL" | awk '{print $1}')"
+    if [ -n "$try_md5" ] && [ "$want" != "$try_md5" ]; then
+        die "try kernel md5 changed since install ($want != $try_md5) — refusing to promote"
+    fi
+    stable_file="/boot/vmlinuz-aikernel-${label}"
+    if [ -f "$stable_file" ]; then
+        bak="${stable_file}.bak-$(date +%s)"
+        cp -p "$stable_file" "$bak" || die "cannot back up $stable_file"
+        log "old stable image backed up: $bak"
+    fi
+    tmp="/boot/.vmlinuz-aikernel-${label}.tmp.$$"
+    install -m 644 "$TRY_KERNEL" "$tmp" || die "cannot stage $stable_file"
+    got="$(md5sum "$tmp" | awk '{print $1}')"
+    if [ "$want" != "$got" ]; then
+        rm -f "$tmp"
+        die "md5 mismatch promoting try kernel ($want -> $got)"
+    fi
+    sync
+    mv -f "$tmp" "$stable_file" || die "cannot replace $stable_file"
+    log "promoted tested try image -> $stable_file (md5=$got)"
+
+    grubenv_set stable_entry "aik-${label}"
+    [ "$(grubenv_get stable_entry || true)" = "aik-${label}" ] || die "stable_entry verification failed"
+    slot_set slot=stable stable_id="aik-${label}" stable_label="#${label}" previous_id="$prev" stable_md5="$got" result=committed \
+             committed_ts="$(date +%s)"
+    audit "commit" "label=$label stable_entry=aik-${label} previous=$prev"
+    log "promoted: stable_entry=aik-${label} (previous stable $prev demoted to fallback)"
+}
+
+# ---------------------------------------------------------------------------
+# auto-commit（aikernel-upgrade-commit.service 入口）
+# ---------------------------------------------------------------------------
+cmd_auto_commit() {
+    # 残留清理：GRUB 侧 save_env 失败时 next_entry 可能残留，userspace 兜底清除
+    if [ "$(grubenv_get next_entry || true)" != "" ]; then
+        grubenv_del next_entry
+        audit "cleanup" "cleared leftover next_entry"
+    fi
+
+    local slot
+    slot="$(slot_get slot || echo stable)"
+    [ "$slot" = "trying" ] || { log "slot=$slot, nothing to do"; return 0; }
+
+    if grep -q "$TRYBOOT_MARK" /proc/cmdline; then
+        log "try boot detected ($TRYBOOT_MARK), running health gate (wait up to 120s)"
+        if wait_health 12; then
+            FORCE_YES=1 cmd_commit
+        else
+            slot_set slot=rollback-failed result=health-failed
+            audit "auto-rollback" "reason=health-failed try_label=$(slot_get try_label || true)"
+            log "health gate FAILED after try boot — recorded rollback-failed"
+            log "next reboot falls back to stable slot (stable_entry untouched)"
+        fi
+    else
+        slot_set slot=rollback-failed result=try-not-booted
+        audit "auto-rollback" "reason=try-not-booted try_label=$(slot_get try_label || true)"
+        log "current boot is the stable slot while slot=trying — try kernel failed to boot"
+        log "recorded rollback-failed; stable slot confirmed"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# rollback（手工）
+# ---------------------------------------------------------------------------
+cmd_rollback() {
+    local reason="${1:-manual}"
+    grubenv_del next_entry
+    local slot
+    slot="$(slot_get slot || true)"
+    if [ "$slot" = "trying" ]; then
+        slot_set slot=rollback result="manual:$reason"
+        audit "rollback" "reason=$reason try_label=$(slot_get try_label || true)"
+        log "rolled back try slot (stable default was never touched); next reboot -> stable"
+    else
+        audit "rollback" "reason=$reason note=no-try-slot(slot=$slot)"
+        log "no try slot active (slot=$slot), stable default untouched"
+    fi
+    [ -f "$TRY_KERNEL" ] && log "note: $TRY_KERNEL kept for inspection"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+cmd_status() {
+    echo "=== AIKernel A/B slot state ($SLOT_STATE) ==="
+    [ -f "$SLOT_STATE" ] && cat "$SLOT_STATE" || echo "(no state file)"
+    echo
+    echo "=== grubenv ($GRUBENV) ==="
+    tail -c +26 "$GRUBENV" 2>/dev/null | tr -d '\0' | sed -n '/^#/q;p' || echo "(empty)"
+    echo
+    echo "=== /boot kernels ==="
+    ls -l /boot/vmlinuz-aikernel* 2>/dev/null || true
+    local stable_id stable_md5 stable_file
+    stable_id="$(slot_get stable_id 2>/dev/null || true)"
+    stable_md5="$(slot_get stable_md5 2>/dev/null || true)"
+    stable_file="/boot/vmlinuz-aikernel-${stable_id#aik-}"
+    if [ -n "$stable_id" ] && [ -n "$stable_md5" ] && [ -f "$stable_file" ]; then
+        if [ "$(md5sum "$stable_file" | awk '{print $1}')" != "$stable_md5" ]; then
+            echo "WARNING: stable slot md5 mismatch ($stable_file != $stable_md5)"
+        fi
+    fi
+    echo
+    echo "=== /proc/cmdline ==="
+    cat /proc/cmdline
+    echo
+    echo "=== try slot marker ==="
+    if grep -q "$TRYBOOT_MARK" /proc/cmdline; then
+        echo "running: TRY slot ($TRYBOOT_MARK present)"
+    else
+        echo "running: STABLE slot"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# export / import（单文件配置全量导出 / 新装机还原）
+# ---------------------------------------------------------------------------
+EXPORT_BASE=/usr/local/share/aikernel
+EXPORT_LIST=(root/.aikernel etc/aikernel
+             etc/ssh/sshd_config.d/50-aik-hardening.conf
+             etc/nftables.conf boot/aik-slot-state boot/grub/grub.cfg
+             usr/local/sbin/aik-upgrade usr/local/sbin/aik-reset
+             usr/local/sbin/aik-backup usr/local/sbin/aikernel-health.sh
+             usr/local/sbin/aikernel-api usr/local/bin/start-sme.sh
+             usr/local/share/aikernel/tools.json
+             usr/local/share/aikernel/sme-seed.jsonl
+             usr/local/share/aikernel/sme-seed.sh)
+
+collect_units() {
+    local u
+    for u in /etc/systemd/system/aik*.service /etc/systemd/system/aik*.timer \
+             /etc/systemd/system/aikernel*.service /etc/systemd/system/aikernel*.timer; do
+        [ -e "$u" ] && printf '%s\n' "${u#/}"
+    done 2>/dev/null | sort -u || true
+}
+
+cmd_export() {
+    local out="${1:-}" nosme="${2:-}"
+    [ -n "$out" ] || die "usage: aik-upgrade export <tar路径> [--no-sme]"
+    local tmp_list
+    tmp_list="$(mktemp)"
+    {
+        local p
+        for p in "${EXPORT_LIST[@]}"; do
+            [ -e "/$p" ] && printf '%s\n' "$p"
+        done
+        collect_units
+    } > "$tmp_list"
+    if [ "$nosme" != "--no-sme" ] && [ -d /opt/sme/data ]; then
+        ( cd /opt/sme && find data -maxdepth 1 -type f | sed 's|^|opt/sme/|' ) >> "$tmp_list"
+    fi
+    tar -czf "$out" -C / -T "$tmp_list" 2>/tmp/aik-export.err || {
+        cat /tmp/aik-export.err >&2; rm -f "$tmp_list" "$out"; die "export tar failed"
+    }
+    local n
+    n="$(tar -tzf "$out" | wc -l)"
+    rm -f "$tmp_list"
+    audit "export" "out=$out entries=$n"
+    log "exported: $out ($(du -h "$out" | cut -f1), entries=$n)"
+}
+
+cmd_import() {
+    local src="${1:-}" nosme="${2:-}"
+    [ -n "$src" ] && [ -f "$src" ] || die "usage: aik-upgrade import <tar路径> [--no-sme]"
+    log "import: safety backup of current state first"
+    /usr/local/sbin/aik-backup || log "WARN: pre-import backup failed, continuing"
+
+    if [ "$nosme" = "--no-sme" ]; then
+        tar -xzf "$src" -C / --exclude='opt/sme/data/*' 2>/tmp/aik-import.err || {
+            cat /tmp/aik-import.err >&2; die "import tar failed"
+        }
+    else
+        systemctl stop aikernel-memory.service 2>/dev/null || true
+        tar -xzf "$src" -C / 2>/tmp/aik-import.err || {
+            cat /tmp/aik-import.err >&2; die "import tar failed"
+        }
+        systemctl start aikernel-memory.service 2>/dev/null || true
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    local u
+    for u in $(collect_units); do
+        systemctl enable "${u##*/}" 2>/dev/null || true
+    done
+    systemctl start aikernel-api.service 2>/dev/null || true
+    audit "import" "src=$src nosme=${nosme:-full}"
+    log "import done; units reloaded; verify with: aik-upgrade healthcheck"
+}
+
+# ---------------------------------------------------------------------------
+usage() {
+    sed -n '2,40p' "$0" | grep -E '^#( |$)' | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        status)		cmd_status ;;
+        install)	local what="${1:-}"; shift || true
+                case "$what" in
+                    kernel)	cmd_install_kernel "$@" ;;
+                    shell)	cmd_install_shell "$@" ;;
+                    *)		usage ;;
+                esac ;;
+        boot)		cmd_boot "$@" ;;
+        commit)		cmd_commit "$@" ;;
+        auto-commit)	cmd_auto_commit ;;
+        rollback)	cmd_rollback "$@" ;;
+        healthcheck)	cmd_healthcheck ;;
+        export)		cmd_export "$@" ;;
+        import)		cmd_import "$@" ;;
+        grubenv)	cmd_grubenv "$@" ;;
+        *)		usage ;;
+    esac
+}
+
+# --yes / --force 旗标透传（REPL 与脚本两种入口统一）
+# C2 波拆分（U3 实测事故驱动）：--yes 只跳过交互确认；--force 才放行防呆门
+# （可疑小镜像）与 commit 的 tryboot 检查豁免。二者共用一个变量会让 REPL
+# 确认路径（--yes）旁路防呆门，坏镜像直接落 try 槽——已在 U3 实测复现并修正。
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --yes)	export FORCE_YES=1 ;;
+        --force)	export FORCE=1 ;;
+        *)		ARGS+=("$a") ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+main "$@"

@@ -1,0 +1,14 @@
+# /etc/systemd/system/aikernel-upgrade-commit.timer
+# 开机后 90s 触发自检提交器（用 timer 而非 ExecStartPre sleep，
+# 避免阻塞 multi-user.target 达成；OnStartupSec 覆盖手工 restart 场景）
+[Unit]
+Description=AIKernel A/B try-slot commit check timer (W28)
+
+[Timer]
+OnBootSec=90
+OnStartupSec=120
+AccuracySec=5s
+Unit=aikernel-upgrade-commit.service
+
+[Install]
+WantedBy=timers.target

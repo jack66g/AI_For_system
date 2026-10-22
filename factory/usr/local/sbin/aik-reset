@@ -1,0 +1,177 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# aik-reset - AIKernel 数据面出厂复位（W28/C 波）
+#
+# 为什么独立脚本而不并入 aik-upgrade reset：
+#   职责正交——aik-upgrade 管"升级生命周期"（内核/二进制/槽状态机/审计），
+#   aik-reset 管"数据面复位"（凭据/模型配置/会话/SME）。两者审计口径、
+#   参数面（--keep-cloud/--wipe-sme）、失败语义完全不同，拆开单一职责、
+#   演练失败时归因清晰；REPL 侧 reset 命令直接对接本脚本。
+#
+# 范围（默认全做；先自动跑一次 aik-backup）：
+#   1. api token 重生成（openssl rand -hex 16 -> /etc/aikernel/api-token，
+#      aikernel-api 每请求现读 token 文件，轮换即时生效、无需重启服务）
+#   2. model.toml 恢复出厂模板；--keep-cloud 则把现文件 [models.cloud] 段
+#      （provider_type/model_name/base_url/api_key/max_tokens）移植进新模板
+#   3. 会话历史归档：/root/.aikernel/sessions -> sessions.bak-<ts>；
+#      REPL history 同属会话历史，一并归档
+#   4. SME 记忆库默认保留；--wipe-sme 才清空（清后 sme-seed 差分重灌接口语料）
+#   全程 journal 留痕（logger -t aik-reset）+ /var/log/aik-upgrade.log 审计。
+#
+# 用法：
+#   aik-reset [--yes] [--keep-cloud] [--wipe-sme]
+set -euo pipefail
+
+AIK_DIR=/root/.aikernel
+TOKEN_FILE=/etc/aikernel/api-token
+MODEL_TOML=$AIK_DIR/model.toml
+KEEP_CLOUD=0
+WIPE_SME=0
+
+log() {
+    printf '[aik-reset] %s\n' "$*" >&2
+}
+
+audit() {
+    printf '%s action=reset rc=%s %s\n' "$(date '+%F %T')" "${AUDIT_RC:-0}" "$*" \
+        >> /var/log/aik-upgrade.log 2>/dev/null || true
+    logger -t aik-reset "$*" 2>/dev/null || true
+}
+
+die() {
+    log "ERROR: $*"
+    audit "error" "msg=\"$*\""
+    exit 1
+}
+
+usage() {
+    sed -n '2,30p' "$0" | grep -E '^#( |$)' | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+# 出厂模板：与首次安装结构一致；lang 缺省 zh（出厂默认中文）
+write_factory_model_toml() {
+    cat > "$MODEL_TOML.tmp.$$" <<'EOF'
+# AIKernel Model Configuration
+# Auto-generated, do not edit while AI Shell is running
+
+[default]
+model = "cloud"
+
+[local]
+enabled = true
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen2.5:1.5b"
+timeout_ms = 3600000
+api_key = ""
+
+[ui]
+ctx_len = 8192
+max_tokens = 1024
+stream = true
+local_api = "native"
+color = false
+verbose = false
+session = "default"
+lang = "zh"
+
+[routing]
+mode = "auto"
+local_catalog = false
+
+[models.local]
+provider_type = "local"
+model_name = "qwen2.5:1.5b"
+base_url = "http://127.0.0.1:11434/v1"
+api_key = ""
+EOF
+}
+
+# 提取现 model.toml 的 [models.cloud] 段（格式固定：5 个键，逐行 key = "value"）
+extract_cloud_section() {
+    awk '/^\[models\.cloud\]/{f=1; print; next} f && /^\[/{f=0} f && /./{print}' "$MODEL_TOML" 2>/dev/null
+}
+
+# ---- 参数 ----
+for a in "$@"; do
+    case "$a" in
+        --yes)	AIK_RESET_YES=1 ;;
+        --keep-cloud)	KEEP_CLOUD=1 ;;
+        --wipe-sme)	WIPE_SME=1 ;;
+        -h|--help)	usage ;;
+        *)		die "unknown argument: $a" ;;
+    esac
+done
+
+if [ "${AIK_RESET_YES:-0}" != "1" ]; then
+    if [ -t 0 ]; then
+        ans=""
+        printf 'Factory reset (token regen, model.toml factory, sessions archived%s)? [y/N] ' \
+               "$([ "$WIPE_SME" = 1 ] && echo ', SME WIPED' || echo ', SME kept')"
+        read -r ans || ans=""
+        case "$ans" in y|Y) ;; *) log "cancelled"; exit 0 ;; esac
+    else
+        die "non-interactive without --yes; refusing to reset"
+    fi
+fi
+
+TS="$(date +%Y%m%d-%H%M%S)"
+audit "reset" "phase=start keep_cloud=$KEEP_CLOUD wipe_sme=$WIPE_SME ts=$TS"
+log "step 1/5: safety backup (aik-backup)"
+/usr/local/sbin/aik-backup || log "WARN: backup rc=$? (continuing)"
+
+log "step 2/5: regenerate api token"
+[ -f "$TOKEN_FILE" ] && cp -p "$TOKEN_FILE" "${TOKEN_FILE}.bak-$TS"
+old_token="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+openssl rand -hex 16 > "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
+new_token="$(cat "$TOKEN_FILE")"
+[ -n "$new_token" ] && [ "$new_token" != "$old_token" ] || die "token regeneration failed"
+audit "reset" "token=regenerated old_md5=$(printf %s "$old_token" | md5sum | cut -c1-8) new_md5=$(printf %s "$new_token" | md5sum | cut -c1-8)"
+
+log "step 3/5: restore factory model.toml (keep_cloud=$KEEP_CLOUD)"
+[ -f "$MODEL_TOML" ] && cp -p "$MODEL_TOML" "$MODEL_TOML.bak-$TS"
+write_factory_model_toml
+if [ "$KEEP_CLOUD" = "1" ]; then
+    if extract_cloud_section > /tmp/aik-reset-cloud.$$ 2>/dev/null && [ -s /tmp/aik-reset-cloud.$$ ]; then
+        printf '\n' >> "$MODEL_TOML.tmp.$$"
+        cat /tmp/aik-reset-cloud.$$ >> "$MODEL_TOML.tmp.$$"
+        rm -f /tmp/aik-reset-cloud.$$
+        log "  [models.cloud] preserved"
+    else
+        log "  WARN: no [models.cloud] section found, factory template without cloud"
+    fi
+fi
+mv -f "$MODEL_TOML.tmp.$$" "$MODEL_TOML"
+audit "reset" "model_toml=factory keep_cloud=$KEEP_CLOUD backup=model.toml.bak-$TS"
+
+log "step 4/5: archive session history"
+if [ -d "$AIK_DIR/sessions" ]; then
+    mv "$AIK_DIR/sessions" "$AIK_DIR/sessions.bak-$TS"
+    mkdir -p "$AIK_DIR/sessions"
+    audit "reset" "sessions_archived=sessions.bak-$TS files=$(ls -1 "$AIK_DIR/sessions.bak-$TS" | wc -l)"
+else
+    mkdir -p "$AIK_DIR/sessions"
+    audit "reset" "sessions_archived=none(no dir)"
+fi
+if [ -f "$AIK_DIR/history" ]; then
+    mv "$AIK_DIR/history" "$AIK_DIR/history.bak-$TS"
+    audit "reset" "history_archived=history.bak-$TS"
+fi
+
+log "step 5/5: SME memory (wipe_sme=$WIPE_SME)"
+if [ "$WIPE_SME" = "1" ]; then
+    systemctl stop aikernel-memory.service 2>/dev/null || true
+    rm -f /opt/sme/data/engine.json /opt/sme/data/engine.json.gz \
+          /opt/sme/data/engine.embeddings.npz
+    systemctl start aikernel-memory.service 2>/dev/null || true
+    sleep 2
+    systemctl start sme-seed.service 2>/dev/null || true
+    audit "reset" "sme=wiped reseeded=interface-corpus"
+else
+    audit "reset" "sme=kept"
+fi
+
+audit "reset" "phase=done ts=$TS"
+log "reset complete (ts=$TS): token rotated, model.toml=factory, sessions archived, SME kept=$([ "$WIPE_SME" = 1 ] && echo false || echo true)"
+log "note: running REPL/API sessions keep old token until reconnect; api service picks token up per-request"

@@ -1,0 +1,6 @@
+[Unit]
+Description=AIKernel 磁盘巡检
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "df -h >> /var/log/aik-disk-check.log 2>&1"

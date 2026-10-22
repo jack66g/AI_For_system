@@ -114,6 +114,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <unistd.h>
 #include <stdint.h>
 #include "linenoise.h"
@@ -1861,6 +1862,158 @@ static void linenoiseEditPaste(struct linenoiseState *l) {
 
 char *linenoiseEditMore = "If you see this, you are misusing the API: when linenoiseEditFeed() is called, if it returns linenoiseEditMore the user is yet editing the line. See the README file for more information.";
 
+/* ---- W60: unbracketed multi-line paste fallback ----
+ *
+ * tmux `paste-buffer` without -p (and some terminals) delivers pasted text
+ * without the ESC[200~/ESC[201~ wrappers and translates every LF to CR.
+ * In raw mode each of those CRs is indistinguishable from the Enter key, so
+ * one paste becomes one linenoise() return per line, and the REPL dispatches
+ * each line as an independent ask (p5-03: 8KB audit log -> 16+ turns).
+ *
+ * When ENTER is read we check whether more bytes are already queued, or
+ * arrive within a short grace window (a paste written in chunks). If so the
+ * whole burst is treated as paste content: internal CR/CRLF become '\n' in
+ * the edit buffer, and a trailing separator means "submit after inserting".
+ * A human cannot press Enter and produce the next byte within 30ms, so
+ * ordinary single-line input, history, Tab completion and Ctrl-C/Ctrl-D are
+ * unaffected; two commands sent with a pause are not merged.
+ */
+#define ENTER_PASTE_GRACE_MS 30
+
+/* Return 1 if input is readable on the editing fd within the grace window. */
+static int pasteInputPending(struct linenoiseState *l)
+{
+    fd_set rf;
+    struct timeval tv;
+    int r;
+
+    FD_ZERO(&rf);
+    FD_SET(l->ifd,&rf);
+    tv.tv_sec = ENTER_PASTE_GRACE_MS / 1000;
+    tv.tv_usec = (ENTER_PASTE_GRACE_MS % 1000) * 1000;
+    do {
+        r = select(l->ifd+1,&rf,NULL,NULL,&tv);
+    } while (r == -1 && errno == EINTR);
+    return r > 0;
+}
+
+/* Drain the rest of an unbracketed paste. Stops after ENTER_PASTE_GRACE_MS
+ * of silence. Returns a malloc'd buffer (NULL if nothing was read) and sets
+ * *submit when the burst ended with a line separator. Bytes beyond
+ * PASTE_MAX_BYTES are drained but discarded, and *overflow is set. */
+static char *pasteCollectBurst(struct linenoiseState *l, size_t *outlen,
+                               int *submit, int *overflow)
+{
+    char *buf = NULL;
+    size_t cap = 0, len = 0;
+    int discard = 0;
+
+    *outlen = 0;
+    *submit = 0;
+    *overflow = 0;
+
+    while (pasteInputPending(l)) {
+        char tmp[4096];
+        ssize_t nr = read(l->ifd,tmp,sizeof(tmp));
+
+        if (nr <= 0) break;
+        if (discard || len > PASTE_MAX_BYTES-(size_t)nr) {
+            discard = 1;
+            continue;
+        }
+        if (len+(size_t)nr > cap) {
+            size_t ncap = cap ? cap : 4096;
+            char *nb;
+
+            while (ncap < len+(size_t)nr) {
+                if (ncap > PASTE_MAX_BYTES/2) {
+                    ncap = PASTE_MAX_BYTES;
+                    break;
+                }
+                ncap *= 2;
+            }
+            nb = realloc(buf,ncap);
+            if (nb == NULL) {
+                discard = 1;
+                continue;
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        memcpy(buf+len,tmp,(size_t)nr);
+        len += (size_t)nr;
+    }
+
+    if (discard) {
+        free(buf);
+        *overflow = 1;
+        return NULL;
+    }
+    if (buf == NULL) return NULL;
+
+    /* Normalize CR and CRLF to LF, same representation as bracketed paste. */
+    {
+        size_t r = 0, w = 0;
+
+        while (r < len) {
+            if (buf[r] == '\r') {
+                buf[w++] = '\n';
+                r += (r+1 < len && buf[r+1] == '\n') ? 2 : 1;
+            } else {
+                buf[w++] = buf[r++];
+            }
+        }
+        len = w;
+    }
+    /* A trailing separator is the paste's own Enter: submit after insert. */
+    if (len && buf[len-1] == '\n') {
+        len--;
+        *submit = 1;
+    }
+    *outlen = len;
+    return buf;
+}
+
+/* Handle ENTER when it may belong to an unbracketed multi-line paste.
+ * Return 0 = ordinary Enter (caller submits the line),
+ *        1 = paste burst carried its own Enter (caller submits now),
+ *        2 = burst absorbed into the edit buffer, keep editing. */
+static int linenoiseEditUnbracketedPaste(struct linenoiseState *l)
+{
+    char *buf;
+    size_t len = 0, start;
+    int submit = 0, overflow = 0;
+
+    if (!pasteInputPending(l)) return 0;
+
+    buf = pasteCollectBurst(l,&len,&submit,&overflow);
+    if (overflow) {
+        linenoiseBeep();
+        return 2;   /* burst drained and dropped; current line still editable */
+    }
+    if (len == 0) {
+        free(buf);
+        /* Only separators arrived: a double Enter still accepts the line. */
+        return submit ? 1 : 0;
+    }
+
+    /* Fold from the end of the first line so the renderer stays single-line:
+     * "line1[... N pasted lines ...]". The real bytes remain in the buffer. */
+    start = l->len;
+    if (linenoiseEditInsertNoRefresh(l,"\n",1) == -1 ||
+        linenoiseEditInsertNoRefresh(l,buf,len) == -1) {
+        free(buf);
+        linenoiseBeep();
+        return 2;
+    }
+    free(buf);
+    if (!maskmode)
+        linenoiseFoldAdd(l,start,l->len);
+    refreshLine(l);
+    return submit ? 1 : 2;
+}
+
+
 /* This function is part of the multiplexed API of linenoise, see the top
  * comment on linenoiseEditStart() for more information. Call this function
  * each time there is some data to read from the standard input file
@@ -1907,6 +2060,11 @@ char *linenoiseEditFeed(struct linenoiseState *l) {
 
     switch(c) {
     case ENTER:    /* enter */
+    {
+        int paste_rc = linenoiseEditUnbracketedPaste(l);
+
+        if (paste_rc == 2) break;   /* multi-line paste absorbed: keep editing */
+        /* paste_rc 0 = ordinary Enter; 1 = burst ended with its own Enter. */
         history_len--;
         free(history[history_len]);
         if (mlmode) linenoiseEditMoveEnd(l);
@@ -1919,6 +2077,7 @@ char *linenoiseEditFeed(struct linenoiseState *l) {
             hintsCallback = hc;
         }
         return strdup(l->buf);
+    }
     case CTRL_C:     /* ctrl-c */
         errno = EAGAIN;
         return NULL;

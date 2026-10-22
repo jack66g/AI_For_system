@@ -1,0 +1,49 @@
+{
+  "created": "2026-10-23T02:23:46+08:00",
+  "kernel": "6.18.39 #59",
+  "notes": [
+    "no binaries, ISO, factory tar, evidence, model.toml or keys",
+    "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
+    "clean-build verification: 33/33 C tests, 40/40 run_all, 19 restored objects byte-identical"
+  ],
+  "overlay_count": 168,
+  "registry": {
+    "desktop": 20,
+    "domains": 8,
+    "sandbox_tools": 7,
+    "seed": 167,
+    "tools": 151
+  },
+  "release": {
+    "api_md5": "e007a7d9d9e8cd9e81ec977d92bd9056",
+    "binary_md5": "adb71f65c7e60fdcba2ce88da9093546",
+    "factory_md5": "5f26e2bfe1a7658aea81f90953ea778a",
+    "iso_md5": "550c003da0da875b3350ac87aab80fb6"
+  },
+  "repo": {
+    "bytes": 45283501,
+    "regular_files": 1029,
+    "symlinks": 4
+  },
+  "schema": "aik-source-manifest/1",
+  "source_tree": "/home/jack66g/linux-6.18.39",
+  "symlinks": [
+    {
+      "path": "agent/ai/tool_catalog.txt",
+      "target": "tools/tool_catalog.txt"
+    },
+    {
+      "path": "agent/ai/tools-sandbox.json",
+      "target": "tools/tools-sandbox.json"
+    },
+    {
+      "path": "agent/ai/tools.json",
+      "target": "tools/tools.json"
+    },
+    {
+      "path": "agent/ai/tools.openai.json",
+      "target": "tools/tools.openai.json"
+    }
+  ],
+  "version": "0.1.0-alpha.11.0"
+}

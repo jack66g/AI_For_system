@@ -1,0 +1,60 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# ============================================================
+# aik-cert-gen —— 为 aikernel-api 生成自签 TLS 证书（运维用）
+#
+# 用法:
+#   aik-cert-gen [IP:1.2.3.4 | DNS:host.name ...]
+#     默认 SAN: IP:127.0.0.1 + DNS:localhost + 本机主 IP
+#
+# 产物:
+#   /etc/aikernel/tls/server.key  (600)
+#   /etc/aikernel/tls/server.crt  (644, 自签 10 年)
+#
+# 启用（二选一改 ~/.aikernel/model.toml 后重启 api 生效）:
+#   [api]
+#   tls  = true
+#   cert = "/etc/aikernel/tls/server.crt"
+#   key  = "/etc/aikernel/tls/server.key"
+#
+# 红线提示: 默认 bind=127.0.0.1 明文本机场景无需 TLS；只有对外
+# 暴露（bind 改非回环）才必须配 TLS+token。
+# ============================================================
+set -e
+
+AIK_TLS_DIR="${AIK_TLS_DIR:-/etc/aikernel/tls}"
+AIK_CERT_DAYS="${AIK_CERT_DAYS:-3650}"
+
+mkdir -p "$AIK_TLS_DIR"
+chmod 700 "$AIK_TLS_DIR"
+
+SAN="IP:127.0.0.1,DNS:localhost"
+PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[ -n "$PRIMARY_IP" ] && SAN="$SAN,IP:$PRIMARY_IP"
+for extra in "$@"; do
+    case "$extra" in
+        IP:*) SAN="$SAN,$extra" ;;
+        DNS:*) SAN="$SAN,$extra" ;;
+        *)  case "$extra" in
+                *[0-9].*[0-9]*) SAN="$SAN,IP:$extra" ;;
+                *)              SAN="$SAN,DNS:$extra" ;;
+            esac ;;
+    esac
+done
+
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days "$AIK_CERT_DAYS" \
+    -subj "/CN=aikernel-api" \
+    -addext "subjectAltName=$SAN" \
+    -keyout "$AIK_TLS_DIR/server.key" \
+    -out  "$AIK_TLS_DIR/server.crt" 2>/dev/null
+
+chmod 600 "$AIK_TLS_DIR/server.key"
+chmod 644 "$AIK_TLS_DIR/server.crt"
+
+echo "[aik-cert-gen] 证书已生成: $AIK_TLS_DIR/server.crt (SAN: $SAN)"
+echo "[aik-cert-gen] 私钥已生成: $AIK_TLS_DIR/server.key (600)"
+echo "[aik-cert-gen] 启用 TLS: 在 ~/.aikernel/model.toml 追加/修改 [api] 段:"
+echo '  tls  = true'
+echo "  cert = \"$AIK_TLS_DIR/server.crt\""
+echo "  key  = \"$AIK_TLS_DIR/server.key\""
+echo "[aik-cert-gen] 然后: systemctl restart aikernel-api"

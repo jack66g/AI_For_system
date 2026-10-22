@@ -8,8 +8,23 @@
 #   make all          # 构建 ai + aikernel-shell
 #   make clean        # 清理
 
+# ============================================================================
+# W46a 防呆（W45 实测根因固化）：本子树独立 make 时不继承顶层 Makefile 的
+# .NOTPARALLEL，`make -j4` 下 gold 链接器并发链接偶发 internal error
+# (signal 7)，产出坏产物（md5 漂移）。此处强制本 Makefile 的全部目标串行
+# 执行——-jN 并发标志被显式无视，任何并发度下的构建口径都与 -j1 一致。
+# ============================================================================
+.NOTPARALLEL:
+
 CC      ?= gcc
-CFLAGS  := -Wall -Wextra -std=c11 -O2 -g -static
+CFLAGS  := -Wall -Wextra -std=c11 -O2 -g -static -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\"
+# 自动头文件依赖：-MMD 生成 <obj>.d（-MP 附带空目标防删除头后报错）。
+# 旧实现只在文件末尾追加了一条「%.o: include/*.h」模式规则——GNU make
+# 不会把两条同模式规则合并，该规则实际不生效；ai_lang.h 增加 TR_SB_*
+# 枚举后 executor.o 未重编、与新 lang.o 混链，导致 tr(TR_SB_CREATED)
+# 取到 TR_CMP_TRUNC 文案（W65 P2 工具结果串线根因）。以编译期依赖文件
+# 为准，任何头文件（含子目录）变更都会重编对应 .o。
+DEPFLAGS := -MMD -MP
 # W10-B：链接器锁定 gold。Ubuntu 22.04 的 ld.bfd 2.38 对本工程的 .bss 布局
 # 存在重定位编码缺陷（全量 clean 重建必现）：init-first.o 的
 # __libc_argc/__libc_argv/__environ 三处 R_X86_64_PC32 被编码到真实地址
@@ -104,6 +119,7 @@ TARGET_SHELL  := aikernel-shell
 
 # 公共源文件（provider/backend/http/stream 按上方 Kconfig 开关条件编入）
 COMMON_SRCS := \
+	$(CLOUD_DIR)/toolname_map.c \
 	$(SHELL_DIR)/shell.c \
 	$(CMD_DIR)/commands_registry.c \
 	$(CMD_DIR)/cmd_help.c \
@@ -112,6 +128,10 @@ COMMON_SRCS := \
 	$(CMD_DIR)/cmd_config.c \
 	$(CMD_DIR)/cmd_chat.c \
 	$(CMD_DIR)/cmd_ask.c \
+	$(CMD_DIR)/cmd_lease.c \
+	$(CMD_DIR)/ask_context.c \
+	$(CMD_DIR)/ask_compact.c \
+	$(CMD_DIR)/ask_clarify.c \
 	$(CMD_DIR)/cmd_model.c \
 	$(CMD_DIR)/cmd_network.c \
 	$(CMD_DIR)/cmd_netlink.c \
@@ -121,6 +141,7 @@ COMMON_SRCS := \
 	$(RUNTIME_DIR)/ai_json_util.c \
 	$(RUNTIME_DIR)/ai_chat_proto.c \
 	$(RUNTIME_DIR)/runtime.c \
+	$(RUNTIME_DIR)/ai_route.c \
 	$(RUNTIME_DIR)/netlink/ai_netlink_client.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \
@@ -130,10 +151,15 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/executor.c \
 	$(CONFIG_DIR)/config_manager.c \
 	$(LOCAL_DIR)/local_http.c \
+	$(LOCAL_DIR)/offline_intent.c \
 	$(KC_SRCS)
 # 注：local_http.c 无条件编入——它是轻量 HTTP 传输工具层，被
 # memory/sme_client.c（SME 记忆服务客户端）依赖，不属于本地 provider 功能。
 
+# W46a：REPL 主入口唯一源是 shell/aikernel_main.c（ai 与 aikernel-shell 复用）。
+# 遗留副本 shell/commands/aikernel_main.c 已删除（W46a 全树 grep 零引用、
+# 与 shell/ 版 diff 逐字节一致后清理）。勿在 commands/ 下再生成同名文件——
+# 改 REPL 入口只改 shell/aikernel_main.c 这一份。
 AI_SRCS    := $(SHELL_DIR)/main.c $(COMMON_SRCS)
 SHELL_SRCS := $(SHELL_DIR)/aikernel_main.c $(COMMON_SRCS)
 
@@ -166,7 +192,7 @@ all: mbedtls $(TARGET_AI) $(TARGET_SHELL)
 mbedtls:
 	@if [ ! -f $(MBEDTLS_DIR)/library/libmbedtls.a ]; then \
 		echo "$(YELLOW)[MBEDTLS]$(NC) Building mbedTLS..."; \
-		$(MAKE) -C $(MBEDTLS_DIR)/library -j$$(nproc) 2>&1 | tail -1; \
+		$(MAKE) -C $(MBEDTLS_DIR)/library -j$$(nproc) CFLAGS='-O2 -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\" -I$(CURDIR)' 2>&1 | tail -1; \
 	fi
 
 $(TARGET_AI): $(AI_OBJS) $(MBEDTLS_LIBS)
@@ -177,14 +203,14 @@ $(TARGET_SHELL): $(SHELL_OBJS) $(MBEDTLS_LIBS)
 	@echo "$(GREEN)[LINK]$(NC) $@"
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -lpthread
 
-$(BUILD_DIR)/%.o: %.c
+$(BUILD_DIR)/%.o: %.c $(wildcard include/*.h)
 	@mkdir -p $(dir $@)
 	@echo "$(YELLOW)[CC]$(NC) $<"
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:
 	@echo "$(YELLOW)[CLEAN]$(NC)"
-	rm -rf $(BUILD_DIR) $(TARGET_AI) $(TARGET_SHELL)
+	rm -rf $(BUILD_DIR) $(TARGET_AI) $(TARGET_SHELL) $(SB_BIN)
 
 install: $(TARGET_AI) $(TARGET_SHELL)
 	@echo "$(GREEN)[INSTALL]$(NC) $(TARGET_AI) -> /usr/local/bin/"
@@ -219,6 +245,7 @@ UI_COMM_DIR    := runtime/communication
 UI_EXTRA_SRCS := \
 	$(LINENOISE_DIR)/linenoise.c \
 	$(SHELL_DIR)/ui_common.c \
+	$(SHELL_DIR)/repl_paste.c \
 	$(CMD_DIR)/cmd_session.c \
 	$(CMD_DIR)/cmd_compact.c
 
@@ -240,11 +267,10 @@ $(TARGET_SHELL): $(BUILD_DIR)/$(SHELL_DIR)/main.o
 # （linenoise 需要 strdup/strcasecmp/fileno 等 POSIX 声明，-std=c11 下需显式开）
 $(BUILD_DIR)/$(LINENOISE_DIR)/linenoise.o: CFLAGS += -Wno-unused-parameter -D_GNU_SOURCE
 
-# 头文件依赖（追加的前置规则，不改动既有 pattern rule）：
-# 既有规则无自动依赖跟踪，头文件变更（如 ai_chat_msg 增字段）会导致
-# 混合布局的旧 .o 参与链接（已实际引发 SIGSEGV）。这里让全部目标文件
-# 依赖公共头目录，任一头变更即整体重编（工程体量小，代价可接受）。
-$(BUILD_DIR)/%.o: $(wildcard include/*.h)
+# 头文件依赖：以编译器生成的 .d 文件为准（见上方 DEPFLAGS；-include 汇总
+# 放在文件末尾，确保所有 *_OBJS 变量已定义）。旧「%.o: include/*.h」第二
+# 模式规则不会与既有 pattern rule 合并，实际是 no-op——已由 W65 修正
+# （stale executor.o 串线事故）。
 
 # install 追加：/usr/local/bin/ai -> aikernel-shell（同一程序的双入口）。
 # 注：追加前置在原 install recipe 之前运行，会被 `install -m 755 ai`
@@ -268,7 +294,85 @@ install-ui-link:
 # ============================================================================
 # P2 权限分级（agent/ai/policy/）：追加段，既有规则不修改
 # ============================================================================
-POLICY_EXTRA_SRCS := policy/ai_user_policy.c
+POLICY_EXTRA_SRCS := policy/ai_user_policy.c policy/ai_lease.c
 POLICY_EXTRA_OBJS := $(POLICY_EXTRA_SRCS:%.c=$(BUILD_DIR)/%.o)
 $(TARGET_AI): $(POLICY_EXTRA_OBJS)
 $(TARGET_SHELL): $(POLICY_EXTRA_OBJS)
+
+# ============================================================================
+# W17-H i18n（agent/ai/i18n/）：追加段，既有规则不修改
+#  - i18n/lang.c（中/英双语字符串表 tr() + 语言状态，见 include/ai_lang.h）
+#  - shell/commands/cmd_lang.c（lang 命令：显示/切换界面语言并持久化）
+#  语言来源优先级：AIKERNEL_LANG > model.toml [ui] lang > zh（缺省中文）
+# ============================================================================
+I18N_EXTRA_SRCS := i18n/lang.c \
+	$(CMD_DIR)/cmd_lang.c
+I18N_EXTRA_OBJS := $(I18N_EXTRA_SRCS:%.c=$(BUILD_DIR)/%.o)
+$(TARGET_AI): $(I18N_EXTRA_OBJS)
+$(TARGET_SHELL): $(I18N_EXTRA_OBJS)
+
+# ============================================================================
+# W42 隔离区工具（agent/ai/sandbox/）：追加段，既有规则不修改
+#  - aik-sandbox：独立静态产物，gcc 直链单文件，不依赖 agent 其余部分
+#    （子智能体宿主侧生命周期工具：create/run/destroy/status，见
+#    sandbox/aik-sandbox.c；executor.c 的 sandbox 通道经它组装 namespace
+#    沙盒）。生产布局装 /usr/local/bin/aik-sandbox。
+# ============================================================================
+SB_DIR   := sandbox
+SB_BIN   := aik-sandbox
+SB_CFLAGS := -Wall -Wextra -std=c11 -O2 -static
+
+$(SB_BIN): $(SB_DIR)/aik-sandbox.c $(wildcard include/*.h)
+	@echo "$(GREEN)[LINK]$(NC) $@"
+	$(CC) $(SB_CFLAGS) $(LDFLAGS) -o $@ $<
+
+all: $(SB_BIN)
+
+install-sandbox: $(SB_BIN)
+	@echo "$(GREEN)[INSTALL]$(NC) $(SB_BIN) -> /usr/local/bin/"
+	install -m 755 $(SB_BIN) /usr/local/bin/
+	@if [ -f tools/tools-sandbox.json ]; then \
+		mkdir -p /usr/local/share/aikernel/; \
+		install -m 644 tools/tools-sandbox.json \
+			/usr/local/share/aikernel/; \
+		echo "$(GREEN)[INSTALL]$(NC) tools/tools-sandbox.json -> /usr/local/share/aikernel/"; \
+	fi
+
+install: install-sandbox
+
+# ============================================================================
+# W43 合并波（plan 只读模式 + slash 命令体系）：追加段，既有规则不修改
+#  - shell/commands/cmd_plan.c（/plan /unplan：会话级只读规划模式开关，
+#    状态位在 policy/ai_user_policy.c，工具闸门在 tools/executor.c）
+#  - shell/commands/cmd_tools.c（/tools：注册表清单，通道/关键词过滤）
+#  - shell/commands/cmd_sandbox.c（/sandbox：隔离区手动管理——与 ask 内
+#    sandbox_* 工具同链路（注册表+闸门+执行器），不旁路安全层）
+# ============================================================================
+W43_EXTRA_SRCS := $(CMD_DIR)/cmd_plan.c \
+	$(CMD_DIR)/cmd_tools.c \
+	$(CMD_DIR)/cmd_sandbox.c
+W43_EXTRA_OBJS := $(W43_EXTRA_SRCS:%.c=$(BUILD_DIR)/%.o)
+$(TARGET_AI): $(W43_EXTRA_OBJS)
+$(TARGET_SHELL): $(W43_EXTRA_OBJS)
+
+# ============================================================================
+# W48B 全轨迹日志（agent/ai/trace/）：追加段，既有规则不修改
+#  - trace/ai_trace.c：JSONL 事件写入（O_APPEND 单写/脱敏/轮转/降级），
+#    session/turn/model/tool/policy/degraded/error 全链路
+#  - shell/commands/cmd_trace.c：trace stats|dump|export（训练数据导出）
+# ============================================================================
+TRACE_EXTRA_SRCS := trace/ai_trace.c \
+	$(CMD_DIR)/cmd_trace.c
+TRACE_EXTRA_OBJS := $(TRACE_EXTRA_SRCS:%.c=$(BUILD_DIR)/%.o)
+$(TARGET_AI): $(TRACE_EXTRA_OBJS)
+$(TARGET_SHELL): $(TRACE_EXTRA_OBJS)
+
+
+# W48 security fix: root tools.json / tools.openai.json / tool_catalog.txt /
+# tools-sandbox.json are symlinks to tools/ (single canonical source, 114 tools).
+# Never edit the root paths; regenerate tools/ with tools/gen_registry.py.
+
+# W65：自动头文件依赖汇总（必须位于全部 *_OBJS 定义之后；见 DEPFLAGS）。
+-include $(AI_OBJS:.o=.d) $(SHELL_OBJS:.o=.d) $(UI_EXTRA_OBJS:.o=.d) \
+	$(POLICY_EXTRA_OBJS:.o=.d) $(I18N_EXTRA_OBJS:.o=.d) \
+	$(W43_EXTRA_OBJS:.o=.d) $(TRACE_EXTRA_OBJS:.o=.d)

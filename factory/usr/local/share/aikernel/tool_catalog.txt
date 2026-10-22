@@ -1,0 +1,151 @@
+procfs_read_status 内核 AI 子系统运
+procfs_read_decisions 决策记录 ring 快照
+procfs_read_chains 因果链视图（trigge
+procfs_read_control 可控制参数表（27 
+procfs_read_latency 决策/感知延迟统
+procfs_read_hitrate 策略命中率统计（
+procfs_read_telemetry 遥测 ring 转储（全
+procfs_read_sched_stats 调度域遥测统计（
+procfs_read_sched_classify 调度分类接口（AI 
+procfs_read_vfs_stats VFS/B 轨遥测统计（
+procfs_read_vfs_rates VFS 事件速率统计
+procfs_read_stats_telemetry_emitted 遥测已发射事件计
+procfs_read_stats_telemetry_dropped 遥测丢弃事件计数
+procfs_read_stats_telemetry_sampled_skip 遥测采样跳过计数
+procfs_read_stats_decisions_total 决策总尝试数（策
+procfs_read_stats_decisions_hit 决策命中数
+procfs_read_stats_decisions_hitrate_permille 决策命中率（千分
+procfs_read_stats_runtime_state Runtime 状态机当前
+procfs_read_cgroup_inferences cgroup AI 已发起推
+sysfs_write_enabled AI 子系统总开关（
+sysfs_write_model_load 加载 AIKWMDL v1 格式
+sysfs_write_model_unload 按名卸载模型
+sysfs_write_policy_think 触发一次内核决策
+sysfs_write_policy_outcome 上报决策结果（决
+sysfs_write_policy_global_enable 决策执行全局闸门
+sysfs_write_policy_max_impact_pct 安全边界：决策参
+sysfs_write_policy_rollback 按 decision_id 回退
+sysfs_write_policy_refresh 同步策略目录（扫
+sysfs_write_policy_chain_dir 因果链 CSV 导出根
+procfs_write_telemetry_format format=raw（原始定
+procfs_write_telemetry_reset 清空全部遥测/决
+netlink_act_sched_nice 设置进程 nice 值（
+netlink_act_sched_affinity 设置进程 CPU 亲和
+netlink_act_sched_oom_score 设置进程 oom_score_a
+netlink_act_sched_timeslice 调度时间片参数（
+netlink_act_mm_swappiness 内存换页倾向 swapp
+netlink_act_mm_readahead 预读窗口 KB（写全
+netlink_act_mm_thp 透明大页模式（0=n
+netlink_act_mm_reclaim_prio 回收优先级（映射
+netlink_act_io_priority I/O 优先级（实时
+netlink_act_io_bandwidth 写回带宽比 max_rati
+netlink_act_net_cwnd TCP 拥塞窗口参数
+netlink_act_net_rto TCP 重传超时参数 m
+netlink_act_net_qdisc 默认队列调度 qdisc
+netlink_act_net_nftables AIKernel 自有 netfilte
+netlink_act_power_freq aiguard 频率上限万
+netlink_act_power_cstate CPU DMA 延迟容忍（
+netlink_act_power_wakeup 调度唤醒事件采集
+netlink_act_sec_lsm_override AIKernel 自家 LSM 执
+netlink_act_sec_seccomp W49 起为 reserved 保
+netlink_act_sec_audit AIKernel 审计采集开
+netlink_act_proc_signal 向目标进程投递信
+netlink_act_proc_freeze 冻结/解冻目标进
+netlink_act_proc_rlimit 设置目标进程资源
+netlink_act_ai_decision_inject AI 决策注入全局总
+netlink_act_ai_decision_oom OOM 受害者评分偏
+netlink_act_ai_decision_sched 调度决策注入使能
+netlink_act_ai_decision_mm 内存决策注入使能
+netlink_sense 按 CPU 读取遥测记
+procfs_read_net_nf_conntrack 内核连接跟踪表（
+exec_run python3 执行 .py 脚
+memory_search 凡涉及 AIKernel 系
+memory_search_advanced 在普通检索上叠加
+memory_add 写入一条记忆到 SM
+memory_batch_add memories 为 JSON 数组
+memory_stats 查询 SME 记忆库统
+memory_get 按 ID 读取单条记
+memory_update text/metadata/tags/impor
+memory_delete 不可恢复
+memory_hit 命中计数 +1、检索
+memory_archive 默认检索不可见，
+memory_restore 恢复归档记忆（POS
+memory_import 按 id 还原 weight/hit
+memory_facts_multi_hop 按文本找实体并沿
+memory_graph 返回 edge_count 与全
+memory_link a/b 均须存在，kind 
+memory_regions 返回 count 与每个 R
+memory_regions_search 返回最相关 Region
+memory_regions_evolve 对空间结构执行 sp
+memory_facts entities/relations/facts
+memory_facts_history text 或 memory_id 至
+memory_profile profile_facts/snapshots/
+memory_qapairs count 与 pairs（questi
+memory_consolidate 聚类生成摘要记忆
+memory_compress 生成压缩摘要，会
+memory_export 全量导出记忆库 JS
+memory_metrics 观测指标摘要（GET
+memory_metrics_report 导出完整遥测报告
+memory_config_get 分组配置项、当前
+memory_config_check ping=false 仅静态校
+sys_shell 仅当用户明确请求
+sandbox_status /sandbox/ 下各区名
+sandbox_create 创建 /sandbox/<name>/r
+sandbox_spawn 在新 mount/pid/uts nam
+sandbox_destroy 卸载残留并清除 /s
+procfs_read_pressure_cpu CPU PSI 压力（some/fu
+procfs_read_pressure_memory 内存 PSI 压力（some
+procfs_read_pressure_io IO PSI 压力（some/ful
+procfs_read_swaps swap 区清单（Filenam
+procfs_read_interrupts 各 CPU 中断计数（
+procfs_read_irq_default_affinity 新建 IRQ 的默认 CPU
+sysfs_write_sched_classify 向 /proc/ai/sched/class
+procfs_read_mounts 当前挂载表（只读
+procfs_read_filesystems 内核支持的文件系
+config_read_fstab 系统开机挂载表（
+config_write_fstab 先 config_read_fstab 
+config_read_nftables 防火墙持久化配置
+config_write_nftables 先读后写，改完用
+config_read_sshd_config SSH 服务端配置（
+config_write_sshd_config 先读后写，保留至
+config_read_resolv_conf DNS 解析配置（只
+config_write_resolv_conf 先读后写，保留现
+config_read_hosts 本地主机名映射（
+config_write_hosts 先读后写，保留 lo
+config_read_hostname 静态主机名文件（
+config_write_hostname 优先 hostnamectl set-h
+sysctl_get key 用点号形式（
+sysctl_set key 用点号形式（
+sysctl_blacklist 每项含键前缀、拒
+sysfs_get path 必须是绝对路
+sysfs_set path 为绝对路径，v
+sysfs_write_model_infer 触发内核内 MLP 推
+procfs_read_model_out 最近一次内核内 ML
+sysfs_write_decision_oom_badness 单 hook 决策注入开
+sysfs_write_decision_sched_vruntime 单 hook 决策注入开
+sysfs_write_decision_sched_wakeup 单 hook 决策注入开
+sysfs_write_decision_readahead 单 hook 决策注入开
+sysfs_write_decision_reclaim 单 hook 决策注入开
+procfs_read_decision_stats per-hook 决策注入记
+memory_health 返回 status/memories 
+desktop_health 返回 demo 服务 versi
+desktop_stats load1/内存占用/uptim
+desktop_apps_list 返回 count 与 apps[]
+desktop_windows_list 每窗口返回稳定 id
+desktop_theme_get current 与 themes 色
+desktop_wallpaper_get current（gradient 或 w
+desktop_notifications_list 最近通知数组（tit
+desktop_screenshot 返回 PNG 绝对 path/b
+desktop_clipboard_get 返回 text/length/sha25
+desktop_theme_set name=dark|light|pink|cus
+desktop_wallpaper_set wallpaper=gradient 或 w
+desktop_notifications_send 追加一条 title/body/
+desktop_apps_launch app=apps.list 的 id（
+desktop_windows_focus id=windows.list 的 w-XX
+desktop_windows_close id=w-XXXX
+desktop_apps_close app=应用 id
+desktop_input_type text≤4096，追加到
+desktop_input_key key 为单字符或 Ente
+desktop_clipboard_set text≤65536
+desktop_power action=lock|logout|reboo
+clarify 一次只问一个问题

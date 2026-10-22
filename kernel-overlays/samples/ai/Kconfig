@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# samples/ai/Kconfig - AIKernel AI 示例
+#
+# 全部 default n（示例仅作模板，不进入默认构建）。
+
+config SAMPLE_AI_SCHED_POLICY
+	tristate "AIKernel AI scheduler policy sample"
+	depends on AIKERNEL && AIKERNEL_RUNTIME && m
+	help
+	  AI 调度器策略注册示例模块：演示 ai_policy_register() 的
+	  "域 + 动作名 + 回调 + 回滚" 接入模板（AI 自动化接入调度决策）。
+
+	  If unsure, say N.
+
+config SAMPLE_AI_IO_SCHEDULER
+	tristate "AIKernel AI I/O scheduler sample"
+	depends on AIKERNEL && AIKERNEL_RUNTIME && AIKERNEL_IO && m
+	help
+	  AI I/O 调度器决策接入示例模块：演示 io 域策略注册 +
+	  ai_io_dispatch_hook() 咨询点调用姿势。
+
+	  If unsure, say N.
+
+config SAMPLE_AI_BPF_HELPER
+	tristate "AIKernel AI BPF helper sample"
+	depends on AIKERNEL && AIKERNEL_RUNTIME && AIKERNEL_BPF && m
+	help
+	  BPF AI helper 示例模块：演示 bpf_ai_query / bpf_ai_telemetry
+	  核心函数调用与 AI PMU（ai/inference）发射。
+
+	  If unsure, say N.

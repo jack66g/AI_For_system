@@ -32,6 +32,21 @@
 #define TOOL_EXEC_OUT_MAX   32768
 
 /*
+ * 结构化参数错误前缀（W65 P2-01/P2-03）。
+ * 形如 "ERROR[E_PARAM_MISSING]: ..."，后接 USAGE/AVAILABLE 指引。
+ * cmd_ask 据此对参数错误做一次自动纠正重试（每轮最多一次），
+ * 并把重试计入 trace（degraded 事件）。
+ */
+#define TOOL_ERR_PARAM_PREFIX "ERROR[E_PARAM"
+
+/*
+ * 策略拒绝结果前缀（W69 P1-4）。只有 plan/W2/黑名单/沙箱隔离等**策略
+ * 拒绝**才带此前缀；二进制缺失、执行失败、参数错误一律记为 fail。
+ * cmd_ask 的 trace status 与 M3 口径据此判定 denied。
+ */
+#define TOOL_ERR_DENIED_PREFIX "ERROR: DENIED:"
+
+/*
  * tool_executor_run - 执行一个工具调用
  * @tool:     注册表中的工具（channel 决定路由）
  * @args_json: 模型给出的参数 JSON 对象字符串（"{}" 可为 NULL）
@@ -42,5 +57,31 @@
  */
 int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		      char **out, int *ok);
+
+/*
+ * tool_exec_effective_risk - 计算一次调用的**有效风险级**（W48）
+ * exec 通道按命令级基础 risk + args0 动词表 + 动态写参数判定
+ * （curl POST/-o、ip add/set、ethtool -s、journalctl --vacuum、
+ * crontab -r 等 → W2）；其余通道返回工具级 risk（缺失按 W1）。
+ * 供权限闸门/plan 闸门/测试共用，保证闸门与执行段同一语义。
+ * 返回静态字符串 "R"/"W1"/"W2"（不释放）。
+ */
+const char *tool_exec_effective_risk(const struct ai_tool *tool,
+				     const char *args_json);
+
+/*
+ * tool_exec_memory_last_rc - 最近一次 memory 通道执行的真实返回码。
+ * 供 cmd_ask 用 sme_degrade_reason_of() 区分 unavailable/http_error，
+ * 不再把所有 memory 失败都记成 "sme unavailable"（W69 P2-3）。
+ * 返回 AI_OK/AI_ERR_*（executor 进程内单线程调用语义）。
+ */
+int tool_exec_memory_last_rc(void);
+
+/*
+ * tool_exec_result_is_denied - 结果文本是否为**策略拒绝**（W69 P1-4）。
+ * 只认 TOOL_ERR_DENIED_PREFIX；二进制缺失/执行失败/参数错误均返回 0。
+ * cmd_ask 的 trace status 与 M3 口径共用本判定。
+ */
+int tool_exec_result_is_denied(const char *out);
 
 #endif /* _AI_TOOL_EXECUTOR_H */

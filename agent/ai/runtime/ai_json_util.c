@@ -263,12 +263,16 @@ int ai_json_obj_member(const char *obj, size_t obj_len, int index,
 		       const char **key, size_t *key_len,
 		       const char **val, size_t *val_len, int *type)
 {
-	const char *p = obj;
-	const char *end = obj + obj_len;
+	const char *p;
+	const char *end;
 	int idx = 0;
 
 	if (!obj || obj_len == 0 || index < 0)
 		return -1;
+	/* W48 C2 修复：先判空再做指针算术（原实现 obj+obj_len 在判空前
+	 * 执行，NULL 指针算术形式 UB） */
+	p = obj;
+	end = obj + obj_len;
 	if (*p != '{')
 		return -1;
 	p++;
