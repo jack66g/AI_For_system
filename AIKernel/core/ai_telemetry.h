@@ -24,7 +24,13 @@
 
 /* ---- 常量 ---- */
 
-#define AI_TELEMETRY_RING_SIZE     (128 * 1024)  /* 每 CPU ring buffer 128KB */
+/*
+ * 每 CPU ring buffer 256KB（w24 由 128KB 扩容）：
+ *   - 64 CPU 内存代价 = 64 x 256KB = 16MB（VM 8GB 级，远低于 64MB 预算）；
+ *   - 目的：为"后台排空周期 + 积压自适应降采样生效窗口"提供突发缓冲，
+ *     使环满真丢弃（dropped）在实际负载下趋近 0。
+ */
+#define AI_TELEMETRY_RING_SIZE     (256 * 1024)
 #define AI_TELEMETRY_MAX_DATA_LEN  4096          /* 原始数据最大长度（对齐计划 0-4096） */
 
 /* ---- 严重级别 ---- */
@@ -226,12 +232,36 @@ enum ai_event_type {
 
 /* ---- 统计结构 ---- */
 
+/*
+ * 统计结构（w24 末尾追加字段，原有字段偏移与语义不变——/proc/ai/status
+ * 仅追加输出，ABI 兼容）：
+ *   - dropped 为"真实丢失记录条数"（w58 起满丢弃/CRITICAL 驱逐/resync
+ *     弃积压逐条计入；resync 的坏头残段按 1 条下界计并见 dmesg 字节数；
+ *     旧版 resync 一次只计 1）；sampled_skip 保持
+ *     "采样跳过"（含 w24 积压自适应降采样跳过——丢的是采样密度，不是
+ *     已发生事件计数）；
+ *   - consumed/adapt_shift/adapt_skipped 为 w24 新增观测字段；
+ *   - resyncs/adapt_peak_shift/adapt_episodes 为 w58 末尾追加字段
+ *     （原有字段偏移与语义不变，/proc/ai/status 仅追加输出）；
+ *   - predrain_dropped 为 w63 末尾追加字段：排空线程（消费者）就绪前
+ *     的环满丢弃条数。w63 起该窗口的丢弃计入 sampled_skip（按采样跳过
+ *     语义，不属于稳态背压），predrain_dropped 保留真实损失观测；消费者
+ *     就绪后的环满丢弃仍计入 dropped。
+ */
 struct ai_telemetry_cpu_stats {
 	u32 emitted;        /* 成功写入条数 */
-	u32 dropped;        /* 满丢弃条数 */
+	u32 dropped;        /* 真实丢失记录条数（满/驱逐/resync 逐条） */
 	u32 sampled_skip;   /* 采样跳过条数 */
 	u32 ring_size;      /* 环形缓冲字节数 */
 	u32 head, tail;     /* 读写位置 */
+	u64 consumed;       /* w24：后台/读者已消费（读出并释放）字节数 */
+	u32 adapt_shift;    /* w24：当前降档级（瞬时；0=当前无降档，非"未启用"） */
+	u64 adapt_skipped;  /* w24：被自适应降采样跳过的条数（含于 sampled_skip） */
+	u32 resyncs;        /* w58：环错位 resync 次数（正常恒 0） */
+	u32 adapt_peak_shift; /* w58：历史最高降档级（0..6） */
+	u64 adapt_episodes; /* w58：进入降档（shift 0→>0）的次数 */
+	u64 predrain_dropped; /* w63：消费者就绪前环满丢弃条数（含于
+			       * sampled_skip；dropped 不含） */
 };
 
 /* ---- 核心接口 ---- */
@@ -248,7 +278,9 @@ int ai_telemetry_init(void);
 /**
  * ai_telemetry_exit() - 销毁遥测核心（释放 per-CPU ring buffer）
  *
- * 由 ai_runtime_destroy() 调用；幂等。
+ * 由 ai_runtime_destroy() 调用；幂等。必须在可睡眠进程上下文调用
+ * （w63：内部用 on_each_cpu() 等生产者退出写临界区、逐个 read_lock
+ * 等读者退出，之后才 vfree）。
  */
 void ai_telemetry_exit(void);
 
@@ -274,7 +306,10 @@ int ai_telemetry_emit(u8 category, u8 event_type, u8 severity,
  * @len: 接收缓冲容量；不足时只拷贝完整的记录
  * @out_bytes: 回填实际拷贝字节数
  *
- * 单读者语义（AI Runtime 独占）；返回 AI_OK 或负错误码。
+ * 线程安全（w58）：每 CPU 一把读者 mutex，串行化"复制记录 + 推进 tail"
+ * 临界区；可在可睡眠进程上下文并发调用（drain kthread / procfs read /
+ * NETLINK SENSE 回调均满足）。返回的每条记录完整、不撕裂；不可在原子/
+ * 软中断上下文调用。返回 AI_OK 或负错误码。
  */
 int ai_telemetry_read(u32 cpu, void *buf, size_t len, size_t *out_bytes);
 
@@ -297,6 +332,16 @@ int ai_telemetry_set_sample_rate(u8 category, u8 event_type, u32 rate);
  * 返回 AI_OK 或负错误码。
  */
 int ai_telemetry_get_sample_rate(u8 category, u8 event_type, u32 *rate);
+
+/**
+ * ai_telemetry_rate_cmd() - 采样率设置命令（w21 用户态写入口）
+ * @s: NUL 结尾命令串 "cat:ev:N"（cat∈[1,AI_CAT_AI] ev∈[1,AI_EV_MAX)，
+ *     N∈[0,65535]；0=丢弃全部 1=全量 N=每 N 条记 1 条）
+ *
+ * 解析并落 ai_telemetry_set_sample_rate()（>65535 钳 65535）。
+ * 返回 AI_OK 或负错误码（语法/边界非法 = AI_ERR_INVALID_ARG）。
+ */
+int ai_telemetry_rate_cmd(const char *s);
 
 /**
  * ai_telemetry_sample_take() - 采样判定（供热路径埋点在构建 payload 前调用）
@@ -345,6 +390,61 @@ int ai_telemetry_reset(void);
  */
 int ai_telemetry_stats(u32 cpu, struct ai_telemetry_cpu_stats *st);
 
+/* ---- w24：消费者常驻化（后台排空） ---- */
+
+/*
+ * 后台排空周期（毫秒）。#58 起稳态基准改为 10ms（100Hz）：250ms 的空闲
+ * 窗口足以让重负载突发先填满 256KB 环再被看到，事后提速无法补回已丢事件。
+ * 10ms 空闲排空 + 环占用 ≥1/4 时 2ms，兼顾训练日志完整性与 CPU 开销；
+ * 每 CPU 每次至多整环，排空能力仍 >=1MB/s。
+ */
+#define AI_TEL_DRAIN_PERIOD_MS  10
+
+/**
+ * ai_telemetry_drain_all() - 同步把全部 CPU 的 ring 读空并释放
+ *
+ * 读出内容计入 consumed 后丢弃（与环满丢弃同损益，但事件先入环、
+ * 在排空周期窗口内仍可被被动读者捕获）。与 /proc/ai/telemetry 读者、
+ * NETLINK SENSE 读者的并发由每 CPU read_lock 串行化（w58）：复制与
+ * tail 推进在同一临界区，慢读者复制中的记录不会被快读者消费后覆盖。
+ * 供后台排空线程周期调用与 KUnit 直接调用。返回 AI_OK 或负错误码。
+ */
+int ai_telemetry_drain_all(void);
+
+/**
+ * ai_telemetry_drain_start() - 启动后台排空线程（"ai_tel_drain"）
+ *
+ * 周期 AI_TEL_DRAIN_PERIOD_MS 调 ai_telemetry_drain_all()，线程首轮
+ * 立即排空一次（w63，不再等首个周期）。幂等；w63 起由 ai_telemetry.c
+ * 的 early_initcall 尽早启动（kthreadd 可用后最早安全点），
+ * ai_proc_init（late_initcall）再幂等调用一次作为失败重试。
+ * 返回 AI_OK 或负错误码。
+ */
+int ai_telemetry_drain_start(void);
+
+/**
+ * ai_telemetry_drain_stop() - 停止后台排空线程并等待退出
+ *
+ * 幂等；ai_telemetry_exit() 释放 ring 前必须先调用（防 vfree 后访问）。
+ */
+void ai_telemetry_drain_stop(void);
+
+/**
+ * ai_telemetry_drain_running() - 排空线程是否在运行（status 观测用）
+ */
+bool ai_telemetry_drain_running(void);
+
+#ifdef CONFIG_AIKERNEL_KUNIT_TEST
+/**
+ * ai_telemetry_test_set_consumer_ready() - 仅 KUnit：置位/复位消费者就绪闩锁
+ * @ready: true=模拟消费者已就绪；false=模拟启动窗口（尚无消费者）
+ *
+ * 用于验证 w63 启动窗口计额：消费者就绪前的环满丢弃计入
+ * sampled_skip + predrain_dropped，dropped 保持 0。
+ */
+void ai_telemetry_test_set_consumer_ready(bool ready);
+#endif
+
 #else /* !CONFIG_AIKERNEL_TELEMETRY */
 
 static inline int ai_telemetry_init(void) { return AI_OK; }
@@ -390,6 +490,10 @@ static inline int ai_telemetry_stats(u32 cpu, struct ai_telemetry_cpu_stats *st)
 		memset(st, 0, sizeof(*st));
 	return AI_OK;
 }
+static inline int ai_telemetry_drain_all(void) { return AI_OK; }
+static inline int ai_telemetry_drain_start(void) { return AI_OK; }
+static inline void ai_telemetry_drain_stop(void) { }
+static inline bool ai_telemetry_drain_running(void) { return false; }
 
 #endif /* CONFIG_AIKERNEL_TELEMETRY */
 #include "ai_telemetry_wrappers.h"

@@ -24,6 +24,8 @@
 #include "ai_commands.h"
 #include "ai_ui.h"
 #include "ai_config.h"
+#include "ai_lang.h"
+#include "memory/sme_client.h"   /* W43: /session SME 可达性 */
 
 /* 当前会话名的快捷访问 */
 static const char *cur_session(struct ai_shell *shell)
@@ -64,14 +66,12 @@ static int do_new(struct ai_shell *shell, int argc, char **argv)
 
 	if (argc >= 3) {
 		if (!ui_session_valid_name(argv[2])) {
-			printf("session: 非法会话名 '%s'"
-			       "（只允许字母数字 - _ .）\n", argv[2]);
+			printf(tr(TR_SES_BAD_NAME), argv[2]);
 			return AI_ERR_INVALID_ARG;
 		}
 		snprintf(name, sizeof(name), "%s", argv[2]);
 		if (ui_session_exists(name)) {
-			printf("session: 会话 '%s' 已存在，切换到它"
-			       "（历史保留）\n", name);
+			printf(tr(TR_SES_EXISTS_SWITCH), name);
 			session_set_current(shell, name);
 			return AI_OK;
 		}
@@ -83,12 +83,12 @@ static int do_new(struct ai_shell *shell, int argc, char **argv)
 		int ret = ui_session_clear(name);
 
 		if (ret != AI_OK) {
-			printf("session: 创建失败: %s\n", ai_error_string(ret));
+			printf(tr(TR_SES_CREATE_FAIL), ai_error_string(ret));
 			return ret;
 		}
 	}
 	session_set_current(shell, name);
-	printf("已创建并切换到会话: %s\n", name);
+	printf(tr(TR_SES_CREATED), name);
 	return AI_OK;
 }
 
@@ -101,10 +101,11 @@ static void do_list(struct ai_shell *shell)
 
 	ui_session_list(&names, &count);
 	if (count == 0) {
-		printf("(无会话文件；ask 时自动以 '%s' 落盘)\n", cur);
+		printf(tr(TR_SES_LIST_EMPTY), cur);
 		return;
 	}
-	printf("%-3s %-24s %s\n", "#", "会话", "消息数");
+	printf(tr(TR_SES_LIST_HDR), "#", tr(TR_SES_HDR_NAME),
+	       tr(TR_SES_HDR_COUNT));
 	for (i = 0; i < count; i++) {
 		char mark[16];
 
@@ -127,6 +128,10 @@ static int do_switch(struct ai_shell *shell, int argc, char **argv)
 	const char *target = NULL;
 	char **names = NULL;
 	int count = 0;
+	/* W48 C1 修复：resolved 原先声明在数字分支块内，块外 target
+	 * 仍指向它（形式上 use-after-scope/UB）。提升到函数作用域，
+	 * 生命周期覆盖整个 do_switch。 */
+	char resolved[UI_SESSION_NAME_MAX];
 
 	if (argc < 3) {
 		printf("Usage: session switch <name|N>\n");
@@ -137,12 +142,11 @@ static int do_switch(struct ai_shell *shell, int argc, char **argv)
 	if (argv[2][0] >= '0' && argv[2][0] <= '9' &&
 	    strspn(argv[2], "0123456789") == strlen(argv[2])) {
 		int idx = atoi(argv[2]);
-		char resolved[UI_SESSION_NAME_MAX];
 		int i;
 
 		ui_session_list(&names, &count);
 		if (idx < 1 || idx > count) {
-			printf("session: 序号超范围（1-%d）\n", count ? count : 0);
+			printf(tr(TR_SES_RANGE), count ? count : 0);
 			for (i = 0; i < count; i++)
 				free(names[i]);
 			free(names);
@@ -156,20 +160,19 @@ static int do_switch(struct ai_shell *shell, int argc, char **argv)
 	} else {
 		target = argv[2];
 		if (!ui_session_valid_name(target)) {
-			printf("session: 非法会话名 '%s'\n", target);
+			printf(tr(TR_SES_BAD_TARGET), target);
 			return AI_ERR_INVALID_ARG;
 		}
 	}
 
 	if (strcmp(target, cur_session(shell)) == 0) {
-		printf("已在会话 '%s'\n", target);
+		printf(tr(TR_SES_ALREADY_IN), target);
 		return AI_OK;
 	}
 
 	/* 切换前落盘当前会话的运行统计（消息本已写透，这里只打印确认） */
 	session_set_current(shell, target);
-	printf("已切换到会话: %s（%d 条历史消息）\n", target,
-	       ui_session_count(target));
+	printf(tr(TR_SES_SWITCHED), target, ui_session_count(target));
 	return AI_OK;
 }
 
@@ -192,10 +195,10 @@ static void do_show(struct ai_shell *shell, int argc, char **argv)
 
 	ret = ui_session_load(cur, &msgs, &n, &pool, &npool);
 	if (ret != AI_OK) {
-		printf("session: 加载失败: %s\n", ai_error_string(ret));
+		printf(tr(TR_SES_LOAD_FAIL), ai_error_string(ret));
 		return;
 	}
-	printf("会话 '%s'：%d 条消息\n", cur, n);
+	printf(tr(TR_SES_SHOW), cur, n);
 	start = n - show_n;
 	if (start < 0)
 		start = 0;
@@ -225,15 +228,26 @@ int cmd_session(void *shell_ptr, int argc, char **argv)
 	struct ai_shell *shell = (struct ai_shell *)shell_ptr;
 
 	if (argc < 2) {
-		printf("Usage: session <new|list|switch|save|delete|show>"
+		/* W43：无子命令 → 会话状态速览（当前会话名/历史条数/
+		 * SME 可达性），子命令帮助照旧附后。 */
+		char sme_resp[SME_OUT_BUF_MIN];
+		int sme_rc;
+
+		printf(tr(TR_SES_STATUS_HDR), cur_session(shell),
+		       ui_session_count(cur_session(shell)));
+		fflush(stdout);
+		sme_rc = sme_health(sme_resp, sizeof(sme_resp));
+		printf("%s", sme_rc == AI_OK ? tr(TR_SME_REACHABLE) :
+		       tr(TR_SME_UNREACHABLE));
+		printf("Usage: session [<new|list|switch|save|delete|show>]"
 		       " [args]\n");
-		printf("  session new [name]      新建并切换会话\n");
-		printf("  session list            列出会话\n");
-		printf("  session switch <name|N> 切换会话\n");
-		printf("  session save            确认落盘\n");
-		printf("  session delete <name>   删除会话\n");
-		printf("  session show [n]        查看最近 n 条消息\n");
-		return AI_ERR_INVALID_ARG;
+		printf("%s", tr(TR_SES_HELP_NEW));
+		printf("%s", tr(TR_SES_HELP_LIST));
+		printf("%s", tr(TR_SES_HELP_SWITCH));
+		printf("%s", tr(TR_SES_HELP_SAVE));
+		printf("%s", tr(TR_SES_HELP_DELETE));
+		printf("%s", tr(TR_SES_HELP_SHOW));
+		return AI_OK;
 	}
 
 	if (strcmp(argv[1], "new") == 0)
@@ -246,7 +260,7 @@ int cmd_session(void *shell_ptr, int argc, char **argv)
 		return do_switch(shell, argc, argv);
 	if (strcmp(argv[1], "save") == 0) {
 		/* 消息在 ask 过程中写透落盘，这里做显式同步确认 */
-		printf("会话 '%s' 已落盘（%d 条消息，每轮 ask 自动追加）\n",
+		printf(tr(TR_SES_SAVED),
 		       cur_session(shell), ui_session_count(cur_session(shell)));
 		return AI_OK;
 	}
@@ -256,17 +270,16 @@ int cmd_session(void *shell_ptr, int argc, char **argv)
 			return AI_ERR_INVALID_ARG;
 		}
 		if (strcmp(argv[2], cur_session(shell)) == 0) {
-			printf("session: 不能删除当前会话"
-			       "（先 switch 到其他会话）\n");
+			printf("%s", tr(TR_SES_DEL_CURRENT));
 			return AI_ERR_INVALID_ARG;
 		}
 		{
 			int ret = ui_session_delete(argv[2]);
 
 			if (ret == AI_OK)
-				printf("已删除会话: %s\n", argv[2]);
+				printf(tr(TR_SES_DELETED), argv[2]);
 			else
-				printf("session: 删除失败: %s\n",
+				printf(tr(TR_SES_DELETE_FAIL),
 				       ai_error_string(ret));
 			return ret;
 		}

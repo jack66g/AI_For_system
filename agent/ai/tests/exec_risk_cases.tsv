@@ -1,0 +1,192 @@
+ls	["-l", "/tmp"]	R	read
+cat	["/etc/hostname"]	R	read
+head	["-n", "1", "/etc/hostname"]	R	read
+tail	["-n", "1", "/etc/hostname"]	R	read
+grep	["root", "/etc/passwd"]	R	read
+ps	["-e"]	R	read
+free	["-m"]	R	read
+df	["-h"]	R	read
+uname	["-a"]	R	read
+uptime	[]	R	read
+date	["+%s"]	R	read
+echo	["hi"]	R	read
+printf	["%s\n", "hi"]	R	read
+dmesg	[]	R	read
+ss	["-t"]	R	read
+stat	["/etc/hostname"]	R	read
+wc	["-l", "/etc/hostname"]	R	read
+sort	["/etc/hostname"]	R	read
+uniq	["/etc/hostname"]	R	read
+cut	["-d", ":", "-f", "1", "/etc/passwd"]	R	read
+which	["sh"]	R	read
+whereis	["sh"]	R	read
+lsblk	[]	R	read
+du	["-s", "/tmp"]	R	read
+lscpu	[]	R	read
+vmstat	[]	R	read
+pidof	["init"]	R	read
+pgrep	["init"]	R	read
+id	[]	R	read
+getent	["passwd", "root"]	R	read
+systemd-analyze	["time"]	R	read
+systemd-analyze	["--generators=no", "time"]	R	read
+journalctl	["-n", "1", "--no-pager"]	R	read
+curl	["-sS", "http://127.0.0.1:1/"]	R	read
+ollama	["list"]	R	read
+timedatectl	["status"]	R	read
+ip	["addr", "show"]	R	read
+ip	["-br", "addr"]	R	read-brief
+ethtool	["eth0"]	R	read
+hostnamectl	["status"]	R	read
+resolvectl	["status"]	R	read
+findmnt	["/"]	R	read
+blkid	[]	R	read
+dumpe2fs	["-h", "/dev/sda2"]	R	read
+smartctl	["-H", "/dev/sda"]	R	read
+quota	["-u"]	R	read
+repquota	["-a"]	R	read
+pvs	[]	R	read
+vgs	[]	R	read
+lvs	[]	R	read
+aa-status	[]	R	read
+apparmor_status	[]	R	read
+hostname	[]	R	read
+find	["/tmp", "-maxdepth", "1"]	R	read
+sort	["-o", "/var/tmp/w69-sort"]	PATH	output outside roots
+sort	["--output=/var/tmp/w69-sort"]	PATH	output= outside roots
+sort	["-T", "/var/tmp"]	PATH	temp dir outside roots
+sort	["-T/tmp"]	W2	temp dir
+sort	["--compress-program=/bin/id"]	DENY	external compressor
+sort	["--compress-program", "/bin/id"]	DENY	external compressor
+sort	["-o", "/tmp/w69-sort"]	W2	output in /tmp
+uniq	["/var/tmp/w69-uniq-in", "/var/tmp/w69-uniq"]	PATH	output outside roots
+uniq	["/etc/hostname", "/tmp/w69-uniq"]	W2	output in /tmp
+date	["-s", "2026-01-01 00:00:00"]	W2	set time
+date	["--set=2026-01-01"]	W2	set= time
+date	["010100002026"]	W2	positional set time
+dmesg	["-C"]	W2	clear ring
+dmesg	["-c"]	W2	read-clear
+dmesg	["--clear"]	W2	clear
+dmesg	["-n", "1"]	W2	console level
+dmesg	["--console-level=1"]	W2	console level=
+dmesg	["-D"]	W2	console off
+dmesg	["-E"]	W2	console on
+ss	["-K"]	W2	kill sockets
+ss	["--kill"]	W2	kill sockets
+ss	["-D", "/var/tmp/w69-ss"]	PATH	diag dump outside roots
+ss	["--diag=/tmp/w69-ss"]	W2	diag dump
+hostname	["w69-new-host"]	W2	set positional
+hostname	["-F", "/etc/hostname"]	W2	set from file
+hostname	["--file=/etc/hostname"]	W2	set from file=
+hostname	["-b"]	W2	set boot hostname
+blkid	["-g"]	W2	garbage collect cache
+blkid	["-w"]	W2	write cache
+blkid	["--write-cache"]	W2	write cache long
+smartctl	["-t", "short", "/dev/sda"]	W2	self test
+smartctl	["--test=long", "/dev/sda"]	W2	self test=
+smartctl	["-s", "on", "/dev/sda"]	W2	set
+smartctl	["--set=on", "/dev/sda"]	W2	set=
+smartctl	["-o", "on", "/dev/sda"]	W2	offlineauto
+smartctl	["-S", "on", "/dev/sda"]	W2	saveauto
+smartctl	["-X", "/dev/sda"]	W2	abort test
+ip	["netns", "exec", "foo", "id"]	DENY	netns exec
+ip	["vrf", "exec", "foo", "id"]	DENY	vrf exec
+ip	["-batch", "/tmp/w69-ip.batch"]	DENY	batch file
+ip	["-b", "/tmp/w69-ip.batch"]	DENY	batch short
+ip	["-bfile"]	DENY	batch attached
+ip	["link", "set", "eth0", "down"]	W2	link set
+ip	["netns", "add", "foo"]	W2	netns add
+ip	["addr", "add", "10.0.0.1/24", "dev", "eth0"]	W2	addr add
+ethtool	["-p", "eth0"]	W2	identify
+ethtool	["-t", "eth0"]	W2	self test
+ethtool	["-s", "eth0", "speed", "1000"]	W2	change
+ethtool	["-E", "eth0"]	W2	change eeprom
+ethtool	["-f", "/tmp/w69-fw.bin", "eth0"]	W2	flash
+ethtool	["-r", "eth0"]	W2	negotiate
+ethtool	["-d", "eth0", "file", "/var/tmp/w69-reg"]	PATH	regdump file
+ethtool	["-w", "eth0", "data", "/var/tmp/w69-dump"]	PATH	dump data file
+ethtool	["-N", "eth0"]	W2	config nfc
+ethtool	["-X", "eth0"]	W2	set rxfh
+ethtool	["-L", "eth0"]	W2	set channels
+ethtool	["-W", "eth0"]	W2	set dump
+ethtool	["--set-eee", "eth0"]	W2	set eee
+ethtool	["--reset", "eth0"]	W2	reset
+ethtool	["--cable-test", "eth0"]	W2	cable test
+journalctl	["--rotate"]	W2	rotate
+journalctl	["--flush"]	W2	flush
+journalctl	["--sync"]	W2	sync
+journalctl	["--vacuum-size=1M"]	W2	vacuum
+journalctl	["--relinquish-var"]	W2	relinquish
+journalctl	["--smart-relinquish-var"]	W2	smart relinquish
+journalctl	["--setup-keys"]	W2	setup keys
+journalctl	["--update-catalog"]	W2	update catalog
+journalctl	["--cursor-file=/var/tmp/w69-cursor"]	PATH	cursor outside roots
+journalctl	["--cursor-file", "/tmp/w69-cursor"]	W2	cursor /tmp
+curl	["-o", "/var/tmp/w69-curl", "http://127.0.0.1:1/"]	PATH	output outside roots
+curl	["--output=/tmp/w69-curl", "http://127.0.0.1:1/"]	W2	output
+curl	["-D", "/tmp/w69-h", "http://127.0.0.1:1/"]	W2	dump header
+curl	["-c", "/tmp/w69-c", "http://127.0.0.1:1/"]	W2	cookie jar
+curl	["--etag-save=/tmp/w69-e", "http://127.0.0.1:1/"]	W2	etag save
+curl	["--form-string", "a=b", "http://127.0.0.1:1/"]	W2	form string
+curl	["--trace-config=/tmp/w69-tc", "http://127.0.0.1:1/"]	W2	trace config
+curl	["--trace", "/tmp/w69-t", "http://127.0.0.1:1/"]	W2	trace
+curl	["--stderr", "/tmp/w69-err", "http://127.0.0.1:1/"]	W2	stderr
+curl	["--libcurl=/tmp/w69-l", "http://127.0.0.1:1/"]	W2	libcurl
+curl	["--hsts=/tmp/w69-hsts", "http://127.0.0.1:1/"]	W2	hsts cache
+curl	["--alt-svc=/tmp/w69-alt", "http://127.0.0.1:1/"]	W2	alt-svc cache
+curl	["--output-dir=/tmp", "http://127.0.0.1:1/"]	W2	output dir
+curl	["-O", "http://127.0.0.1:1/x"]	W2	remote name
+curl	["--remote-name-all", "http://127.0.0.1:1/x"]	W2	remote name all
+curl	["-d", "a=b", "http://127.0.0.1:1/"]	W2	data
+curl	["--json", "{}", "http://127.0.0.1:1/"]	W2	json
+curl	["-F", "a=b", "http://127.0.0.1:1/"]	W2	form
+curl	["-T", "/etc/hostname", "http://127.0.0.1:1/"]	W2	upload
+curl	["-X", "POST", "http://127.0.0.1:1/"]	W2	request
+curl	["-K", "/etc/passwd"]	DENY	config short
+curl	["--config", "/etc/passwd"]	DENY	config long
+curl	["--engine", "foo", "http://127.0.0.1:1/"]	DENY	engine
+curl	["--ssl-engine=foo", "http://127.0.0.1:1/"]	DENY	ssl engine
+systemd-analyze	["--generators", "time"]	W2	generators
+systemd-analyze	["--output=/var/tmp/w69-sa", "plot"]	PATH	output outside roots
+systemd-analyze	["--output", "/tmp/w69-sa", "plot"]	W2	output /tmp
+pvs	["--config", "log/file=/tmp/w69-pvs"]	DENY	lvm config
+pvs	["--config=foo"]	DENY	lvm config=
+pvs	["--profile", "foo"]	DENY	lvm profile
+pvs	["--commandprofile=foo"]	DENY	lvm commandprofile
+pvs	["--reportfile=/tmp/w69-pvs"]	W2	lvm reportfile
+pvs	["--logfile=/tmp/w69-pvs"]	W2	lvm logfile
+vgs	["--config=foo"]	DENY	vgs config
+vgs	["--reportfile=/tmp/w69-vgs"]	W2	vgs reportfile
+lvs	["--config=foo"]	DENY	lvs config
+lvs	["--reportfile=/tmp/w69-lvs"]	W2	lvs reportfile
+df	["--sync"]	W2	sync before report
+find	["/tmp", "-delete"]	DENY	find delete
+find	["/tmp", "-exec", "id", "{}", "+"]	DENY	find exec
+find	["/tmp", "-fprint", "/etc/w69-find"]	DENY	find fprint
+ping	["-f", "127.0.0.1"]	W2	flood
+ping	["--flood", "127.0.0.1"]	W2	flood long
+ping	["-l", "100", "127.0.0.1"]	W2	preload
+ping	["-c", "1", "127.0.0.1"]	W1	normal ping
+cp	["-l", "/var/tmp/w69-src", "/tmp/w69-hard"]	PATH	cp hardlink source
+cp	["/tmp/a", "/tmp/b"]	W1	normal cp
+gcc	["-dumpdir", "/etc", "-save-temps", "/tmp/x.c"]	GCC	gcc dumpdir
+gcc	["-dumpdir=/etc", "/tmp/x.c"]	GCC	gcc dumpdir=
+gcc	["-fprofile-generate=/etc", "/tmp/x.c"]	GCC	gcc profile dir
+gcc	["-fprofile-note=/etc/note", "/tmp/x.c"]	GCC	gcc profile note
+ollama	["pull", "llama3"]	W2	ollama pull
+ollama	["run", "llama3"]	W1	ollama run
+timedatectl	["set-time", "2026-01-01 00:00:00"]	W2	set time
+timedatectl	["set-ntp", "true"]	W2	set ntp
+# W72：W69 只读误伤回归
+systemctl	["--failed"]	R	read failed units
+systemctl	["is-system-running"]	R	read system state
+systemctl	["list-jobs"]	R	read jobs
+systemctl	["restart", "ssh"]	W2	restart still W2
+curl	["-o", "/dev/null", "http://127.0.0.1:1/"]	R	devnull sink
+curl	["--output=/dev/null", "http://127.0.0.1:1/"]	R	devnull sink long
+curl	["-D", "/dev/null", "http://127.0.0.1:1/"]	R	devnull header
+curl	["-o", "/tmp/w72-curl", "http://127.0.0.1:1/"]	W2	output tmp still W2
+hostnamectl	["set-hostname", "x"]	W2	set hostname
+hostnamectl	["hostname", "x"]	W2	hostname verb
+resolvectl	["flush-caches"]	W2	flush caches
+resolvectl	["dns", "1.1.1.1"]	W2	dns write

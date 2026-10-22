@@ -10,6 +10,7 @@
 #include <string.h>
 #include "ai_shell.h"
 #include "ai_commands.h"
+#include "ai_lang.h"
 
 /* 前向声明 */
 struct ai_provider *openai_compatible_provider_create(void);
@@ -39,6 +40,9 @@ int ai_shell_init(struct ai_shell *shell)
 
 	/* 加载配置 */
 	ai_config_load(shell->config);
+
+	/* i18n：语言初始化（AIKERNEL_LANG > [ui] lang > zh） */
+	lang_init(shell->config->ui.lang);
 
 	/* 检查是否有模型配置 */
 	ai_config_get_models(shell->config, &model_names, &model_count);
@@ -162,9 +166,35 @@ static int dispatch_command(struct ai_shell *shell, int argc, char **argv)
 		}
 	}
 
-	printf("Unknown command: %s\nType 'help' for available commands.\n",
-	       argv[0]);
+	printf(tr(TR_REPL_UNKNOWN), argv[0]);
 	return AI_ERR_NOT_FOUND;
+}
+
+/* P0-1 直说转 ask 的首次提示标志（每进程一次，不刷屏） */
+static int g_ask_fallback_hint_shown;
+
+/*
+ * ask_fallback - P0-1：非命令输入按 "ask <原文>" 处理
+ * @raw: 分词前的原始输入行副本（本函数接管并 free）
+ */
+static void ask_fallback(struct ai_shell *shell, char *raw)
+{
+	char *qargv[2];
+
+	if (!raw)
+		return;
+	raw[strcspn(raw, "\r\n")] = '\0';
+	if (!raw[0]) {
+		free(raw);
+		return;
+	}
+	if (!g_ask_fallback_hint_shown) {
+		printf("%s", tr(TR_REPL_ASK_HINT));
+		g_ask_fallback_hint_shown = 1;
+	}
+	qargv[0] = (char *)"ask";
+	qargv[1] = raw;
+	cmd_ask(shell, 2, qargv);
 }
 
 int ai_shell_run(struct ai_shell *shell)
@@ -179,10 +209,8 @@ int ai_shell_run(struct ai_shell *shell)
 
 	/* 第一次运行检查 */
 	if (shell->first_run) {
-		printf("No AI Provider Configured.\n");
-		printf("Please configure a model first.\n\n");
-		printf("Suggested Command:\n");
-		printf("  model add <name>\n");
+		printf("%s", tr(TR_SHELL_FIRST_RUN));
+		printf("%s", tr(TR_SHELL_SUGGEST));
 	}
 
 	shell->running = 1;
@@ -198,14 +226,25 @@ int ai_shell_run(struct ai_shell *shell)
 			break;
 		}
 
-		/* 分割命令行 */
-		argc = split_line(line, argv, AI_MAX_ARGS);
-		if (argc == 0)
-			continue;
+		/* 原始行副本（split_line 会写入 '\0' 破坏原行） */
+		{
+			char *raw = strdup(line);
 
-		/* 分发执行 */
-		ret = dispatch_command(shell, argc, argv);
-		AI_UNUSED(ret);
+			/* 分割命令行 */
+			argc = split_line(line, argv, AI_MAX_ARGS);
+			if (argc == 0) {
+				free(raw);
+				continue;
+			}
+
+			/* 分发执行；未命中命令表 → 直说转 ask（P0-1） */
+			ret = dispatch_command(shell, argc, argv);
+			if (ret == AI_ERR_NOT_FOUND)
+				ask_fallback(shell, raw);
+			else
+				free(raw);
+			AI_UNUSED(ret);
+		}
 	}
 
 	return AI_OK;

@@ -11,6 +11,12 @@
  *     finish_reason）。
  * 消息数组的转换与解析全部走 ai_json_util 区间扫描（无 JSON 库依赖），
  * HTTP 传输复用 local/ 的 local_http_post。
+ *
+ * 运维建议（T2 修复 12 记录项，未实现）：本地 ollama 目前由 systemd
+ * 常驻或手工拉起，2GB 内存机型上常驻挤占内核页缓存。建议改用 systemd
+ * socket 激活（ollama.socket 监听 11434，收到首个连接按需拉起服务，
+ * 空闲 N 分钟 StopTimeoutSec 退出），agent 侧无需任何改动——首请求
+ * 多一次模型加载延迟，可用 socket 的 ActivateImmediately 探活预热。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -313,6 +319,23 @@ static void nb_append_message(struct nb *b, const struct ai_chat_msg *m)
 
 /* ---- 请求体构造 ---- */
 
+/*
+ * omsg_is_role / omsg_has_tool_calls - 孤儿 role:tool 判型（T2 P0-1）
+ * 与 ai_chat_proto.c 的请求构造器同一不变式：role:tool 消息只有紧跟
+ * assistant(tool_calls) 之后才进请求体，孤儿剔除（本地 Ollama 同样
+ * 会因孤儿 tool 结果配不上对而报 400）。两个构造入口同语义防漂移。
+ */
+static int omsg_is_role(const struct ai_chat_msg *m, const char *role)
+{
+	return m && m->role && strcmp(m->role, role) == 0;
+}
+
+static int omsg_has_tool_calls(const struct ai_chat_msg *m)
+{
+	return omsg_is_role(m, "assistant") && m->tool_calls_json &&
+	       m->tool_calls_json[0];
+}
+
 char *ollama_native_build_body(const char *model_name,
 			       const struct ai_chat_msg *msgs, int nmsgs,
 			       const char *tools_json,
@@ -328,10 +351,28 @@ char *ollama_native_build_body(const char *model_name,
 	nb_append_str(&b, "{\"model\":");
 	nb_append_json_str(&b, model_name);
 	nb_append_str(&b, ",\"messages\":[");
-	for (i = 0; i < nmsgs; i++) {
-		if (i > 0)
-			nb_append_str(&b, ",");
-		nb_append_message(&b, &msgs[i]);
+	{
+		int in_tool_group = 0;
+		int emitted = 0;
+
+		for (i = 0; i < nmsgs; i++) {
+			const struct ai_chat_msg *m = &msgs[i];
+
+			/* 孤儿 role:tool：剔除（与 OpenAI 兼容构造器一致；
+			 * 组内连续 tool 消息——单轮并行多 tool_calls 的
+			 * 回填——必须全保留，见 ai_chat_proto.c 同注） */
+			if (omsg_is_role(m, "tool") && !in_tool_group)
+				continue;
+
+			if (emitted > 0)
+				nb_append_str(&b, ",");
+			nb_append_message(&b, m);
+			emitted++;
+			if (omsg_is_role(m, "tool"))
+				;   /* 组内保持 */
+			else
+				in_tool_group = omsg_has_tool_calls(m);
+		}
 	}
 	nb_append_str(&b, "]");
 

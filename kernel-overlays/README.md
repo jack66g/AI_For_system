@@ -1,31 +1,44 @@
-# kernel-overlays — AIKernel 对上游 Linux 内核的修改文件
+# kernel-overlays — AIKernel 对干净 Linux 6.18.39 的全部改动
 
-本目录保存 AIKernel 对**干净上游内核 linux-6.18.39** 的全部修改文件，保持与内核源码树相同的相对路径。
+本目录是 alpha.11.0 内核的**完整侵入面**，不是旧的 10 文件清单。共 **168 个文件**，保持与内核源码树相同的相对路径：
 
-## 用法
+| 目录 | 文件数 | 说明 |
+|---|---:|---|
+| `arch/` | 11 | x86 entry/kernel/kvm 的 syscall、CFI、NMI/MCE、kprobes、KVM 钩子 |
+| `block/` | 8 | BIO、blk-mq、io-cost、throttle、wbt、elevator、genhd 遥测 |
+| `drivers/` | 12 | base、char/random、cpufreq、cpuidle、input、thermal、tty、vfio、virtio |
+| `fs/` | 20 | VFS、dcache、aio、epoll、exec、ext4、inotify、namespace、proc 等 |
+| `include/` | 6 | `ai_accessors.h`、`ai_netlink.h` 等 UAPI/内部头 |
+| `init/` | 2 | 启动/initramfs 模型预加载 |
+| `kernel/` | 45 | sched、fork/exit/signal、time、irq、locking、bpf、trace、audit、seccomp、events 等 |
+| `lib/` | 1 | ubsan 钩子 |
+| `mm/` | 27 | 分配/回收/THP/compaction/slub/oom/readahead 等 |
+| `net/` | 23 | TCP、qdisc、netfilter、XDP、GRO/NAPI、conntrack 等 |
+| `samples/ai/` | 5 | 内核侧 AI 示例（Kconfig/Makefile/3 个 sample） |
+| `security/` | 4 | capability、keys、LSM 遥测 |
+| `virt/` | 1 | KVM 主路径 |
+| 顶层 | 3 | `Makefile`、`Kconfig`、`Kbuild` 接入 |
 
-1. 从 https://cdn.kernel.org/pub/linux/kernel/v6.x/ 下载 `linux-6.18.39.tar.xz` 并解压；
-2. 将本目录下的所有文件按相对路径覆盖到内核树中（例如 `kernel-overlays/mm/vmscan.c` → `linux-6.18.39/mm/vmscan.c`）；
-3. 将仓库根目录的 `.config` 复制为内核树根的 `.config`；
-4. 正常 `make` 即可编译出带 AIKernel 子系统的内核。
+另含 W48 的死代码清理：`net/sched/sch_fq.c` 恢复 `static`/去掉无用导出，`sch_codel.c`、`sch_fq_codel.c` 的 ops 改为 `static`。
 
-## 修改文件清单（每个文件用 `grep -n "ai_" <file>` 可定位全部改动点）
+## 应用
 
-| 文件 | 改动原因 |
-|------|----------|
-| `mm/vmscan.c` | LRU 回收优先级挂点：按 AI 策略对 shrink_lruvec 的扫描优先级 ±1 微调（W3 决策挂点之一） |
-| `mm/oom_kill.c` | OOM 评分偏置：oom_badness 按交互/批处理分类注入 ±200 oom_score 量纲偏置，实现受控的受害者翻转 |
-| `mm/backing-dev.c` | 回写阻塞设备跟踪：为 AI 内存子系统暴露 backing device 状态查询接口 |
-| `mm/readahead.c` | 页面预读挂点：按 AI 策略对 readahead 窗口 ×2/÷2 一档动态调整 |
-| `fs/dcache.c` | dentry 缓存挂点：AI 内存子系统对 dcache 回收的观测与优先级控制 |
-| `kernel/sched/fair.c` | CFS 调度挂点：vruntime 加权（±100‰，永不跨越加权均值）、唤醒抢占提示、place_entity 决策注入（交互唤醒等待实测 -21%） |
-| `kernel/sys.c` | 系统调用入口挂点：AI 策略对进程分类信息的获取入口 |
-| `net/sched/sch_fq.c` | FQ 网络调度挂点：AI 策略对网络包调度流的优先级干预预留 |
-| `include/linux/ai_accessors.h` | 新增文件：AIKernel 内核侧统一访问器（AI 策略读取/决策查询的内联接口） |
-| `include/uapi/linux/ai_netlink.h` | 新增文件：AI netlink 用户态-内核态通信协议 UAPI 头（策略下发/事件上报） |
+```bash
+bash ../build/apply-overlays.sh /path/to/linux-6.18.39
+cp ../.config /path/to/linux-6.18.39/.config
+```
+
+脚本按 `MANIFEST.sha256` 逐个复制并校验；**不要**用 `rsync -a` 整目录覆盖，`README.md`/`MANIFEST.sha256` 不是内核文件。
+
+## 校验
+
+```bash
+cd kernel-overlays
+sha256sum -c MANIFEST.sha256
+```
 
 ## 说明
 
-- 以上 8 个修改文件 + 2 个新增文件即 AIKernel 对上游内核的**全部**侵入面；其余功能全部位于内核树 `AIKernel/` 子目录（见仓库根 `AIKernel/ARCHITECTURE.md`）。
-- 所有挂点默认"计数+放行"，决策注入总开关默认关闭（`/sys/kernel/ai/decision_inject`），不影响原生行为。
-- 基础内核版本：**Linux 6.18.39**。许可证：GPL-2.0（见仓库根 LICENSE）。
+- 所有挂点默认“计数+放行”，决策注入总开关默认关闭（`/sys/kernel/ai/decision_inject`），不改变原生内核行为。
+- 基础版本固定为 Linux 6.18.39；升级内核时不要直接套用本目录，需按钩子逐个移植。
+- GPL-2.0；文件头保留 SPDX。

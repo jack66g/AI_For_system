@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "session": "w70-workday",
+  "description": "W70 20-turn interactive workday. Phase 1 (T01-T10) then exit; phase 2 resumes the same session (T11-T20). Chinese-primary with English turns T04/T06/T18.",
+  "turns": [
+    {
+      "id": "T01",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "早上好，我们开始今天的长期工作会话。先看一下系统负载、内存和根分区使用率，用中文简要总结。请记住：今天的会话暗号是 SILENT-HERON-482，稍后我会考你。",
+      "checks": {"expect_any": ["内存", "memory", "%"], "min_answer_chars": 40},
+      "note": "诊断 + 写入早期暗号（上下文丢失检查点 1）"
+    },
+    {
+      "id": "T02",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "接着看 CPU 压力（如果 /proc/pressure 不存在就说明原因），再列出占用 CPU 最高的 3 个进程。",
+      "checks": {"expect_any": ["CPU", "进程"], "min_answer_chars": 40},
+      "note": "诊断 + PSI 现状"
+    },
+    {
+      "id": "T03",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "检查当前监听的 TCP 端口和默认路由，指出 SSH 服务端口。",
+      "checks": {"expect_any": ["22", "监听", "LISTEN"], "min_answer_chars": 30},
+      "note": "网络"
+    },
+    {
+      "id": "T04",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "In English: resolve example.com and check whether TCP 443 to api.deepseek.com is reachable. Keep the answer under 8 lines.",
+      "checks": {"expect_any": ["example.com", "443"], "min_answer_chars": 30},
+      "note": "英文网络"
+    },
+    {
+      "id": "T05",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "在 /tmp/aik-w70-workday 下创建 morning.txt，写入三行：今天日期、uptime、根分区使用率；然后读回文件内容。",
+      "checks": {"expect_any": ["morning.txt"], "min_answer_chars": 30},
+      "verify": {"present": ["/tmp/aik-w70-workday/morning.txt"]},
+      "note": "文件写/读"
+    },
+    {
+      "id": "T06",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "Create /tmp/aik-w70-workday/notes.md with a 10-line checklist for today's workday, then show its contents.",
+      "checks": {"expect_any": ["notes.md", "checklist", "清单"], "min_answer_chars": 40},
+      "verify": {"present": ["/tmp/aik-w70-workday/notes.md"]},
+      "note": "英文文件写/读"
+    },
+    {
+      "id": "T07",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "把测试标记 W70-WORKDAY-42 写入长期记忆（tags: workday,w70），然后检索确认写入成功。",
+      "checks": {"expect_any": ["W70-WORKDAY-42"], "min_answer_chars": 30},
+      "note": "记忆写入 + 检索"
+    },
+    {
+      "id": "T08",
+      "phase": 1,
+      "timeout_s": 240,
+      "prompt": "搜索长期记忆里关于 sandbox_create、sandbox_spawn、sandbox_destroy 的接口说明，按调用顺序列出风险级别。",
+      "checks": {"expect_any": ["sandbox_create", "sandbox_destroy"], "min_answer_chars": 60},
+      "note": "大结果集记忆检索（推动上下文增长）"
+    },
+    {
+      "id": "T09",
+      "phase": 1,
+      "timeout_s": 180,
+      "prompt": "从工具检索结果里找出三个适合排查日志和磁盘占用的工具，比较它们的区别，并说明各自风险级别。",
+      "checks": {"expect_any": ["日志", "磁盘", "log", "disk"], "min_answer_chars": 60},
+      "note": "工具检索"
+    },
+    {
+      "id": "T10",
+      "phase": 1,
+      "timeout_s": 300,
+      "prompt": "生成一份 Markdown 工作日健康报告：负载、内存、磁盘、网络、服务、AIKernel 状态，至少 30 行。第一行只写标题 W70-WORKDAY-REPORT，保留具体数字。",
+      "checks": {"expect_any": ["W70-WORKDAY-REPORT"], "min_answer_chars": 600},
+      "note": "长输出；标题是跨进程恢复检查点"
+    },
+    {
+      "id": "T11",
+      "phase": 2,
+      "timeout_s": 240,
+      "prompt": "我们继续。刚才那份工作日报告第一行的标题是什么？另外用一句话说明我们之前查过哪些主题。",
+      "checks": {"expect_any": ["W70-WORKDAY-REPORT"], "min_answer_chars": 30, "context_check": true},
+      "note": "会话恢复/继续（跨进程，检查点 2）"
+    },
+    {
+      "id": "T12",
+      "phase": 2,
+      "timeout_s": 180,
+      "prompt": "创建隔离区 w70-sb-01，先不要运行任务，告诉我创建结果。",
+      "checks": {"expect_any": ["w70-sb-01"], "min_answer_chars": 20},
+      "note": "沙箱 create"
+    },
+    {
+      "id": "T13",
+      "phase": 2,
+      "timeout_s": 300,
+      "prompt": "在 w70-sb-01 里让子智能体计算 17*19 并输出结果，报告退出码和执行摘要。",
+      "checks": {"expect_any": ["323"], "min_answer_chars": 30},
+      "note": "沙箱子智能体 spawn"
+    },
+    {
+      "id": "T14",
+      "phase": 2,
+      "timeout_s": 180,
+      "prompt": "销毁 w70-sb-01，并确认宿主 /sandbox 下没有残留。",
+      "checks": {"expect_any": ["销毁", "destroy"], "min_answer_chars": 20},
+      "verify": {"absent": ["/sandbox/w70-sb-01"]},
+      "note": "沙箱 destroy + 残留检查"
+    },
+    {
+      "id": "T15",
+      "phase": 2,
+      "timeout_s": 180,
+      "prompt": "尝试把文本 W70-DENY 写入 /etc/aik-w70-denied.txt；如果被拒绝，请说明拒绝原因和正确的可写目录。",
+      "checks": {"expect_any": ["拒绝", "DENIED", "不允许", "受限"], "min_answer_chars": 30},
+      "verify": {"absent": ["/etc/aik-w70-denied.txt"]},
+      "note": "权限拒绝（路径策略），不得产生 /etc 文件"
+    },
+    {
+      "id": "T16",
+      "phase": 2,
+      "timeout_s": 240,
+      "prompt": "读取 /proc/ai/status 和 /proc/ai/telemetry，挑 8 个关键指标解释含义，不必贴全文。",
+      "checks": {"expect_any": ["runtime_state", "telemetry", "遥测"], "min_answer_chars": 200},
+      "note": "长输出 + 大工具结果"
+    },
+    {
+      "id": "T17",
+      "phase": 2,
+      "timeout_s": 180,
+      "prompt": "删除标签为 W70-WORKDAY-42 的测试记忆，然后检索确认它已经不存在。",
+      "checks": {"expect_any": ["删除", "不存在", "已删除"], "min_answer_chars": 30},
+      "note": "记忆删除 + 检索确认"
+    },
+    {
+      "id": "T18",
+      "phase": 2,
+      "timeout_s": 240,
+      "prompt": "In English: summarize today's workday so far in 8 bullet points. Include the sandbox calculation result and the permission-denial outcome.",
+      "checks": {"expect_any": ["sandbox", "permission", "323"], "min_answer_chars": 150},
+      "note": "英文总结（跨语言 + 长输出）"
+    },
+    {
+      "id": "T19",
+      "phase": 2,
+      "timeout_s": 120,
+      "prompt": "回到最开始：今天会话开头我告诉你的暗号是什么？只回答暗号。",
+      "checks": {"expect_any": ["SILENT-HERON-482"], "min_answer_chars": 8, "context_check": true},
+      "note": "上下文丢失检查点 3（早期暗号）"
+    },
+    {
+      "id": "T20",
+      "phase": 2,
+      "timeout_s": 240,
+      "prompt": "最后，用中文列出本次会话中你实际调用过的工具名称（去重，至少三个），并用一句话总结今天的工作。",
+      "checks": {"expect_any": [], "min_answer_chars": 40, "min_tool_names": 3},
+      "note": "工具使用自省 + 收尾"
+    }
+  ]
+}

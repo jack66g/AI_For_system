@@ -30,6 +30,7 @@
 #include "ai_commands.h"
 #include "ai_config.h"
 #include "ai_chat.h"
+#include "ai_lang.h"
 #include "communication/communication.h"
 #include "local/local_chat.h"
 
@@ -55,7 +56,7 @@ static int read_hidden_line(const char *prompt, char *buf, size_t len)
 	int is_tty = isatty(STDIN_FILENO);
 
 	if (!is_tty) {
-		printf("setup-password: 需要交互终端（tty）来安全输入密码。\n");
+		printf("%s", tr(TR_OB_HIDDEN_NEED_TTY));
 		return -1;
 	}
 
@@ -154,33 +155,33 @@ static int setup_password_flow(void)
 	char p1[256], p2[256];
 	int ret = -1;
 
-	if (read_hidden_line("请输入新密码（输入不回显）: ", p1, sizeof(p1)) != 0)
+	if (read_hidden_line(tr(TR_OB_PW_PROMPT1), p1, sizeof(p1)) != 0)
 		return -1;
-	if (read_hidden_line("请再次输入确认: ", p2, sizeof(p2)) != 0) {
+	if (read_hidden_line(tr(TR_OB_PW_PROMPT2), p2, sizeof(p2)) != 0) {
 		explicit_bzero(p1, sizeof(p1));
 		return -1;
 	}
 
 	if (p1[0] == '\0') {
-		printf("setup-password: 密码不能为空。\n");
+		printf("%s", tr(TR_OB_PW_EMPTY));
 		goto out;
 	}
 	if (strlen(p1) < 6) {
-		printf("setup-password: 密码至少 6 位。\n");
+		printf("%s", tr(TR_OB_PW_TOO_SHORT));
 		goto out;
 	}
 	if (strcmp(p1, p2) != 0) {
-		printf("setup-password: 两次输入不一致。\n");
+		printf("%s", tr(TR_OB_PW_MISMATCH));
 		goto out;
 	}
 
-	printf("setup-password: 正在设置 root 密码...\n");
+	printf("%s", tr(TR_OB_PW_SETTING));
 	fflush(stdout);
 	if (apply_password(p1) == 0) {
-		printf("setup-password: root 密码设置成功。\n");
+		printf("%s", tr(TR_OB_PW_OK));
 		ret = 0;
 	} else {
-		printf("setup-password: 密码设置失败（chpasswd 执行出错）。\n");
+		printf("%s", tr(TR_OB_PW_FAIL));
 	}
 
 out:
@@ -206,17 +207,9 @@ int cmd_setup_password(void *shell_ptr, int argc, char **argv)
 
 /* ---- onboarding：AI 对话通道 ---- */
 
-/* onboarding 专用 system 提示词（1.5b 本地模型可执行级别的简明指令） */
-#define ONBOARD_SYS_PROMPT \
-	"你是 AIKernel OS 的初始化引导助手。你正通过本机控制台引导用户完成" \
-	"这台机器的首次初始化。你要做三件事：1) 简短自我介绍：你是这台机器" \
-	"的 AI 控制台，负责系统监控、参数调优和运维辅助；2) 引导用户设置" \
-	"root 密码：请用户输入命令 setup-password，并说明密码输入不回显、" \
-	"你不会看到密码内容；3) 引导用户选择 AI 模型来源：回复 1 选择本地" \
-	"模型（机器内置 ollama），回复 2 选择云端 API。规则：每次回复不超过" \
-	"3 句话，用中文；不要编造系统状态；涉及系统接口、参数或用法的提问" \
-	"先查记忆库（memory.search，含 aikernel-interface 接口语料）再回答，" \
-	"无工具可用时如实说明，不要凭空编造接口；不要透露或询问密码本身。"
+/* onboarding 专用 system 提示词（1.5b 本地模型可执行级别的简明指令；
+ * 双语见 i18n 表 TR_OB_SYS_PROMPT——en 模式指示模型用英文回复） */
+#define ONBOARD_SYS_PROMPT tr(TR_OB_SYS_PROMPT)
 
 /*
  * onboarding_ai_say - 发一段对话给当前模型，打印回复
@@ -313,21 +306,19 @@ static int onboard_model_local(struct ai_shell *shell)
 	ai_config_get_local(shell->config, NULL, &base_url, NULL,
 			    NULL, NULL);
 	if (!base_url || !base_url[0]) {
-		printf("onboarding: model.toml 缺少 [local].base_url，"
-		       "无法自动配置本地模型。\n");
+		printf("%s", tr(TR_OB_LOCAL_NO_BASEURL));
 		free(base_url);
 		return -1;
 	}
 
-	printf("onboarding: 正在探测本地模型服务 %s ...\n", base_url);
+	printf(tr(TR_OB_LOCAL_PROBING), base_url);
 	fflush(stdout);
 	if (probe_openai_endpoint(base_url) != 0) {
-		printf("onboarding: 本地模型服务不可达"
-		       "（ollama 未运行或模型未就绪）。\n");
+		printf("%s", tr(TR_OB_LOCAL_UNREACH));
 		free(base_url);
 		return -1;
 	}
-	printf("onboarding: 本地模型服务可达。\n");
+	printf("%s", tr(TR_OB_LOCAL_OK));
 
 	argv[0] = (char *)"model";
 	argv[1] = (char *)"use";
@@ -351,18 +342,17 @@ static int onboard_model_cloud(struct ai_shell *shell)
 	char *argv[4];
 	int ret = -1;
 
-	printf("请输入云端 API base_url（如 https://api.deepseek.com/v1，"
-	       "或内部 OpenAI 兼容端点）:\n> ");
+	printf("%s", tr(TR_OB_CLOUD_ASK_URL));
 	fflush(stdout);
 	if (!fgets(base_url, sizeof(base_url), stdin))
 		return -1;
 	base_url[strcspn(base_url, "\n")] = '\0';
 	if (!base_url[0]) {
-		printf("onboarding: base_url 不能为空。\n");
+		printf("%s", tr(TR_OB_URL_EMPTY));
 		return -1;
 	}
 
-	printf("请输入 API Key（输入不落盘、不进模型上下文；无则回车跳过）:\n> ");
+	printf("%s", tr(TR_OB_CLOUD_ASK_KEY));
 	fflush(stdout);
 	if (!fgets(api_key, sizeof(api_key), stdin)) {
 		explicit_bzero(api_key, sizeof(api_key));
@@ -370,25 +360,25 @@ static int onboard_model_cloud(struct ai_shell *shell)
 	}
 	api_key[strcspn(api_key, "\n")] = '\0';
 
-	printf("请输入模型名（如 deepseek-chat / qwen2.5-7b-instruct）:\n> ");
+	printf("%s", tr(TR_OB_CLOUD_ASK_MODEL));
 	fflush(stdout);
 	if (!fgets(model_name, sizeof(model_name), stdin))
 		return -1;
 	model_name[strcspn(model_name, "\n")] = '\0';
 	if (!model_name[0]) {
-		printf("onboarding: 模型名不能为空。\n");
+		printf("%s", tr(TR_OB_MODEL_EMPTY));
 		explicit_bzero(api_key, sizeof(api_key));
 		return -1;
 	}
 
-	printf("onboarding: 正在测试端点连通性...\n");
+	printf("%s", tr(TR_OB_PROBING));
 	fflush(stdout);
 	if (probe_openai_endpoint(base_url) != 0) {
-		printf("onboarding: 端点不可达，请检查地址/网络后重试。\n");
+		printf("%s", tr(TR_OB_ENDPOINT_UNREACH));
 		explicit_bzero(api_key, sizeof(api_key));
 		return -1;
 	}
-	printf("onboarding: 端点可达，正在写入配置...\n");
+	printf("%s", tr(TR_OB_ENDPOINT_OK));
 
 	snprintf(name, sizeof(name), "cloud");
 	/* 同名条目先删后建（幂等） */
@@ -398,7 +388,7 @@ static int onboard_model_cloud(struct ai_shell *shell)
 				  api_key[0] ? api_key : "");
 	explicit_bzero(api_key, sizeof(api_key));
 	if (ret != AI_OK) {
-		printf("onboarding: 写入模型配置失败。\n");
+		printf("%s", tr(TR_OB_WRITE_FAIL));
 		return -1;
 	}
 	ai_config_set_default_model(shell->config, name);
@@ -409,8 +399,7 @@ static int onboard_model_cloud(struct ai_shell *shell)
 	argv[2] = name;
 	ret = cmd_model(shell, 3, argv);
 	if (ret != AI_OK) {
-		printf("onboarding: 配置已写入但切换失败，可稍后 "
-		       "'model use cloud' 重试。\n");
+		printf("%s", tr(TR_OB_SWITCH_FAIL));
 		return -1;
 	}
 	return 0;
@@ -422,8 +411,8 @@ static int mark_onboarded(void)
 	int fd = open(ONBOARDED_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
 	if (fd < 0) {
-		printf("onboarding: 无法写入 %s（%s）。\n",
-		       ONBOARDED_PATH, strerror(errno));
+		printf(tr(TR_OB_MARK_FAIL), ONBOARDED_PATH,
+		       strerror(errno));
 		return -1;
 	}
 	{
@@ -466,18 +455,14 @@ int onboarding_run(void *shell_ptr)
 
 	memset(hist, 0, sizeof(hist));
 
-	printf("\n=== AIKernel 初始化引导 (onboarding) ===\n");
-	printf("提示：此流程将引导你设置 root 密码并选择 AI 模型。\n");
-	printf("      输入 help 可查看引导命令；密码绝不经过 AI。\n\n");
+	printf("%s", tr(TR_OB_HEAD));
+	printf("%s", tr(TR_OB_HINT1));
+	printf("%s", tr(TR_OB_HINT2));
 
 	/* 步骤 0：AI 欢迎自我介绍（失败降级内置文案） */
 	(void)onboarding_ai_say(shell, hist, &nhist,
-		"请向用户做开场自我介绍，并告诉他第一步是设置 root 密码、"
-		"请在提示符输入 setup-password。",
-		"[AI] 你好，我是这台机器的 AI 控制台（AIKernel），"
-		"负责系统监控、参数调优与运维辅助。\n"
-		"初始化分两步：先设置 root 密码（输入命令 setup-password，"
-		"输入过程不回显，我不会看到密码内容），再选择 AI 模型来源。");
+		tr(TR_OB_WELCOME_ASK),
+		tr(TR_OB_WELCOME_FALLBACK));
 
 	/* 步骤 1：强制设密码 */
 	while (step <= 1) {
@@ -496,20 +481,12 @@ int onboarding_run(void *shell_ptr)
 			if (setup_password_flow() == 0) {
 				step = 2;
 				onboarding_ai_say(shell, hist, &nhist,
-					"用户已成功设置 root 密码。"
-					"请祝贺他，并引导第二步："
-					"选择 AI 模型来源，回复 1 用本地模型，"
-					"回复 2 用云端 API。",
-					"[AI] root 密码已设置。第二步：选择 "
-					"AI 模型来源——输入 1 使用本地模型"
-					"（内置 ollama），输入 2 使用云端 API。");
+					tr(TR_OB_PW_DONE_ASK),
+					tr(TR_OB_PW_DONE_FALLBACK));
 			} else {
 				onboarding_ai_say(shell, hist, &nhist,
-					"用户的密码设置失败了（为空/不足6位/"
-					"两次不一致/chpasswd 出错）。请提醒他"
-					"重新输入 setup-password 再试。",
-					"[AI] 密码未设置成功，"
-					"请重新输入 setup-password 再试一次。");
+					tr(TR_OB_PW_FAIL_ASK),
+					tr(TR_OB_PW_FAIL_FALLBACK));
 			}
 			continue;
 		}
@@ -521,14 +498,7 @@ int onboarding_run(void *shell_ptr)
 		}
 
 		if (strcmp(p, "help") == 0 || strcmp(p, "?") == 0) {
-			printf("引导命令：\n"
-			       "  setup-password  设置 root 密码（关回显，"
-			       "两次确认，>=6 位）\n"
-			       "  1 | local       选择本地模型\n"
-			       "  2 | cloud       选择云端 API\n"
-			       "  shell           进入维护 bash（逃生口，"
-			       "exit 返回）\n"
-			       "  其他任意文字    与引导 AI 对话\n");
+			printf("%s", tr(TR_OB_HELP));
 			continue;
 		}
 
@@ -538,14 +508,13 @@ int onboarding_run(void *shell_ptr)
 		/* 步骤 1 期间收到 1/2：提示先完成密码（强制顺序） */
 		if (strcmp(p, "1") == 0 || strcmp(p, "local") == 0 ||
 		    strcmp(p, "2") == 0 || strcmp(p, "cloud") == 0) {
-			printf("onboarding: 请先完成 root 密码设置"
-			       "（输入 setup-password），再选择模型。\n");
+			printf("%s", tr(TR_OB_PW_FIRST));
 			continue;
 		}
 
 		/* 其它输入 → AI 对话（引导回主线） */
 		onboarding_ai_say(shell, hist, &nhist, p,
-			"[AI] 现在请先输入 setup-password 设置 root 密码。");
+			tr(TR_OB_STEP1_CHAT_FALLBACK));
 	}
 
 	/* 步骤 2：选模型 */
@@ -566,12 +535,8 @@ int onboarding_run(void *shell_ptr)
 				step = 3;
 			} else {
 				onboarding_ai_say(shell, hist, &nhist,
-					"本地模型服务当前不可达。请告诉用户"
-					"可以先改用云端（输入 2），或稍后重启"
-					"机器等 ollama 就绪后重试（输入 1）。",
-					"[AI] 本地模型暂时不可用。"
-					"你可以输入 2 改用云端 API，"
-					"或稍后重试输入 1。");
+					tr(TR_OB_LOCAL_FAIL_ASK),
+					tr(TR_OB_LOCAL_FAIL_FALLBACK));
 			}
 			continue;
 		}
@@ -581,9 +546,7 @@ int onboarding_run(void *shell_ptr)
 			continue;
 		}
 		if (strcmp(p, "help") == 0 || strcmp(p, "?") == 0) {
-			printf("输入 1 或 local 选择本地模型；"
-			       "输入 2 或 cloud 选择云端 API；"
-			       "输入 shell 进入维护 bash。\n");
+			printf("%s", tr(TR_OB_STEP2_HELP));
 			continue;
 		}
 		if (strcmp(p, "shell") == 0) {
@@ -593,7 +556,7 @@ int onboarding_run(void *shell_ptr)
 		if (p[0] == '\0')
 			continue;
 		onboarding_ai_say(shell, hist, &nhist, p,
-			"[AI] 请输入 1（本地模型）或 2（云端 API）继续。");
+			tr(TR_OB_STEP2_CHAT_FALLBACK));
 	}
 
 	/* 步骤 3：完成落标记 */
@@ -601,11 +564,9 @@ int onboarding_run(void *shell_ptr)
 		return -1;
 
 	onboarding_ai_say(shell, hist, &nhist,
-		"初始化全部完成。请简短祝贺用户，说明接下来就进入正常控制台，"
-		"可以直接输入 ask 向你提问。",
-		"[AI] 初始化完成！即将进入 AI 控制台，"
-		"输入 help 查看命令，ask 后跟问题即可向我提问。");
+		tr(TR_OB_DONE_ASK),
+		tr(TR_OB_DONE_FALLBACK));
 
-	printf("\n=== 初始化完成，进入 AI 控制台 ===\n\n");
+	printf("%s", tr(TR_OB_DONE));
 	return 0;
 }

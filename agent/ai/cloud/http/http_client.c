@@ -20,6 +20,7 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/error.h"
+#include "mbedtls/debug.h"
 #include "mbedtls/x509_crt.h"
 
 #include "http_client.h"
@@ -29,6 +30,30 @@
 static mbedtls_entropy_context g_entropy;
 static mbedtls_ctr_drbg_context g_ctr_drbg;
 static int g_initialized = 0;
+
+/* ---- mbedTLS 调试钩子（AIKERNEL_TLS_DEBUG 环境变量门控）----
+ * 值 = 调试阈值 1(error)-4(全量记录转储)，未设置/0 时零输出。
+ * 诊断握手失败、记录层解密失败、对端 alert 等问题用。 */
+static int g_tls_debug = 0;
+
+static void tls_debug_cb(void *ctx, int level,
+			 const char *file, int line, const char *str)
+{
+	(void)level;
+	fprintf((FILE *)ctx, "mbedtls[%s:%04d] %s", file, line, str);
+	fflush((FILE *)ctx);
+}
+
+static void tls_debug_maybe_attach(mbedtls_ssl_config *conf)
+{
+	const char *e = getenv("AIKERNEL_TLS_DEBUG");
+
+	if (e && e[0] >= '1' && e[0] <= '4') {
+		g_tls_debug = e[0] - '0';
+		mbedtls_debug_set_threshold(g_tls_debug);
+		mbedtls_ssl_conf_dbg(conf, tls_debug_cb, stderr);
+	}
+}
 
 /* ---- Timeout 配置 ---- */
 
@@ -124,6 +149,46 @@ static int tcp_connect(const char *host, int port)
 
 /* ---- HTTP 请求构建 ---- */
 
+/* 循环写满：mbedtls_ssl_write 是部分写语义（单记录上限
+ * MBEDTLS_SSL_OUT_CONTENT_LEN=16384 字节；超限请求只发第一个分片并返回
+ * 分片长度），调用方必须按返回值推进缓冲继续发——否则服务端按
+ * Content-Length 等剩余 body 直到断连。明文 write() 同理处理部分写与
+ * EINTR。返回值 <0 表示写失败（透传 mbedtls/errno 错误）。 */
+static int write_all_tls(mbedtls_ssl_context *ssl, const unsigned char *buf,
+			 size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		int w = mbedtls_ssl_write(ssl, buf + off, len - off);
+
+		if (w == MBEDTLS_ERR_SSL_WANT_WRITE ||
+		    w == MBEDTLS_ERR_SSL_WANT_READ)
+			continue;
+		if (w <= 0)
+			return w;
+		off += (size_t)w;
+	}
+	return (int)len;
+}
+
+static int write_all_plain(int sock, const unsigned char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		ssize_t w = write(sock, buf + off, len - off);
+
+		if (w < 0) {
+			if (errno == EINTR)
+				continue;
+			return (int)w;
+		}
+		off += (size_t)w;
+	}
+	return (int)len;
+}
+
 static char *build_http_request(const char *host, const char *path,
 	const char *api_key, const char *json_body, size_t *req_len)
 {
@@ -146,56 +211,173 @@ static char *build_http_request(const char *host, const char *path,
 /* ---- Chunked Transfer Encoding 解码 ---- */
 
 /*
- * strip_chunked - 解码 HTTP chunked transfer encoding
- * 格式: <hex-size>\r\n<data>\r\n... 0\r\n\r\n
- * 原地修改，返回干净数据的起始指针。
+ * strip_chunked - 解码 HTTP chunked transfer encoding（v3：两遍扫描+硬边界）
+ * 格式: <hex-size>[;ext]\r\n<data>\r\n ... 0[;ext]\r\n[trailers]\r\n
+ *
+ * 原地解码，成功返回干净数据起始指针（== body）。
+ * 任何格式异常（hex 回绕/声明超长/缺行终止/缺数据 CRLF）在第一遍只读
+ * 校验中发现：stderr 明确报错并原样返回未修改的 body——绝不越界读写
+ * （旧实现单遍直写：扩展行错位复制、声明超长时 src 越过 '\0' 在堆上
+ * 乱扫，memmove 读越界页间歇 SIGSEGV，见 mbedtls-trim-evidence 取证）。
+ * 校验通过后第二遍才写入：dst 恒 ≤ src，原地解码无溢出。
  */
 static char *strip_chunked(char *body)
 {
-	char *src = body, *dst = body;
-	unsigned int first_size = 0;
-	const char *p = body;
+	char *src, *dst, *end;
+	const char *p;
 
-	/* W10-B：先探测首行是否为合法 hex chunk 大小——非 chunked 响应
-	 * （Content-Length / 连接关闭定长）必须原样返回。原实现对任意 body
-	 * 无条件按 chunked 解析：首字符非 hex 时 chunk_size==0 直接 break，
-	 * 末尾 *dst='\0' 恰好落在 body 首字节，把整段 body 清空。 */
-	while (*p && *p != '\r' && *p != '\n') {
-		char c = *p;
+	if (!body)
+		return body;
 
-		if (c >= '0' && c <= '9')      first_size = first_size * 16 + (unsigned)(c - '0');
-		else if (c >= 'a' && c <= 'f') first_size = first_size * 16 + (unsigned)(c - 'a' + 10);
-		else if (c >= 'A' && c <= 'F') first_size = first_size * 16 + (unsigned)(c - 'A' + 10);
-		else return body;   /* 非 hex 开头 → 非 chunked，原样 */
-		p++;
+	/* 探测首行——非 chunked 响应（Content-Length / 连接关闭定长）
+	 * 原样返回（W10-B 语义保留）。首字符必须 hex（区别于 HTML 等
+	 * 文本体）；首行其余字符允许 chunk 扩展（';' 后任意非 CRLF）；
+	 * 首行 hex 值为 0 → 空 body / 仅终止块，原样。 */
+	p = body;
+	if (!(((*p >= '0') && (*p <= '9')) ||
+	      ((*p >= 'a') && (*p <= 'f')) ||
+	      ((*p >= 'A') && (*p <= 'F'))))
+		return body;           /* 非 hex 开头 → 非 chunked，原样 */
+	{
+		unsigned long long first_size = 0;
+
+		while (*p && *p != '\r' && *p != '\n') {
+			char c = *p;
+			unsigned d;
+
+			if (c >= '0' && c <= '9')      d = (unsigned)(c - '0');
+			else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+			else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+			else
+				break; /* 扩展分隔符起不再属于 hex 值 */
+			first_size = first_size * 16 + d;
+			p++;
+		}
+		if (first_size == 0)
+			return body;   /* 空 body / 仅终止块，原样 */
 	}
-	if (first_size == 0)
-		return body;        /* 空 body / 仅终止块，原样 */
 
-	while (*src) {
-		unsigned int chunk_size = 0;
+	end = body + strlen(body);
 
-		/* 解析 hex 大小 */
-		while (*src && *src != '\r' && *src != '\n') {
+	/* ---- pass1：只读校验全帧结构（不写任何字节） ---- */
+	src = body;
+	for (;;) {
+		unsigned long long chunk_size = 0;
+		size_t crlf;
+
+		if (src >= end)
+			goto bad_frame;        /* 缺 chunk 行 */
+		/* hex 大小（每步防回绕：超过剩余长度即必坏帧） */
+		while (src < end && *src != '\r' && *src != '\n') {
 			char c = *src;
-			chunk_size <<= 4;
-			if (c >= '0' && c <= '9')      chunk_size += c - '0';
-			else if (c >= 'a' && c <= 'f') chunk_size += c - 'a' + 10;
-			else if (c >= 'A' && c <= 'F') chunk_size += c - 'A' + 10;
-			else break;
+			unsigned d;
+
+			if (c >= '0' && c <= '9')      d = (unsigned)(c - '0');
+			else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+			else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+			else break;            /* chunk 扩展分隔符等 */
+			if (chunk_size >
+			    (unsigned long long)(end - src))
+				goto bad_frame;
+			chunk_size = chunk_size * 16 + d;
 			src++;
 		}
-		while (*src == '\r' || *src == '\n') src++;
+		/* 跳过 chunk 扩展至行尾 */
+		while (src < end && *src != '\r' && *src != '\n')
+			src++;
+		/* 行终止必须存在（吃 ≤1 个 CRLF） */
+		if (src >= end)
+			goto bad_frame;
+		crlf = 0;
+		while (src < end && (*src == '\r' || *src == '\n') &&
+		       crlf < 2) {
+			src++;
+			crlf++;
+		}
+		if (crlf == 0)
+			goto bad_frame;
+		if (chunk_size == 0) {
+			/* 终止块：消费 trailers（若干行 + 空行）或串尾 */
+			while (src < end) {
+				size_t linelen = 0;
 
-		if (chunk_size == 0) break;
+				while (src + linelen < end &&
+				       src[linelen] != '\n')
+					linelen++;
+				if (linelen == 0) {          /* "\n" 空行 */
+					src++;
+					break;
+				}
+				if (linelen == 1 && src[0] == '\r') {
+					src += 2;            /* "\r\n" 空行 */
+					break;
+				}
+				src += linelen + 1;          /* trailer 行 */
+			}
+			break;
+		}
+		/* 硬边界：chunk 数据必须完整落在缓冲内 */
+		if (chunk_size > (unsigned long long)(end - src))
+			goto bad_frame;
+		src += (size_t)chunk_size;
+		/* 数据行后必须有 CRLF（吃 ≤1 个 CRLF） */
+		crlf = 0;
+		while (src < end && (*src == '\r' || *src == '\n') &&
+		       crlf < 2) {
+			src++;
+			crlf++;
+		}
+		if (crlf == 0)
+			goto bad_frame;
+	}
 
-		/* 复制 chunk 数据到 dst */
-		memmove(dst, src, chunk_size);
-		dst += chunk_size;
-		src += chunk_size;
-		while (*src == '\r' || *src == '\n') src++;
+	/* ---- pass2：结构已验证，原地解码（dst 恒 ≤ src） ---- */
+	src = body;
+	dst = body;
+	for (;;) {
+		unsigned long long chunk_size = 0;
+		size_t crlf;
+
+		/* hex 大小 */
+		while (src < end && *src != '\r' && *src != '\n') {
+			char c = *src;
+			unsigned d;
+
+			if (c >= '0' && c <= '9')      d = (unsigned)(c - '0');
+			else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+			else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+			else break;
+			chunk_size = chunk_size * 16 + d;
+			src++;
+		}
+		/* 跳过 chunk 扩展至行尾 + 行终止 */
+		while (src < end && *src != '\r' && *src != '\n')
+			src++;
+		crlf = 0;
+		while (src < end && (*src == '\r' || *src == '\n') &&
+		       crlf < 2) {
+			src++;
+			crlf++;
+		}
+		if (chunk_size == 0)
+			break;                 /* trailers 不参与输出 */
+		memmove(dst, src, (size_t)chunk_size);
+		dst += (size_t)chunk_size;
+		src += (size_t)chunk_size;
+		crlf = 0;
+		while (src < end && (*src == '\r' || *src == '\n') &&
+		       crlf < 2) {
+			src++;
+			crlf++;
+		}
 	}
 	*dst = '\0';
+	return body;
+
+bad_frame:
+	fprintf(stderr,
+		"http_client: chunked 响应格式异常（声明长度/行终止不合法）"
+		"，解码中止，响应体原样返回\n");
 	return body;
 }
 
@@ -231,6 +413,7 @@ static int tls_conf_verify(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca,
 	/* ret > 0：个别证书解析失败但链整体可用，与上游官方示例口径一致 */
 	mbedtls_ssl_conf_ca_chain(conf, ca, NULL);
 	mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+	tls_debug_maybe_attach(conf);
 	return 0;
 }
 
@@ -325,14 +508,10 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 			if (error_msg) *error_msg = strdup("Failed to build HTTP request");
 			goto tls_cleanup;
 		  }
-		  { int w;
-		    while ((w = mbedtls_ssl_write(&ssl, (unsigned char *)req, req_len)) <= 0) {
-			if (w != MBEDTLS_ERR_SSL_WANT_WRITE && w != MBEDTLS_ERR_SSL_WANT_READ) {
-				free(req);
-				if (error_msg) *error_msg = strdup("TLS write failed");
-				goto tls_cleanup;
-			}
-		    }
+		  if (write_all_tls(&ssl, (unsigned char *)req, req_len) < 0) {
+			free(req);
+			if (error_msg) *error_msg = strdup("TLS write failed");
+			goto tls_cleanup;
 		  }
 		  free(req);
 		}
@@ -377,9 +556,8 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 		char *req = build_http_request(uinfo.host, uinfo.path,
 			api_key, json_body, &req_len);
 		if (req) {
-			ssize_t wn = write(sock, req, req_len);
-
-			if (wn < 0 || (size_t)wn != req_len) {
+			if (write_all_plain(sock, (unsigned char *)req,
+					    req_len) < 0) {
 				free(req);
 				if (error_msg)
 					*error_msg = strdup("HTTP write failed");
@@ -503,14 +681,10 @@ if (uinfo.use_tls) {
 		if (error_msg) *error_msg = strdup("Failed to build HTTP request");
 		goto get_tls_cleanup;
 	  }
-	  { int w;
-	    while ((w = mbedtls_ssl_write(&ssl, (unsigned char *)req, req_len)) <= 0) {
-		if (w != MBEDTLS_ERR_SSL_WANT_WRITE && w != MBEDTLS_ERR_SSL_WANT_READ) {
-			free(req);
-			if (error_msg) *error_msg = strdup("TLS write failed");
-			goto get_tls_cleanup;
-		}
-	    }
+	  if (write_all_tls(&ssl, (unsigned char *)req, req_len) < 0) {
+		free(req);
+		if (error_msg) *error_msg = strdup("TLS write failed");
+		goto get_tls_cleanup;
 	  }
 	  free(req);
 	}
@@ -554,9 +728,8 @@ get_tls_cleanup:
 	size_t req_len;
 	char *req = build_get_request(uinfo.host, uinfo.path, &req_len);
 	if (req) {
-		ssize_t wn = write(sock, req, req_len);
-
-		if (wn < 0 || (size_t)wn != req_len) {
+		if (write_all_plain(sock, (unsigned char *)req,
+				    req_len) < 0) {
 			free(req);
 			if (error_msg)
 				*error_msg = strdup("HTTP write failed");
@@ -840,17 +1013,11 @@ int https_post_stream(const char *url, const char *api_key,
 				*error_msg = strdup("Failed to build HTTP request");
 			goto ps_tls_cleanup;
 		  }
-		  { int w;
-		    while ((w = mbedtls_ssl_write(&ssl, (unsigned char *)req,
-						  req_len)) <= 0) {
-			if (w != MBEDTLS_ERR_SSL_WANT_WRITE &&
-			    w != MBEDTLS_ERR_SSL_WANT_READ) {
-				free(req);
-				if (error_msg)
-					*error_msg = strdup("TLS write failed");
-				goto ps_tls_cleanup;
-			}
-		    }
+		  if (write_all_tls(&ssl, (unsigned char *)req, req_len) < 0) {
+			free(req);
+			if (error_msg)
+				*error_msg = strdup("TLS write failed");
+			goto ps_tls_cleanup;
 		  }
 		  free(req);
 		}
@@ -967,7 +1134,8 @@ ps_tls_cleanup:
 			free(hdr);
 			return -1;
 		}
-		if (write(sock, req, req_len) < 0) {
+		if (write_all_plain(sock, (unsigned char *)req,
+				    req_len) < 0) {
 			free(req);
 			if (error_msg)
 				*error_msg = strdup("Socket write failed");

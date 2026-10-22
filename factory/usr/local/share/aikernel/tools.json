@@ -1,32 +1,100 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-02T06:11:41",
+  "generated_at": "2026-10-22T02:30:02",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 75,
+  "tool_count": 151,
+  "tool_names_sha256": "52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2",
   "channel_counts": {
-    "procfs-read": 20,
-    "sysfs-write": 12,
+    "procfs-read": 36,
+    "sysfs-write": 25,
     "netlink-act": 27,
     "netlink-sense": 1,
     "exec": 1,
-    "memory": 13,
-    "shell": 1
+    "memory": 30,
+    "shell": 1,
+    "sandbox": 4,
+    "sysctl": 3,
+    "sysfs": 2,
+    "desktop": 20,
+    "interaction": 1
   },
   "risk_counts": {
-    "R": 28,
-    "W1": 16,
-    "W2": 30,
+    "R": 69,
+    "W1": 37,
+    "W2": 44,
     "exec按命令": 1
   },
   "exec_command_tiers": {
-    "R": 32,
-    "W1": 11,
-    "W2": 7
+    "R": 52,
+    "W1": 13,
+    "W2": 32
   },
+  "blocked_sysctl": [
+    {
+      "key": "kernel.sysrq",
+      "reason": "SysRq 立即重启/崩溃/杀进程：写入后任意触发键即可让系统当场 panic 或掉电重启，远程不可恢复",
+      "bypass": false
+    },
+    {
+      "key": "kernel.panic",
+      "reason": "panic 族（kernel.panic/panic_on_oops/panic_on_warn/panic_on_rcu_stall/panic_on_io_nmi/panic_on_unrecovered_nmi 等）：把可恢复错误升级为立即 panic/重启，可能丢失未落盘数据",
+      "bypass": false
+    },
+    {
+      "key": "kernel.hung_task_panic",
+      "reason": "hung task 超时即 panic：正常 IO 抖动即可触发宕机",
+      "bypass": false
+    },
+    {
+      "key": "kernel.softlockup_panic",
+      "reason": "soft lockup 即 panic：高负载下可能被误触发",
+      "bypass": false
+    },
+    {
+      "key": "kernel.hardlockup_panic",
+      "reason": "hard lockup 即 panic：NMI 抖动即可宕机",
+      "bypass": false
+    },
+    {
+      "key": "kernel.core_pattern",
+      "reason": "core dump 管道处理器：写入 |/path 可在崩溃时以 root 执行任意程序；管道消费端不读会让 core dump 永久挂起（进程不可回收）",
+      "bypass": false
+    },
+    {
+      "key": "kernel.modules_disabled",
+      "reason": "写 1 后永久禁止模块加载，只能重启恢复；写错即失去驱动/文件系统模块的热插拔能力",
+      "bypass": false
+    },
+    {
+      "key": "kernel.kexec_load_disabled",
+      "reason": "写 1 后永久禁止 kexec，只能重启恢复（崩溃转储/快速重启通道被切断）",
+      "bypass": false
+    },
+    {
+      "key": "kernel.sched_rt_runtime_us",
+      "reason": "把 RT 带宽设为 -1（无限制）后，任一 RT 任务可 100% 占核饿死整机，表现为硬锁死，远程无法登录",
+      "bypass": false
+    },
+    {
+      "key": "vm.panic_on_oom",
+      "reason": "OOM 时直接 panic 而非杀进程：内存压力即整机宕机",
+      "bypass": false
+    },
+    {
+      "key": "vm.oom_kill_allocating_task",
+      "reason": "OOM 时杀正在分配内存的任务（常为关键服务/内核路径），处置面比默认受害者选择更窄，易误杀导致系统不可用",
+      "bypass": false
+    },
+    {
+      "key": "/proc/sysrq-trigger",
+      "reason": "SysRq 触发文件：写入单字符即可立即重启/崩溃/杀全部进程；该路径不在/proc/sys 下，sysctl 通道按 realpath 前缀已天然拒绝，此处显式登记防止未来通道放宽时被重新引入",
+      "bypass": false
+    }
+  ],
   "tools": [
     {
-      "name": "procfs.read.status",
+      "name": "procfs_read_status",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/status（只读）：内核 AI 子系统运行状态总览（enabled/模型/内存/统计开关）",
@@ -35,10 +103,14 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "procfs.read.decisions",
+      "name": "procfs_read_decisions",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/decisions（只读）：决策记录 ring 快照（4096 条，含 decision/outcome 全字段）",
@@ -47,10 +119,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.chains",
+      "name": "procfs_read_chains",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/chains（只读）：因果链视图（trigger_event_id → decision_id → outcome）",
@@ -59,22 +134,29 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.control",
+      "name": "procfs_read_control",
       "channel": "procfs-read",
       "risk": "R",
-      "description": "读取 /proc/ai/control（只读）：可控制参数表（23 个参数的 name/domain/min/max/current/default）",
+      "description": "读取 /proc/ai/control（只读）：可控制参数表（27 个参数的 name/domain/min/max/current/default）",
       "path": "/proc/ai/control",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "procfs.read.latency",
+      "name": "procfs_read_latency",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/latency（只读）：决策/感知延迟统计（执行耗时直方图）",
@@ -83,10 +165,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.hitrate",
+      "name": "procfs_read_hitrate",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/hitrate（只读）：策略命中率统计（attempts/hits）",
@@ -95,10 +180,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.telemetry",
+      "name": "procfs_read_telemetry",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/telemetry（只读）：遥测 ring 转储（全类别事件记录；读，写见 procfs.write.*）",
@@ -107,10 +195,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.sched_stats",
+      "name": "procfs_read_sched_stats",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/sched/stats（只读）：调度域遥测统计（AI 采样器累计）",
@@ -119,10 +210,14 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.sched_classify",
+      "name": "procfs_read_sched_classify",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/sched/classify（只读）：调度分类接口（AI 识别的任务分类结果）",
@@ -131,10 +226,14 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.vfs_stats",
+      "name": "procfs_read_vfs_stats",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/vfs/stats（只读）：VFS/B 轨遥测统计（挂载/文件锁/poll/错误）",
@@ -143,10 +242,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "fs"
+      ]
     },
     {
-      "name": "procfs.read.vfs_rates",
+      "name": "procfs_read_vfs_rates",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/ai/vfs/rates（只读）：VFS 事件速率统计",
@@ -155,10 +257,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "fs"
+      ]
     },
     {
-      "name": "procfs.read.stats.telemetry_emitted",
+      "name": "procfs_read_stats_telemetry_emitted",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/telemetry_emitted（只读）：遥测已发射事件计数（全 CPU 合计）",
@@ -167,10 +272,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.telemetry_dropped",
+      "name": "procfs_read_stats_telemetry_dropped",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/telemetry_dropped（只读）：遥测丢弃事件计数（ring 满等）",
@@ -179,10 +287,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.telemetry_sampled_skip",
+      "name": "procfs_read_stats_telemetry_sampled_skip",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/telemetry_sampled_skip（只读）：遥测采样跳过计数",
@@ -191,10 +302,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.decisions_total",
+      "name": "procfs_read_stats_decisions_total",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/decisions_total（只读）：决策总尝试数（策略匹配计数）",
@@ -203,10 +317,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.decisions_hit",
+      "name": "procfs_read_stats_decisions_hit",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/decisions_hit（只读）：决策命中数",
@@ -215,10 +332,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.decisions_hitrate_permille",
+      "name": "procfs_read_stats_decisions_hitrate_permille",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/decisions_hitrate_permille（只读）：决策命中率（千分比）",
@@ -227,10 +347,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.stats.runtime_state",
+      "name": "procfs_read_stats_runtime_state",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/kernel/ai/stats/runtime_state（只读）：Runtime 状态机当前值",
@@ -239,10 +362,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.read.cgroup.inferences",
+      "name": "procfs_read_cgroup_inferences",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /sys/fs/cgroup/ai.inferences（只读）：cgroup AI 已发起推理计数（RO）",
@@ -251,10 +377,14 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "sysfs.write.enabled",
+      "name": "sysfs_write_enabled",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/enabled（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：AI 子系统总开关（1/0；写 1 会幂等拉起 Runtime）",
@@ -270,10 +400,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.model_load",
+      "name": "sysfs_write_model_load",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/model_load（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：加载 AIKWMDL v1 格式模型（AIKernel/tools 或 ~/w1k-model/gen_model.py 可生成），旧 echo 语义已废",
@@ -289,10 +422,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.model_unload",
+      "name": "sysfs_write_model_unload",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/model_unload（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：按名卸载模型",
@@ -308,10 +444,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_think",
+      "name": "sysfs_write_policy_think",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/think（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：触发一次内核决策闭环（格式: event_id,domain,type,value[,pid]；走 ai_runtime_think 全流程，等价第 2 决策来源）",
@@ -327,10 +466,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_outcome",
+      "name": "sysfs_write_policy_outcome",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/outcome（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：上报决策结果（决策闭环第 4 步，格式: decision_id,outcome,metric_delta）",
@@ -346,10 +488,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_global_enable",
+      "name": "sysfs_write_policy_global_enable",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/global_enable（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：决策执行全局闸门（关闭后 ai_policy_execute 单分支拒绝）",
@@ -365,10 +510,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_max_impact_pct",
+      "name": "sysfs_write_policy_max_impact_pct",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/max_impact_pct（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：安全边界：决策参数最大影响幅度（百分比）",
@@ -384,10 +532,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_rollback",
+      "name": "sysfs_write_policy_rollback",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/rollback（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：按 decision_id 回退决策（恢复决策前快照值）",
@@ -403,10 +554,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_refresh",
+      "name": "sysfs_write_policy_refresh",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/refresh（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：同步策略目录（扫描策略注册表，幂等新建 <name> 开关文件）",
@@ -422,10 +576,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "sysfs.write.policy_chain_dir",
+      "name": "sysfs_write_policy_chain_dir",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "写 /sys/kernel/ai/policy/chain_dir（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：因果链 CSV 导出根目录",
@@ -441,10 +598,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.write.telemetry_format",
+      "name": "procfs_write_telemetry_format",
       "channel": "sysfs-write",
       "risk": "W1",
       "description": "切换遥测输出格式：format=raw（原始定长记录）或 format=human（文本行，默认）。影响后续读 /proc/ai/telemetry 与 SENSE 输出（写 /proc/ai/telemetry，value 取 ['format=raw', 'format=human']）",
@@ -464,10 +624,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "procfs.write.telemetry_reset",
+      "name": "procfs_write_telemetry_reset",
       "channel": "sysfs-write",
       "risk": "W2",
       "description": "清空全部遥测/决策 ring（需 CAP_SYS_ADMIN；记录不可恢复，慎用——如需留档先在 procfs 侧导出）（写 /proc/ai/telemetry，value 取 ['reset']）",
@@ -486,10 +649,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "netlink.act.sched.nice",
+      "name": "netlink_act_sched_nice",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 sched.nice：设置进程 nice 值（实时生效；data[0]=pid data[1]=value） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -523,18 +689,21 @@
           "pid",
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.sched.affinity",
+      "name": "netlink_act_sched_affinity",
       "channel": "netlink-act",
       "risk": "W2",
-      "description": "NETLINK_AI ACT 下发可控参数 sched.affinity：设置进程 CPU 亲和（掩码/编号，实时生效；同上 data 约定） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "description": "NETLINK_AI ACT 下发可控参数 sched.affinity：设置进程 CPU 亲和（掩码/编号，实时生效；值域 0..nr_cpu_ids-1，VM /proc/ai/control 实测 max=63；同上 data 约定） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
       "param": "sched.affinity",
       "domain": 1,
       "task_param": true,
       "value_min": 0,
-      "value_max": 255,
+      "value_max": 63,
       "parameters": {
         "type": "object",
         "properties": {
@@ -545,9 +714,9 @@
           },
           "value": {
             "type": "integer",
-            "description": "参数值（域 [0, 255]，内核默认 0，客户端与内核双层钳制）",
+            "description": "参数值（域 [0, 63]，内核默认 0，客户端与内核双层钳制）",
             "minimum": 0,
-            "maximum": 255
+            "maximum": 63
           },
           "confidence": {
             "type": "integer",
@@ -560,10 +729,13 @@
           "pid",
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.sched.oom_score",
+      "name": "netlink_act_sched_oom_score",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 sched.oom_score：设置进程 oom_score_adj（实时生效；同上 data 约定） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -597,10 +769,13 @@
           "pid",
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.sched.timeslice",
+      "name": "netlink_act_sched_timeslice",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 sched.timeslice：调度时间片参数（EEVDF base_slice，单位 0.1ms；安全限幅+快照+记录） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -628,10 +803,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.mm.swappiness",
+      "name": "netlink_act_mm_swappiness",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 mm.swappiness：内存换页倾向 swappiness（实时生效，经 mm/vmscan.c 门控访问器） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -659,10 +837,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.mm.readahead",
+      "name": "netlink_act_mm_readahead",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 mm.readahead：预读窗口 KB（写全部 bdi ra_pages，与 /sys/class/bdi/*/readahead_kb 同源，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -690,13 +871,16 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.mm.thp",
+      "name": "netlink_act_mm_thp",
       "channel": "netlink-act",
       "risk": "W2",
-      "description": "NETLINK_AI ACT 下发可控参数 mm.thp：透明大页模式（0=never 1=madvise 2=always，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "description": "NETLINK_AI ACT 下发可控参数 mm.thp：透明大页模式（0=never 1=madvise 2=always，实时生效；VM /proc/ai/control 实测默认 2=always） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
       "param": "mm.thp",
       "domain": 2,
       "task_param": false,
@@ -707,7 +891,7 @@
         "properties": {
           "value": {
             "type": "integer",
-            "description": "参数值（域 [0, 2]，内核默认 1，客户端与内核双层钳制）",
+            "description": "参数值（域 [0, 2]，内核默认 2，客户端与内核双层钳制）",
             "minimum": 0,
             "maximum": 2
           },
@@ -721,10 +905,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.mm.reclaim_prio",
+      "name": "netlink_act_mm_reclaim_prio",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 mm.reclaim_prio：回收优先级（映射 /proc/sys/vm/vfs_cache_pressure） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -752,10 +939,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.io.priority",
+      "name": "netlink_act_io_priority",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 io.priority：I/O 优先级（实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -783,10 +973,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "fs",
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.io.bandwidth",
+      "name": "netlink_act_io_bandwidth",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 io.bandwidth：写回带宽比 max_ratio（百分比；0=恢复默认 100；与 /sys/class/bdi/*/max_ratio 同源，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -814,10 +1008,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "fs",
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.net.cwnd",
+      "name": "netlink_act_net_cwnd",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 net.cwnd：TCP 拥塞窗口参数（仅作用于 ai_cca 拥塞控制算法的连接） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -845,10 +1043,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.net.rto",
+      "name": "netlink_act_net_rto",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 net.rto：TCP 重传超时参数 ms（实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -876,26 +1077,29 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.net.qdisc",
+      "name": "netlink_act_net_qdisc",
       "channel": "netlink-act",
       "risk": "W2",
-      "description": "NETLINK_AI ACT 下发可控参数 net.qdisc：诚实保留 reserved：运行时 graft（dev_graft_qdisc）实测冻结网络栈，无安全实现路径；仅支持查询 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "description": "NETLINK_AI ACT 下发可控参数 net.qdisc：默认队列调度 qdisc（0=回滚到设置前快照 kind/无快照 no-op 1=codel 2=fq 3=fq_codel；独立内核 worker 持 rtnl 异步换根，作用于 up 的非回环单队列网卡，多队列诚实跳过；异步生效用 tc qdisc show 实证；客户端+内核双层钳制；值域 0-3；VM /proc/ai/control 实测 domain=4 [real] min=0 max=3 default=0） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
       "param": "net.qdisc",
       "domain": 4,
       "task_param": false,
       "value_min": 0,
-      "value_max": 2,
+      "value_max": 3,
       "parameters": {
         "type": "object",
         "properties": {
           "value": {
             "type": "integer",
-            "description": "参数值（域 [0, 2]，内核默认 0，客户端与内核双层钳制）",
+            "description": "参数值（域 [0, 3]，内核默认 0，客户端与内核双层钳制）",
             "minimum": 0,
-            "maximum": 2
+            "maximum": 3
           },
           "confidence": {
             "type": "integer",
@@ -907,10 +1111,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec",
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.net.nftables",
+      "name": "netlink_act_net_nftables",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 net.nftables：AIKernel 自有 netfilter LOCAL_OUT 采集钩子开关（真注册/真计数），非 nft chain（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -938,10 +1146,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.power.freq",
+      "name": "netlink_act_power_freq",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 power.freq：aiguard 频率上限万分比（如 3000=30%；经 aiguard governor 真实钳制；QEMU 无 cpufreq 时作用于请求表，实机直接生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -969,10 +1180,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.power.cstate",
+      "name": "netlink_act_power_cstate",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 power.cstate：CPU DMA 延迟容忍（单位 ×100us；经 PM QoS /dev/cpu_dma_latency 真实生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1000,10 +1214,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.power.wakeup",
+      "name": "netlink_act_power_wakeup",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 power.wakeup：调度唤醒事件采集开关（sched_wakeup tracepoint 探针门控：0=停采 1=采集）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1031,10 +1248,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.sec.lsm_override",
+      "name": "netlink_act_sec_lsm_override",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 sec.lsm_override：AIKernel 自家 LSM 执行档位（0=observe 只观测 1=enforce 按规则拦截；默认 0）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1062,13 +1282,16 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.sec.seccomp",
+      "name": "netlink_act_sec_seccomp",
       "channel": "netlink-act",
       "risk": "W2",
-      "description": "NETLINK_AI ACT 下发可控参数 sec.seccomp：向 AIKernel LSM 决策表注入/解除目标 pid 的 deny 规则（lsm=ai 启用时真实拦截），非 seccomp BPF（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "description": "NETLINK_AI ACT 下发可控参数 sec.seccomp：W49 起为 reserved 保留参数：VM /proc/ai/control 实测 sec.seccomp domain=5 [reserved]，当前内核不提供 seccomp BPF 注入/解除，写入只记录值、不产生任何拦截或规则副作用；需要真实安全策略请用 sec.lsm_override（enforce/observe）与 sec.audit（审计采集）；seccomp 基线应在用户态 exec 前由子进程自装过滤器（reserved 参数，无真实拦截副作用） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
       "param": "sec.seccomp",
       "domain": 5,
       "task_param": false,
@@ -1093,13 +1316,16 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.sec.audit",
+      "name": "netlink_act_sec_audit",
       "channel": "netlink-act",
       "risk": "W2",
-      "description": "NETLINK_AI ACT 下发可控参数 sec.audit：AIKernel 审计采集开关（0=停采、事件在 gate 直接丢弃 1=采集关联）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
+      "description": "NETLINK_AI ACT 下发可控参数 sec.audit：AIKernel 审计采集开关（0=停采、事件在 gate 直接丢弃 1=采集关联；VM /proc/ai/control 实测默认 1）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
       "param": "sec.audit",
       "domain": 5,
       "task_param": false,
@@ -1110,7 +1336,7 @@
         "properties": {
           "value": {
             "type": "integer",
-            "description": "参数值（域 [0, 1]，内核默认 0，客户端与内核双层钳制）",
+            "description": "参数值（域 [0, 1]，内核默认 1，客户端与内核双层钳制）",
             "minimum": 0,
             "maximum": 1
           },
@@ -1124,10 +1350,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "netlink.act.proc.signal",
+      "name": "netlink_act_proc_signal",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 proc.signal：向目标进程投递信号（data[0]=pid data[1]=信号号；kthread/init 受保护拒绝，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1161,10 +1390,14 @@
           "pid",
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res",
+        "sysadmin"
+      ]
     },
     {
-      "name": "netlink.act.proc.freeze",
+      "name": "netlink_act_proc_freeze",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 proc.freeze：冻结/解冻目标进程（data[0]=pid data[1]=1 冻结 SIGSTOP / 0 解冻 SIGCONT，实时生效）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1198,10 +1431,14 @@
           "pid",
           "value"
         ]
-      }
+      },
+      "sub": [
+        "res",
+        "sysadmin"
+      ]
     },
     {
-      "name": "netlink.act.proc.rlimit",
+      "name": "netlink_act_proc_rlimit",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 proc.rlimit：设置目标进程资源软限（data[0]=pid data[1]=软限值 data[2]=资源号 res，prlimit64 语义仅改 cur，实时生效） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1242,10 +1479,14 @@
           "value",
           "res"
         ]
-      }
+      },
+      "sub": [
+        "res",
+        "sysadmin"
+      ]
     },
     {
-      "name": "netlink.act.ai.decision_inject",
+      "name": "netlink_act_ai_decision_inject",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 ai.decision_inject：AI 决策注入全局总开关：开启后内核 5 个决策挂点（OOM 评分/vruntime 加权/唤醒抢占/预读窗口/回收优先级）按 per-hook 使能真实生效启发式偏置；默认关=与原生行为一致（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1273,10 +1514,13 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore"
+      ]
     },
     {
-      "name": "netlink.act.ai.decision_oom",
+      "name": "netlink_act_ai_decision_oom",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 ai.decision_oom：OOM 受害者评分偏置使能（交互式保护/批处理加压，badness ±200；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1304,10 +1548,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.ai.decision_sched",
+      "name": "netlink_act_ai_decision_sched",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 ai.decision_sched：调度决策注入使能（vruntime 加权 ±10% + 唤醒抢占提示，成对开关；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1335,10 +1583,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "netlink.act.ai.decision_mm",
+      "name": "netlink_act_ai_decision_mm",
       "channel": "netlink-act",
       "risk": "W2",
       "description": "NETLINK_AI ACT 下发可控参数 ai.decision_mm：内存决策注入使能（预读窗口 ±1 档 + 回收扫描优先级 ±1，成对开关；需先开 decision_inject）（默认安全钳制可能拦截翻转，需临时调 /sys/kernel/ai/policy/max_impact_pct） 该操作仅定向作用于本参数（v2 按参数名定向下发，不影响同域其他参数）。值域由客户端钳制 + 内核安全边界双层兜底。",
@@ -1366,10 +1618,14 @@
         "required": [
           "value"
         ]
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "netlink.sense",
+      "name": "netlink_sense",
       "channel": "netlink-sense",
       "risk": "R",
       "description": "NETLINK_AI SENSE 拉取内核感知遥测（AI_CMD_SENSE，只读，要求 AI 子系统已启用）：按 CPU 读取遥测记录，human 格式返回遥测文本，raw 格式返回二进制流统计",
@@ -1399,10 +1655,14 @@
           }
         },
         "required": []
-      }
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
     },
     {
-      "name": "procfs.read.net_nf_conntrack",
+      "name": "procfs_read_net_nf_conntrack",
       "channel": "procfs-read",
       "risk": "R",
       "description": "读取 /proc/net/nf_conntrack（只读）：内核连接跟踪表（nf_conntrack：每条连接的源/目的地址与端口、协议、状态与超时；查「当前有哪些网络连接/谁连着我/连接数多少」用它；补充手段：exec ss 查套接字级连接",
@@ -1411,14 +1671,18 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "netsec"
+      ]
     },
     {
-      "name": "exec.run",
+      "name": "exec_run",
       "channel": "exec",
-      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL；stdin 接 /dev/null（无参 cat 不会挂起）",
+      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。核心能力：python3 执行 .py 脚本（W2 高危写，逐次红色确认；先 tee 落盘 /root /tmp 再以 python3 <script.py> 执行，禁止 -c/-m 与一切选项）、tee 写文件（input 配方）、只读诊断。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]（写目标限 /root /tmp /var/ai）。未给 input 时 stdin 接 /dev/null（无参 cat 不会挂起）；python3 每次执行逐次弹红色确认面板，审计全量落盘",
       "exec": {
         "default_timeout": 30,
+        "input_max_bytes": 60000,
         "commands": [
           {
             "command": "ls",
@@ -1476,14 +1740,19 @@
             "bin": "/usr/bin/date"
           },
           {
+            "command": "echo",
+            "risk": "R",
+            "bin": "/usr/bin/echo"
+          },
+          {
+            "command": "printf",
+            "risk": "R",
+            "bin": "/usr/bin/printf"
+          },
+          {
             "command": "dmesg",
             "risk": "R",
             "bin": "/usr/bin/dmesg"
-          },
-          {
-            "command": "ip",
-            "risk": "R",
-            "bin": "/usr/bin/ip"
           },
           {
             "command": "ss",
@@ -1561,6 +1830,16 @@
             "bin": "/usr/bin/id"
           },
           {
+            "command": "getent",
+            "risk": "R",
+            "bin": "/usr/bin/getent"
+          },
+          {
+            "command": "systemd-analyze",
+            "risk": "R",
+            "bin": "/usr/bin/systemd-analyze"
+          },
+          {
             "command": "journalctl",
             "risk": "R",
             "bin": "/usr/bin/journalctl",
@@ -1579,7 +1858,61 @@
             "command": "ollama",
             "risk": "R",
             "bin": "/usr/local/bin/ollama",
-            "timeout": 60
+            "timeout": 60,
+            "args0": [
+              {
+                "verb": "list",
+                "risk": "R"
+              },
+              {
+                "verb": "ps",
+                "risk": "R"
+              },
+              {
+                "verb": "show",
+                "risk": "R"
+              },
+              {
+                "verb": "run",
+                "risk": "W1"
+              },
+              {
+                "verb": "pull",
+                "risk": "W2"
+              },
+              {
+                "verb": "rm",
+                "risk": "W2"
+              },
+              {
+                "verb": "cp",
+                "risk": "W1"
+              },
+              {
+                "verb": "create",
+                "risk": "W2"
+              },
+              {
+                "verb": "push",
+                "risk": "W2"
+              },
+              {
+                "verb": "stop",
+                "risk": "W1"
+              },
+              {
+                "verb": "serve",
+                "risk": "W2"
+              },
+              {
+                "verb": "help",
+                "risk": "R"
+              },
+              {
+                "verb": "--version",
+                "risk": "R"
+              }
+            ]
           },
           {
             "command": "systemctl",
@@ -1599,11 +1932,43 @@
                 "risk": "R"
               },
               {
+                "verb": "list-unit-files",
+                "risk": "R"
+              },
+              {
+                "verb": "list-timers",
+                "risk": "R"
+              },
+              {
+                "verb": "list-jobs",
+                "risk": "R"
+              },
+              {
                 "verb": "is-active",
                 "risk": "R"
               },
               {
+                "verb": "is-system-running",
+                "risk": "R"
+              },
+              {
+                "verb": "--failed",
+                "risk": "R"
+              },
+              {
                 "verb": "is-enabled",
+                "risk": "R"
+              },
+              {
+                "verb": "show",
+                "risk": "R"
+              },
+              {
+                "verb": "cat",
+                "risk": "R"
+              },
+              {
+                "verb": "get-default",
                 "risk": "R"
               },
               {
@@ -1616,6 +1981,58 @@
               },
               {
                 "verb": "restart",
+                "risk": "W2"
+              },
+              {
+                "verb": "reload",
+                "risk": "W2"
+              },
+              {
+                "verb": "enable",
+                "risk": "W2"
+              },
+              {
+                "verb": "disable",
+                "risk": "W2"
+              },
+              {
+                "verb": "mask",
+                "risk": "W2"
+              },
+              {
+                "verb": "unmask",
+                "risk": "W2"
+              },
+              {
+                "verb": "daemon-reload",
+                "risk": "W1"
+              },
+              {
+                "verb": "set-default",
+                "risk": "W2"
+              },
+              {
+                "verb": "isolate",
+                "risk": "W2"
+              },
+              {
+                "verb": "rescue",
+                "risk": "W2"
+              },
+              {
+                "verb": "emergency",
+                "risk": "W2"
+              },
+              {
+                "verb": "reboot",
+                "risk": "W2"
+              },
+              {
+                "verb": "poweroff",
+                "risk": "W2"
+              },
+              {
+                "verb": "halt",
                 "risk": "W2"
               }
             ]
@@ -1630,7 +2047,49 @@
             "command": "timedatectl",
             "risk": "R",
             "bin": "/usr/bin/timedatectl",
-            "timeout": 30
+            "timeout": 30,
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "show",
+                "risk": "R"
+              },
+              {
+                "verb": "list-timezones",
+                "risk": "R"
+              },
+              {
+                "verb": "timesync-status",
+                "risk": "R"
+              },
+              {
+                "verb": "show-timesync",
+                "risk": "R"
+              },
+              {
+                "verb": "ntp-servers",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-time",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-timezone",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-ntp",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-local-rtc",
+                "risk": "W2"
+              }
+            ]
           },
           {
             "command": "tc",
@@ -1639,10 +2098,237 @@
             "timeout": 30
           },
           {
-            "command": "ping",
-            "risk": "W1",
-            "bin": "/usr/bin/ping",
-            "path_check": true
+            "command": "ip",
+            "risk": "R",
+            "bin": "/usr/sbin/ip"
+          },
+          {
+            "command": "ethtool",
+            "risk": "R",
+            "bin": "/usr/sbin/ethtool"
+          },
+          {
+            "command": "conntrack",
+            "risk": "W2",
+            "bin": "/usr/sbin/conntrack",
+            "args0": [
+              {
+                "verb": "-L",
+                "risk": "R"
+              },
+              {
+                "verb": "--dump",
+                "risk": "R"
+              },
+              {
+                "verb": "-S",
+                "risk": "R"
+              },
+              {
+                "verb": "-C",
+                "risk": "R"
+              },
+              {
+                "verb": "-E",
+                "risk": "R"
+              },
+              {
+                "verb": "-F",
+                "risk": "W2"
+              },
+              {
+                "verb": "--flush",
+                "risk": "W2"
+              },
+              {
+                "verb": "-D",
+                "risk": "W2"
+              },
+              {
+                "verb": "--delete",
+                "risk": "W2"
+              },
+              {
+                "verb": "-U",
+                "risk": "W2"
+              },
+              {
+                "verb": "--update",
+                "risk": "W2"
+              },
+              {
+                "verb": "-I",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "hostnamectl",
+            "risk": "R",
+            "bin": "/usr/bin/hostnamectl",
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "show",
+                "risk": "R"
+              },
+              {
+                "verb": "hostname",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-hostname",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-icon-name",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-chassis",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-deployment",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-location",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "resolvectl",
+            "risk": "R",
+            "bin": "/usr/bin/resolvectl",
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "statistics",
+                "risk": "R"
+              },
+              {
+                "verb": "query",
+                "risk": "R"
+              },
+              {
+                "verb": "dns",
+                "risk": "W2"
+              },
+              {
+                "verb": "domain",
+                "risk": "W2"
+              },
+              {
+                "verb": "default-route",
+                "risk": "W2"
+              },
+              {
+                "verb": "llmnr",
+                "risk": "W2"
+              },
+              {
+                "verb": "mdns",
+                "risk": "W2"
+              },
+              {
+                "verb": "dnssec",
+                "risk": "W2"
+              },
+              {
+                "verb": "dnsovertls",
+                "risk": "W2"
+              },
+              {
+                "verb": "flush-caches",
+                "risk": "W2"
+              },
+              {
+                "verb": "reset-server-features",
+                "risk": "W2"
+              },
+              {
+                "verb": "revert",
+                "risk": "W2"
+              },
+              {
+                "verb": "log-level",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "findmnt",
+            "risk": "R",
+            "bin": "/usr/bin/findmnt"
+          },
+          {
+            "command": "blkid",
+            "risk": "R",
+            "bin": "/usr/sbin/blkid"
+          },
+          {
+            "command": "dumpe2fs",
+            "risk": "R",
+            "bin": "/usr/sbin/dumpe2fs"
+          },
+          {
+            "command": "smartctl",
+            "risk": "R",
+            "bin": "/usr/sbin/smartctl",
+            "timeout": 60
+          },
+          {
+            "command": "quota",
+            "risk": "R",
+            "bin": "/usr/bin/quota"
+          },
+          {
+            "command": "repquota",
+            "risk": "R",
+            "bin": "/usr/sbin/repquota"
+          },
+          {
+            "command": "pvs",
+            "risk": "R",
+            "bin": "/usr/sbin/pvs"
+          },
+          {
+            "command": "vgs",
+            "risk": "R",
+            "bin": "/usr/sbin/vgs"
+          },
+          {
+            "command": "lvs",
+            "risk": "R",
+            "bin": "/usr/sbin/lvs"
+          },
+          {
+            "command": "aa-status",
+            "risk": "R",
+            "bin": "/usr/sbin/aa-status"
+          },
+          {
+            "command": "apparmor_status",
+            "risk": "R",
+            "bin": "/usr/sbin/apparmor_status"
+          },
+          {
+            "command": "hostname",
+            "risk": "R",
+            "bin": "/usr/bin/hostname"
+          },
+          {
+            "command": "find",
+            "risk": "R",
+            "bin": "/usr/bin/find"
           },
           {
             "command": "mkdir",
@@ -1687,8 +2373,13 @@
             "path_check": true
           },
           {
-            "command": "tar",
+            "command": "ping",
             "risk": "W1",
+            "bin": "/usr/bin/ping"
+          },
+          {
+            "command": "tar",
+            "risk": "W2",
             "bin": "/usr/bin/tar",
             "timeout": 120,
             "path_check": true
@@ -1701,10 +2392,35 @@
             "path_check": true
           },
           {
+            "command": "gcc",
+            "risk": "W1",
+            "bin": "/usr/bin/gcc",
+            "timeout": 120,
+            "path_check": true,
+            "path_roots": [
+              "/tmp"
+            ]
+          },
+          {
+            "command": "cc",
+            "risk": "W1",
+            "bin": "/usr/bin/cc",
+            "timeout": 120,
+            "path_check": true,
+            "path_roots": [
+              "/tmp"
+            ]
+          },
+          {
             "command": "traceroute",
             "risk": "W1",
             "bin": "/usr/bin/traceroute",
             "timeout": 60
+          },
+          {
+            "command": "sync",
+            "risk": "W1",
+            "bin": "/usr/bin/sync"
           },
           {
             "command": "kill",
@@ -1727,6 +2443,170 @@
             "command": "passwd",
             "risk": "W2",
             "bin": "/usr/bin/passwd"
+          },
+          {
+            "command": "python3",
+            "risk": "W2",
+            "bin": "/usr/bin/python3",
+            "timeout": 120
+          },
+          {
+            "command": "mount",
+            "risk": "W2",
+            "bin": "/usr/bin/mount"
+          },
+          {
+            "command": "umount",
+            "risk": "W2",
+            "bin": "/usr/bin/umount"
+          },
+          {
+            "command": "fstrim",
+            "risk": "W2",
+            "bin": "/usr/sbin/fstrim",
+            "timeout": 120
+          },
+          {
+            "command": "swapon",
+            "risk": "W2",
+            "bin": "/usr/sbin/swapon"
+          },
+          {
+            "command": "swapoff",
+            "risk": "W2",
+            "bin": "/usr/sbin/swapoff"
+          },
+          {
+            "command": "setquota",
+            "risk": "W2",
+            "bin": "/usr/sbin/setquota"
+          },
+          {
+            "command": "rm",
+            "risk": "W2",
+            "bin": "/usr/bin/rm",
+            "path_check": true
+          },
+          {
+            "command": "chmod",
+            "risk": "W2",
+            "bin": "/usr/bin/chmod",
+            "path_check": true
+          },
+          {
+            "command": "chown",
+            "risk": "W2",
+            "bin": "/usr/bin/chown",
+            "path_check": true
+          },
+          {
+            "command": "useradd",
+            "risk": "W2",
+            "bin": "/usr/sbin/useradd"
+          },
+          {
+            "command": "usermod",
+            "risk": "W2",
+            "bin": "/usr/sbin/usermod"
+          },
+          {
+            "command": "userdel",
+            "risk": "W2",
+            "bin": "/usr/sbin/userdel"
+          },
+          {
+            "command": "groupadd",
+            "risk": "W2",
+            "bin": "/usr/sbin/groupadd"
+          },
+          {
+            "command": "groupmod",
+            "risk": "W2",
+            "bin": "/usr/sbin/groupmod"
+          },
+          {
+            "command": "groupdel",
+            "risk": "W2",
+            "bin": "/usr/sbin/groupdel"
+          },
+          {
+            "command": "aa-enforce",
+            "risk": "W2",
+            "bin": "/usr/sbin/aa-enforce"
+          },
+          {
+            "command": "aa-complain",
+            "risk": "W2",
+            "bin": "/usr/sbin/aa-complain"
+          },
+          {
+            "command": "aa-disable",
+            "risk": "W2",
+            "bin": "/usr/sbin/aa-disable"
+          },
+          {
+            "command": "aik-backup",
+            "risk": "W2",
+            "bin": "/usr/local/sbin/aik-backup",
+            "timeout": 300
+          },
+          {
+            "command": "aik-reset",
+            "risk": "W2",
+            "bin": "/usr/local/sbin/aik-reset"
+          },
+          {
+            "command": "aik-upgrade",
+            "risk": "W2",
+            "bin": "/usr/local/sbin/aik-upgrade",
+            "timeout": 300,
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "healthcheck",
+                "risk": "R"
+              },
+              {
+                "verb": "export",
+                "risk": "W2"
+              },
+              {
+                "verb": "import",
+                "risk": "W2"
+              },
+              {
+                "verb": "install",
+                "risk": "W2"
+              },
+              {
+                "verb": "boot",
+                "risk": "W2"
+              },
+              {
+                "verb": "commit",
+                "risk": "W2"
+              },
+              {
+                "verb": "rollback",
+                "risk": "W2"
+              },
+              {
+                "verb": "auto-commit",
+                "risk": "W2"
+              },
+              {
+                "verb": "grubenv",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "crontab",
+            "risk": "W2",
+            "bin": "/usr/bin/crontab"
           }
         ]
       },
@@ -1735,7 +2615,7 @@
         "properties": {
           "command": {
             "type": "string",
-            "description": "命令名（白名单内）",
+            "description": "命令名（白名单内单个词，如 uname / df / ss）。严禁把整条命令串塞进本字段：'uname -a' 应写 command=\"uname\", args=[\"-a\"]；'touch /tmp/x' 应写 command=\"touch\", args=[\"/tmp/x\"]。选项和操作数一律放 args 数组。",
             "enum": [
               "ls",
               "cat",
@@ -1748,8 +2628,9 @@
               "uname",
               "uptime",
               "date",
+              "echo",
+              "printf",
               "dmesg",
-              "ip",
               "ss",
               "stat",
               "wc",
@@ -1765,6 +2646,8 @@
               "pidof",
               "pgrep",
               "id",
+              "getent",
+              "systemd-analyze",
               "journalctl",
               "curl",
               "ollama",
@@ -1772,7 +2655,24 @@
               "nft",
               "timedatectl",
               "tc",
-              "ping",
+              "ip",
+              "ethtool",
+              "conntrack",
+              "hostnamectl",
+              "resolvectl",
+              "findmnt",
+              "blkid",
+              "dumpe2fs",
+              "smartctl",
+              "quota",
+              "repquota",
+              "pvs",
+              "vgs",
+              "lvs",
+              "aa-status",
+              "apparmor_status",
+              "hostname",
+              "find",
               "mkdir",
               "touch",
               "cp",
@@ -1780,13 +2680,40 @@
               "ln",
               "sed",
               "tee",
+              "ping",
               "tar",
               "gzip",
+              "gcc",
+              "cc",
               "traceroute",
+              "sync",
               "kill",
               "apt",
               "dpkg",
-              "passwd"
+              "passwd",
+              "python3",
+              "mount",
+              "umount",
+              "fstrim",
+              "swapon",
+              "swapoff",
+              "setquota",
+              "rm",
+              "chmod",
+              "chown",
+              "useradd",
+              "usermod",
+              "userdel",
+              "groupadd",
+              "groupmod",
+              "groupdel",
+              "aa-enforce",
+              "aa-complain",
+              "aa-disable",
+              "aik-backup",
+              "aik-reset",
+              "aik-upgrade",
+              "crontab"
             ]
           },
           "args": {
@@ -1795,18 +2722,26 @@
             "items": {
               "type": "string"
             }
+          },
+          "input": {
+            "type": "string",
+            "description": "可选：喂给命令 stdin 的文本（≤60000 字节）。写文件用它给 tee 提供内容，如 command=\"tee\"、args=[\"/tmp/t.txt\"]、input=\"hello\"。echo/printf 只回显到输出、不落盘"
           }
         },
         "required": [
           "command"
         ]
-      }
+      },
+      "sub": [
+        "sysadmin",
+        "fs"
+      ]
     },
     {
-      "name": "memory.search",
+      "name": "memory_search",
       "channel": "memory",
       "risk": "R",
-      "description": "系统接口/参数/用法问题必先查本工具：凡涉及 AIKernel 系统接口、/proc/ai 与 /sys/kernel/ai 节点、内核参数、netlink/procfs/sysfs 操作方式、工具用法的问题（怎么调、如何查看、如何配置），必须先用本工具检索 SME 记忆库（含 aikernel-interface 接口语料），依据命中结果再回答或行动，不要凭空猜测接口用法。SME 语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
+      "description": "[参数名注意] 本工具唯一必填参数是 text（不是 query）。系统接口/参数/用法问题必先查本工具：凡涉及 AIKernel 系统接口、/proc/ai 与 /sys/kernel/ai 节点、内核参数、netlink/procfs/sysfs 操作方式、工具用法的问题（怎么调、如何查看、如何配置），必须先用本工具检索 SME 记忆库（含 aikernel-interface 接口语料），依据命中结果再回答或行动，不要凭空猜测接口用法。SME 语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1824,13 +2759,77 @@
         "required": [
           "text"
         ]
-      }
+      },
+      "sub": [
+        "memory",
+        "aicore"
+      ]
     },
     {
-      "name": "memory.add",
+      "name": "memory_search_advanced",
+      "channel": "memory",
+      "risk": "R",
+      "description": "高级语义检索（POST /memories/search 的组合玩法）：在普通检索上叠加元数据过滤、标签、命名空间、归档记忆、图谱扩展与 Region 策略。普通问答/接口查询用 memory_search；需要按 metadata/tags/ns 精确定位、查归档、或沿记忆图扩展时用本工具。metadata_filters 为 JSON 对象字符串，tags 为 JSON 数组字符串。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "查询文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "返回条数上限（默认 10）",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "top_regions": {
+            "type": "integer",
+            "description": "参与检索的 Region 数上限（可选）",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "metadata_filters": {
+            "type": "string",
+            "description": "元数据过滤 JSON 对象字符串，如 {\"src\":\"ask\"}"
+          },
+          "tags": {
+            "type": "string",
+            "description": "标签过滤 JSON 数组字符串，如 [\"k8s\",\"net\"]"
+          },
+          "region_retrieval": {
+            "type": "string",
+            "description": "区域检索策略（如 spatial/hybrid，可选）"
+          },
+          "include_archived": {
+            "type": "boolean",
+            "description": "是否包含已归档记忆（默认 false）"
+          },
+          "graph_expand": {
+            "type": "integer",
+            "description": "图谱扩展跳数（0=不扩展）",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "ns": {
+            "type": "string",
+            "description": "命名空间过滤（多用户隔离）"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "sub": [
+        "memory",
+        "aicore"
+      ]
+    },
+    {
+      "name": "memory_add",
       "channel": "memory",
       "risk": "W1",
-      "description": "写入一条记忆到 SME（POST /memories），供后续 ask 检索",
+      "description": "写入一条记忆到 SME（POST /memories），供后续 ask 检索。可选 tags/importance/source/link_to/ns；metadata 为 JSON 对象字符串。写入成功返回新记忆 dict（含 id）。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1841,15 +2840,65 @@
           "metadata": {
             "type": "string",
             "description": "可选元数据 JSON 对象字符串"
+          },
+          "tags": {
+            "type": "string",
+            "description": "可选标签 JSON 数组字符串，如 [\"a\",\"b\"]"
+          },
+          "importance": {
+            "type": "number",
+            "description": "重要度 0..1（默认 0.5）",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source": {
+            "type": "string",
+            "description": "来源（user/llm/system，默认 user）"
+          },
+          "link_to": {
+            "type": "string",
+            "description": "可选：写入后链接到既有记忆 id"
+          },
+          "link_kind": {
+            "type": "string",
+            "description": "link_to 的关系类型（默认 reference）"
+          },
+          "ns": {
+            "type": "string",
+            "description": "命名空间（多用户隔离）"
           }
         },
         "required": [
           "text"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.stats",
+      "name": "memory_batch_add",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "批量新增记忆（POST /memories/batch）：memories 为 JSON 数组字符串，每条 {text,metadata?,tags?,importance?,source?} 走完整写入管线（抽取/去噪），返回 added/dropped/total。每条生成新 id，**非幂等**：重试会产生重复记忆；需要无损恢复旧数据请用 memory_import。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memories": {
+            "type": "string",
+            "description": "JSON 数组字符串（元素含 text）"
+          }
+        },
+        "required": [
+          "memories"
+        ]
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_stats",
       "channel": "memory",
       "risk": "R",
       "description": "查询 SME 记忆库统计（GET /stats，含记忆数/Region 数/graph 边数）",
@@ -1857,10 +2906,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.get",
+      "name": "memory_get",
       "channel": "memory",
       "risk": "R",
       "description": "按 ID 读取单条记忆全文（GET /memories/{id}）",
@@ -1875,10 +2927,82 @@
         "required": [
           "id"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.hit",
+      "name": "memory_update",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "更新记忆字段（PATCH /memories/{id}）：text/metadata/tags/importance/weight/summary 至少提供一项，未提供的字段保持不变；改 text 会重新向量化。metadata 为 JSON 对象字符串，tags 为 JSON 数组字符串。返回更新后的记忆 dict。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID"
+          },
+          "text": {
+            "type": "string",
+            "description": "新文本（可选）"
+          },
+          "metadata": {
+            "type": "string",
+            "description": "新元数据 JSON 对象字符串（整体替换）"
+          },
+          "tags": {
+            "type": "string",
+            "description": "新标签 JSON 数组字符串（整体替换）"
+          },
+          "importance": {
+            "type": "number",
+            "description": "重要度 0..1",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "weight": {
+            "type": "number",
+            "description": "检索权重（>=0）",
+            "minimum": 0
+          },
+          "summary": {
+            "type": "string",
+            "description": "摘要文本（可选）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_delete",
+      "channel": "memory",
+      "risk": "W2",
+      "description": "永久删除一条记忆（DELETE /memories/{id}，W2 红色确认）：不可恢复；仅用于删除错误/敏感记忆。要保留历史请用 memory_archive。返回 {\"deleted\":\"<id>\"}。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 ID（如 m_xxxx）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_hit",
       "channel": "memory",
       "risk": "W1",
       "description": "Ebbinghaus 强化：命中计数 +1、检索权重上调（POST /memories/{id}/hit）；对检索命中的记忆及时调用",
@@ -1893,10 +3017,13 @@
         "required": [
           "id"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.archive",
+      "name": "memory_archive",
       "channel": "memory",
       "risk": "W1",
       "description": "归档记忆（POST /memories/{id}/archive）：默认检索不可见，不删除",
@@ -1911,10 +3038,13 @@
         "required": [
           "id"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.restore",
+      "name": "memory_restore",
       "channel": "memory",
       "risk": "W1",
       "description": "恢复归档记忆（POST /memories/{id}/restore）",
@@ -1929,10 +3059,36 @@
         "required": [
           "id"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.facts_multi_hop",
+      "name": "memory_import",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "无损导入导出格式记忆（POST /import）：按 id 还原 weight/hit_count/created_at/向量等全部字段。二选一传参：memories 为 JSON 数组字符串；path 为本地 JSON 文件绝对路径（/tmp 或 /var/ai 下，数组或含 memories 的导出对象，上限 8MB）。带 id 条目按 id 覆盖=可重试幂等；缺 id 条目每次生成新 id（重试会重复）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memories": {
+            "type": "string",
+            "description": "JSON 数组字符串（导出格式条目）"
+          },
+          "path": {
+            "type": "string",
+            "description": "本地 JSON 文件绝对路径（/tmp 或 /var/ai）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_facts_multi_hop",
       "channel": "memory",
       "risk": "R",
       "description": "知识图谱多跳查询（POST /facts/multi_hop）：按文本找实体并沿关系跳转；factgraph 模块未启用时返回 enabled=false",
@@ -1953,10 +3109,80 @@
         "required": [
           "text"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.regions_search",
+      "name": "memory_graph",
+      "channel": "memory",
+      "risk": "R",
+      "description": "读取记忆图（GET /graph）：返回 edge_count 与全部边（source/target/kind/weight/note）。用于查看关联结构、发现孤立节点或准备 memory_link。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_link",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "建立记忆间链接（POST /graph/link）：a/b 均须存在，kind 默认 reference，weight 默认 1.0，note 可选。用于手动关联因果/引用关系。注意服务端没有 unlink 端点：边只能随记忆删除或图重建移除。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "type": "string",
+            "description": "起点记忆 ID"
+          },
+          "b": {
+            "type": "string",
+            "description": "终点记忆 ID"
+          },
+          "kind": {
+            "type": "string",
+            "description": "关系类型（默认 reference）"
+          },
+          "weight": {
+            "type": "number",
+            "description": "边权重（默认 1.0）",
+            "minimum": 0
+          },
+          "note": {
+            "type": "string",
+            "description": "备注（可选）"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ]
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_regions",
+      "channel": "memory",
+      "risk": "R",
+      "description": "列出全部空间 Region（GET /regions）：返回 count 与每个 Region 的 id/摘要/大小/密度等。用于了解记忆的空间聚类。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_regions_search",
       "channel": "memory",
       "risk": "R",
       "description": "空间区域检索（POST /regions/search）：返回最相关 Region",
@@ -1977,10 +3203,92 @@
         "required": [
           "text"
         ]
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.consolidate",
+      "name": "memory_regions_evolve",
+      "channel": "memory",
+      "risk": "W1",
+      "description": "触发 Region 演化（POST /regions/evolve，W1）：对空间结构执行 split/merge 并改写成员归属，返回 events。用于整理长期积累后失真的区域划分；会改动 Region 元数据但不增删记忆。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_facts",
+      "channel": "memory",
+      "risk": "R",
+      "description": "列出事实图谱与双时态事实（GET /facts）：entities/relations/facts/stats；factgraph/factversion 未启用时返回 enabled=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_facts_history",
+      "channel": "memory",
+      "risk": "R",
+      "description": "查询单个事实的双时态版本链（GET /facts/history）：text 或 memory_id 至少一个；返回 oldest→newest 的 versions。无匹配 404；模块关闭返回 enabled=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "自由文本或记忆 ID"
+          },
+          "memory_id": {
+            "type": "string",
+            "description": "明确的记忆 ID（与 text 二选一）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_profile",
+      "channel": "memory",
+      "risk": "R",
+      "description": "读取用户画像事实与快照（GET /profile）：profile_facts/snapshots/stats；模块未启用返回 enabled=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_qapairs",
+      "channel": "memory",
+      "risk": "R",
+      "description": "列出问答对（GET /qapairs）：count 与 pairs（question/answer_text/关联记忆 id）；模块未启用返回 enabled=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_consolidate",
       "channel": "memory",
       "risk": "W2",
       "description": "触发记忆巩固（POST /consolidate）：聚类生成摘要记忆，会新增派生记忆（created 数组）",
@@ -1988,10 +3296,13 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.compress",
+      "name": "memory_compress",
       "channel": "memory",
       "risk": "W2",
       "description": "触发记忆压缩（POST /compress）：生成压缩摘要，会新增派生记忆",
@@ -1999,26 +3310,32 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.export",
+      "name": "memory_export",
       "channel": "memory",
       "risk": "R",
-      "description": "全量导出记忆库 JSON（GET /export）落盘到 /tmp 文件，返回文件路径与预览",
+      "description": "全量导出记忆库 JSON（GET /export）落盘到 /tmp 或 /var/ai（导出路径白名单）文件，返回文件路径与预览",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
             "type": "string",
-            "description": "导出文件路径（默认 /tmp/sme-export.json）"
+            "description": "导出文件绝对路径（白名单: /tmp 或 /var/ai 下；默认 /tmp/sme-export.json）"
           }
         },
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "memory.metrics",
+      "name": "memory_metrics",
       "channel": "memory",
       "risk": "R",
       "description": "观测指标摘要（GET /metrics，Module 10；telemetry 未启用时返回 enabled=false）",
@@ -2026,18 +3343,1362 @@
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
     },
     {
-      "name": "sys.shell",
-      "channel": "shell",
-      "risk": "W1",
-      "description": "替用户降入交互式维护 shell（bash）。仅当用户明确请求打开 shell / 进入命令行时调用（如「帮我打开一个 shell」）；用户输入 exit 退出后本工具返回，再把控制权交还对话。审计行记录「AI 应请求开启 shell」。",
+      "name": "memory_metrics_report",
+      "channel": "memory",
+      "risk": "R",
+      "description": "导出完整遥测报告（GET /metrics/report）落盘 JSON 文件（/tmp 或 /var/ai 白名单），返回路径/字节数/预览；telemetry 未启用时服务端 404。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "报告文件绝对路径（默认 /tmp/sme-metrics-report.json）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_config_get",
+      "channel": "memory",
+      "risk": "R",
+      "description": "读取 SME 引擎配置中心（GET /config）：分组配置项、当前值/默认值/取值范围；api_key 由服务端掩码。用于排障与核对检索/Region/动力学参数。",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": []
-      }
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "memory_config_check",
+      "channel": "memory",
+      "risk": "R",
+      "description": "校验当前 SME 配置（POST /config/check，只读诊断）：ping=false 仅静态校验；ping=true 额外探测 LLM/Embedding 连通性（可能产生外部调用与延迟）。不修改配置。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ping": {
+            "type": "boolean",
+            "description": "是否额外探测外部依赖（默认 false）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "memory"
+      ]
+    },
+    {
+      "name": "sys_shell",
+      "channel": "shell",
+      "risk": "W2",
+      "description": "替用户降入交互式维护 shell（bash）。W2 高危：仅当用户明确请求打开 shell / 进入命令行时调用（如「帮我打开一个 shell」）；且仅宿主 TTY 会话可用，沙箱子进程与非交互环境一律拒绝。用户输入 exit 退出后本工具返回，再把控制权交还对话。审计行记录「AI 应请求开启 shell」。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "sandbox_status",
+      "channel": "sandbox",
+      "risk": "R",
+      "description": "列出隔离区（只读）：/sandbox/ 下各区名称、挂载点与存活子智能体 pid",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "sandbox_create",
+      "channel": "sandbox",
+      "risk": "W1",
+      "description": "建立隔离区：创建 /sandbox/<name>/root 挂载点目录（低危写；真正的 namespace 隔离在 sandbox_spawn 的 run 阶段生效）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "隔离区名（字母数字.-_，≤64 字符；如 sb1）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "sandbox_spawn",
+      "channel": "sandbox",
+      "risk": "W2",
+      "description": "派子智能体进隔离区干活（W2 高危写，红色确认）：在新 mount/pid/uts namespace 中挂 tmpfs 空根，/usr /proc /sys 与 /etc 白名单只读挂入，宿主 /root /home /var 完全不可见，网络保留；子智能体以受限工具表运行（无任何 W2 能力、不能再派生沙盒），输出尾部 4KB 作为摘要返回；max_seconds 超时 SIGKILL 全组。典型用法：先 sandbox_create 建区，再本工具派活，最后 sandbox_destroy 焚区",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "隔离区名（字母数字.-_，≤64 字符；如 sb1）"
+          },
+          "task": {
+            "type": "string",
+            "description": "交给子智能体的任务（一段话指令，如「报告你的工作目录与可见根目录内容」）"
+          },
+          "max_seconds": {
+            "type": "integer",
+            "description": "任务预算秒数（默认 300，上限 900；超时击杀）",
+            "minimum": 1,
+            "maximum": 900,
+            "default": 300
+          },
+          "model": {
+            "type": "string",
+            "description": "可选：子智能体模型偏好（当前 ai CLI 无模型选择参数，登记为 AIKERNEL_SANDBOX_MODEL 供跟踪，模型沿用其自身 model.toml）"
+          }
+        },
+        "required": [
+          "name",
+          "task"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "sandbox_destroy",
+      "channel": "sandbox",
+      "risk": "W1",
+      "description": "焚毁隔离区：卸载残留并清除 /sandbox/<name>（幂等；沙盒内数据本就随 tmpfs 消亡，此步清理宿主侧痕迹）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "隔离区名（字母数字.-_，≤64 字符；如 sb1）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "procfs_read_pressure_cpu",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/pressure/cpu（只读）：CPU PSI 压力（some/full 的 avg10/avg60/avg300/total，只读）：判断 CPU 是否成为瓶颈；与 memory/io 两文件联读定位 stall 根因（能力探测：/proc/pressure 不存在时本工具不可用）",
+      "path": "/proc/pressure/cpu",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "probe": "/proc/pressure",
+      "sub": [
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_pressure_memory",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/pressure/memory（只读）：内存 PSI 压力（some/full，只读）：OOM/回收前兆的金标准；AI 做内存配给与回收决策前先读（能力探测：/proc/pressure 不存在时本工具不可用）",
+      "path": "/proc/pressure/memory",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "probe": "/proc/pressure",
+      "sub": [
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_pressure_io",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/pressure/io（只读）：IO PSI 压力（some/full，只读）：磁盘/IO 拥塞诊断；与 io.priority/io.bandwidth 参数配合（能力探测：/proc/pressure 不存在时本工具不可用）",
+      "path": "/proc/pressure/io",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "probe": "/proc/pressure",
+      "sub": [
+        "res",
+        "fs"
+      ]
+    },
+    {
+      "name": "procfs_read_swaps",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/swaps（只读）：swap 区清单（Filename/Type/Size/Used/Priority，只读）：查看当前 swap 是否启用、用量与优先级；开关用 exec swapon/swapoff（W2）",
+      "path": "/proc/swaps",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_interrupts",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/interrupts（只读）：各 CPU 中断计数（只读）：定位中断风暴/网卡 IRQ 分布；单 IRQ 亲和用 sysfs_get/sysfs_set 读写 /proc/irq/<n>/smp_affinity",
+      "path": "/proc/interrupts",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_irq_default_affinity",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/irq/default_smp_affinity（只读）：新建 IRQ 的默认 CPU 亲和掩码（只读）：改默认亲和用 sysfs_set 写同一路径（W2）",
+      "path": "/proc/irq/default_smp_affinity",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_write_sched_classify",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "向 /proc/ai/sched/classify 写 pid 查询单任务调度分类（AIKernel 内核调度分类器；写后回读分类结果）（写 /proc/ai/sched/classify，value 取 目标 pid（十进制））",
+      "path": "/proc/ai/sched/classify",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "目标进程 PID"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    },
+    {
+      "name": "procfs_read_mounts",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/mounts（只读）：当前挂载表（只读）：设备/挂载点/文件系统/选项；挂载与卸载用 exec mount/umount（W2），查询可用 exec findmnt",
+      "path": "/proc/mounts",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "fs"
+      ]
+    },
+    {
+      "name": "procfs_read_filesystems",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/filesystems（只读）：内核支持的文件系统清单（只读）：判断能否挂载某类型",
+      "path": "/proc/filesystems",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "fs"
+      ]
+    },
+    {
+      "name": "config_read_fstab",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/fstab（只读）：系统开机挂载表（只读）：改前必读；写用 config_write_fstab（W2，整文件覆盖，写坏可致开机失败，需保留可启动回退）",
+      "path": "/etc/fstab",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "fs",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "config_write_fstab",
+      "channel": "sysfs-write",
+      "risk": "W2",
+      "description": "整文件覆盖 /etc/fstab（W2 高危写）：先 config_read_fstab 取全文，只改目标行后整体写回；错误条目可导致开机挂载失败/进入维护模式。优先用 mount -a 验证（写 /etc/fstab，value 取 完整 fstab 文本）",
+      "path": "/etc/fstab",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "完整文件内容（含换行）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "fs",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "config_read_nftables",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/nftables.conf（只读）：防火墙持久化配置（只读）：运行时 nft 规则重启即失，持久化改此文件；写用 config_write_nftables（W2）",
+      "path": "/etc/nftables.conf",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_write_nftables",
+      "channel": "sysfs-write",
+      "risk": "W2",
+      "description": "整文件覆盖 /etc/nftables.conf（W2）：先读后写，改完用 nft -c -f 语法检查；错误规则可致远程失联，务必保留现有 SSH 放行规则（写 /etc/nftables.conf，value 取 完整 nftables.conf 文本）",
+      "path": "/etc/nftables.conf",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "完整文件内容（含换行）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_read_sshd_config",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/ssh/sshd_config（只读）：SSH 服务端配置（只读）：排障/审计 PermitRootLogin、PasswordAuthentication 等；写用 config_write_sshd_config（W2，改错可锁死远程登录）",
+      "path": "/etc/ssh/sshd_config",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "config_write_sshd_config",
+      "channel": "sysfs-write",
+      "risk": "W2",
+      "description": "整文件覆盖 /etc/ssh/sshd_config（W2）：先读后写，保留至少一条可登录通道；改完用 sshd -t 校验再 systemctl reload ssh。写错可导致远程锁死（写 /etc/ssh/sshd_config，value 取 完整 sshd_config 文本）",
+      "path": "/etc/ssh/sshd_config",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "完整文件内容（含换行）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "netsec",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "config_read_resolv_conf",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/resolv.conf（只读）：DNS 解析配置（只读）：nameserver/search/options；DNS 失效是最高频网络故障，先读再改",
+      "path": "/etc/resolv.conf",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_write_resolv_conf",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "整文件覆盖 /etc/resolv.conf（W1）：先读后写，保留现有可用 nameserver 作为回退；systemd-resolved 环境下该文件可能是符号链接，写前用 sysfs_get 确认真实落点（写 /etc/resolv.conf，value 取 完整 resolv.conf 文本）",
+      "path": "/etc/resolv.conf",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "完整文件内容（含换行）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_read_hosts",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/hosts（只读）：本地主机名映射（只读）：排查域名解析/本地别名；写用 config_write_hosts（W1）",
+      "path": "/etc/hosts",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_write_hosts",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "整文件覆盖 /etc/hosts（W1）：先读后写，保留 localhost 基线行（写 /etc/hosts，value 取 完整 hosts 文本）",
+      "path": "/etc/hosts",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "完整文件内容（含换行）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "netsec",
+        "fs"
+      ]
+    },
+    {
+      "name": "config_read_hostname",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /etc/hostname（只读）：静态主机名文件（只读）：改主机名优先用 hostnamectl set-hostname（W2），本文件是持久化落点",
+      "path": "/etc/hostname",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "config_write_hostname",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /etc/hostname（W1）：优先 hostnamectl set-hostname（会同步运行时主机名）；直接写本文件只改下次启动值（写 /etc/hostname，value 取 新主机名（单行））",
+      "path": "/etc/hostname",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "主机名（单行，仅字母数字.-）"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "sysctl_get",
+      "channel": "sysctl",
+      "risk": "R",
+      "description": "读取 Linux sysctl（/proc/sys 下任意合法键，只读）：key 用点号形式（如 net.ipv4.ip_forward）或斜杠形式（net/ipv4/ip_forward）；也可用 prefix 列举整棵子树（如 net.ipv4），输出 key = value 行并在超限时标注截断。适用场景：查看内核网络/内存/文件系统/vm 旋钮、排障前取证、写 sysctl_set 前读旧值。只读无风险；路径经 realpath 校验，只允许 /proc/sys 下真实文件。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "sysctl 键（点号或斜杠形式），与 prefix 二选一"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "子树前缀（如 net.ipv4、vm、kernel），列举其下全部键值"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "sysctl_set",
+      "channel": "sysctl",
+      "risk": "W2",
+      "description": "写入 Linux sysctl（W2 高危写，逐次红色确认）：key 用点号形式（如 net.ipv4.ip_forward、vm.swappiness），value 为单行文本。执行前会把旧值写入审计（可据此回滚），写入后回读确认并返回 old/new。安全约束：① realpath 必须落在 /proc/sys/ 内（防路径穿越/符号链接逃逸）；② 拒绝换行/NUL/控制字符；③ 命中崩溃黑名单直接拒绝并给出原因（kernel.sysrq、kernel.panic*、kernel.core_pattern、kernel.modules_disabled、vm.panic_on_oom 等，完整清单见 sysctl_blacklist 工具）。典型合法场景：ip_forward、somaxconn、conntrack_max、swappiness、vfs_cache_pressure、rp_filter（敏感但可回滚，仍为 W2）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "sysctl 键（点号形式，如 net.ipv4.ip_forward）"
+          },
+          "value": {
+            "type": "string",
+            "description": "新值（单行；禁止换行/NUL/控制字符）"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "sysctl_blacklist",
+      "channel": "sysctl",
+      "risk": "R",
+      "description": "列出 sysctl_set 的崩溃黑名单（只读）：每项含键前缀、拒绝原因、是否可通过参数绕过（不可）。给 AI 在写sysctl 前自检用；命中黑名单的写入由执行器硬拒绝，不存在 --force 或白名单旁路。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "sysfs_get",
+      "channel": "sysfs",
+      "risk": "R",
+      "description": "读取 sysfs/procfs 任意受控路径（只读）：path 必须是绝对路径，允许前缀 /sys/、/proc/sys/、/proc/irq/、/proc/ai/、/proc/pressure/、/proc/net/。适用场景：读 cgroup v2 限额（/sys/fs/cgroup/<组>/memory.max）、AIKernel per-policy 开关（/sys/kernel/ai/policy/<name>）、cpufreq governor（/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor）、IRQ 亲和（/proc/irq/<n>/smp_affinity）等动态文件。realpath 校验防穿越；超长输出截断标注。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "绝对路径（受控前缀内，见描述）"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "最多读取字节数（默认 32768，上限 131072）",
+            "minimum": 1,
+            "maximum": 131072
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_set",
+      "channel": "sysfs",
+      "risk": "W2",
+      "description": "写 sysfs/procfs 受控动态文件（W2 高危写，逐次红色确认）：path 为绝对路径，value 为单行文本。允许前缀仅：/sys/fs/cgroup/（cgroup v2 资源配给，含 ai.max_inferences/ai.max_tops/ai.mem_limit_mb、cpu.max、memory.max、io.max、pids.max）、/sys/kernel/ai/（含动态 policy/<name>）、/sys/devices/system/cpu/（cpufreq governor/EAS）、/sys/block/（IO 调度）、/sys/class/net/（网卡队列/offload）、/proc/irq/（smp_affinity）、/proc/ai/。执行前记录旧值到审计，写入后回读。刻意排除 /sys/power（suspend 可让远程主机失联）、/sys/firmware（可写坏引导固件）、/sys/kernel/debug|security|config、/sys/module。cgroup 文件通常只存在于子组：先 sysfs_get 确认路径。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "绝对路径（受控前缀内，文件必须已存在）"
+          },
+          "value": {
+            "type": "string",
+            "description": "新值（单行；禁止换行/NUL/控制字符）"
+          }
+        },
+        "required": [
+          "path",
+          "value"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_write_model_infer",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/model_infer（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：触发内核内 MLP 推理（W1）：value 格式为 \"<模型名> <float32 输入向量 hex...>\"（小端 hex，空格分隔）；推理走 ai_runtime_model_infer_by_name，结果用 procfs_read_model_out 读取",
+      "path": "/sys/kernel/ai/model_infer",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "<模型名> <hex float32...>，如 \"mlp 0000803f00000040\""
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore"
+      ]
+    },
+    {
+      "name": "procfs_read_model_out",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/model_out（只读）：最近一次内核内 MLP 推理结果（只读）：模型名/输入输出长度/输出 float32 hex；与 sysfs_write_model_infer 配对使用",
+      "path": "/sys/kernel/ai/model_out",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    },
+    {
+      "name": "sysfs_write_decision_oom_badness",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/decision/oom_badness（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：单 hook 决策注入开关（W1）：1=启用 0=停用；OOM 受害者评分偏置（交互式保护/批处理加压）。需同时打开 /sys/kernel/ai/decision_inject 总闸（sysfs_write_decision_inject 未单列，可用 sysfs_set 写同一路径）；实际偏置仍受内核安全限幅",
+      "path": "/sys/kernel/ai/decision/oom_badness",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用",
+            "enum": [
+              "0",
+              "1"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_write_decision_sched_vruntime",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/decision/sched_vruntime（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：单 hook 决策注入开关（W1）：1=启用 0=停用；调度 vruntime 加权（±10%）。需同时打开 /sys/kernel/ai/decision_inject 总闸（sysfs_write_decision_inject 未单列，可用 sysfs_set 写同一路径）；实际偏置仍受内核安全限幅",
+      "path": "/sys/kernel/ai/decision/sched_vruntime",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用",
+            "enum": [
+              "0",
+              "1"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_write_decision_sched_wakeup",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/decision/sched_wakeup（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：单 hook 决策注入开关（W1）：1=启用 0=停用；唤醒抢占提示。需同时打开 /sys/kernel/ai/decision_inject 总闸（sysfs_write_decision_inject 未单列，可用 sysfs_set 写同一路径）；实际偏置仍受内核安全限幅",
+      "path": "/sys/kernel/ai/decision/sched_wakeup",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用",
+            "enum": [
+              "0",
+              "1"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "sysfs_write_decision_readahead",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/decision/readahead（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：单 hook 决策注入开关（W1）：1=启用 0=停用；预读窗口偏置（±1 档）。需同时打开 /sys/kernel/ai/decision_inject 总闸（sysfs_write_decision_inject 未单列，可用 sysfs_set 写同一路径）；实际偏置仍受内核安全限幅",
+      "path": "/sys/kernel/ai/decision/readahead",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用",
+            "enum": [
+              "0",
+              "1"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "fs"
+      ]
+    },
+    {
+      "name": "sysfs_write_decision_reclaim",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "写 /sys/kernel/ai/decision/reclaim（需 CAP_SYS_ADMIN，决策进内核决策 ring/因果链）：单 hook 决策注入开关（W1）：1=启用 0=停用；回收扫描优先级偏置（±1 档）。需同时打开 /sys/kernel/ai/decision_inject 总闸（sysfs_write_decision_inject 未单列，可用 sysfs_set 写同一路径）；实际偏置仍受内核安全限幅",
+      "path": "/sys/kernel/ai/decision/reclaim",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "1=启用 0=停用",
+            "enum": [
+              "0",
+              "1"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_decision_stats",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /sys/kernel/ai/decision/stats（只读）：per-hook 决策注入记账（只读）：每个 hook 的 queries/injected/effects/fallback/ring/last_bias，用于归因注入效果",
+      "path": "/sys/kernel/ai/decision/stats",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    },
+    {
+      "name": "memory_health",
+      "channel": "memory",
+      "risk": "R",
+      "description": "SME 记忆服务健康探活（GET /health，只读）：返回 status/memories 等 JSON；SME 不可达时立即暴露（记忆是增强能力，不可达不应拖垮主链路）。排障第一步：先 health，再 stats/metrics。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "memory",
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "desktop_health",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "桌面后端健康（只读 D0）：返回 demo 服务 version/bind/desktop 后端能力（web-demo、screenshot=playwright、power=unavailable）。任何桌面动作前可先查；不可用时应如实报告，不要假设成功",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_stats",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "桌面系统状态（只读 D0）：load1/内存占用/uptime/内核版本与 60 点负载/内存历史；用于桌面侧性能与响应性判断",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_apps_list",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "枚举已安装应用（只读 D0）：返回 count 与 apps[]（id/name/name_en/exec/icon/categories/terminal）；launch 前先用 id",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_windows_list",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "枚举桌面窗口（只读 D0）：每窗口返回稳定 id(w-0001)/title/app/geometry{x,y,w,h}/focused/visible/z/text/last_key；同时返回 mode/theme/wallpaper/clipboard 摘要",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_theme_get",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "读取主题（只读 D0）：current 与 themes 色板（dark/light/pink/custom）；set 前先读，便于回滚",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_wallpaper_get",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "读取壁纸（只读 D0）：current（gradient 或 wall-*）与 available 画廊列表；set 前先读，便于恢复",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_notifications_list",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "读取桌面通知（只读 D0）：最近通知数组（title/body/tag/time）；send 前先读可判断是否重复",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_screenshot",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "桌面截图（只读 D0，Playwright）：返回 PNG 绝对 path/bytes/sha256/width/height；用于验证界面真实渲染（>30KB 防白屏）。截图含窗口与桌面内容，按敏感数据处理",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_clipboard_get",
+      "channel": "desktop",
+      "risk": "R",
+      "description": "读取剪贴板（只读 D0，敏感）：返回 text/length/sha256/updated_at；set 前先读旧值以便恢复",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_theme_set",
+      "channel": "desktop",
+      "risk": "W1",
+      "description": "切换主题（D1 可逆）：name=dark|light|pink|custom；写入后回读 current 验证。回滚=切回 theme.get 读到的旧值",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "主题名：dark|light|pink|custom"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_wallpaper_set",
+      "channel": "desktop",
+      "risk": "W1",
+      "description": "切换壁纸（D1 可逆）：wallpaper=gradient 或 wallpaper.get 返回的 available 名（如 wall-aurora）；回滚=切回旧 current",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "wallpaper": {
+            "type": "string",
+            "description": "gradient 或 wall-* 画廊名"
+          }
+        },
+        "required": [
+          "wallpaper"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_notifications_send",
+      "channel": "desktop",
+      "risk": "W1",
+      "description": "发送桌面通知（D1 可逆）：追加一条 title/body/tag；返回 count。不覆盖历史；清空/删除通知不属于本工具",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "通知标题（≤80 字）"
+          },
+          "body": {
+            "type": "string",
+            "description": "通知正文（≤400 字）"
+          },
+          "tag": {
+            "type": "string",
+            "description": "分类标签（可选，如 ai）"
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_apps_launch",
+      "channel": "desktop",
+      "risk": "W1",
+      "description": "启动应用窗口（D1 可逆）：app=apps.list 的 id（如 gnome-control-center）。Web demo 创建虚拟窗口并聚焦，返回 window_id；未启动宿主进程（W84 真桌面）。关闭用 apps.close",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "应用 id（来自 desktop_apps_list）"
+          }
+        },
+        "required": [
+          "app"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_windows_focus",
+      "channel": "desktop",
+      "risk": "W1",
+      "description": "聚焦窗口（D1 可逆）：id=windows.list 的 w-XXXX；置顶并设 focused=true，返回 focused。回滚=聚焦原窗口",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "窗口 id（w-XXXX）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_windows_close",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "关闭单个窗口（D2 不可逆，需确认/租约）：id=w-XXXX；窗口从列表消失。关闭后无法恢复窗口内未保存文本；应用仍可用 apps.launch 重新打开",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "窗口 id（w-XXXX）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_apps_close",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "关闭某应用的全部窗口（D2 不可逆，需确认/租约）：app=应用 id；返回 closed[]。未保存内容丢失；重新打开用 apps.launch",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "应用 id"
+          }
+        },
+        "required": [
+          "app"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_input_type",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "向当前聚焦窗口注入文本（D2 敏感，需确认/租约）：text≤4096，追加到窗口文本缓冲。输入注入等于代替用户操作，可能触发应用行为；返回 text_before/text_after。无焦点窗口返回 409",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要输入的文本（≤4096 字符）"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_input_key",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "向当前聚焦窗口注入按键（D2 敏感，需确认/租约）：key 为单字符或 Enter/Backspace/Tab/Escape/Delete/Home/End/PageUp/PageDown/方向键/F1-F12；modifiers=ctrl,alt,shift,meta 逗号分隔。Ctrl+L/U 清空窗口文本。返回 last_key/text_after",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "单字符或允许的键名（如 Enter）"
+          },
+          "modifiers": {
+            "type": "string",
+            "description": "可选：ctrl,alt,shift,meta 逗号分隔"
+          }
+        },
+        "required": [
+          "key"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_clipboard_set",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "写系统剪贴板（D2 敏感，需确认/租约）：text≤65536；返回新 sha256 与 previous 旧值（用于恢复）。剪贴板可能含隐私数据，读取/写回都要谨慎",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要写入剪贴板的文本（≤65536 字符）"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "desktop_power",
+      "channel": "desktop",
+      "risk": "W2",
+      "description": "电源动作（D3 系统级，需确认/D3 租约）：action=lock|logout|reboot|shutdown|suspend。W76 Web demo 无 logind 控制面，后端明确返回 unavailable 且不执行；绝不返回伪造成功。真桌面见 W84",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "lock|logout|reboot|shutdown|suspend",
+            "enum": [
+              "lock",
+              "logout",
+              "reboot",
+              "shutdown",
+              "suspend"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "desktop"
+      ]
+    },
+    {
+      "name": "clarify",
+      "channel": "interaction",
+      "risk": "R",
+      "description": "向用户提出一个结构化澄清问题（interaction 通道，R，非授权；不创建租约、不执行任何动作）。用于意图/范围/策略/授权/恢复确有歧义时：一次只问一个问题，给 2-4 个选项。kind 取 intent|scope|strategy|authorization|recovery（默认 intent）。每个选项支持 id/label/description/why/impact/rollback/danger；recommended 选项必须给出 why；选项 danger 缺省继承请求 danger，任一选项（含继承）为 D3/D4 时必须提供 impact 与 rollback。非 authorization 必须指定唯一 recommended；authorization 可省略 recommended，但若给出则仍需 why。authorization 且 danger=D3/D4 时禁止 default，绝不允许自动执行；其他情况 default 可选且必须引用选项 id。可选 header 作为菜单短标题。TTY 显示数字菜单（推荐项置顶标注、why/影响/回滚子行、[o] 其他、[q] 取消；15 分钟无输入按取消处理），无效输入最多重试 3 次；非 TTY 不阻塞，返回 CLARIFY_REQUIRED JSON（nonce 前缀 cq-/expires_at）并结束本轮 ask。同一轮含 clarify 时其他工具一律不执行（等待答案后重试）。单次 ask 最多 2 个澄清问题。澄清不等于授权：任何 D2+ 操作仍需现有 lease/CONFIRM_REQUIRED 确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "要问用户的一个问题（单行）"
+          },
+          "header": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "可选短标题（TTY 菜单首行）"
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "选项 id（2-4 个选项中唯一；字母数字 _-."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "展示给用户的选项文本"
+                },
+                "description": {
+                  "type": "string",
+                  "description": "可选的补充说明"
+                },
+                "why": {
+                  "type": "string",
+                  "description": "证据/理由（recommended 选项必填）"
+                },
+                "impact": {
+                  "type": "string",
+                  "description": "影响（该选项 danger 为 D3/D4 时必填）"
+                },
+                "rollback": {
+                  "type": "string",
+                  "description": "回滚方式（该选项 danger 为 D3/D4 时必填）"
+                },
+                "danger": {
+                  "type": "string",
+                  "enum": [
+                    "D0",
+                    "D1",
+                    "D2",
+                    "D3",
+                    "D4"
+                  ],
+                  "description": "该选项的 D 级；缺省继承请求 danger"
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ]
+            },
+            "description": "2-4 个选项，id 唯一"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "intent",
+              "scope",
+              "strategy",
+              "authorization",
+              "recovery"
+            ],
+            "default": "intent",
+            "description": "问题类型；authorization 表示在征询是否授权某后续动作（仍不创建租约）"
+          },
+          "recommended": {
+            "type": "string",
+            "description": "唯一推荐选项 id（必须带 why）；authorization 可省略"
+          },
+          "default": {
+            "type": "string",
+            "description": "默认选项 id（必须存在）；authorization D3/D4 禁止使用"
+          },
+          "danger": {
+            "type": "string",
+            "enum": [
+              "D0",
+              "D1",
+              "D2",
+              "D3",
+              "D4"
+            ],
+            "description": "authorization 必填：拟授权动作的 D 级"
+          },
+          "multi_select": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否允许多选（逗号/空格分隔）"
+          }
+        },
+        "required": [
+          "question",
+          "options"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
     }
   ]
 }

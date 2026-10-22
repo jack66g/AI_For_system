@@ -424,6 +424,18 @@ static int __init ai_proc_init(void)
 	ai_telemetry_init();
 	/* 热路径默认采样率：syscall 全量参数 1/256（防 ring 饱和） */
 	ai_telemetry_set_sample_rate(AI_CAT_USER_INPUT, AI_EV_SYSCALL, 256);
+	/* w24：遥测环后台排空（消费者常驻化）。此前唯一消费者是被动拉取
+	 * （/proc/ai/telemetry 读 / NETLINK SENSE 拉），无人拉取时环常满、
+	 * 全部写入 dropped（实测空闲 dropped 15278 条/s、积压恒 13.1 万
+	 * 字节）。排空线程 250ms 周期把各 CPU ring 读空，积压回落、
+	 * dropped≈0；启动失败仅告警不阻断（退化为 #38 的被动消费路径）。 */
+	{
+		int rc = ai_telemetry_drain_start();
+
+		if (rc != AI_OK)
+			pr_warn("AIKernel: telemetry drainer start failed (%d)\n",
+				rc);
+	}
 #endif
 
 #ifdef CONFIG_AIKERNEL_RUNTIME

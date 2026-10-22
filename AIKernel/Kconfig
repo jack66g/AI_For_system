@@ -213,7 +213,8 @@ config AIKERNEL_NETLINK
 	  构建 NETLINK_AI 协议族（AIKernel/net/ai_netlink.c，编号 31）：
 	    - AI_CMD_SENSE：一条消息拉取最近 N 条感知记录（上限 4096，raw/human）
 	    - AI_CMD_ACT：下发决策指令并执行对应决策域策略（CAP_SYS_ADMIN）
-	    - AI_CMD_REG：注册回调（异步事件推送预留，CAP_SYS_ADMIN）
+	    - AI_CMD_REG：注册/注销异步事件推送（CAP_SYS_ADMIN）
+	    - AI_CMD_EVENT：内核主动推送策略执行/模型生命周期事件
 	  AI Runtime 与内核通信的高速通道（接口契约见
 	  include/uapi/linux/ai_netlink.h）。
 

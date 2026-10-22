@@ -175,7 +175,7 @@ AI 从下表"接管点"列处接管决策。
 | arch/x86/entry/syscall_64.c | `ai_telemetry_syscall_entry` / `ai_telemetry_syscall_exit` | 系统调用入口是全内核最热路径，汇编相邻、绝对性能敏感；采样判定（默认 1/256）已在被调函数内 | 采样命中 → 全量参数留痕；频率/序列/错误簇统计供 AI 行为建模 |
 | drivers/input/input.c（2769） | `ai_proc_input_event` | input_handle_event 是所有输入设备汇聚点，逐字节热路径 | per-CPU 输入状态机（键盘序列/组合键/鼠标/触摸）驱动用户行为感知 |
 | drivers/tty/n_tty.c | `ai_proc_tty_input_focus` / `ai_telemetry_tty_input` / `ai_telemetry_tty_output` | tty 缓冲路径紧贴行规程语义 | 8 槽 tty 焦点窗口表 → user_focus_window 事件（前台应用识别） |
-| kernel/seccomp.c | `ai_sec_seccomp_hook` / `ai_telemetry_seccomp_filter/kill` | seccomp 过滤器检查在 syscall 热路径上 | `ai_sec_seccomp_hook` 输出 action 建议（空实现=不改判定；AI 分析进程行为后接管） |
+| kernel/seccomp.c | `ai_sec_seccomp_hook` / `ai_telemetry_seccomp_filter/kill` | seccomp 过滤器检查在 syscall 热路径上 | `ai_sec_seccomp_hook` 只计数（W49 确认调用点不消费 action；seccomp 只允许进程自装，故不承担 sec.seccomp 参数执行） |
 | mm/page_alloc.c（7741） | `ai_mm_alloc_hook` / `ai_mm_emit_page_alloc/free/failure/latency` | 分配器热路径（每秒百万次），只能加分支最少的埋点 | `ai_mm_alloc_hook` 返回 migratetype（空实现=原样返回；AI 分配策略预留） |
 | mm/slub.c（10164） | `ai_mm_emit_slab_alloc/free/grow/shrink/fragmentation` | slab 快路径同理 | 遥测外流（slab 碎片率 → AI 内存压力建模） |
 
@@ -192,8 +192,11 @@ AI 从下表"接管点"列处接管决策。
 "计数 + 原样放行"（返回值不改变内核默认行为）。
 例：`ai_sched_pick_next_hook` 原样返回默认选核结果；
 `ai_proc_futex_hook` 返回 0；`ai_mm_reclaim_hook` 不修改扫描参数；
-`ai_sec_seccomp_hook` 不改 action。AI 决策介入 = 未来把空实现替换为
-"查询决策表/模型输出"，调用点（上游埋点）无需再动。
+`ai_sec_seccomp_hook` 不改 action。W49 复核：该调用点只在任务已挂
+seccomp 过滤器时执行且不消费 action，无法给任意任务强装过滤器（seccomp
+只允许进程自装/clone 继承/同线程组 TSYNC）→ `sec.seccomp` 参数已如实
+降级 reserved（无 REAL、无 apply，仅记录值）；真正的基线应由用户态在
+exec 前对子进程自装过滤器（W51 设计）。
 配套：每个 Hook 都有决策统计计数（`ai_*_stats`/`*_hook_calls`），
 经 /proc/ai/stats、/sys/kernel/ai/stats/ 外流，供 AI 主体评估影响面。
 
@@ -508,7 +511,7 @@ real 化 / agent 侧桩清零），第二波 guest 集成 E2E，主控补修 pro
 | net.nftables | AIKernel 自有 netfilter LOCAL_OUT 采集钩子（真注册/真计数），如实语义 |
 | io.bandwidth | bdi max_ratio 写回带宽比（0=恢复默认） |
 | sec.lsm_override | AIKernel 自家 LSM enforce/observe 档位 |
-| sec.seccomp | TASK 基线收紧=ai_lsm deny 规则注入/解除（如实语义，非 seccomp BPF） |
+| sec.seccomp | **reserved（W49 降级）**：跨进程 seccomp 注入无安全路径；参数仅记录值，无内核效果 |
 | sec.audit | ai_audit 采集真开关（关后 gate 直接丢弃） |
 | power.freq | aiguard 频率上限万分比（get_next_freq 真实钳制；QEMU 无 cpufreq 如实标注） |
 | power.cstate | PM QoS cpu_dma_latency（/dev/cpu_dma_latency 同源） |

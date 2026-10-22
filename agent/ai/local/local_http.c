@@ -23,6 +23,8 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 #include "local_http.h"
 #include "ai_types.h"
@@ -127,15 +129,55 @@ static int tcp_connect_ex(const char *host, int port, int timeout_ms,
 		return -1;
 
 	for (rp = res; rp; rp = rp->ai_next) {
+		int fl;
+		int cerr = 0;
+		socklen_t cerrlen = sizeof(cerr);
+		fd_set wf;
+
 		sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 		if (sock < 0)
 			continue;
+		/* W43：非阻塞 connect + select 超时。原实现为阻塞 connect，
+		 * 对黑洞地址（丢包不回 RST）会挂到内核 TCP 超时（约 2 分钟），
+		 * timeout_ms 形同虚设——SME 失忆降级与本地 provider 都可能
+		 * 被拖死。connect 超时即调用方 timeout_ms（整体预算）；
+		 * 立即连上与 ECONNREFUSED 语义不变。 */
+		fl = fcntl(sock, F_GETFL, 0);
+		if (fl >= 0)
+			fcntl(sock, F_SETFL, fl | O_NONBLOCK);
 		if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0)
-			break;
-		if (saved_errno)
-			*saved_errno = errno;
-		close(sock);
-		sock = -1;
+			goto connected;
+		if (errno != EINPROGRESS) {
+			if (saved_errno)
+				*saved_errno = errno;
+			close(sock);
+			sock = -1;
+			continue;
+		}
+		FD_ZERO(&wf);
+		FD_SET(sock, &wf);
+		tv.tv_sec = timeout_ms / 1000;
+		tv.tv_usec = (timeout_ms % 1000) * 1000;
+		if (select(sock + 1, NULL, &wf, NULL, &tv) <= 0) {
+			if (saved_errno)
+				*saved_errno = ETIMEDOUT;
+			close(sock);
+			sock = -1;
+			continue;
+		}
+		if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &cerr,
+			       &cerrlen) != 0 || cerr != 0) {
+			if (saved_errno)
+				*saved_errno = cerr ? cerr : ECONNREFUSED;
+			close(sock);
+			sock = -1;
+			continue;
+		}
+connected:
+		/* 恢复阻塞模式（后续收发走 SO_RCVTIMEO/SO_SNDTIMEO） */
+		if (fl >= 0)
+			fcntl(sock, F_SETFL, fl);
+		break;
 	}
 	freeaddrinfo(res);
 
@@ -154,10 +196,12 @@ static int tcp_connect_ex(const char *host, int port, int timeout_ms,
 /* ---- 请求构建与发送 ---- */
 
 /*
- * build_post_request - 构建完整 HTTP/1.1 POST 报文
+ * build_post_request - 构建完整 HTTP/1.1 带体请求报文（方法可配）
  * Content-Length 必带；api_key 为空时不发送 Authorization 头。
+ * W50：新增 method 参数（POST/PATCH），SME 的 PATCH /memories/{id} 复用。
  */
-static char *build_post_request(const char *host, const char *path,
+static char *build_post_request(const char *method,
+				const char *host, const char *path,
 				const char *api_key, const char *json_body,
 				size_t *req_len)
 {
@@ -173,7 +217,7 @@ static char *build_post_request(const char *host, const char *path,
 
 	if (key_len > 0)
 		n = snprintf(req, cap,
-			     "POST %s HTTP/1.1\r\n"
+			     "%s %s HTTP/1.1\r\n"
 			     "Host: %s\r\n"
 			     "Content-Type: application/json\r\n"
 			     "Authorization: Bearer %s\r\n"
@@ -181,17 +225,18 @@ static char *build_post_request(const char *host, const char *path,
 			     "Connection: close\r\n"
 			     "\r\n"
 			     "%s",
-			     path, host, api_key, strlen(json_body), json_body);
+			     method, path, host, api_key,
+			     strlen(json_body), json_body);
 	else
 		n = snprintf(req, cap,
-			     "POST %s HTTP/1.1\r\n"
+			     "%s %s HTTP/1.1\r\n"
 			     "Host: %s\r\n"
 			     "Content-Type: application/json\r\n"
 			     "Content-Length: %zu\r\n"
 			     "Connection: close\r\n"
 			     "\r\n"
 			     "%s",
-			     path, host, strlen(json_body), json_body);
+			     method, path, host, strlen(json_body), json_body);
 
 	if (n < 0 || (size_t)n >= cap) {
 		free(req);
@@ -355,9 +400,10 @@ static int is_chunked(const char *header)
 
 /* ---- 对外接口 ---- */
 
-int local_http_post(const char *url, const char *api_key,
-		    const char *json_body, int timeout_ms,
-		    char **response, char **error_message, int *status_code)
+int local_http_request(const char *method, const char *url,
+		       const char *api_key, const char *json_body,
+		       int timeout_ms, char **response,
+		       char **error_message, int *status_code)
 {
 	struct local_url uinfo;
 	char *req = NULL;
@@ -376,7 +422,8 @@ int local_http_post(const char *url, const char *api_key,
 	if (status_code)
 		*status_code = 0;
 
-	if (!url || !json_body || !response || !error_message)
+	if (!method || !method[0] || strlen(method) >= 16 ||
+	    !url || !json_body || !response || !error_message)
 		return AI_ERR_INVALID_ARG;
 
 	{
@@ -398,8 +445,8 @@ int local_http_post(const char *url, const char *api_key,
 	if (timeout_ms <= 0)
 		timeout_ms = LOCAL_HTTP_DEFAULT_TIMEOUT_MS;
 
-	req = build_post_request(uinfo.host, uinfo.path, api_key, json_body,
-				 &req_len);
+	req = build_post_request(method, uinfo.host, uinfo.path, api_key,
+				 json_body, &req_len);
 	if (!req) {
 		*error_message = strdup("Out of memory while building request");
 		return AI_ERR_MEMORY;
@@ -514,6 +561,25 @@ out:
 	if (sock >= 0)
 		close(sock);
 	return ret;
+}
+
+int local_http_post(const char *url, const char *api_key,
+		    const char *json_body, int timeout_ms,
+		    char **response, char **error_message, int *status_code)
+{
+	return local_http_request("POST", url, api_key, json_body, timeout_ms,
+				  response, error_message, status_code);
+}
+
+/*
+ * DELETE：SME 的 DELETE /memories/{id} 无请求体。为复用带体请求的同一
+ * 收发实现，发送空体（Content-Length: 0）；FastAPI/Starlette 接受。
+ */
+int local_http_delete(const char *url, int timeout_ms,
+		      char **response, char **error_message, int *status_code)
+{
+	return local_http_request("DELETE", url, NULL, "", timeout_ms,
+				  response, error_message, status_code);
 }
 
 /* ---- 流式 POST（增量交付响应体） ---- */
@@ -669,8 +735,8 @@ int local_http_post_stream(const char *url, const char *api_key,
 		}
 	}
 
-	req = build_post_request(uinfo.host, uinfo.path, api_key, json_body,
-				 &req_len);
+	req = build_post_request("POST", uinfo.host, uinfo.path, api_key,
+				 json_body, &req_len);
 	if (!req) {
 		*error_message = strdup("Out of memory while building request");
 		ret = AI_ERR_MEMORY;

@@ -59,6 +59,9 @@ EXPORT_SYMBOL_GPL(ai_cca_clamp_hits_read);
  *
  * 慢启动：tcp_slow_start 指数增窗；拥塞避免：分数 AIMD（同 tcp_cong_avoid_ai 语义），
  * 每窗口增窗量默认 1，先经 ai_net_cong_hook 咨询（AI 可调整增窗节奏）。
+ * @sk: 目的套接字（取 tcp_sock 读写 cwnd）
+ * @ack: 本次确认的序号（reno 拥塞避免不直接消费）
+ * @acked: 本次确认累计 ACK 的报文数（慢启动/增窗计数依据）
  */
 static void tcp_ai_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
@@ -106,6 +109,9 @@ clamp_out:
 
 /**
  * tcp_ai_ssthresh() - 丢包后的慢启动阈值（reno 语义折半，AI 可调整）
+ * @sk: 目的套接字（按当前 cwnd 折半，经 ai_net_cong_ssthresh_hook 供 AI 调整）
+ *
+ * Return: 新 ssthresh（下限 2，受 ai_cca_cwnd_clamp 钳制）
  */
 static u32 tcp_ai_ssthresh(struct sock *sk)
 {
@@ -121,6 +127,9 @@ static u32 tcp_ai_ssthresh(struct sock *sk)
 
 /**
  * tcp_ai_undo_cwnd() - 撤销窗口（reno 语义）
+ * @sk: 目的套接字（恢复 prior_cwnd 与当前 cwnd 的较大者）
+ *
+ * Return: 撤销后的 cwnd（包数）
  */
 static u32 tcp_ai_undo_cwnd(struct sock *sk)
 {

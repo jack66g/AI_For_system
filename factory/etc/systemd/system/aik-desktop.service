@@ -1,0 +1,44 @@
+[Unit]
+Description=AIKernel Desktop Web Demo (loopback 127.0.0.1:8091)
+Documentation=file:/opt/aikdesktop/README.md
+After=network.target
+ConditionPathExists=/opt/aikdesktop/server.py
+ConditionPathExists=/usr/bin/python3
+
+[Service]
+Type=simple
+User=aikdesk
+Group=aikdesk
+Environment=HOME=/var/lib/aikdesktop
+Environment=AIK_DESKTOP_ROOT=/var/lib/aikdesktop
+Environment=AIK_DESKTOP_PORT=8091
+Environment=AIK_DESKTOP_BIND=127.0.0.1
+Environment=AIK_DESKTOP_VM=0
+Environment=AIK_DESKTOP_SCREENSHOT=0
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/aikdesktop/server.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+StateDirectory=aikdesktop
+StateDirectoryMode=0700
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=127.0.0.1/32 ::1/128
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

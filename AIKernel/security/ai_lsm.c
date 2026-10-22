@@ -7,7 +7,8 @@
  *
  * A 轨（重构计划 6.1/6.2/6.3/6.4/6.5/6.8）：
  *   - LSM 钩子（file_open/task_kill/ptrace_access_check）+ 行为建模与异常检测框架；
- *   - ai_sec_seccomp/cap/key/crypto_hook：AI 决策接入点（空实现=原样放行）；
+ *   - ai_sec_seccomp/cap/key/crypto_hook：AI 决策接入点（空实现=原样放行；
+ *     sec.seccomp 参数已于 W49 如实降级 reserved，见文末说明）；
  *   - ai_sec_syscall_name()：syscall 号→名称（低频事件专用）。
  * B 轨（数据计划 第8类）：8.1/8.2/8.3/8.5/8.6/8.8 事件发射全量原始零脱敏。
  * 8.4（审计）由 ai_audit.c 承担；8.7 kmsan/ubsan/kcsan 发射本文件提供，采集点在
@@ -433,6 +434,12 @@ static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
 
 /* ==================================================================
  * ai_sec_* Hook（AI 决策接入点，空实现 = 原样放行）
+ *
+ * 注意：ai_sec_seccomp_hook 只在任务已挂 seccomp 过滤器时被
+ * kernel/seccomp.c __seccomp_filter() 调用，且当前调用点不消费 action
+ * 建议；它无法给任意任务安装过滤器（seccomp 设计上只允许进程自装/
+ * clone 继承/同线程组 TSYNC）。因此它不是 sec.seccomp 参数的真实
+ * 执行面，只作行为模型计数观测点。sec.seccomp 已降级 reserved。
  * ================================================================== */
 
 void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
@@ -536,29 +543,32 @@ DEFINE_LSM(ai) = {
 	.init = ai_lsm_init,
 };
 
-/* ---- sec.seccomp 立即生效参数（TASK：AI 进程行为基线收紧） ----
- * 语义选择（如实说明）：内核态跨进程安装 seccomp BPF 过滤器无安全
- * 路径（seccomp 仅允许进程自装 / clone 继承 / 同线程组 TSYNC）；本参数
- * 实现为"AIKernel 行为基线收紧"：value=1 向 AIKernel LSM 决策表注入该
- * pid 的 deny 规则（lsm=ai 启用时 file_open 真实拦截，配合
- * sec.lsm_override=enforce 档位），value=0 解除。 */
-static int ai_sec_seccomp_apply_ex(struct ai_control_param *p, s32 pid,
-				   s64 value, s64 *eff, const s64 *data)
-{
-	int rc;
-
-	if (value == 1)
-		rc = ai_lsm_rule_add((u32)pid, true, "ai_seccomp_baseline");
-	else if (value == 0)
-		rc = ai_lsm_rule_del((u32)pid);
-	else
-		return AI_ERR_INVALID_ARG;
-	if (rc != AI_OK)
-		return AI_ERR_GENERIC;
-	*eff = value;
-	pr_info("AIKernel: sec.seccomp pid=%d baseline %lld\n", pid, value);
-	return AI_OK;
-}
+/* ---- sec.seccomp：W49 如实降级为 reserved（无 AI_CTRL_F_REAL） ----
+ *
+ * 降级理由（技术不可安全实现，非偷懒）：
+ *   1) seccomp 过滤器只能由目标任务自己安装（或 clone 继承、同线程组
+ *      TSYNC）。内核对已存在的外部任务强制安装过滤器没有安全路径：
+ *      tsk->seccomp 是 kernel/seccomp.c 私有状态，绕过 seccomp_attach_
+ *      filter() 直接改 mode/filter 会破坏引用计数与同步语义。
+ *   2) 本参数 ABI 只有 pid + 0/1，没有 syscall 白名单/动作语义；把
+ *      0/1 解释为"拒绝全部系统调用"会让目标任务立即不可用，不是可用
+ *      的 seccomp 配置。
+ *   3) 旧实现把 1 映射为 ai_lsm 规则表 deny 项，但：
+ *      - 它拦的是 file_open/ptrace/task_kill，不是系统调用；
+ *      - AIKernel 自家 LSM 默认不在 CONFIG_LSM 列表（需 lsm=ai 显式
+ *        启用），生产 VM 实测 /sys/kernel/security/lsm 无 ai，规则永不
+ *        被消费；
+ *      - 即使启用，deny 还要配合 sec.lsm_override=enforce 才拦截。
+ *      即"标 real 但空转"，违反诚实性原则。
+ *   4) 若改为默认启用自家的 LSM 来让规则生效，会把一个自定义 LSM 的
+ *      file_open 热路径钩子+遥测推上生产全量文件打开路径，属于超出
+ *      A/B 内核升级范围的安全姿态变更，风险不可接受。
+ *
+ * 因此本参数保留 TASK 作用域（写入值仍记录、/proc/ai/control 明确显示
+ * [reserved]），但不再产生任何规则注入/内核行为。真正的 seccomp 基线
+ * 应由用户态在 exec 前对子进程自装过滤器（W51 工具面另行设计）。
+ * ai_lsm 规则表本身保留：它是 lsm=ai 启用时的合法决策面，与参数解耦。
+ */
 
 /* ---- sec.lsm_override / sec.audit 立即生效参数 ---- */
 static int ai_sec_lsm_override_apply(struct ai_control_param *p, s32 pid,
@@ -590,9 +600,10 @@ static int __init ai_sec_control_init(void)
 	ai_control_register("sec.lsm_override", AI_POLICY_DOMAIN_SECURITY,
 			    AI_CTRL_F_REAL, 0, 1, 0,
 			    ai_sec_lsm_override_apply);
-	ai_control_register_ex("sec.seccomp", AI_POLICY_DOMAIN_SECURITY,
-			       AI_CTRL_F_REAL | AI_CTRL_F_TASK,
-			       0, 1, 0, NULL, ai_sec_seccomp_apply_ex);
+	/* W49：诚实降级 reserved —— 无 REAL、无 apply，只保留 TASK 作用域
+	 * 记录写入值；/proc/ai/control 显示 [reserved]。详见上文长注释。 */
+	ai_control_register("sec.seccomp", AI_POLICY_DOMAIN_SECURITY,
+			    AI_CTRL_F_TASK, 0, 1, 0, NULL);
 	ai_control_register("sec.audit", AI_POLICY_DOMAIN_SECURITY,
 			    AI_CTRL_F_REAL, 0, 1, 1, ai_sec_audit_apply);
 	return 0;

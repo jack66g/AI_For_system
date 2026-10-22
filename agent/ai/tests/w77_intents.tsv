@@ -1,0 +1,32 @@
+# W77 离线核心意图语料：question<TAB>expected_intent
+# 覆盖状态/诊断/文件/服务/沙箱/记忆/租约/计划/配置/路由/网络/内核
+系统状态	status
+看看系统健康	status
+内存使用情况	memory
+内存还剩多少	memory
+磁盘空间	disk
+根分区使用率	disk
+当前负载	load
+CPU 使用情况	load
+进程列表	load
+服务 nginx 状态	service
+nginx 服务是否运行	service
+服务列表	services
+失败服务	services
+文件 /etc/hosts 大小	file
+查看目录 /tmp 权限	file
+沙箱列表	sandbox
+隔离区状态	sandbox
+最近计划	plan
+上次任务	plan
+路由模式	route
+当前用哪个模型	route
+配置	config
+模型配置	config
+网络状态	network
+IP 地址	network
+内核版本	kernel
+系统运行多久	uptime
+租约状态	lease
+日志	logs
+记忆 部署	memory_query

@@ -1,0 +1,19 @@
+# /etc/systemd/system/aikernel-upgrade-commit.service
+# AIKernel A/B 试运行槽开机自检提交器（W28/C 波）
+# 逻辑在 /usr/local/sbin/aik-upgrade auto-commit：
+#   - 槽状态 != trying -> 无事退出
+#   - /proc/cmdline 带 ai.tryboot=1（try 引导）-> 健康门（最多等 30s）：
+#     过 -> 自动 commit（grubenv stable_entry 转正）；不过 -> 记 rollback-failed
+#   - 无 tryboot 标记（try 内核没起来，落在稳定槽）-> 记 rollback-failed
+# 触发：aikernel-upgrade-commit.timer（OnBootSec=90，不阻塞 multi-user.target）
+[Unit]
+Description=AIKernel A/B try-slot auto commit/rollback (W28)
+Documentation=man:aik-upgrade(8)
+After=multi-user.target ollama.service aikernel-memory.service
+Wants=aikernel-memory.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aik-upgrade auto-commit
+RemainAfterExit=no
+TimeoutStartSec=300

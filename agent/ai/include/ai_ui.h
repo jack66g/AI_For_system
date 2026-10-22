@@ -103,6 +103,16 @@ int ui_session_exists(const char *name);
 int ui_session_append(const char *name, const struct ui_session_rec *rec);
 
 /*
+ * ui_session_replace - 原子替换整个会话文件（W59 compact）
+ * @name:  会话名
+ * @recs:  新历史记录数组（写临时文件 + fsync + rename 覆盖）
+ * @nrecs: 记录条数（0=清空）
+ * 返回: AI_OK 成功；AI_ERR_* 失败（旧文件保持不变）
+ */
+int ui_session_replace(const char *name, const struct ui_session_rec *recs,
+		       int nrecs);
+
+/*
  * ui_session_load - 从会话文件加载历史到消息数组
  * @name:   会话名
  * @msgs:   输出消息数组（调用者 free(*msgs)；其中 content 等
@@ -140,6 +150,15 @@ int ui_session_delete(const char *name);
 int ui_session_count(const char *name);
 
 /* ---- spinner（braille 转轮，ask 等待模型期间显示阶段文案） ---- */
+
+/*
+ * ui_fbterm_compat - fbterm 兼容输出模式探测（1=启用）
+ * FBTERM_RUN 环境变量非空即生效（fbterm 内启动的进程必有该变量，
+ * 见 .profile 链）。该模式禁用覆盖类终端序列（\r 覆盖动画、\ESC[K
+ * 清行）：spinner 退化为单行静态提示，AI 回复由调用方改整行输出
+ * （关流式增量打印）。结果进程内缓存（首次调用后固定）。
+ */
+int ui_fbterm_compat(void);
 
 /*
  * ui_spinner_start - 启动 spinner 线程

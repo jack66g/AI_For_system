@@ -62,6 +62,10 @@ static int ai_proc_status_show(struct seq_file *m, void *v)
 		   nr_cpu_ids, AI_TELEMETRY_RING_SIZE / 1024);
 	seq_printf(m, "telemetry_format: %s\n",
 		   ai_telemetry_fmt == AI_TELEMETRY_FMT_RAW ? "raw" : "human");
+	/* w24 追加字段：后台排空线程状态（消费者常驻化，详见 ai_telemetry.c） */
+	seq_printf(m, "telemetry_drain: period_ms=%d active=%d\n",
+		   AI_TEL_DRAIN_PERIOD_MS,
+		   ai_telemetry_drain_running() ? 1 : 0);
 
 	/* 模型表 */
 	for (mi = 0; ; mi++) {
@@ -86,10 +90,20 @@ static int ai_proc_status_show(struct seq_file *m, void *v)
 
 		if (ai_telemetry_stats(cpu, &st) != AI_OK)
 			continue;
+		/* w24/w58/w63 追加字段（语义见 ai_telemetry.h）：consumed=已消费
+		 * 字节 adapt_shift=当前降档级（瞬时） adapt_skipped=自适应跳过
+		 * 条数 resyncs=环错位次数 adapt_peak_shift=历史最高档
+		 * adapt_episodes=进入降档次数 predrain_dropped=消费者就绪前环满
+		 * 丢弃条数（含于 sampled_skip，不计入 dropped）。既有字段
+		 * 顺序/语义不变，仅追加输出。 */
 		seq_printf(m, "cpu%d: emitted=%u dropped=%u sampled_skip=%u "
-			   "head=%u tail=%u\n",
+			   "head=%u tail=%u consumed=%llu adapt_shift=%u "
+			   "adapt_skipped=%llu resyncs=%u adapt_peak_shift=%u "
+			   "adapt_episodes=%llu predrain_dropped=%llu\n",
 			   cpu, st.emitted, st.dropped, st.sampled_skip,
-			   st.head, st.tail);
+			   st.head, st.tail, st.consumed, st.adapt_shift,
+			   st.adapt_skipped, st.resyncs, st.adapt_peak_shift,
+			   st.adapt_episodes, st.predrain_dropped);
 		/* 采样率：仅列出非默认（非全量）条目 */
 		for (c = 1; c <= AI_CAT_KCONFIG; c++) {
 			for (e = 1; e < AI_EV_MAX; e++) {
@@ -455,6 +469,21 @@ static ssize_t ai_proc_telemetry_write(struct file *file,
 	}
 	if (strcmp(buf, "format=human") == 0) {
 		ai_telemetry_fmt = AI_TELEMETRY_FMT_HUMAN;
+		return count;
+	}
+	/* w21：采样率运行时可调 "rate=cat:ev:N"（N∈[0,65535]，0=关 1=全量
+	 * N=每 N 条 1 条；cat/ev 边界与 N 钳制在 ai_telemetry_rate_cmd）。
+	 * 前置 "rate=" 后剩余须非空（防 "rate=" 空参误入）。 */
+	if (strncmp(buf, "rate=", 5) == 0) {
+		int rc;
+
+		if (n <= 5)
+			return -EINVAL;
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		rc = ai_telemetry_rate_cmd(buf + 5);
+		if (rc != AI_OK)
+			return ai_error_to_errno(rc);
 		return count;
 	}
 	if (strcmp(buf, "reset") == 0) {

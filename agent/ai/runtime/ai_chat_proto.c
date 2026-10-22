@@ -16,6 +16,7 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "ai_chat.h"
+#include "ai_toolname_map.h"
 
 /* ---- 可增长字符串缓冲 ---- */
 
@@ -86,6 +87,27 @@ static void sbuf_append_num(struct sbuf *b, long long v)
 
 /* ---- 请求构造 ---- */
 
+/*
+ * msg_is_role / msg_has_tool_calls - 消息层判型小工具
+ * T2 P0-1 兜底：多轮历史重放（跨 ask 会话文件 / 消息数组拼接）一旦
+ * 产生"role:tool 前面没有携带 tool_calls 的 assistant"的孤儿消息，
+ * DeepSeek 等 OpenAI 兼容服务端直接 400 且会话永久毒化。与其在每个
+ * 历史写入点追防，不如在唯二请求构造入口做不变式收敛：
+ * role:tool 消息只有紧跟在 assistant(tool_calls) 之后才序列化，
+ * 孤儿消息静默剔除（与 T2 期 L1 代理 drop_orphan_tools 同语义，见
+ * t2-evidence/e43b-orphan-tool-evidence.log）。
+ */
+static int msg_is_role(const struct ai_chat_msg *m, const char *role)
+{
+	return m && m->role && strcmp(m->role, role) == 0;
+}
+
+static int msg_has_tool_calls(const struct ai_chat_msg *m)
+{
+	return msg_is_role(m, "assistant") && m->tool_calls_json &&
+	       m->tool_calls_json[0];
+}
+
 /* 单条消息 → JSON 对象文本 */
 static void append_message_json(struct sbuf *b, const struct ai_chat_msg *m)
 {
@@ -134,10 +156,36 @@ char *ai_chat_build_request_json_ex(const char *model_name,
 	sbuf_append_json_str(&b, model_name);
 	sbuf_append_str(&b, ",\"messages\":[");
 
-	for (i = 0; i < nmsgs; i++) {
-		if (i > 0)
-			sbuf_append_str(&b, ",");
-		append_message_json(&b, &msgs[i]);
+	{
+		int in_tool_group = 0;     /* 当前是否处于 assistant(tool_calls)
+					    * 的 tool 响应组内 */
+		int emitted = 0;           /* 已写入的消息条数（逗号用） */
+
+		for (i = 0; i < nmsgs; i++) {
+			const struct ai_chat_msg *m = &msgs[i];
+
+			/* 孤儿 role:tool：直接剔除，不进请求体 */
+			if (msg_is_role(m, "tool") && !in_tool_group)
+				continue;
+
+			if (emitted > 0)
+				sbuf_append_str(&b, ",");
+			append_message_json(&b, m);
+			emitted++;
+			/*
+			 * 组标志推进（主控合并态回归修复）：模型单轮并行
+			 * 多个 tool_calls 时 execute_round 回填连续多条
+			 * role:tool——组标志必须在同组连续 tool 消息间保持，
+			 * 否则第二条起被当孤儿误杀（DeepSeek 400
+			 * "insufficient tool messages following tool_calls
+			 * message"）。组内 tool → 保持；assistant(tool_calls)
+			 * → 开新组；其余 role → 出组。
+			 */
+			if (msg_is_role(m, "tool"))
+				;   /* 组内保持 in_tool_group 不变 */
+			else
+				in_tool_group = msg_has_tool_calls(m);
+		}
 	}
 	sbuf_append_str(&b, "]");
 
@@ -242,7 +290,11 @@ static int parse_tool_calls(const char *tok, size_t tlen,
 				if (ai_json_obj_get(fv, fvl, "name", &nv,
 						    &nl, &nt_) == 1 &&
 				    nt_ == AI_JSON_STR)
-					tc.name = ai_json_strdup_str(nv, nl);
+					/* W41 bug2: 入站线缆名查表还原为注册表本名
+					 * （下划线→点逆映射有歧义，必须查 seed 表；
+					 * 表外名字透传，存量工具零影响） */
+					tc.name = ai_toolname_map_restore_alloc(
+							ai_json_strdup_str(nv, nl));
 				if (ai_json_obj_get(fv, fvl, "arguments",
 						    &av, &al, &at) == 1 &&
 				    at == AI_JSON_STR)
@@ -476,7 +528,8 @@ int ai_chat_parse_text_toolcall(const char *content,
 	if (name && args) {
 		memset(tc, 0, sizeof(*tc));
 		tc->id = strdup("text-1");
-		tc->name = name;
+			/* W41 bug2: 降级协议入站名同样查表还原 */
+		tc->name = ai_toolname_map_restore_alloc(name);
 		tc->arguments = args;
 		return AI_TEXT_TOOL_CALL;
 	}
@@ -512,9 +565,16 @@ char *ai_chat_render_tool_calls(const struct ai_tool_call *tcs, int n)
 			sbuf_append_str(&b, ",");
 		sbuf_append_str(&b, "{\"id\":");
 		sbuf_append_json_str(&b, tcs[i].id ? tcs[i].id : "");
+		char wire_name[AI_TOOLNAME_WIRE_MAX + 1];
+
 		sbuf_append_str(&b, ",\"type\":\"function\",\"function\":{"
 				     "\"name\":");
-		sbuf_append_json_str(&b, tcs[i].name ? tcs[i].name : "");
+		/* W41 bug2: 历史重放出站名点→下划线（服务端规范） */
+		sbuf_append_json_str(&b,
+				     ai_toolname_sanitize(tcs[i].name ?
+						  tcs[i].name : "",
+						  wire_name,
+						  sizeof(wire_name)));
 		sbuf_append_str(&b, ",\"arguments\":");
 		/* arguments 是 JSON 对象字符串 → 二次编码为字符串字面量 */
 		sbuf_append_json_str(&b, tcs[i].arguments ? tcs[i].arguments

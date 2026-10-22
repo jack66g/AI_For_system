@@ -1,0 +1,10 @@
+[Unit]
+Description=AIKernel 数据备份定时器（每周日 03:00）
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+Unit=aikernel-backup.service
+
+[Install]
+WantedBy=timers.target

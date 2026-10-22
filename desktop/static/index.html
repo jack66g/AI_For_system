@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-2.0 -->
+<!-- AIKernel IMG-1: AI-first 桌面 Demo 前端(单页) -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIKernel · AI 桌面</title>
+<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-theme="dark" data-mode="ai">
+
+  <!-- ============ 顶栏(两种模式共用) ============ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo-chip" title="AIKernel">
+        <span class="logo-dot"></span>AIKernel
+      </div>
+      <div class="badges">
+        <span class="badge" id="badge-ai">AI:检测中</span>
+        <span class="badge" id="badge-load">负载 --</span>
+        <span class="badge" id="badge-mem">内存 --</span>
+        <span class="badge clickable" id="badge-vm"
+          title="点击探测生产 VM(192.168.245.138)真系统">VM:未探测</span>
+      </div>
+    </div>
+    <div class="clock" id="clock">
+      <div class="clock-time" id="clock-time">--:--:--</div>
+      <div class="clock-date" id="clock-date">----</div>
+    </div>
+    <div class="topbar-right">
+      <button class="icon-btn" id="btn-bell" title="通知中心">♪<span
+        id="bell-count" class="bell-count" hidden>0</span></button>
+      <button class="icon-btn" id="btn-theme" title="切换主题">◐</button>
+      <button class="icon-btn" id="btn-mode" title="切换 AI / 桌面">⇄</button>
+      <button class="icon-btn power" id="btn-power" title="电源">⏻</button>
+    </div>
+  </header>
+
+  <!-- ============ 通知中心 ============ -->
+  <div class="theme-menu" id="notif-menu">
+    <div class="notif-head"><b>通知中心</b>
+      <button id="notif-clear" title="清空">清空</button></div>
+    <div class="notif-list" id="notif-list"></div>
+  </div>
+
+  <!-- ============ sparkline 仪表 ============ -->
+  <div id="spark-panel">
+    <div class="spark-row"><span>负载</span>
+      <svg id="spark-load" viewBox="0 0 120 32" preserveAspectRatio="none">
+        <polyline fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      </svg><b id="spark-load-now">--</b></div>
+    <div class="spark-row"><span>内存</span>
+      <svg id="spark-mem" viewBox="0 0 120 32" preserveAspectRatio="none">
+        <polyline fill="none" stroke="var(--accent2)" stroke-width="1.5"/>
+      </svg><b id="spark-mem-now">--</b></div>
+    <div class="spark-vm" id="spark-vm">VM AI 内核:未探测(点击 VM 徽章)</div>
+    <button id="btn-aiops" class="spark-aiops">☰ 决策流(VM /proc/ai)</button>
+    <div class="spark-note">近 60 采样 × 5s(刷新不丢,server 端环形缓冲)</div>
+  </div>
+
+  <!-- ============ 决策流面板(VM /proc/ai 只读) ============ -->
+  <div id="aiops-panel">
+    <div class="sess-head"><b>AI 决策流 · VM /proc/ai</b>
+      <span>
+        <button id="aiops-refresh" class="chip" style="margin-right:6px">刷新</button>
+        <button class="icon-btn" id="aiops-close">✕</button></span></div>
+    <div class="aiops-body" id="aiops-body">加载中…</div>
+  </div>
+
+  <!-- ============ AI 对话模式(默认第一屏) ============ -->
+  <main class="ai-view" id="ai-view">
+    <div class="chat-wrap">
+      <div class="chat-hero">
+        <div class="hero-orb"></div>
+        <h1>AIKernel AI</h1>
+        <p>我是整个系统的控制中枢 —— 对话即操作。试试下面的指令。</p>
+        <div class="chips">
+          <button class="chip" data-say="显示我装的 app">显示我装的 app</button>
+          <button class="chip" data-say="把系统变粉">把系统变粉</button>
+          <button class="chip" data-say="切到传统桌面">切到传统桌面</button>
+          <button class="chip" data-say="系统状态怎么样">系统状态怎么样</button>
+        </div>
+      </div>
+      <div class="chat-scroll" id="chat-scroll"></div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" rows="1"
+          placeholder="对 AIKernel 说话,例如:显示我装的 app…"></textarea>
+        <button id="btn-send" class="send-btn" title="发送">➤</button>
+      </div>
+      <div class="chat-meta" id="chat-meta">就绪</div>
+      <div class="chat-actions">
+        <button id="btn-sessions" title="会话管理器">☰ 会话</button>
+        <button id="btn-aiops2" title="AI 决策流(VM 只读)">⚡ 决策流</button>
+        <button id="btn-new-chat" title="开始新会话(当前会话已保存)">✚ 新会话</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ 传统桌面模式 ============ -->
+  <main class="desktop-view" id="desktop-view">
+    <div class="wallpaper"></div>
+    <div class="win-layer" id="win-layer"></div>
+    <div class="icon-grid" id="icon-grid"></div>
+
+    <!-- 任务栏 -->
+    <footer class="taskbar">
+      <button class="tb-btn tb-ai" id="tb-ai" title="回到 AI">✦ AI</button>
+      <button class="tb-btn" id="tb-apps" title="应用抽屉">▣ 应用</button>
+      <button class="tb-btn" id="tb-ask" title="迷你聊天窗">✦ 问我</button>
+      <div class="tb-running" id="tb-running">
+        <span class="tb-hint">没有正在运行的应用(demo)</span>
+      </div>
+      <div class="tb-tray">
+        <span id="tb-net">LAN</span>
+        <span id="tb-vol">♪</span>
+        <span id="tb-batt">AC</span>
+      </div>
+      <div class="tb-clock" id="tb-clock">--:--</div>
+    </footer>
+  </main>
+
+  <!-- ============ 应用抽屉(全屏浮层) ============ -->
+  <div class="drawer" id="drawer">
+    <div class="drawer-head">
+      <h2>已安装应用 <span id="drawer-count"></span></h2>
+      <input type="search" id="drawer-search" placeholder="搜索应用…">
+      <button class="icon-btn" id="drawer-close" title="关闭">✕</button>
+    </div>
+    <div class="cat-row" id="cat-row"></div>
+    <div class="drawer-grid" id="drawer-grid"></div>
+  </div>
+
+  <!-- ============ 电源菜单 ============ -->
+  <div class="power-menu" id="power-menu">
+    <button data-power="lock">锁定</button>
+    <button data-power="logout">注销</button>
+    <button data-power="reboot">重启</button>
+    <button data-power="shutdown" class="danger">关机</button>
+    <div class="power-note">W76:电源后端 unavailable(真桌面 W84)</div>
+  </div>
+
+  <!-- ============ 主题菜单 ============ -->
+  <div class="theme-menu" id="theme-menu">
+    <button data-theme-pick="dark">暗色</button>
+    <button data-theme-pick="light">亮色</button>
+    <button data-theme-pick="pink">粉色</button>
+    <button data-theme-pick="custom" id="pick-custom-entry">自定义主题…</button>
+  </div>
+
+  <!-- ============ 壁纸子菜单 ============ -->
+  <div class="theme-menu" id="wp-menu"></div>
+
+  <!-- ============ 设置面板(自定义主题) ============ -->
+  <div id="settings" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-head"><b>主题自定义</b>
+        <button class="icon-btn" id="settings-close">✕</button></div>
+      <div class="modal-body">
+        <label class="set-row">主色
+          <input type="color" id="pick-accent" value="#ff5fa2">
+          <code id="pick-hex">#ff5fa2</code></label>
+        <label class="set-row">基调
+          <select id="set-base">
+            <option value="dark">暗色基调</option>
+            <option value="light">亮色基调</option>
+          </select></label>
+        <label class="set-row">锁屏 PIN
+          <input type="password" id="set-pin" maxlength="8"
+            placeholder="4-8 位数字" style="flex:1;height:34px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);padding:0 10px;font-family:var(--font);">
+          <button id="pin-save" class="chip">设置</button>
+          <button id="pin-clear" class="chip">清除</button></label>
+        <p class="set-note" id="pin-status">PIN 状态加载中…</p>
+        <p class="set-note">任选主色即刻全系统生效(聊天/任务栏/壁纸/气泡),
+          并持久化到 theme.json 的 custom 主题。PIN 仅存 hash,错误 3 次锁 30 秒。</p>
+      </div>
+      <div class="modal-foot">
+        <button id="settings-apply" class="send-btn-wide">应用并保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 关于 ============ -->
+  <div id="about-modal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-head"><b>关于 AIKernel</b>
+        <button class="icon-btn" id="about-close">✕</button></div>
+      <div class="modal-body about-body">
+        <div class="hero-orb" style="width:44px;height:44px"></div>
+        <h3>AIKernel <span id="about-version">IMG-3</span></h3>
+        <p class="dim">AI-first 桌面演示 · 构建 <span id="about-built">--</span></p>
+        <p class="dim">51 款应用全知 · DeepSeek 直连 · VM 真系统只读视图<br>
+        GPL-2.0 · 感谢 freedesktop 社区 / GNOME / Yaru 图标 / DeepSeek API<br>
+        桌面是可卸载的附件:删除 img1 目录即零残留。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 会话管理器侧栏 ============ -->
+  <div id="sessions-panel">
+    <div class="sess-head"><b>会话管理</b>
+      <button class="icon-btn" id="sess-close">✕</button></div>
+    <div class="sess-list" id="sess-list"></div>
+  </div>
+
+  <!-- ============ 日历 ============ -->
+  <div id="cal-menu"></div>
+
+  <!-- ============ 桌面右键菜单 ============ -->
+  <div id="ctx-menu">
+    <button data-ctx="ai">打开 AI 对话</button>
+    <button data-ctx="drawer">应用抽屉</button>
+    <button data-ctx="ask">迷你聊天窗</button>
+    <button data-ctx="theme-dark">主题:暗色</button>
+    <button data-ctx="theme-light">主题:亮色</button>
+    <button data-ctx="theme-pink">主题:粉色</button>
+    <button data-ctx="wallpaper">换壁纸(AI 画廊)</button>
+    <button data-ctx="settings">主题自定义…</button>
+    <button data-ctx="about">关于 AIKernel</button>
+  </div>
+
+  <!-- ============ 迷你聊天窗(桌面模式随叫随到) ============ -->
+  <div id="mini-chat">
+    <div class="mini-head"><span>✦ AIKernel · 随叫随到</span>
+      <button id="mini-close" title="收起">✕</button></div>
+    <div class="mini-msgs" id="mini-msgs"></div>
+    <div class="mini-input-row">
+      <input id="mini-input" placeholder="问点什么,或说「变粉」…">
+      <button id="mini-send" title="发送">➤</button>
+    </div>
+  </div>
+
+  <!-- ============ 开机引导序列(fake-boot) ============ -->
+  <div id="boot">
+    <div class="boot-orb"></div>
+    <div class="boot-title">AIKernel</div>
+    <div class="boot-sub">AI-first 桌面 · 内核 6.18</div>
+    <div class="boot-bar"><i id="boot-bar-fill"></i></div>
+    <div class="boot-log" id="boot-log"></div>
+  </div>
+
+  <!-- ============ 锁屏 ============ -->
+  <div id="lockscreen">
+    <div class="lock-orb"></div>
+    <div class="lock-time" id="lock-time">--:--</div>
+    <div class="lock-date" id="lock-date"></div>
+    <div class="lock-pin-row" id="lock-pin-row" hidden>
+      <input type="password" id="lock-pin-input" maxlength="8"
+        placeholder="输入 PIN" inputmode="numeric">
+      <button id="lock-pin-btn">解锁</button>
+    </div>
+    <div class="lock-hint" id="lock-hint">点击任意处解锁</div>
+  </div>
+
+  <!-- ============ Toast ============ -->
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

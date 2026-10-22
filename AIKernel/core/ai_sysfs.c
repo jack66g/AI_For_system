@@ -77,8 +77,14 @@ static ssize_t ai_enabled_store(struct kobject *kobj,
 	if (kstrtobool(buf, &val) != 0)
 		return -EINVAL;
 
-	if (val && !ai_startup_get_enabled())
-		ai_runtime_init();   /* 幂等：启动时被 ai.enabled=0 跳过的 Runtime 现在拉起 */
+	if (val && !ai_startup_get_enabled()) {
+		/* 幂等：启动时被 ai.enabled=0 跳过的 Runtime 现在拉起。
+		 * W63：不得吞掉初始化失败（此前失败仍返回成功并置 enabled=1，
+		 * 用户态会误以为 AI 已可用）。 */
+		rc = ai_runtime_init();
+		if (rc != AI_OK)
+			return ai_error_to_errno(rc);
+	}
 	ai_startup_set_enabled(val);
 	return count;
 }

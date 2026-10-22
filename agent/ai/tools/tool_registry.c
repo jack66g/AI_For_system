@@ -24,10 +24,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
+#include "ai_toolname_map.h"
 
 enum tool_channel tool_channel_from_str(const char *s)
 {
@@ -47,6 +49,16 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_MEMORY;
 	if (strcmp(s, "shell") == 0)
 		return TOOL_CH_SHELL;
+	if (strcmp(s, "sandbox") == 0)
+		return TOOL_CH_SANDBOX;
+	if (strcmp(s, "sysctl") == 0)
+		return TOOL_CH_SYSCTL;
+	if (strcmp(s, "sysfs") == 0)
+		return TOOL_CH_SYSFS_DYN;
+	if (strcmp(s, "desktop") == 0)
+		return TOOL_CH_DESKTOP;
+	if (strcmp(s, "interaction") == 0)
+		return TOOL_CH_CLARIFY;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -54,7 +66,8 @@ static const char *channel_str(enum tool_channel ch)
 {
 	static const char *const names[] = {
 		"procfs-read", "sysfs-write", "netlink-act", "netlink-sense",
-		"exec", "memory", "shell", "unknown",
+		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
+		"desktop", "interaction", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)
@@ -240,6 +253,10 @@ static void tool_free(struct ai_tool *t)
 	free(t->path);
 	free(t->param);
 	free(t->risk);
+	for (i = 0; i < t->sub_count; i++)
+		free(t->sub[i]);
+	free(t->sub);
+	free(t->probe);
 	free(t->parameters_json);
 	for (i = 0; i < t->exec_cmd_count; i++) {
 		struct tool_exec_cmd *c = &t->exec_cmds[i];
@@ -257,6 +274,9 @@ static void tool_free(struct ai_tool *t)
 		}
 		free(c->args0_enum);
 		free(c->args0_risk);
+		for (j = 0; j < c->path_root_count; j++)
+			free(c->path_roots[j]);
+		free(c->path_roots);
 	}
 	free(t->exec_cmds);
 	for (i = 0; i < t->param_count; i++)
@@ -368,6 +388,10 @@ static int parse_exec_block(struct ai_tool *t, const char *tok, size_t tlen)
 			    &cmds_len, &cmds_ty) == 1 && cmds_ty == AI_JSON_NUM)
 		t->exec_default_timeout = (int)ai_json_ll(cmds_tok, cmds_len);
 
+	if (ai_json_obj_get(tok, tlen, "input_max_bytes", &cmds_tok,
+			    &cmds_len, &cmds_ty) == 1 && cmds_ty == AI_JSON_NUM)
+		t->exec_input_max = (int)ai_json_ll(cmds_tok, cmds_len);
+
 	if (ai_json_obj_get(tok, tlen, "commands", &cmds_tok, &cmds_len,
 			    &cmds_ty) != 1 || cmds_ty != AI_JSON_ARR)
 		return AI_OK;
@@ -411,6 +435,11 @@ static int parse_exec_block(struct ai_tool *t, const char *tok, size_t tlen)
 		if (ai_json_obj_get(ct, cl, "args0", &v, &vl, &vt) == 1 &&
 		    vt == AI_JSON_ARR)
 			parse_args0(v, vl, &c);
+		/* W65：更严格的写目标根（可选；如 gcc/cc 仅 /tmp） */
+		if (ai_json_obj_get(ct, cl, "path_roots", &v, &vl, &vt) == 1 &&
+		    vt == AI_JSON_ARR)
+			parse_str_array(v, vl, &c.path_roots,
+					&c.path_root_count);
 
 		if (!c.command) {
 			free(c.bin);
@@ -418,6 +447,9 @@ static int parse_exec_block(struct ai_tool *t, const char *tok, size_t tlen)
 			for (j = 0; j < c.args_template_n; j++)
 				free(c.args_template[j]);
 			free(c.args_template);
+			for (j = 0; j < c.path_root_count; j++)
+				free(c.path_roots[j]);
+			free(c.path_roots);
 			continue;       /* 跳过坏条目，不整体失败 */
 		}
 		nc = realloc(t->exec_cmds,
@@ -429,6 +461,9 @@ static int parse_exec_block(struct ai_tool *t, const char *tok, size_t tlen)
 			for (j = 0; j < c.args_template_n; j++)
 				free(c.args_template[j]);
 			free(c.args_template);
+			for (j = 0; j < c.path_root_count; j++)
+				free(c.path_roots[j]);
+			free(c.path_roots);
 			return AI_ERR_MEMORY;
 		}
 		t->exec_cmds = nc;
@@ -494,6 +529,20 @@ static int parse_tool(const char *tok, size_t tlen, struct ai_tool *t)
 	    vt == AI_JSON_STR)
 		t->risk = ai_json_strdup_str(v, vl);
 
+	/* W74：能力域数组 "sub": ["fs","sysadmin"]（只读元数据） */
+	if (ai_json_obj_get(tok, tlen, "sub", &v, &vl, &vt) == 1 &&
+	    vt == AI_JSON_ARR)
+		parse_str_array(v, vl, &t->sub, &t->sub_count);
+
+	/* W65 P2-05：能力探测路径（可选）。不存在则标记不可用。 */
+	t->available = 1;
+	if (ai_json_obj_get(tok, tlen, "probe", &v, &vl, &vt) == 1 &&
+	    vt == AI_JSON_STR) {
+		t->probe = ai_json_strdup_str(v, vl);
+		if (t->probe && access(t->probe, F_OK) != 0)
+			t->available = 0;
+	}
+
 	if (ai_json_obj_get(tok, tlen, "exec", &v, &vl, &vt) == 1 &&
 	    vt == AI_JSON_OBJ) {
 		rc = parse_exec_block(t, v, vl);
@@ -517,6 +566,293 @@ static int parse_tool(const char *tok, size_t tlen, struct ai_tool *t)
 		return AI_ERR_PARSE;
 	}
 	return AI_OK;
+}
+
+/* ---- W69：注册表头部完整性校验（纯 C SHA-256，无外部依赖） ---- */
+struct w69_sha256 {
+	uint32_t h[8];
+	uint64_t len;
+	unsigned char buf[64];
+	size_t buflen;
+};
+
+static uint32_t w69_rotr(uint32_t x, unsigned int n)
+{
+	return (x >> n) | (x << (32 - n));
+}
+
+static void w69_sha256_block(struct w69_sha256 *c, const unsigned char *p)
+{
+	static const uint32_t k[64] = {
+		0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+		0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+		0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+		0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+		0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+		0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+		0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+		0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+		0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+		0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+		0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+		0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+		0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+		0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+	};
+	uint32_t w[64];
+	uint32_t a, b, cc, d, e, f, g, h;
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		w[i] = ((uint32_t)p[i * 4] << 24) |
+		       ((uint32_t)p[i * 4 + 1] << 16) |
+		       ((uint32_t)p[i * 4 + 2] << 8) |
+		       (uint32_t)p[i * 4 + 3];
+	}
+	for (i = 16; i < 64; i++) {
+		uint32_t s0 = w69_rotr(w[i - 15], 7) ^
+			      w69_rotr(w[i - 15], 18) ^
+			      (w[i - 15] >> 3);
+		uint32_t s1 = w69_rotr(w[i - 2], 17) ^
+			      w69_rotr(w[i - 2], 19) ^
+			      (w[i - 2] >> 10);
+
+		w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+	}
+	a = c->h[0]; b = c->h[1]; cc = c->h[2]; d = c->h[3];
+	e = c->h[4]; f = c->h[5]; g = c->h[6]; h = c->h[7];
+	for (i = 0; i < 64; i++) {
+		uint32_t s1 = w69_rotr(e, 6) ^ w69_rotr(e, 11) ^
+			      w69_rotr(e, 25);
+		uint32_t ch = (e & f) ^ ((~e) & g);
+		uint32_t t1 = h + s1 + ch + k[i] + w[i];
+		uint32_t s0 = w69_rotr(a, 2) ^ w69_rotr(a, 13) ^
+			      w69_rotr(a, 22);
+		uint32_t maj = (a & b) ^ (a & cc) ^ (b & cc);
+		uint32_t t2 = s0 + maj;
+
+		h = g; g = f; f = e; e = d + t1;
+		d = cc; cc = b; b = a; a = t1 + t2;
+	}
+	c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d;
+	c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
+}
+
+static void w69_sha256_init(struct w69_sha256 *c)
+{
+	c->h[0] = 0x6a09e667; c->h[1] = 0xbb67ae85;
+	c->h[2] = 0x3c6ef372; c->h[3] = 0xa54ff53a;
+	c->h[4] = 0x510e527f; c->h[5] = 0x9b05688c;
+	c->h[6] = 0x1f83d9ab; c->h[7] = 0x5be0cd19;
+	c->len = 0;
+	c->buflen = 0;
+}
+
+static void w69_sha256_update(struct w69_sha256 *c, const void *data, size_t n)
+{
+	const unsigned char *p = data;
+
+	c->len += n;
+	while (n > 0) {
+		size_t take = 64 - c->buflen;
+
+		if (take > n)
+			take = n;
+		memcpy(c->buf + c->buflen, p, take);
+		c->buflen += take;
+		p += take;
+		n -= take;
+		if (c->buflen == 64) {
+			w69_sha256_block(c, c->buf);
+			c->buflen = 0;
+		}
+	}
+}
+
+static void w69_sha256_final(struct w69_sha256 *c, unsigned char out[32])
+{
+	uint64_t bits = c->len * 8;
+	int i;
+
+	c->buf[c->buflen++] = 0x80;
+	if (c->buflen > 56) {
+		while (c->buflen < 64)
+			c->buf[c->buflen++] = 0;
+		w69_sha256_block(c, c->buf);
+		c->buflen = 0;
+	}
+	while (c->buflen < 56)
+		c->buf[c->buflen++] = 0;
+	for (i = 7; i >= 0; i--)
+		c->buf[c->buflen++] = (unsigned char)(bits >> (i * 8));
+	w69_sha256_block(c, c->buf);
+	for (i = 0; i < 8; i++) {
+		out[i * 4] = (unsigned char)(c->h[i] >> 24);
+		out[i * 4 + 1] = (unsigned char)(c->h[i] >> 16);
+		out[i * 4 + 2] = (unsigned char)(c->h[i] >> 8);
+		out[i * 4 + 3] = (unsigned char)c->h[i];
+	}
+}
+
+static void w69_sha256_hex(const void *data, size_t n, char out[65])
+{
+	struct w69_sha256 c;
+	unsigned char d[32];
+	int i;
+
+	w69_sha256_init(&c);
+	w69_sha256_update(&c, data, n);
+	w69_sha256_final(&c, d);
+	for (i = 0; i < 32; i++)
+		sprintf(out + i * 2, "%02x", d[i]);
+	out[64] = 0;
+}
+
+/* 按 channel 校验必填字段（W68 P2-8） */
+static int tool_fields_validate(const struct ai_tool *t, char **err)
+{
+	switch (t->channel) {
+	case TOOL_CH_PROCFS_READ:
+	case TOOL_CH_SYSFS_WRITE:
+		if (!t->path || t->path[0] != '/') {
+			if (asprintf(err, "工具 %s（%s）缺少绝对 path 字段",
+				     t->name, channel_str(t->channel)) < 0)
+				*err = NULL;
+			return AI_ERR_PARSE;
+		}
+		break;
+	case TOOL_CH_NETLINK_ACT:
+		if (!t->param || !t->param[0]) {
+			if (asprintf(err, "工具 %s（netlink-act）缺少 param "
+				     "字段", t->name) < 0)
+				*err = NULL;
+			return AI_ERR_PARSE;
+		}
+		break;
+	case TOOL_CH_EXEC:
+		if (!t->exec_cmds || t->exec_cmd_count <= 0) {
+			if (asprintf(err, "工具 %s（exec）缺少非空 "
+				     "exec.commands 白名单", t->name) < 0)
+				*err = NULL;
+			return AI_ERR_PARSE;
+		}
+		break;
+	case TOOL_CH_CLARIFY:
+		/* W77c：question/options 的语义校验在 ask_clarify.c 执行
+		 * （2-4 选项、id 唯一、recommended/default 规则），注册表
+		 * 只承载 schema，不需要通道专属字段。 */
+		break;
+	case TOOL_CH_UNKNOWN:
+		if (asprintf(err, "工具 %s 的 channel 未知", t->name) < 0)
+			*err = NULL;
+		return AI_ERR_PARSE;
+	default:
+		break;
+	}
+	return AI_OK;
+}
+
+/* 头部校验：version / tool_count / tool_names_sha256（存在即校验） */
+static int tool_manifest_validate(const char *tok, size_t tlen,
+				  const struct tool_registry *reg, char **err)
+{
+	const char *v;
+	size_t vl;
+	int vt;
+	long long ver = -1;
+	long long cnt = -1;
+	char *sha = NULL;
+	int rc = AI_OK;
+	int i;
+
+	if (ai_json_obj_get(tok, tlen, "version", &v, &vl, &vt) == 1 &&
+	    vt == AI_JSON_NUM)
+		ver = ai_json_ll(v, vl);
+	if (ver >= 0 && ver != 1 && ver != 2) {
+		if (asprintf(err, "tools.json version=%lld 不受支持（仅 1/2）",
+			     ver) < 0)
+			*err = NULL;
+		rc = AI_ERR_PARSE;
+		goto out;
+	}
+	if (ai_json_obj_get(tok, tlen, "tool_count", &v, &vl, &vt) == 1 &&
+	    vt == AI_JSON_NUM) {
+		cnt = ai_json_ll(v, vl);
+		if (cnt != reg->tool_count) {
+			if (asprintf(err, "tools.json 头部 tool_count=%lld 与"
+				     "实际解析 %d 件不一致（表损坏或被截断）",
+				     cnt, reg->tool_count) < 0)
+				*err = NULL;
+			rc = AI_ERR_PARSE;
+			goto out;
+		}
+	}
+	if (ai_json_obj_get(tok, tlen, "tool_names_sha256", &v, &vl,
+			    &vt) == 1 && vt == AI_JSON_STR) {
+		size_t total = 0;
+		size_t off = 0;
+		char *joined;
+		char hex[65];
+
+		sha = ai_json_strdup_str(v, vl);
+		if (!sha || strlen(sha) != 64) {
+			if (asprintf(err, "tools.json tool_names_sha256 格式"
+				     "非法（应为 64 位十六进制）") < 0)
+				*err = NULL;
+			rc = AI_ERR_PARSE;
+			goto out;
+		}
+		for (i = 0; i < reg->tool_count; i++)
+			total += strlen(reg->tools[i].name) + 1;
+		joined = malloc(total + 1);
+		if (!joined) {
+			if (asprintf(err, "内存不足（manifest 校验）") < 0)
+				*err = NULL;
+			rc = AI_ERR_MEMORY;
+			goto out;
+		}
+		for (i = 0; i < reg->tool_count; i++) {
+			size_t nl = strlen(reg->tools[i].name);
+
+			memcpy(joined + off, reg->tools[i].name, nl);
+			off += nl;
+			joined[off++] = '\n';
+		}
+		joined[off] = 0;
+		w69_sha256_hex(joined, off, hex);
+		free(joined);
+		if (strcmp(sha, hex) != 0) {
+			if (asprintf(err, "tools.json tool_names_sha256 不匹配"
+				     "（头部 %s / 实际 %s）：工具名清单被改动"
+				     "或文件损坏", sha, hex) < 0)
+				*err = NULL;
+			rc = AI_ERR_PARSE;
+			goto out;
+		}
+	}
+out:
+	free(sha);
+	return rc;
+}
+
+static int registry_has_w2(const struct tool_registry *reg)
+{
+	int i, j;
+
+	for (i = 0; i < reg->tool_count; i++) {
+		const struct ai_tool *t = &reg->tools[i];
+
+		if (t->risk && strcmp(t->risk, TOOL_RISK_W2) == 0)
+			return 1;
+		for (j = 0; j < t->exec_cmd_count; j++) {
+			if (t->exec_cmds[j].risk &&
+			    strcmp(t->exec_cmds[j].risk, TOOL_RISK_W2) == 0)
+				return 1;
+		}
+	}
+	return 0;
 }
 
 /* ---- 加载 ---- */
@@ -592,6 +928,8 @@ int tool_registry_load(struct tool_registry *reg, char **err)
 	static const char *const rel_paths[] = {
 		"./tools.json",
 		"tools/tools.json",
+		/* W43：生产布局兜底（/usr/local/bin 下运行、任意 cwd） */
+		"/usr/local/share/aikernel/tools.json",
 		NULL,
 	};
 	char *text = NULL;
@@ -604,11 +942,24 @@ int tool_registry_load(struct tool_registry *reg, char **err)
 	*err = NULL;
 	memset(reg, 0, sizeof(*reg));
 
-	/* 1) 环境变量显式指定 */
+	/* 1) 环境变量显式指定：W69 P1-2 fail-closed——文件缺失/不可读
+	 * 直接失败，绝不回退到 130 主表（沙箱子进程会因此获得 W2）。 */
 	{
 		const char *env = getenv("AIKERNEL_TOOLS_JSON");
 
-		if (env && env[0] && read_file(env, &text) == AI_OK) {
+		if (env && env[0]) {
+			int erc = read_file(env, &text);
+
+			if (erc != AI_OK) {
+				if (asprintf(err, "AIKERNEL_TOOLS_JSON=%s "
+					     "加载失败（%s）；显式指定注册表时"
+					     "禁止回退主表（fail-closed）", env,
+					     erc == AI_ERR_NOT_FOUND ?
+					     "文件缺失或为空" : "读取失败") < 0)
+					*err = NULL;
+				return erc == AI_ERR_NOT_FOUND ?
+				       AI_ERR_NOT_FOUND : AI_ERR_STORAGE;
+			}
 			cand = strdup(env);
 			goto found;
 		}
@@ -680,8 +1031,23 @@ found:
 				break;
 			if (tty != AI_JSON_OBJ)
 				continue;
-			if (parse_tool(tt, tl, &t) != AI_OK)
-				continue;       /* 跳过坏条目，不整体失败 */
+			if (parse_tool(tt, tl, &t) != AI_OK) {
+				if (asprintf(err, "tools.json 第 %d 个工具条目"
+					     "解析失败（name/channel 等必填"
+					     "字段缺失）", i + 1) < 0)
+					*err = NULL;
+				free(text);
+				free(cand);
+				tool_registry_free(reg);
+				return AI_ERR_PARSE;
+			}
+			if (tool_fields_validate(&t, err) != AI_OK) {
+				tool_free(&t);
+				free(text);
+				free(cand);
+				tool_registry_free(reg);
+				return AI_ERR_PARSE;
+			}
 			nt = realloc(reg->tools,
 				     sizeof(*nt) *
 				     (size_t)(reg->tool_count + 1));
@@ -695,10 +1061,58 @@ found:
 			reg->tools = nt;
 			reg->tools[reg->tool_count++] = t;
 		}
-	}
 
+		/* W69 P2-8：头部 count/hash/version 校验（root_tok 作用域内） */
+		if (tool_manifest_validate(root_tok, root_len, reg, err) !=
+		    AI_OK) {
+			free(text);
+			free(cand);
+			tool_registry_free(reg);
+			return AI_ERR_PARSE;
+		}
+	}
+	/* W69 P1-2：沙箱子进程加载到任何 W2（工具级或命令级）即拒绝启动，
+	 * 即使 AIKERNEL_TOOLS_JSON 缺失/被回退也 fail-closed。 */
+	{
+		const char *zone = getenv("AIKERNEL_SANDBOX");
+
+		if (zone && zone[0] && registry_has_w2(reg)) {
+			if (asprintf(err, "沙箱子进程（AIKERNEL_SANDBOX=%s）"
+				     "加载的注册表 %s 含 W2 工具/命令，拒绝"
+				     "启动（应使用 tools-sandbox.json）",
+				     zone, cand ? cand : "?") < 0)
+				*err = NULL;
+			free(text);
+			free(cand);
+			tool_registry_free(reg);
+			return AI_ERR_PARSE;
+		}
+	}
 	reg->source_path = cand;
 	free(text);
+
+	/* W41 bug2: 注册表装载完成后播种云端工具名映射表
+	 * （点号→下划线出站，查表还原入站；无点号时全部恒等）。
+	 * 冲突条目跳过并告警——映射对该工具退化为透传。 */
+	{
+		const char **names = malloc(sizeof(char *) *
+					   (size_t)reg->tool_count);
+		int i;
+		int skipped_names = 0;
+
+		if (names) {
+			for (i = 0; i < reg->tool_count; i++)
+				names[i] = reg->tools[i].name;
+			skipped_names = ai_toolname_map_seed(
+				(const char *const *)names, reg->tool_count);
+			free(names);
+		}
+		if (skipped_names > 0)
+			fprintf(stderr,
+				"toolname_map: %d 个点号工具名因线缆名冲突"
+				"跳过映射（该工具出站保留本名）\n",
+				skipped_names);
+	}
 
 	if (reg->tool_count == 0) {
 		*err = strdup("tools.json 中没有可用工具");
@@ -824,7 +1238,8 @@ static char *params_min_json(const struct ai_tool *t)
 	return out;
 }
 
-char *tool_registry_build_tools_json(const struct tool_registry *reg)
+static char *build_tools_json_impl(const struct tool_registry *reg,
+				   const char *const *names, int name_count)
 {
 	size_t cap;
 	char *out;
@@ -856,7 +1271,16 @@ char *tool_registry_build_tools_json(const struct tool_registry *reg)
 		off = cap - 1;
 	for (i = 0; i < reg->tool_count; i++) {
 		const struct ai_tool *t = &reg->tools[i];
-		char *esc_name = ai_json_escape(t->name);
+		char wire_name[AI_TOOLNAME_WIRE_MAX + 1];
+		/* W65 P2-05：能力探测不可用的工具不进入请求数组
+		 * （如内核未启用 PSI 时 /proc/pressure 下的节点）。 */
+		if (!t->available)
+			continue;
+		/* W41 bug2: 出站线缆名点→下划线（无点号恒等，不改本名） */
+		const char *out_name = ai_toolname_sanitize(t->name,
+						    wire_name,
+						    sizeof(wire_name));
+		char *esc_name = ai_json_escape(out_name);
 		/* W7S-T2：desc 80 字节截断（与 summarize 同款，UTF-8 边界
 		 * 安全）——tools.json 里的完整描述经此路径原样进 prompt，
 		 * 74 工具累计 ~7k token，为 prompt 超限主因之一。 */
@@ -866,6 +1290,25 @@ char *tool_registry_build_tools_json(const struct tool_registry *reg)
 		char *esc_desc;
 		/* W7S-T2：最小 parameters schema（见 params_min_json 注释） */
 		char *pjson = params_min_json(t);
+		int k, selected = 1;
+
+		/* SME 路由过滤：names 非空时只输出已激活集合中的工具
+		 * （会话级激活集合由 cmd_ask 维护，检索命中动态扩入） */
+		if (names && name_count > 0) {
+			selected = 0;
+			for (k = 0; k < name_count; k++) {
+				if (names[k] &&
+				    strcmp(names[k], t->name) == 0) {
+					selected = 1;
+					break;
+				}
+			}
+		}
+		if (!selected) {
+			free(esc_name);
+			free(pjson);
+			continue;
+		}
 
 		if (dlen > 80) {
 			dlen = ai_json_utf8_floor(desc, 80);
@@ -900,7 +1343,143 @@ char *tool_registry_build_tools_json(const struct tool_registry *reg)
 	return out;
 }
 
-char *tool_registry_summarize(const struct tool_registry *reg)
+char *tool_registry_build_tools_json(const struct tool_registry *reg)
+{
+	return build_tools_json_impl(reg, NULL, 0);
+}
+
+char *tool_registry_build_tools_json_filtered(const struct tool_registry *reg,
+					      const char *const *names,
+					      int name_count)
+{
+	if (!names || name_count <= 0)
+		return build_tools_json_impl(reg, NULL, 0);
+	return build_tools_json_impl(reg, names, name_count);
+}
+
+char *tool_registry_build_catalog(const struct tool_registry *reg)
+{
+	size_t cap;
+	char *out;
+	size_t off = 0;
+	int i;
+
+	if (!reg || reg->tool_count <= 0)
+		return NULL;
+
+	/* 目录页：每行 "<name> <核心短语>"。核心短语规则与
+	 * gen_registry.py 的 tool_catalog.txt 生成逐字一致（单一权威
+	 * 在 gen_registry.py）：desc 含"："/":"取其后文本，无则取整段
+	 * 按句读（。！？;；）截首句，再 UTF-8 边界安全截 24 字节。 */
+#define AI_CATALOG_DESC_BYTES 24
+
+	cap = 128;
+	for (i = 0; i < reg->tool_count; i++)
+		cap += strlen(reg->tools[i].name) +
+		       strlen(reg->tools[i].desc) + 64;
+
+	out = malloc(cap);
+	if (!out)
+		return NULL;
+
+	for (i = 0; i < reg->tool_count; i++) {
+		const struct ai_tool *t = &reg->tools[i];
+		const char *desc = t->desc ? t->desc : "";
+		const char *phrase = desc;
+		const char *colon = NULL;
+		const char *p;
+		char tmp[128];
+		size_t plen;
+
+		/* W65 P2-05：不可用工具不进入目录页 */
+		if (!t->available)
+			continue;
+
+		/* 冒号优先（全角/半角，取第一处之后的文本） */
+		for (p = desc; *p; p++) {
+			if ((*p & 0x80) == 0 && *p == ':') {
+				colon = p;
+				break;
+			}
+			if ((unsigned char)p[0] == 0xEF &&
+			    (unsigned char)p[1] == 0xBC &&
+			    (unsigned char)p[2] == 0x9A) { /* "：" */
+				colon = p;
+				break;
+			}
+		}
+		if (colon && colon[0] &&
+		    ((colon[0] & 0x80) == 0 ? colon[1] : colon[3])) {
+			phrase = ((colon[0] & 0x80) == 0) ?
+				 colon + 1 : colon + 3;
+		}
+		while (*phrase == ' ')
+			phrase++;
+
+		/* 句读截首段：ASCII ';' '\n' 单字节；中文句读 ！？；
+		 * 为三字节 UTF-8（EF BC 81/9F/9B），"。"为 E3 80 82。
+		 * 注意全角冒号"："（EF BC 9A）不是句读——否则"安全边界：
+		 * 决策参数"这类冒号后短语会被二次截断（与 gen_registry.py
+		 * 的 _punct 集合对齐：。！？;；\n，无冒号） */
+		plen = strlen(phrase);
+		for (p = phrase; *p; p++) {
+			if ((*p & 0x80) == 0) {
+				if (*p == ';' || *p == '\n') {
+					plen = (size_t)(p - phrase);
+					break;
+				}
+				continue;
+			}
+			/* "。" E3 80 82 */
+			if ((unsigned char)p[0] == 0xE3 &&
+			    (unsigned char)p[1] == 0x80 &&
+			    (unsigned char)p[2] == 0x82) {
+				plen = (size_t)(p - phrase);
+				break;
+			}
+			/* ！=EF BC 81 ；=EF BC 9B ？=EF BC 9F */
+			if ((unsigned char)p[0] == 0xEF &&
+			    (unsigned char)p[1] == 0xBC) {
+				unsigned char c3 = (unsigned char)p[2];
+
+				if (c3 == 0x81 || c3 == 0x9B ||
+				    c3 == 0x9F) {
+					plen = (size_t)(p - phrase);
+					break;
+				}
+			}
+		}
+		if (plen >= sizeof(tmp))
+			plen = sizeof(tmp) - 1;
+		memcpy(tmp, phrase, plen);
+		tmp[plen] = '\0';
+		/* 去尾空格 */
+		while (plen > 0 && tmp[plen - 1] == ' ')
+			tmp[--plen] = '\0';
+
+		/* UTF-8 边界安全截 28 字节 */
+		plen = strlen(tmp);
+		if (plen > AI_CATALOG_DESC_BYTES)
+			plen = ai_json_utf8_floor(tmp,
+						  AI_CATALOG_DESC_BYTES);
+
+		off += (size_t)snprintf(out + off, cap - off, "%s %.*s\n",
+					t->name, (int)plen, tmp);
+		if (off > cap - 1)
+			off = cap - 1;
+	}
+
+	/* W65 P2-05：全部工具不可用时也要返回合法空串（原实现 malloc
+	 * 后未写 NUL，unavailable 过滤可能让循环零次执行）。 */
+	if (off >= cap)
+		off = cap - 1;
+	out[off] = '\0';
+	return out;
+#undef AI_CATALOG_DESC_BYTES
+}
+
+static char *summarize_impl(const struct tool_registry *reg,
+			    const char *const *names, int name_count)
 {
 	size_t cap = 4096;
 	char *out;
@@ -927,6 +1506,26 @@ char *tool_registry_summarize(const struct tool_registry *reg)
 		char dtmp[96];
 		const char *desc;
 		size_t dlen;
+		int k, selected = 1;
+
+		/* W65 P2-05：不可用工具不进入文本清单 */
+		if (!t->available)
+			continue;
+
+		/* SME 路由过滤（同 build_tools_json_impl）：names 非空时
+		 * 只输出激活集合中的工具 */
+		if (names && name_count > 0) {
+			selected = 0;
+			for (k = 0; k < name_count; k++) {
+				if (names[k] &&
+				    strcmp(names[k], t->name) == 0) {
+					selected = 1;
+					break;
+				}
+			}
+		}
+		if (!selected)
+			continue;
 
 		/* W7S：80 字节 UTF-8 安全描述截断（见函数头注释） */
 		desc = t->desc ? t->desc : "";
@@ -978,7 +1577,25 @@ char *tool_registry_summarize(const struct tool_registry *reg)
 #undef AI_SUM_CLAMP
 	}
 
+	/* W65 P2-05：过滤后可能零条，必须显式 NUL 终止 */
+	if (off >= cap)
+		off = cap - 1;
+	out[off] = '\0';
 	return out;
+}
+
+char *tool_registry_summarize(const struct tool_registry *reg)
+{
+	return summarize_impl(reg, NULL, 0);
+}
+
+char *tool_registry_summarize_filtered(const struct tool_registry *reg,
+				       const char *const *names,
+				       int name_count)
+{
+	if (!names || name_count <= 0)
+		return summarize_impl(reg, NULL, 0);
+	return summarize_impl(reg, names, name_count);
 }
 
 void tool_registry_count_by_channel(const struct tool_registry *reg,

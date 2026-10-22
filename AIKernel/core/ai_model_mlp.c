@@ -236,6 +236,14 @@ static int ai_mlp_ops_unload(struct ai_model *model)
  * ai_mlp_infer() - 真实稠密前向（Q31 定点 MAC，纯整数无浮点指令）
  * x = input（float32 位级 → Q31）；每层 y[j] = sat(b[j] + Σ w[j][k]·x[k])
  * （算术右移 31 位回 Q31 尺度，ReLU 按 act 位施加）；输出 Q31 → float32。
+ * @model: 模型实例（ai_model，private_data 指向 ai_mlp_model）
+ * @input: 输入特征缓冲（float32 数组，位级转 Q31）
+ * @in_len: 输入缓冲字节数（须等于输入维 * sizeof(float)）
+ * @output: 输出缓冲（Q31 结果回写 float32）
+ * @out_len: 输入输出参数，调用前为缓冲字节数，返回时写实际输出字节数
+ * @latency_ns: 返回时写本次前向耗时（纳秒）
+ *
+ * Return: AI_OK 成功；负错误码（维度不符/未加载等）
  */
 static int ai_mlp_infer(struct ai_model *model, const void *input,
 			size_t in_len, void *output, size_t *out_len,

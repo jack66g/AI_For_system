@@ -267,7 +267,7 @@ terminal_input serial console
 terminal_output serial console
 # 默认项: ttyS0 先注册、tty0 收尾 => 交互控制台落在图形控制台(VMware 窗口可见可输入)
 menuentry 'AIKernel 0.1.0-alpha' {
-	linux /boot/vmlinuz-aikernel root=PARTUUID=$PARTUUID rw console=ttyS0 console=tty0 ai.enabled=1 kunit.enable=0
+	linux /boot/vmlinuz-aikernel root=PARTUUID=$PARTUUID rw console=ttyS0 console=tty0 vga=791 ai.enabled=1 kunit.enable=0
 }
 # 第二项: 旧顺序(tty0 先、ttyS0 收尾) => 交互落在串口, 供 -nographic/串口用户
 menuentry 'AIKernel 0.1.0-alpha (serial console)' {
@@ -288,6 +288,7 @@ printf '   根分区: %s  UUID=%s\n' "$PART2" "$UUID"
 printf '   引导  : BIOS(MBR)=%s  UEFI(ESP)=%s\n' \
   "$([ $GRUB_BIOS_RC -eq 0 ] && echo OK || echo FAIL)" \
   "$([ $GRUB_EFI_RC -eq 0 ] && echo OK || echo FAIL)"
+printf '   看门狗: softdog 模块+开机自启已装 (RuntimeWatchdogSec=15s)\n'
 printf '\n'
 printf '   重启进入 AIKernel，首次开机 AI 将引导你完成初始化。\n'
 printf '==================================================\n'

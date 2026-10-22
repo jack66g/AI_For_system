@@ -8,7 +8,9 @@
  *   3. 会话持久化（~/.aikernel/sessions/<name>.jsonl，每行一条消息 JSON，
  *      写透落盘，ask 闭环跨次历史与重启恢复共用）；
  *   4. braille spinner 线程（ask 等待模型期间显示阶段文案，
- *      首 token 到达即由调用方 ui_spinner_stop 清除）。
+ *      首 token 到达即由调用方 ui_spinner_stop 清除；fbterm 内
+ *      （FBTERM_RUN 非空）自动切兼容模式：禁 \r 覆盖动画与
+ *      \ESC[K 清行，改单行静态提示）。
  *
  * 会话文件行格式（单行 JSON，字段均可选，tool 消息附 name 便于人读）：
  *   {"ts":1690000000,"role":"user","content":"..."}
@@ -151,13 +153,74 @@ int ui_session_exists(const char *name)
 	return access(path, F_OK) == 0;
 }
 
+/*
+ * sess_write_rec - 写一条 JSONL 记录（调用方持有 fp 锁/生命周期）
+ * 返回: AI_OK/AI_ERR_MEMORY
+ */
+static int sess_write_rec(FILE *fp, const struct ui_session_rec *rec)
+{
+	char *esc_content = NULL;
+	char *esc_tcid = NULL;
+	char *esc_name = NULL;
+
+	if (fp == NULL || rec == NULL || rec->role == NULL)
+		return AI_ERR_INVALID_ARG;
+
+	/*
+	 * T2 P0-1 根因修复（e43b/req_109）：旧实现用"下一字段的前缀
+	 * `","` 关闭上一字符串、结尾统一补 `\"}`"的拼接协议——当 assistant
+	 * 消息只有 tool_calls（裸 JSON，无开放字符串）时，结尾补的引号
+	 * 落在 `]` 之后产生 `]"}` 非法 JSON，整行在 ui_session_load 被
+	 * 当损坏行跳过 → 历史重放丢失 assistant(tool_calls) → tool 消息
+	 * 孤儿化 → DeepSeek 400 且会话永久毒化。
+	 * 改为每个字段自包含（自己关闭自己的引号），字段间只加逗号。
+	 */
+	fprintf(fp, "{\"ts\":%ld,\"role\":\"%s\"",
+		rec->ts > 0 ? rec->ts : time(NULL), rec->role);
+
+	if (rec->content && rec->content[0]) {
+		esc_content = ai_json_escape(rec->content);
+		if (esc_content)
+			fprintf(fp, ",\"content\":\"%s\"", esc_content);
+		else
+			goto oom;
+	}
+	if (rec->tool_call_id && rec->tool_call_id[0]) {
+		esc_tcid = ai_json_escape(rec->tool_call_id);
+		if (esc_tcid)
+			fprintf(fp, ",\"tool_call_id\":\"%s\"", esc_tcid);
+		else
+			goto oom;
+	}
+	if (rec->tool_name && rec->tool_name[0]) {
+		esc_name = ai_json_escape(rec->tool_name);
+		if (esc_name)
+			fprintf(fp, ",\"name\":\"%s\"", esc_name);
+		else
+			goto oom;
+	}
+	if (rec->tool_calls_json && rec->tool_calls_json[0])
+		fprintf(fp, ",\"tool_calls\":%s", rec->tool_calls_json);
+
+	fprintf(fp, "}\n");
+
+	free(esc_content);
+	free(esc_tcid);
+	free(esc_name);
+	return AI_OK;
+
+oom:
+	free(esc_content);
+	free(esc_tcid);
+	free(esc_name);
+	return AI_ERR_MEMORY;
+}
+
 int ui_session_append(const char *name, const struct ui_session_rec *rec)
 {
 	char path[AI_PATH_MAX];
 	FILE *fp;
-	char *esc_content = NULL;
-	char *esc_tcid = NULL;
-	char *esc_name = NULL;
+	int rc;
 
 	if (!name || !rec || !rec->role)
 		return AI_ERR_INVALID_ARG;
@@ -169,51 +232,62 @@ int ui_session_append(const char *name, const struct ui_session_rec *rec)
 		return AI_ERR_STORAGE;
 
 	flockfile(fp);
-	fprintf(fp, "{\"ts\":%ld,\"role\":\"", rec->ts > 0 ? rec->ts
-							   : time(NULL));
-	/* role 来自固定集合，无需转义 */
-	fprintf(fp, "%s", rec->role);
-
-	if (rec->content && rec->content[0]) {
-		esc_content = ai_json_escape(rec->content);
-		if (esc_content)
-			fprintf(fp, "\",\"content\":\"%s", esc_content);
-		else
-			goto oom;
-	}
-	if (rec->tool_call_id && rec->tool_call_id[0]) {
-		esc_tcid = ai_json_escape(rec->tool_call_id);
-		if (esc_tcid)
-			fprintf(fp, "\",\"tool_call_id\":\"%s", esc_tcid);
-		else
-			goto oom;
-	}
-	if (rec->tool_name && rec->tool_name[0]) {
-		esc_name = ai_json_escape(rec->tool_name);
-		if (esc_name)
-			fprintf(fp, "\",\"name\":\"%s", esc_name);
-		else
-			goto oom;
-	}
-	if (rec->tool_calls_json && rec->tool_calls_json[0])
-		fprintf(fp, "\",\"tool_calls\":%s", rec->tool_calls_json);
-
-	fprintf(fp, "\"}\n");
+	rc = sess_write_rec(fp, rec);
 	funlockfile(fp);
-	fclose(fp);
+	if (fclose(fp) != 0 && rc == AI_OK)
+		rc = AI_ERR_STORAGE;
+	return rc;
+}
 
-	free(esc_content);
-	free(esc_tcid);
-	free(esc_name);
+/*
+ * ui_session_replace - 原子替换整个会话文件（W59）
+ *
+ * compact 的"摘要 + 最近原文"必须一次性替换旧历史：旧实现 clear 后逐条
+ * append，进程在中间退出会留下空/半截会话，且清空窗口内并发读会看到
+ * 中间态。这里写同目录临时文件 -> fsync -> rename 覆盖，读者只会看到
+ * 旧文件或新文件。
+ */
+int ui_session_replace(const char *name, const struct ui_session_rec *recs,
+		       int nrecs)
+{
+	char path[AI_PATH_MAX];
+	char tmp[AI_PATH_MAX];
+	FILE *fp;
+	int i, rc = AI_OK;
+	int n;
+
+	if (!name || nrecs < 0 || (nrecs > 0 && !recs))
+		return AI_ERR_INVALID_ARG;
+	if (ui_session_path(name, path, sizeof(path)) != AI_OK)
+		return AI_ERR_INVALID_ARG;
+	n = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
+	if (n < 0 || (size_t)n >= sizeof(tmp))
+		return AI_ERR_INVALID_ARG;
+
+	fp = fopen(tmp, "w");
+	if (!fp)
+		return AI_ERR_STORAGE;
+
+	for (i = 0; i < nrecs; i++) {
+		rc = sess_write_rec(fp, &recs[i]);
+		if (rc != AI_OK)
+			break;
+	}
+	if (rc == AI_OK && fflush(fp) != 0)
+		rc = AI_ERR_STORAGE;
+	if (rc == AI_OK && fsync(fileno(fp)) != 0)
+		rc = AI_ERR_STORAGE;
+	if (fclose(fp) != 0 && rc == AI_OK)
+		rc = AI_ERR_STORAGE;
+	if (rc != AI_OK) {
+		unlink(tmp);
+		return rc;
+	}
+	if (rename(tmp, path) != 0) {
+		unlink(tmp);
+		return AI_ERR_STORAGE;
+	}
 	return AI_OK;
-
-oom:
-	funlockfile(fp);
-	fclose(fp);
-	free(esc_content);
-	free(esc_tcid);
-	free(esc_name);
-	return AI_ERR_MEMORY;
 }
 
 /*
@@ -463,6 +537,25 @@ int ui_session_count(const char *name)
 
 /* ---- spinner ---- */
 
+/*
+ * fbterm 兼容探测（W18 问题 3）
+ * FBTERM_RUN 非空 = 进程跑在 fbterm 内（.profile 链注入，防递归的
+ * 同一变量）。fbterm 对 "\r 覆盖 + \ESC[K 清行 + 高频重绘" 的渲染
+ * 不稳，该模式下禁用覆盖类序列：spinner 动画改单行静态提示，AI
+ * 回复走普通整行输出（调用方据此关流式增量打印）。
+ */
+static int g_fbterm_compat = -1;	/* -1=未探测 */
+
+int ui_fbterm_compat(void)
+{
+	if (g_fbterm_compat < 0) {
+		const char *env = getenv("FBTERM_RUN");
+
+		g_fbterm_compat = (env && env[0]) ? 1 : 0;
+	}
+	return g_fbterm_compat;
+}
+
 /* braille 转轮帧（UTF-8） */
 static const char *const SPIN_FRAMES[] = {
 	"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
@@ -489,7 +582,8 @@ static void *spin_thread(void *arg)
 			pthread_mutex_unlock(&g_spin_mu);
 			break;
 		}
-		if (isatty(1)) {
+		/* fbterm 兼容模式不画动画（ui_spinner_start 已打静态行） */
+		if (isatty(1) && !ui_fbterm_compat()) {
 			fprintf(stdout, "\r\033[2m%s %s\033[0m   ",
 				SPIN_FRAMES[frame % SPIN_NFRAMES],
 				g_spin_stage);
@@ -515,6 +609,11 @@ void ui_spinner_start(const char *stage)
 			g_spin_active = 0;
 		}
 	}
+	/* fbterm 兼容模式：单行静态提示（带换行，回复从新行开始） */
+	if (g_spin_active && isatty(1) && ui_fbterm_compat()) {
+		fprintf(stdout, "(%s)\n", g_spin_stage);
+		fflush(stdout);
+	}
 	pthread_mutex_unlock(&g_spin_mu);
 }
 
@@ -538,7 +637,8 @@ void ui_spinner_stop(void)
 		pthread_join(g_spin_tid, NULL);
 		g_spin_running = 0;
 	}
-	if (isatty(1)) {
+	/* fbterm 兼容模式：无覆盖行可清，跳过 \r\ESC[K */
+	if (isatty(1) && !ui_fbterm_compat()) {
 		fputs("\r\033[K", stdout);
 		fflush(stdout);
 	}

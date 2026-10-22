@@ -19,6 +19,7 @@
 
 #include "ai_shell.h"
 #include "ai_commands.h"
+#include "ai_lang.h"
 
 int cmd_shell(void *shell_ptr, int argc, char **argv)
 {
@@ -30,25 +31,23 @@ int cmd_shell(void *shell_ptr, int argc, char **argv)
 	(void)argv;
 
 	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-		printf("shell: 当前环境非交互终端（stdin/stdout 被重定向），"
-		       "拒绝进入子 shell。\n");
+		printf("%s", tr(TR_SH_NOT_TTY));
 		return AI_ERR_INVALID_ARG;
 	}
 
-	printf("进入维护 shell（bash）。输入 exit 返回 AI 控制台。\n");
+	printf("%s", tr(TR_SH_ENTER));
 	fflush(stdout);
 
 	pid = fork();
 	if (pid < 0) {
-		printf("shell: fork 失败（%s）。\n", strerror(errno));
+		printf(tr(TR_SH_FORK_FAIL), strerror(errno));
 		return AI_ERR_GENERIC;
 	}
 
 	if (pid == 0) {
 		execl("/bin/bash", "bash", (char *)NULL);
 		/* exec 失败才到这里 */
-		fprintf(stderr, "shell: 无法启动 /bin/bash（%s）。\n",
-			strerror(errno));
+		fprintf(stderr, tr(TR_SH_EXEC_FAIL), strerror(errno));
 		_exit(127);
 	}
 
@@ -57,8 +56,8 @@ int cmd_shell(void *shell_ptr, int argc, char **argv)
 		;
 
 	if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
-		printf("shell: /bin/bash 启动失败。\n");
+		printf("%s", tr(TR_SH_START_FAIL));
 
-	printf("已返回 AI 控制台。\n");
+	printf("%s", tr(TR_SH_RETURN));
 	return AI_OK;
 }

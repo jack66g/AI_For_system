@@ -1,0 +1,694 @@
+{
+  "version": 2,
+  "generator": "agent/ai/tools/gen_registry.py",
+  "generated_at": "2026-10-22T02:30:02",
+  "purpose": "sandbox-subagent-restricted",
+  "source": "tools.json 派生（sandbox 受限面，无 W2，防嵌套派生）",
+  "tool_count": 7,
+  "channel_counts": {
+    "procfs-read": 2,
+    "netlink-sense": 1,
+    "exec": 1,
+    "memory": 1,
+    "sandbox": 2
+  },
+  "risk_counts": {
+    "R": 5,
+    "exec按命令": 1,
+    "W1": 1
+  },
+  "exec_command_tiers": {
+    "R": 46,
+    "W1": 11,
+    "W2": 0
+  },
+  "tools": [
+    {
+      "name": "procfs_read_status",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/status（只读）：内核 AI 子系统运行状态总览（enabled/模型/内存/统计开关）",
+      "path": "/proc/ai/status",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "procfs_read_control",
+      "channel": "procfs-read",
+      "risk": "R",
+      "description": "读取 /proc/ai/control（只读）：可控制参数表（27 个参数的 name/domain/min/max/current/default）",
+      "path": "/proc/ai/control",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "netlink_sense",
+      "channel": "netlink-sense",
+      "risk": "R",
+      "description": "NETLINK_AI SENSE 拉取内核感知遥测（AI_CMD_SENSE，只读，要求 AI 子系统已启用）：按 CPU 读取遥测记录，human 格式返回遥测文本，raw 格式返回二进制流统计",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "string",
+            "description": "\"all\" 或 CPU 编号（如 \"0\"）",
+            "default": "all"
+          },
+          "count": {
+            "type": "integer",
+            "description": "最多拉取记录数（1-4096）",
+            "minimum": 1,
+            "maximum": 4096,
+            "default": 128
+          },
+          "format": {
+            "type": "string",
+            "description": "输出格式（默认 human）",
+            "enum": [
+              "raw",
+              "human"
+            ],
+            "default": "human"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "aicore",
+        "res"
+      ]
+    },
+    {
+      "name": "exec_run",
+      "channel": "exec",
+      "description": "执行白名单 shell 命令（沙盒受限版）。只保留只读诊断与 mkdir/touch/cp/mv/ln/sed/tee/gzip 八个写命令，另含沙箱内 W1 的 python3（仅 <script.py> 形态）/gcc/cc（落点限 /tmp）与只读 which（tar 已升 W2 并剔除；所有写面限本沙盒 tmpfs）；绝无 systemctl/kill/apt 等高危命令。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容",
+      "exec": {
+        "default_timeout": 30,
+        "input_max_bytes": 60000,
+        "commands": [
+          {
+            "command": "ls",
+            "risk": "R",
+            "bin": "/usr/bin/ls"
+          },
+          {
+            "command": "cat",
+            "risk": "R",
+            "bin": "/usr/bin/cat"
+          },
+          {
+            "command": "head",
+            "risk": "R",
+            "bin": "/usr/bin/head"
+          },
+          {
+            "command": "tail",
+            "risk": "R",
+            "bin": "/usr/bin/tail"
+          },
+          {
+            "command": "grep",
+            "risk": "R",
+            "bin": "/usr/bin/grep"
+          },
+          {
+            "command": "ps",
+            "risk": "R",
+            "bin": "/usr/bin/ps"
+          },
+          {
+            "command": "free",
+            "risk": "R",
+            "bin": "/usr/bin/free"
+          },
+          {
+            "command": "df",
+            "risk": "R",
+            "bin": "/usr/bin/df"
+          },
+          {
+            "command": "uname",
+            "risk": "R",
+            "bin": "/usr/bin/uname"
+          },
+          {
+            "command": "uptime",
+            "risk": "R",
+            "bin": "/usr/bin/uptime"
+          },
+          {
+            "command": "date",
+            "risk": "R",
+            "bin": "/usr/bin/date"
+          },
+          {
+            "command": "echo",
+            "risk": "R",
+            "bin": "/usr/bin/echo"
+          },
+          {
+            "command": "printf",
+            "risk": "R",
+            "bin": "/usr/bin/printf"
+          },
+          {
+            "command": "dmesg",
+            "risk": "R",
+            "bin": "/usr/bin/dmesg"
+          },
+          {
+            "command": "ss",
+            "risk": "R",
+            "bin": "/usr/bin/ss"
+          },
+          {
+            "command": "stat",
+            "risk": "R",
+            "bin": "/usr/bin/stat"
+          },
+          {
+            "command": "wc",
+            "risk": "R",
+            "bin": "/usr/bin/wc"
+          },
+          {
+            "command": "sort",
+            "risk": "R",
+            "bin": "/usr/bin/sort"
+          },
+          {
+            "command": "uniq",
+            "risk": "R",
+            "bin": "/usr/bin/uniq"
+          },
+          {
+            "command": "cut",
+            "risk": "R",
+            "bin": "/usr/bin/cut"
+          },
+          {
+            "command": "which",
+            "risk": "R",
+            "bin": "/usr/bin/which"
+          },
+          {
+            "command": "whereis",
+            "risk": "R",
+            "bin": "/usr/bin/whereis"
+          },
+          {
+            "command": "lsblk",
+            "risk": "R",
+            "bin": "/usr/bin/lsblk"
+          },
+          {
+            "command": "du",
+            "risk": "R",
+            "bin": "/usr/bin/du"
+          },
+          {
+            "command": "lscpu",
+            "risk": "R",
+            "bin": "/usr/bin/lscpu"
+          },
+          {
+            "command": "vmstat",
+            "risk": "R",
+            "bin": "/usr/bin/vmstat"
+          },
+          {
+            "command": "pidof",
+            "risk": "R",
+            "bin": "/usr/bin/pidof"
+          },
+          {
+            "command": "pgrep",
+            "risk": "R",
+            "bin": "/usr/bin/pgrep"
+          },
+          {
+            "command": "id",
+            "risk": "R",
+            "bin": "/usr/bin/id"
+          },
+          {
+            "command": "getent",
+            "risk": "R",
+            "bin": "/usr/bin/getent"
+          },
+          {
+            "command": "systemd-analyze",
+            "risk": "R",
+            "bin": "/usr/bin/systemd-analyze"
+          },
+          {
+            "command": "hostnamectl",
+            "risk": "R",
+            "bin": "/usr/bin/hostnamectl",
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "show",
+                "risk": "R"
+              },
+              {
+                "verb": "hostname",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-hostname",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-icon-name",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-chassis",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-deployment",
+                "risk": "W2"
+              },
+              {
+                "verb": "set-location",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "resolvectl",
+            "risk": "R",
+            "bin": "/usr/bin/resolvectl",
+            "args0": [
+              {
+                "verb": "status",
+                "risk": "R"
+              },
+              {
+                "verb": "statistics",
+                "risk": "R"
+              },
+              {
+                "verb": "query",
+                "risk": "R"
+              },
+              {
+                "verb": "dns",
+                "risk": "W2"
+              },
+              {
+                "verb": "domain",
+                "risk": "W2"
+              },
+              {
+                "verb": "default-route",
+                "risk": "W2"
+              },
+              {
+                "verb": "llmnr",
+                "risk": "W2"
+              },
+              {
+                "verb": "mdns",
+                "risk": "W2"
+              },
+              {
+                "verb": "dnssec",
+                "risk": "W2"
+              },
+              {
+                "verb": "dnsovertls",
+                "risk": "W2"
+              },
+              {
+                "verb": "flush-caches",
+                "risk": "W2"
+              },
+              {
+                "verb": "reset-server-features",
+                "risk": "W2"
+              },
+              {
+                "verb": "revert",
+                "risk": "W2"
+              },
+              {
+                "verb": "log-level",
+                "risk": "W2"
+              }
+            ]
+          },
+          {
+            "command": "findmnt",
+            "risk": "R",
+            "bin": "/usr/bin/findmnt"
+          },
+          {
+            "command": "blkid",
+            "risk": "R",
+            "bin": "/usr/sbin/blkid"
+          },
+          {
+            "command": "dumpe2fs",
+            "risk": "R",
+            "bin": "/usr/sbin/dumpe2fs"
+          },
+          {
+            "command": "smartctl",
+            "risk": "R",
+            "bin": "/usr/sbin/smartctl",
+            "timeout": 60
+          },
+          {
+            "command": "quota",
+            "risk": "R",
+            "bin": "/usr/bin/quota"
+          },
+          {
+            "command": "repquota",
+            "risk": "R",
+            "bin": "/usr/sbin/repquota"
+          },
+          {
+            "command": "pvs",
+            "risk": "R",
+            "bin": "/usr/sbin/pvs"
+          },
+          {
+            "command": "vgs",
+            "risk": "R",
+            "bin": "/usr/sbin/vgs"
+          },
+          {
+            "command": "lvs",
+            "risk": "R",
+            "bin": "/usr/sbin/lvs"
+          },
+          {
+            "command": "aa-status",
+            "risk": "R",
+            "bin": "/usr/sbin/aa-status"
+          },
+          {
+            "command": "apparmor_status",
+            "risk": "R",
+            "bin": "/usr/sbin/apparmor_status"
+          },
+          {
+            "command": "hostname",
+            "risk": "R",
+            "bin": "/usr/bin/hostname"
+          },
+          {
+            "command": "find",
+            "risk": "R",
+            "bin": "/usr/bin/find"
+          },
+          {
+            "command": "mkdir",
+            "risk": "W1",
+            "bin": "/usr/bin/mkdir",
+            "path_check": true
+          },
+          {
+            "command": "touch",
+            "risk": "W1",
+            "bin": "/usr/bin/touch",
+            "path_check": true
+          },
+          {
+            "command": "cp",
+            "risk": "W1",
+            "bin": "/usr/bin/cp",
+            "path_check": true
+          },
+          {
+            "command": "mv",
+            "risk": "W1",
+            "bin": "/usr/bin/mv",
+            "path_check": true
+          },
+          {
+            "command": "ln",
+            "risk": "W1",
+            "bin": "/usr/bin/ln",
+            "path_check": true
+          },
+          {
+            "command": "sed",
+            "risk": "W1",
+            "bin": "/usr/bin/sed",
+            "path_check": true
+          },
+          {
+            "command": "tee",
+            "risk": "W1",
+            "bin": "/usr/bin/tee",
+            "path_check": true
+          },
+          {
+            "command": "gzip",
+            "risk": "W1",
+            "bin": "/usr/bin/gzip",
+            "timeout": 120,
+            "path_check": true
+          },
+          {
+            "command": "gcc",
+            "risk": "W1",
+            "bin": "/usr/bin/gcc",
+            "timeout": 120,
+            "path_check": true,
+            "path_roots": [
+              "/tmp"
+            ]
+          },
+          {
+            "command": "cc",
+            "risk": "W1",
+            "bin": "/usr/bin/gcc",
+            "timeout": 120,
+            "path_check": true,
+            "path_roots": [
+              "/tmp"
+            ]
+          },
+          {
+            "command": "python3",
+            "risk": "W1",
+            "bin": "/usr/bin/python3",
+            "timeout": 120
+          }
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "命令名（白名单内单个词，如 uname / df / ss）。严禁把整条命令串塞进本字段：'uname -a' 应写 command=\"uname\", args=[\"-a\"]；'touch /tmp/x' 应写 command=\"touch\", args=[\"/tmp/x\"]。选项和操作数一律放 args 数组。",
+            "enum": [
+              "ls",
+              "cat",
+              "head",
+              "tail",
+              "grep",
+              "ps",
+              "free",
+              "df",
+              "uname",
+              "uptime",
+              "date",
+              "echo",
+              "printf",
+              "dmesg",
+              "ss",
+              "stat",
+              "wc",
+              "sort",
+              "uniq",
+              "cut",
+              "which",
+              "whereis",
+              "lsblk",
+              "du",
+              "lscpu",
+              "vmstat",
+              "pidof",
+              "pgrep",
+              "id",
+              "getent",
+              "systemd-analyze",
+              "journalctl",
+              "curl",
+              "ollama",
+              "systemctl",
+              "nft",
+              "timedatectl",
+              "tc",
+              "ip",
+              "ethtool",
+              "conntrack",
+              "hostnamectl",
+              "resolvectl",
+              "findmnt",
+              "blkid",
+              "dumpe2fs",
+              "smartctl",
+              "quota",
+              "repquota",
+              "pvs",
+              "vgs",
+              "lvs",
+              "aa-status",
+              "apparmor_status",
+              "hostname",
+              "find",
+              "mkdir",
+              "touch",
+              "cp",
+              "mv",
+              "ln",
+              "sed",
+              "tee",
+              "ping",
+              "tar",
+              "gzip",
+              "gcc",
+              "cc",
+              "traceroute",
+              "sync",
+              "kill",
+              "apt",
+              "dpkg",
+              "passwd",
+              "python3",
+              "mount",
+              "umount",
+              "fstrim",
+              "swapon",
+              "swapoff",
+              "setquota",
+              "rm",
+              "chmod",
+              "chown",
+              "useradd",
+              "usermod",
+              "userdel",
+              "groupadd",
+              "groupmod",
+              "groupdel",
+              "aa-enforce",
+              "aa-complain",
+              "aa-disable",
+              "aik-backup",
+              "aik-reset",
+              "aik-upgrade",
+              "crontab"
+            ]
+          },
+          "args": {
+            "type": "array",
+            "description": "命令参数列表（如 [\"-h\"]；含元字符/超 256 字符整条拒绝）",
+            "items": {
+              "type": "string"
+            }
+          },
+          "input": {
+            "type": "string",
+            "description": "可选：喂给命令 stdin 的文本（≤60000 字节）。写文件用它给 tee 提供内容，如 command=\"tee\"、args=[\"/tmp/t.txt\"]、input=\"hello\"。echo/printf 只回显到输出、不落盘"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "fs"
+      ]
+    },
+    {
+      "name": "memory_search",
+      "channel": "memory",
+      "risk": "R",
+      "description": "[参数名注意] 本工具唯一必填参数是 text（不是 query）。系统接口/参数/用法问题必先查本工具：凡涉及 AIKernel 系统接口、/proc/ai 与 /sys/kernel/ai 节点、内核参数、netlink/procfs/sysfs 操作方式、工具用法的问题（怎么调、如何查看、如何配置），必须先用本工具检索 SME 记忆库（含 aikernel-interface 接口语料），依据命中结果再回答或行动，不要凭空猜测接口用法。SME 语义检索（POST /memories/search，两段式+混合检索），返回命中记忆 JSON 原文",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "查询文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "返回条数上限（默认 3）",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "sub": [
+        "memory",
+        "aicore"
+      ]
+    },
+    {
+      "name": "sandbox_status",
+      "channel": "sandbox",
+      "risk": "R",
+      "description": "列出隔离区（只读）：/sandbox/ 下各区名称、挂载点与存活子智能体 pid",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "sandbox_destroy",
+      "channel": "sandbox",
+      "risk": "W1",
+      "description": "焚毁隔离区：卸载残留并清除 /sandbox/<name>（幂等；沙盒内数据本就随 tmpfs 消亡，此步清理宿主侧痕迹）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "隔离区名（字母数字.-_，≤64 字符；如 sb1）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    }
+  ]
+}
