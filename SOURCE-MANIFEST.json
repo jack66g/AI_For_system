@@ -9,21 +9,27 @@
   "overlay_count": 168,
   "registry": {
     "desktop": 20,
-    "domains": 8,
+    "domains": 9,
     "sandbox_tools": 7,
     "seed": 167,
+    "seed_lines": 173,
+    "tool_count": 156,
     "tools": 151
   },
   "release": {
-    "api_md5": "e007a7d9d9e8cd9e81ec977d92bd9056",
-    "binary_md5": "adb71f65c7e60fdcba2ce88da9093546",
-    "factory_md5": "5f26e2bfe1a7658aea81f90953ea778a",
-    "iso_md5": "550c003da0da875b3350ac87aab80fb6"
+    "iso_bytes": 740706304,
+    "iso_md5": "27bdfe30b6cf0ccfee675d1ffbbc240b",
+    "kernel": "6.18.39 #59",
+    "kernel_unchanged": true,
+    "shell_md5": "784cc0f014409cfdd8186f95c557dcd0",
+    "version": "0.1.0-alpha.12.0"
   },
   "repo": {
-    "bytes": 45283545,
+    "bytes": 45509480,
     "regular_files": 1033,
-    "symlinks": 4
+    "source_files": 1043,
+    "symlinks": 4,
+    "tracked_files": 1049
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
@@ -45,5 +51,5 @@
       "target": "tools/tools.openai.json"
     }
   ],
-  "version": "0.1.0-alpha.11.0"
+  "version": "0.1.0-alpha.12.0"
 }
