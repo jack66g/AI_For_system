@@ -25,7 +25,7 @@
 - ISO、factory tar、rootfs、VM 备份、trace、证据日志、`longterm/`
 - `model.toml`、api-token、私钥、host key、任何 `.aikernel/` 运行时状态
 
-导出树检查：**1032 个文件、47 MiB、0 个 ELF**（文档写入前）。测试源码、测试夹具、KUnit、qemu 脚本、`third_party/mbedtls` 源码全部保留。
+导出树检查：**1033 个文件、47 MiB、0 个 ELF**（文档写入前）。测试源码、测试夹具、KUnit、qemu 脚本、`third_party/mbedtls` 源码全部保留。
 
 ## 3. 当前“疑似未引用”C 文件（只报告，不删除）
 
