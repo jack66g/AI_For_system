@@ -1,5 +1,5 @@
 {
-  "created": "2026-10-23T02:23:46+08:00",
+  "created": "2026-10-23T02:27:25+08:00",
   "kernel": "6.18.39 #59",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -21,8 +21,8 @@
     "iso_md5": "550c003da0da875b3350ac87aab80fb6"
   },
   "repo": {
-    "bytes": 45283501,
-    "regular_files": 1029,
+    "bytes": 45287202,
+    "regular_files": 1032,
     "symlinks": 4
   },
   "schema": "aik-source-manifest/1",
@@ -30,19 +30,19 @@
   "symlinks": [
     {
       "path": "agent/ai/tool_catalog.txt",
-      "target": "tools/tool_catalog.txt"
+      "target": "tools\\tool_catalog.txt"
     },
     {
       "path": "agent/ai/tools-sandbox.json",
-      "target": "tools/tools-sandbox.json"
+      "target": "tools\\tools-sandbox.json"
     },
     {
       "path": "agent/ai/tools.json",
-      "target": "tools/tools.json"
+      "target": "tools\\tools.json"
     },
     {
       "path": "agent/ai/tools.openai.json",
-      "target": "tools/tools.openai.json"
+      "target": "tools\\tools.openai.json"
     }
   ],
   "version": "0.1.0-alpha.11.0"
