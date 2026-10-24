@@ -1,6 +1,6 @@
 # AIKernel W75 全知/全能对象矩阵
 
-> 由 `agent/ai/tools/audit_capabilities.py` 只读扫描生成；生成时间 2026-10-20T23:59:17+0800；审计主机 `jack66g-virtual-machine`；VM 探测 `root@192.168.245.138`。
+> 由 `agent/ai/tools/audit_capabilities.py` 只读扫描生成；生成时间 2026-10-24T15:11:38+0800；审计主机 `jack66g-virtual-machine`；VM 探测 `root@192.168.245.138`。
 > 矩阵不手填：对象目录、路径判定、覆盖计数、缺口引用均来自脚本。口径见 §1；每次重跑覆盖本文件即视为刷新。
 
 ## 1. 口径
@@ -22,14 +22,14 @@
 | 实测存活读路径 | 94/97 = **96.9%** |
 | 结构化+语义化覆盖 | 68/97 = **70.1%** |
 | 其中 semantic（typed 对象模型） | 10/97 = **10.3%** |
-| 写路径覆盖（可写对象） | 70/75 = **93.3%** |
+| 写路径覆盖（可写对象） | 69/75 = **92.0%** |
 | 写路径 but shell-escape only | 8 |
 | 写路径 but Principal-only（非 AI） | 1 |
 | 缺口总数（open） / P0 / P1 / P2 / P3 | 33 / 0 / 13 / 15 / 5 |
 | 已关闭缺口（W76） | 3（G-002, G-015, G-035） |
-| 工具 / 域 / desktop 工具 | 151 / 8 / 20（W77c 新增 clarify） |
-| SME seed/corpus | 167（combo=8, domain-header=8, tool=151） |
-| 工具名清单 SHA-256 | `52cbbc49c18da3c339fb9daf5441cd89cf4bbc02555462387e5d43055b52d3c2` |
+| 工具 / 域 / desktop 工具 | 156 / 9 / 20 |
+| SME seed/corpus | 173（combo=8, domain-header=9, tool=156） |
+| 工具名清单 SHA-256 | `1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81` |
 
 读路径覆盖达到 95% 目标；但直连/语义化覆盖仍低于目标，缺口见 `CAPABILITY-GAPS.md`。
 
@@ -130,7 +130,7 @@
 | 桌面 | 输入注入（键鼠） | — | `tool:desktop_input_type` [gated]<br>`tool:desktop_input_key` [gated] | none | D2 | desktop_input_type/key（D2）；读无“输入历史”对象，窗口文本经 desktop_windows_list 观察（10-task 07/08） | - |
 | 桌面 | 截图 | `tool:desktop_screenshot` [ok] | — | structured | D0 | desktop_screenshot；path/bytes/sha256/width/height，>30KB/colors 防白屏（10-task 06/07b） | - |
 | 桌面 | 剪贴板 | `tool:desktop_clipboard_get` [ok] | `tool:desktop_clipboard_set` [gated] | structured | D0/D2 | desktop_clipboard_get/set；previous 恢复（10-task 10） | - |
-| 桌面 | 聊天/会话/电源 | `api:GET /api/chat/history` [ok]<br>`api:GET /api/chat/sessions` [ok] | `apiw:POST /api/chat` [ok] | semantic | D0/D3 | chat 仍 exec_run curl（有效 W2）；desktop_power D3 已注册但 /api/power 501 unavailable，不计有效写；G-033 保持开放 | G-033 |
+| 桌面 | 聊天/会话/电源 | `api:GET /api/chat/history` [ok]<br>`api:GET /api/chat/sessions` [ok] | `apiw:POST /api/chat` [ABSENT] | semantic | D0/D3 | chat 仍 exec_run curl（有效 W2）；desktop_power D3 已注册但 /api/power 501 unavailable，不计有效写；G-033 保持开放 | G-033 |
 | 时间/NTP/cron/timers/SSH | 时钟/NTP | `cmd:timedatectl` [ok]<br>`file:/etc/timezone` [ok] | `cmd:timedatectl` [gated] | structured | D0/D3 | timedatectl show; timedatectl timesync-status; set-* 为 W2 | - |
 | 时间/NTP/cron/timers/SSH | 用户 crontab | `cmd:crontab` [gated]<br>`file:/var/spool/cron/crontabs` [ok/unavailable] | `cmd:crontab` [gated] | raw | D0/D2 | crontab -l（W2；VM 二进制缺失、spool 不存在） | G-026 |
 | 时间/NTP/cron/timers/SSH | 系统 cron/timers | `cmd:ls` [ok]<br>`file:/etc/crontab` [ok]<br>`file:/etc/cron.d` [ok]<br>`cmd:systemctl` [ok] | — | structured | D0 | cat /etc/crontab; ls /etc/cron.d; systemctl list-timers | G-026 |
@@ -146,5 +146,5 @@
 <!-- READ_ANY: 94 -->
 <!-- READ_DIRECT: 87 -->
 <!-- SEMANTIC_STRUCTURED: 68 -->
-<!-- WRITE_ANY: 70 -->
+<!-- WRITE_ANY: 69 -->
 

@@ -12,15 +12,15 @@ alpha.12.0 已通过发布门禁（qemu install/diskboot/contentcheck/deskcheck 
 
 - 50 场景：**M1 50/50**，M3 契约 **100%**，M5 **100%**，P95 all **30.5s** / regular **23.7s**
 - workday：**20/20**，stuck 0，无连续压缩，T11/T19 上下文回忆通过
-- Clarify 专项：**23/23**，漏问 0、不必要询问 0、推荐接受 3/3、澄清后成功 3/3
-- qemu：install **6/6**、diskboot **6/6**、contentcheck 全 PASS、deskcheck **15/15**
+- Clarify 专项（2.0）：C 单测 **188 pass/0 fail**（33 用例）、gate **9 场景 31/31**（漏问 0、乱问 0、推荐接受 3/3），API 不回退（33+21 check）
+- qemu：install **6/6**、diskboot **6/6**、contentcheck **49/49**、deskcheck **15/15**
 - 注册表：**156 工具 / 9 域 / 20 desktop**（新增 model 域 5 工具），seed **173**；0 未授权 D3/D4
-- 发布件：shell `adb71f65c7e60fdcba2ce88da9093546`、API `e007a7d9d9e8cd9e81ec977d92bd9056`（v3）、factory `5f26e2bfe1a7658aea81f90953ea778a`、ISO `550c003da0da875b3350ac87aab80fb6`
+- 模型生命周期：`aik model catalog/recommend/install/remove/switch/rollback/benchmark` + 5 个 `model_*` 总线工具（install/remove=D2 lease，云端大模型可代用户安装）
+- 发布件：shell `784cc0f014409cfdd8186f95c557dcd0`、API `e007a7d9d9e8cd9e81ec977d92bd9056`（v3，未变）、factory tar `8aae5ee68574a04e43eeed4a6674c081`、ISO `27bdfe30b6cf0ccfee675d1ffbbc240b`（706,706,304 B）
 
 已知限制（如实记录）：
 
-- 真实 qwen2.5:1.5b 的工具调用能力仍不达标（B-059）；当前 1.5B 是占位/可替换模型，不代表最终本地能力。
-- W77d 本地模型生命周期（install/benchmark/switch/rollback/remove）尚未实现。
+- 出厂不预装本地模型（alpha.12 起）：本地模型按需 `aik model install`（D2 确认，装后验证、失败如实上报）；推荐目录 6 条（星火 X2.5-4B/1.7B/X2.6-4B、qwen3:8b、qwen2.5:7b、llama3.1:8b，硬件门控）。B-059 已随预装移除关闭。
 - W76 桌面是 Web demo，不是真 OS 桌面；截图 503、power 501 为当前边界。
 - 语义全知审计 70.1%、typed 10.3%（B-036），交 W82。
 - 尚无 CI/密钥托管（W81）；生产 VM 的 cloud key 需按 B-075 轮换。

@@ -143,6 +143,9 @@ max_payload_kb = 64            # 单字段载荷上限（默认 64 KB）
 `needs_confirmation_no_tty`/`plan_read_only`—PLAN 由 executor 记录）,
 `tool`, `confirm_source`（`auto`/`interactive`/`assume_yes`/`none`）,
 `args`, `uid`。W1/W2 判定在 `policy/ai_user_policy.c` 统一记录。
+  W74 起扩展可选字段：`lease_id`、`danger`（D0-D4）、`confirmation`
+  （none/interactive/ephemeral/lease/approved_file）、`pending_nonce`、
+  `lease_source`；`tool_call` 亦新增 `danger` 与 `lease_id`。
 
 ### degraded
 `component`（`sme`/`cloud`）, `reason_code`
@@ -150,6 +153,10 @@ max_payload_kb = 64            # 单字段载荷上限（默认 64 KB）
 
 ### error
 `phase`（如 `model_request`）, `code`（`ai_error_string` 文本）, `message`。
+
+W77 起模型路由决策写独立文件 `$AIKERNEL_TRACE_DIR/route.jsonl`
+（`route_decision`/`route_switch`/`route_offline` 事件；0600、>8MB 轮转；
+不写 base_url/api_key），见 `docs/W77-OFFLINE.md` §6。
 
 ## 6. 脱敏规则
 
