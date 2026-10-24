@@ -1,5 +1,7 @@
 # AIKernel 架构矩阵：能力 → 检索 → 执行 → 权限 → 追踪
 
+> 状态注记（2026-10-23，alpha.12.0）： 本文为 W68 系统逻辑收口快照（130 工具/7 域/10 通道）。当前注册表 **156 工具/9 域/11 通道**（W76 +desktop 域 20、W77c +clarify、W77d +model 域 5）；工具数与 sha 以 `tools/tools.json` 为准，后续演进见 `~/aikernel-longterm/reports/`。
+
 状态：W68 系统逻辑收口（2026-10-20），W69B 整理入仓。
 源码基线：`agent/ai` 用户态 AI Shell；`tools/tools.json` 130 工具（由
 `tools/gen_registry.py` 生成，生成时间 2026-10-20 17:13，sha256
@@ -106,8 +108,11 @@ flowchart TD
 | sandbox | 4 | W2（spawn） | `aik-sandbox` + NS/PID/UTS + cgroup v2 |
 | sysctl | 3 | W1/W2 | `/proc/sys`；崩溃黑名单硬拒 |
 | sysfs | 2 | W1/W2 | 动态路径 + realpath 前缀校验 |
+| model | 5 | R/W1/W2 | 模型目录/推荐（D0）、基准（D1）、安装/卸载（D2，ai_lease_gate）；W77d，单源引擎 `shell/commands/model_lifecycle.c` |
+| desktop | 20 | D0-D3 | 20 件 desktop_*（W76），见 docs/W76-DESKTOP.md |
+| clarify | 1 | D0 | 澄清交互（W77c/2.0），仅 ask 交互层执行 |
 
-合计 130 工具（36+25+27+1+1+30+1+4+3+2）。
+合计（W68 快照）130 工具（36+25+27+1+1+30+1+4+3+2）；当前另加 desktop 20 + clarify 1 + model 5 = **156**。
 
 ## 5. 关键结论（W68）
 

@@ -72,7 +72,7 @@ sudo make install
 ## 4. 测试与审计
 
 ```bash
-make -C tests -j1                       # 构建 35 个测试目标
+make -C tests -j1                       # 构建 37 个测试目标
 bash agent/ai/tests/run_all.sh          # 当前全量 runner（C + Python + audit，SUMMARY 全绿）
 
 # 或单独运行：
@@ -84,7 +84,7 @@ python3 tools/audit_capabilities.py --check
 
 期望：注册表 **156 工具 / 9 域 / 20 desktop**，sandbox **7 工具 / 57 命令**，seed **173**；`audit_capabilities.py --check` PASS。
 
-2026-10-23 干净导出验证结果：C 单元测试 **33/33**（clarify 121、lease 89、lease_gate 98、w77 53/31/18、desktop 56、trace 75 等），API mock **33/33**，clarify gate **23/23**，真 shell API E2E **21/21**，`audit_capabilities.py --check` PASS。
+2026-10-23 alpha.12.0 验证结果：`tests/run_all.sh` **40/40**（C 37 目标：clarify 188、lease 89、lease_gate 98、w77 57、desktop 56、trace 75、model_lifecycle 33、onboarding_cloud 3 等），API mock **33/33**，clarify gate **9 场景 31/31**，API clarify e2e **21/21**，`audit_capabilities.py --check` PASS（156/9/173）。
 
 注意：`run-w48-tests.sh` 是 W48 时代的历史 runner，其 `CORE` 源列表没有包含后来新增的 `local/` 依赖，会在 `test_ask_autocompact`/`test_compact_loop` 上出现 BUILD-FAIL；当前全量构建/运行以 `agent/ai/tests/Makefile` + `agent/ai/tests/run_all.sh` 为准。`test_sysctl_tools` 需要 root，非 root 环境会跳过。
 
@@ -106,8 +106,8 @@ ISO 打包线在 `w6i-tools/`（`init` 安装器、`grub-iso.cfg`、`build-iso.s
 ## 6. 发布校验清单
 
 - [ ] `agent/ai/aikernel-shell --version` = `0.1.0-alpha.12.0`
-- [ ] `tools.json` 151 工具、8 域、20 desktop；`tools-sandbox.json` 7 工具
-- [ ] `sme-seed.jsonl` 167 行
+- [ ] `tools.json` 156 工具、9 域、20 desktop；`tools-sandbox.json` 7 工具
+- [ ] `sme-seed.jsonl` 173 行
 - [ ] `agent/ai/api/aikernel-api` 为 v3（tagged stderr event + `/clarify`）
 - [ ] `audit_capabilities.py --check` PASS
 - [ ] 无 `model.toml`、token、私钥、ISO、`.o`、测试 ELF 进入仓库
@@ -117,4 +117,4 @@ ISO 打包线在 `w6i-tools/`（`init` 安装器、`grub-iso.cfg`、`build-iso.s
 
 - `bzImage`/`vmlinux` 的字节级 md5 依赖构建路径、时间戳、工具链；源码树用 overlay SHA 校验。
 - factory tar / ISO 含时间戳与构建机路径；发布记录中的 md5 仅用于该次产物。
-- 真实 qwen2.5:1.5b 的工具能力评测依赖 VM 上的 Ollama 模型与 cloud key，不在本仓库。
+- 本地模型评测依赖按需安装的 Ollama 模型（`aik model install`，出厂不预装）与 cloud key，不在本仓库。

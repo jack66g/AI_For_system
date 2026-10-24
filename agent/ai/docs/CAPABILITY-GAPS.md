@@ -1,6 +1,6 @@
 # AIKernel W75 能力缺口清单
 
-> 由 `agent/ai/tools/audit_capabilities.py` 生成；生成时间 2026-10-20T23:59:18+0800。优先级：P0 阻断 alpha.10 / P1 日常使用阻断 / P2 功能正确性 / P3 体验与文档。
+> 由 `agent/ai/tools/audit_capabilities.py` 生成；生成时间 2026-10-24T15:11:38+0800。优先级：P0 阻断 alpha.10 / P1 日常使用阻断 / P2 功能正确性 / P3 体验与文档。
 
 ## 1. 汇总
 
@@ -48,7 +48,7 @@
 | G-032 | 全局 | 进程/文件/网络/包/硬件对象没有进入 SME 世界模型；只有工具语料与运维记忆 | 全知的下一层是“可推理”：当前 AI 能读状态但不能回答跨对象因果（如“哪个 cgroup 的 IO 压力导致 nginx 慢”） | W82 | 对象/关系/时序进入 SME；Top-3 语义检索 ≥98%；可解释命中 |
 | G-036 | 语义化覆盖（全局） | structured+semantic 68/97 = 70.1%；typed semantic 仅 10/97 = 10.3%；26 个对象仍是 raw 文本 | 能读不等于能推理：进程/文件/网络/包/硬件仍是自由文本，缺少 schema、单位、枚举与对象关系；W82 无法做跨对象因果 | W82 | 核心 97 对象 structured+ ≥95%；关键 30 对象 typed ≥60%；检索答案可引用 typed 字段与关系 |
 | G-027 | 设备树 | /sys/firmware/devicetree 在 x86 不存在；当前平台 N/A | ARM/真机启用后设备树是硬件拓扑主源，当前无读取工具 | W85 | hardware.devicetree 在 ARM 目标返回节点树；x86 返回 N/A |
-| G-030 | 文档/注册表漂移 | ARCHITECTURE-MATRIX 仍写 55 个沙箱命令（实际 57）、tools.json 旧 sha/生成时间；gen_registry 文档仍写 EXPECTED_TOOL_COUNT(79)（常量 150） | 文档漂移会让后续波次基于错误口径验收 | W81 | 脚本 --check 断言文档计数与注册表一致；CI 失败即阻断 |
+| G-030 | 文档/注册表漂移 | ARCHITECTURE-MATRIX 仍写 55 个沙箱命令（实际 57）、tools.json 旧 sha/生成时间；gen_registry 文档仍写 EXPECTED_TOOL_COUNT(151) | 文档漂移会让后续波次基于错误口径验收 | W81 | 脚本 --check 断言文档计数与注册表一致；CI 失败即阻断 |
 | G-031 | 能力探测 | 只有 3/150 工具带 probe（PSI 三件套）；desktop_* 及其余节点依赖工具无 probe，节点缺失时报“通道不可用”而非“能力不可用” | AI 无法区分“内核没这功能”和“路径写错/权限不足/桌面服务停机”，容易误判 | W81 | 每个 procfs-read/sysfs-write/desktop 工具有 probe；unavailable 有原因码 |
 | G-033 | 桌面电源 | desktop_power D3 已注册，但 /api/power 返回 501 unavailable；不执行关机/重启/锁屏；工具如实失败，不伪造成功。G-033 保持开放 | 电源动作 D3 需要 logind/会话绑定与回滚；W76 只完成工具登记与 D3 门禁，后端未接 | W84 | desktop_power 走 logind + D3 确认；有回滚/取消；501 变为真实执行 |
 | G-034 | 命名空间 | ip netns list 可用；lsns 不在白名单；只能读 /proc/<pid>/ns/* 的 inode | 无法按 namespace 类型/ID 聚合进程与资源 | W84 | namespace.list 返回 type/id/members JSON |
@@ -113,7 +113,7 @@
 
 ## 5. 注册/实现/二进制差异
 
-- 注册/实现差异：0（150/150 工具均有通道实现，desktop 20/20；`--check` 断言）。
+- 注册/实现差异：0（156/156 工具均有通道实现，desktop 20/20；`--check` 断言）。
 - **F-006** (P1): host (L1) missing 15/97 exec binaries: conntrack, smartctl, quota, repquota, pvs, vgs, lvs, traceroute, setquota, aa-enforce, aa-complain, aa-disable, aik-backup, aik-reset, aik-upgrade
 - **F-007** (P1): production VM missing 16/97 exec binaries: ethtool, conntrack, smartctl, quota, repquota, pvs, vgs, lvs, aa-status, apparmor_status, traceroute, setquota, aa-enforce, aa-complain, aa-disable, crontab
 - **F-017** (P3): exec_run has no top-level risk key; effective risk is command-level (intentional but breaks uniform schema)
@@ -121,10 +121,9 @@
 ## 6. 文档漂移与风险发现
 
 - **F-008** (doc-drift/P3): ARCHITECTURE-MATRIX says 55 sandbox commands; actual 57
-- **F-009** (doc-drift/P3): ARCHITECTURE-MATRIX tools.json sha256=6bc7584fe9f912d2b3b4c5b0930ee65db825d9c6e42f978ce4768e0cb901a450 actual=6a7e136a22e9f707ac5dd7a24e9e61ecb69938c75014d60252c9cad08fd7e1f0
-- **F-010** (doc-drift/P3): ARCHITECTURE-MATRIX generated_at=2026-10-20 17:13 actual=2026-10-20T23:47:06
-- **F-011** (doc-drift/P3): gen_registry.py docstring still asserts EXPECTED_TOOL_COUNT(79); constant is 150
-- **F-012** (observability/P3): only 3/150 tools declare a capability probe (procfs_read_pressure_cpu, procfs_read_pressure_memory, procfs_read_pressure_io)
+- **F-009** (doc-drift/P3): ARCHITECTURE-MATRIX tools.json sha256=6bc7584fe9f912d2b3b4c5b0930ee65db825d9c6e42f978ce4768e0cb901a450 actual=1928f757df941ec113540a31e4c9f3c023ad36bf1a4aefb1f6e268052396e822
+- **F-010** (doc-drift/P3): ARCHITECTURE-MATRIX generated_at=2026-10-20 17:13 actual=2026-10-23T04:13:48
+- **F-012** (observability/P3): only 3/156 tools declare a capability probe (procfs_read_pressure_cpu, procfs_read_pressure_memory, procfs_read_pressure_io)
 - **F-019** (probe/P2): probe unavailable on production VM: /proc/pressure
 
 <!-- GAP_TOTAL: 36 -->

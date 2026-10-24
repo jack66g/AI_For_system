@@ -1,5 +1,7 @@
 # W74 授权租约与意图保险丝（AIKernel alpha.10）
 
+> 状态注记（2026-10-23，alpha.12.0）： 本文租约/D0-D4 语义在 alpha.12.0 仍然有效。注意 §7 D1 行的 `model_*` 指内核 `sysfs_write_model_*`（AIKWMDL 决策模型，非 ollama LLM）；W77d 新增的 model 域总线工具（model_catalog_list/recommend=D0、model_benchmark=D1、model_install/model_remove=D2）复用同一闸门，见 `~/aikernel-longterm/reports/W77D-IMPL.md`。
+
 - 状态：已实现（L1 构建 + 单测/集成测试 + 非破坏性 CLI 探针）
 - 范围：`agent/ai/policy`、`tools/executor`、`shell`、`trace`、`i18n`、`tests`
 - 不在范围：内核 `AIKernel/**`、`sandbox/**`、`aik-upgrade`、生产 VM 部署

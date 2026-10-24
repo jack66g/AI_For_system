@@ -1,5 +1,7 @@
 # W76 → W75 矩阵补丁（供主会话合并，不直接改 W75 文件）
 
+> 状态注记（2026-10-23，alpha.12.0）： 本补丁的行级变更已并入 2026-10-23 重生成的 `OBSERVABILITY-MATRIX.md`/`CAPABILITY-GAPS.md`；本文保留作 W76→W75 合并的历史记录，不再作为合并依据。
+
 - 日期：2026-10-20
 - 依据：W76 实现与验收（`reports/W76.md`、`fix-w76/`）
 - 使用方式：主会话在 W75 重跑/合并时采用下列行变更；**不要**用本文件覆盖 `docs/OBSERVABILITY-MATRIX.md` / `docs/CAPABILITY-GAPS.md`。

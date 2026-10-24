@@ -31,11 +31,11 @@ find . -name 'model.toml' -o -name '*.pem' -o -name '*.key' -o -name 'api-token'
 
 ## 当前已知风险（如实）
 
-1. **sshd 基线**：`factory/etc/ssh/sshd_config` 当前允许 root 登录和密码认证。这是现有出厂基线，W83 安全波次需要重新评估（强制 key/首启改密/禁用 root 密码）。不要把它当作最终安全配置。
+1. **sshd 基线**：`factory/etc/ssh/sshd_config` 当前允许 root 登录和密码认证。这是现有出厂基线，W83 安全波次需要重新评估（强制 key/首启改密/禁用 root 密码）。不要把它当作最终安全配置。（出厂 ISO 自 alpha.12.0 起不再携带 `root/.ssh/authorized_keys`——该 key 曾随开发 VM 导出带入工厂树，已移除并有 qsmoke `root_authkeys=0` 断言。）
 2. **Web 桌面**：`aik-desktop` 只监听 127.0.0.1:8091，当前没有独立鉴权；截图返回 503、power 501。它不是真 OS 桌面（W84）。
 3. **主 Agent root + 注入面**：W74 租约/W83 红队仍在推进；不要把“有租约”理解为“已沙箱化”。
 4. **云端密钥**：生产 VM 的 cloud key 在 `model.toml`（600）。B-075 要求轮换并迁移到 secret store；轮换前先备份/确认，避免把 API 锁死。
-5. **本地 1.5B 占位模型**：工具能力不达标（B-059），不应被宣传为已达标的本地大脑；路由是策略选择，不是能力上限。
+5. **本地模型（按需安装）**：出厂不预装任何模型（alpha.12 起，B-095/B-096 清理后工厂树无模型权重与 root 残渣）；本地模型经 `aik model install` 按需安装（install/remove=D2 lease），装后连通+小推理验证、失败如实上报；spark2_5 等自定义架构需较新 ollama，目录 notes 已标注预检要求。
 
 ## 供应链
 

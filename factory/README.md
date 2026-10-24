@@ -1,4 +1,4 @@
-# factory/ — 出厂系统资产（alpha.11.0 收编）
+# factory/ — 出厂系统资产（alpha.12.0 收编）
 
 本目录对应 guest rootfs 的绝对路径：`factory/etc/...` ↔ `/etc/...`，`factory/usr/...` ↔ `/usr/...`。只收编**项目自有**资产，不包含发行版文件、运行时密钥或 rootfs 镜像。
 
@@ -13,7 +13,7 @@
 | `aikernel-upgrade-commit.service` / `.timer` | A/B 升级健康门提交 |
 | `aik-disk-check.service` / `.timer` | 磁盘水位检查 |
 | `aik-desktop.service` | Web 桌面 demo（127.0.0.1:8091） |
-| `ollama.service` | 本地模型引擎（127.0.0.1:11434） |
+| `ollama.service` | 本地模型引擎（127.0.0.1:11434；出厂不预装模型，按需 `aik model install`） |
 | `sme-seed.service` | 首启 seed 幂等导入 |
 | `ssh-keygen.service` | 开机补齐缺失 SSH host key |
 
@@ -24,8 +24,9 @@
 
 ## /usr/local/share/aikernel
 
-- `tools.json` / `tools.openai.json` / `tools-sandbox.json` / `tool_catalog.txt`（151/8/20、7 工具）
-- `sme-seed.jsonl`（167 行）、`sme-seed.sh`（差量幂等导入）
+- `tools.json` / `tools.openai.json` / `tools-sandbox.json` / `tool_catalog.txt`（156/9/20、7 工具）
+- `sme-seed.jsonl`（173 行）、`sme-seed.sh`（差量幂等导入）
+- `model-catalog.json`（`aik model` 目录源，6 条目，硬件门控推荐）
 
 ## /etc 配置
 
