@@ -5,7 +5,8 @@
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
     "kernel overlay manifest: kernel-overlays/MANIFEST.sha256 (unchanged in W78)",
     "verification: run_all 45/45, audit W75 CHECK PASS (182 tools/9 domains/20 desktop/seed 199), qemu install 6/6 diskboot 7/7 contentcheck 56/56 deskcheck 15/15",
-    "registry.tools/registry.seed and repo.regular_files now carry current values (were stale alpha.11 numbers in prior manifests)"
+    "registry.tools/registry.seed and repo.regular_files now carry current values (were stale alpha.11 numbers in prior manifests)",
+    "MANIFEST hashes canonical LF checkout bytes (8 files were hashed as CRLF working-tree copies in the first alpha.13.0 regen, caught by fresh-clone verify)"
   ],
   "overlay_count": 168,
   "registry": {
@@ -26,7 +27,7 @@
     "version": "0.1.0-alpha.13.0"
   },
   "repo": {
-    "bytes": 45839984,
+    "bytes": 45838166,
     "regular_files": 1066,
     "source_files": 1064,
     "symlinks": 4,
