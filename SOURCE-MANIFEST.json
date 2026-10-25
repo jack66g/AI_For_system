@@ -1,35 +1,36 @@
 {
-  "created": "2026-10-23T02:32:05+08:00",
-  "kernel": "6.18.39 #59",
+  "created": "2026-10-26T04:34:21+08:00",
+  "kernel": "6.18.39 #60",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
-    "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
-    "clean-build verification: 33/33 C tests, 40/40 run_all, 19 restored objects byte-identical"
+    "kernel overlay manifest: kernel-overlays/MANIFEST.sha256 (unchanged in W78)",
+    "verification: run_all 45/45, audit W75 CHECK PASS (182 tools/9 domains/20 desktop/seed 199), qemu install 6/6 diskboot 7/7 contentcheck 56/56 deskcheck 15/15",
+    "registry.tools/registry.seed and repo.regular_files now carry current values (were stale alpha.11 numbers in prior manifests)"
   ],
   "overlay_count": 168,
   "registry": {
     "desktop": 20,
     "domains": 9,
     "sandbox_tools": 7,
-    "seed": 167,
-    "seed_lines": 173,
-    "tool_count": 156,
-    "tools": 151
+    "seed": 199,
+    "seed_lines": 199,
+    "tool_count": 182,
+    "tools": 182
   },
   "release": {
-    "iso_bytes": 740706304,
-    "iso_md5": "27bdfe30b6cf0ccfee675d1ffbbc240b",
-    "kernel": "6.18.39 #59",
-    "kernel_unchanged": true,
-    "shell_md5": "784cc0f014409cfdd8186f95c557dcd0",
-    "version": "0.1.0-alpha.12.0"
+    "iso_bytes": 752271360,
+    "iso_md5": "ab6a98e7cebf6f147e10059ef5345d20",
+    "kernel": "6.18.39 #60",
+    "kernel_unchanged": false,
+    "shell_md5": "487b21b6f974ed78a20353449991b477",
+    "version": "0.1.0-alpha.13.0"
   },
   "repo": {
-    "bytes": 45513629,
-    "regular_files": 1033,
-    "source_files": 1043,
+    "bytes": 45839984,
+    "regular_files": 1066,
+    "source_files": 1064,
     "symlinks": 4,
-    "tracked_files": 1049
+    "tracked_files": 1070
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
@@ -51,5 +52,5 @@
       "target": "tools/tools.openai.json"
     }
   ],
-  "version": "0.1.0-alpha.12.0"
+  "version": "0.1.0-alpha.13.0"
 }
