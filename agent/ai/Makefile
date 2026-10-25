@@ -145,6 +145,9 @@ COMMON_SRCS := \
 	$(RUNTIME_DIR)/runtime.c \
 	$(RUNTIME_DIR)/ai_route.c \
 	$(RUNTIME_DIR)/netlink/ai_netlink_client.c \
+	$(RUNTIME_DIR)/netlink/ai_streams.c \
+	$(TOOLS_DIR)/macro_tools.c \
+	$(TOOLS_DIR)/net_admin.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \
 	$(PROVIDER_DIR)/provider_core.c \

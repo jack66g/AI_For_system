@@ -25,7 +25,7 @@ TESTS   := test_utf8_body test_http_retry test_cloud_stream test_provider_stream
 	   test_sysctl_tools \
 	   test_desktop_tools test_w77_route test_w77_offline \
 	   test_w77_offline_gate test_model_lifecycle \
-	   test_onboarding_cloud test_clarify
+	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -101,7 +101,7 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
-SB_EXEC_SRCS := ../tools/executor.c ../tools/tool_registry.c \
+SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
@@ -252,7 +252,7 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
-MEM_ALL_SRCS := ../tools/executor.c ../tools/tool_registry.c \
+MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \
@@ -305,3 +305,30 @@ clean:
 	rm -f $(TESTS)
 
 .PHONY: all test test-e2e clean
+
+# W78：六条事件流工具单测（只依赖 ai_streams.c，无需全量链接）
+test_streams: test_streams.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_streams.c \
+		../runtime/netlink/ai_streams.c ../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
+
+# W78 agent-D：mbedtls 服务端能力回归（SSL_SRV_C 回开）。
+# 私钥解析存留 + 回环 mTLS 握手（正/无证书/野CA 三路），内嵌一次性证书。
+test_tls_srv: test_tls_srv.c tls_test_certs.h
+	$(CC) $(CFLAGS) -I.. -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\" \
+		-I$(MBEDTLS_DIR)/include -o $@ test_tls_srv.c $(MBEDTLS_LIBS) -lpthread
+
+# W78：宏工具单测（纯函数+R 件真跑；W 件的 executor 依赖以桩满足链接）
+test_macros: test_macros.c ../tools/macro_tools.c \
+		../runtime/netlink/ai_streams.c ../runtime/netlink/ai_netlink_client.c \
+		../runtime/ai_types.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_macros.c \
+		../tools/macro_tools.c ../runtime/netlink/ai_streams.c \
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
+
+# W78 agent-E：P2 网络执行面单测（纯函数 + 注入拒绝 + 无 root 诚实错误路径）
+test_net_admin: test_net_admin.c ../tools/net_admin.c \
+		../runtime/netlink/ai_streams.c ../runtime/netlink/ai_netlink_client.c \
+		../runtime/ai_types.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_net_admin.c \
+		../tools/net_admin.c ../runtime/netlink/ai_streams.c \
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c

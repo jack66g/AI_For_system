@@ -45,7 +45,7 @@ extern void ai_cancel_restore(void);
 extern volatile sig_atomic_t ai_cancel_requested;
 
 /* W65 P3-02：--version 版本口径（与 alpha.8.0 基线一致） */
-#define AIKERNEL_SHELL_VERSION "0.1.0-alpha.12.0"   /* W77d */
+#define AIKERNEL_SHELL_VERSION "0.1.0-alpha.13.0"   /* W78 */
 
 /* 外部声明 */
 extern struct ai_provider *openai_compatible_provider_create(void);

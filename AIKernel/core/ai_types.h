@@ -77,4 +77,11 @@ static inline int ai_error_to_errno(int ai_err)
 	}
 }
 
-#endif /* _AIKERNEL_AI_TYPES_H */
+/* W78：kernel/sched/psi.c 埋点提供的 PSI 读取器（CONFIG_PSI 激活后，
+ * psi.c 与 AIKernel/sched/ai_sched.c 两处引用需同一原型；原型缺失
+ * 曾在 PSI 长期未编期间潜伏——W78 开 PSI 后由 -Werror 暴露）。 */
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
+int ai_psi_read(u8 resource, unsigned long some_avg[3],
+		unsigned long full_avg[3]);
+#endif
+#endif

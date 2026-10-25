@@ -57,6 +57,32 @@ netlink_act_ai_decision_oom OOM 受害者评分偏
 netlink_act_ai_decision_sched 调度决策注入使能
 netlink_act_ai_decision_mm 内存决策注入使能
 netlink_sense 按 CPU 读取遥测记
+event_listen 先 REG 登记 portid（
+proc_watch 实时捕获 fork/exec/e
+taskstats_sample CPU/阻塞IO/换入/缺
+nflog_dump 需要 nftables 规则
+net_monitor 实时感知网络拓扑
+udev_monitor 设备 add/remove/change
+psi_snapshot /proc/pressure/{cpu,memo
+kernel_ai_healthcheck /proc/ai 的 status/cont
+disk_hogs /proc/mounts 里 ext4/ex
+service_doctor 一次拿 is-active + st
+baseline_diff sysctl_snapshot 存基
+sysctl_snapshot 按前缀递归快照 /p
+schedule_list 列出 aik-* 计划任
+sysctl_restore 逐次确认
+schedule_create systemd-run transient ti
+schedule_remove 停止并移除 aik-<nam
+ip_ban_verified 插入 nft 运行时规
+process_quarantine sched.nice=19 → proc.f
+model_verify model_load(path)→model
+net_iface state=up|down
+net_addr_add 已存在如实报 EEXIS
+net_addr_del AI 识别→暂停→授
+net_route_add 同目标已存在如实
+net_route_del 断网卡/锁死风险
+net_link_del AI 识别→暂停→授
+nft_txn ops 每条一个 nft 片
 procfs_read_net_nf_conntrack 内核连接跟踪表（
 exec_run python3 执行 .py 脚
 memory_search 凡涉及 AIKernel 系

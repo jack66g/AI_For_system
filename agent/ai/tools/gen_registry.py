@@ -81,6 +81,9 @@ CH_SYSFS_DYN = "sysfs"      # W48：sysfs/procfs 动态路径读写（cgroup 等
 CH_DESKTOP = "desktop"      # W76：桌面能力面（127.0.0.1:8091 本机 HTTP）
 CH_CLARIFY = "interaction"  # W77c：结构化澄清（ask 交互层，非授权）
 CH_MODEL = "model"          # W77d：本地模型生命周期（目录/推荐/装/卸/基准）
+CH_STREAM = "stream"        # W78：内核事件流订阅（六条流，只读）
+CH_MACRO = "macro"          # W78：宏工具（高频组合升格）
+CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -223,6 +226,35 @@ SUB_MAP = {
     "config_write_resolv_conf": ["netsec", "fs"],
     "config_read_hosts": ["netsec", "fs"],
     "config_write_hosts": ["netsec", "fs"],
+    # ---- W78 事件流订阅（六条流，只读）----
+    "event_listen": ["aicore"],
+    "proc_watch": ["res", "aicore"],
+    "taskstats_sample": ["res"],
+    "nflog_dump": ["netsec"],
+    "net_monitor": ["netsec"],
+    "udev_monitor": ["sysadmin", "res"],
+    # ---- W78 宏工具（13 件）----
+    "psi_snapshot": ["res", "aicore"],
+    "kernel_ai_healthcheck": ["aicore"],
+    "disk_hogs": ["fs", "sysadmin"],
+    "service_doctor": ["sysadmin"],
+    "baseline_diff": ["sysadmin", "netsec"],
+    "sysctl_snapshot": ["sysadmin", "res"],
+    "schedule_list": ["sysadmin"],
+    "sysctl_restore": ["sysadmin", "res"],
+    "schedule_create": ["sysadmin"],
+    "schedule_remove": ["sysadmin"],
+    "ip_ban_verified": ["netsec"],
+    "process_quarantine": ["res", "netsec"],
+    "model_verify": ["aicore", "model"],
+    # ---- W78 agent-E：P2 网络执行面（7 件，全 W2）----
+    "net_iface": ["netsec"],
+    "net_addr_add": ["netsec"],
+    "net_addr_del": ["netsec"],
+    "net_route_add": ["netsec"],
+    "net_route_del": ["netsec"],
+    "net_link_del": ["netsec"],
+    "nft_txn": ["netsec"],
     # ---- aicore AI 内核面（40 主域）----
     "procfs_read_status": ["aicore", "res"],
     "procfs_read_decisions": ["aicore"],
@@ -705,7 +737,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 156        # 主表 tools.json（W77d：151 + 5 件 model_*）
+EXPECTED_TOOL_COUNT = 182        # 主表 tools.json（W78：156 + 6 流 + 13 宏 + 7 网络执行面）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -771,6 +803,32 @@ EXPECTED_TOOL_NAMES = [
     "netlink_act_ai_decision_sched",
     "netlink_act_ai_decision_mm",
     "netlink_sense",
+    "event_listen",
+    "proc_watch",
+    "taskstats_sample",
+    "nflog_dump",
+    "net_monitor",
+    "udev_monitor",
+    "psi_snapshot",
+    "kernel_ai_healthcheck",
+    "disk_hogs",
+    "service_doctor",
+    "baseline_diff",
+    "sysctl_snapshot",
+    "schedule_list",
+    "sysctl_restore",
+    "schedule_create",
+    "schedule_remove",
+    "ip_ban_verified",
+    "process_quarantine",
+    "model_verify",
+    "net_iface",
+    "net_addr_add",
+    "net_addr_del",
+    "net_route_add",
+    "net_route_del",
+    "net_link_del",
+    "nft_txn",
     "procfs_read_net_nf_conntrack",
     "exec_run",
     "memory_search",
@@ -869,7 +927,7 @@ EXPECTED_TOOL_NAMES = [
     "model_benchmark",
     "clarify",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "1999f820a09887a66ca3f1878b1fc76523fcb911929e6ed4cfbc61c67e3afe81"
+EXPECTED_TOOL_NAMES_SHA256 = "c3ce0b61a0e13ae4b0b92467f37821f28cefb12cf1fa54a8148d3130a64d4472"
 
 
 def manifest_sha256(names):
@@ -1241,6 +1299,19 @@ EXEC_COMMANDS = [
               ("hostname", RISK_W2), ("set-hostname", RISK_W2),
               ("set-icon-name", RISK_W2), ("set-chassis", RISK_W2),
               ("set-deployment", RISK_W2), ("set-location", RISK_W2)]),
+    # W78 白名单补齐（W78A 报告；lsof/dig 出厂 rootfs 缺失不收录）
+    ex("sshd", RISK_W2, bin="/usr/sbin/sshd",
+       args0=[("-t", RISK_R), ("-T", RISK_R)]),
+    ex("networkctl", RISK_W2, bin="/usr/bin/networkctl",
+       args0=[("status", RISK_R), ("list", RISK_R), ("ls", RISK_R),
+              ("lldp", RISK_R)]),
+    ex("loginctl", RISK_W2, bin="/usr/bin/loginctl",
+       args0=[("list", RISK_R), ("list-sessions", RISK_R),
+              ("sessions", RISK_R), ("show", RISK_R),
+              ("user-status", RISK_R), ("seat-status", RISK_R)]),
+    ex("udevadm", RISK_W2, bin="/usr/bin/udevadm",
+       args0=[("info", RISK_R), ("monitor", RISK_R),
+              ("version", RISK_R)]),
     ex("resolvectl", RISK_R, bin="/usr/bin/resolvectl",
        args0=[("status", RISK_R), ("statistics", RISK_R),
               ("query", RISK_R), ("dns", RISK_W2), ("domain", RISK_W2),
@@ -1338,7 +1409,6 @@ EXEC_COMMANDS = [
               ("auto-commit", RISK_W2), ("grubenv", RISK_W2)]),
     # sy-1：crontab（首参 -l 查询 R；-r 清空/文件安装 W2；-e 交互拒绝；
     # 无参数会从 stdin 读空内容覆盖当前表——executor 显式拒绝）
-    ex("crontab", RISK_W2, bin="/usr/bin/crontab"),
 ]
 
 EXEC_ENUM = [c["command"] for c in EXEC_COMMANDS]
@@ -1476,6 +1546,189 @@ def tool_netlink_sense():
                        "enum": ["raw", "human"], "default": "human"},
         }),
     }
+
+
+def _tmo_schema():
+    return {"type": "integer", "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100, "maximum": 10000, "default": 1000}
+
+
+def _mev_schema():
+    return {"type": "integer", "description": "最多收集事件数（1-256）",
+            "minimum": 1, "maximum": 256, "default": 32}
+
+
+def tool_stream(name, desc, props, required=None):
+    """W78 事件流工具通用构造（channel=stream，全 R 只读订阅）"""
+    return {"name": name, "channel": CH_STREAM, "risk": RISK_R,
+            "description": desc,
+            "parameters": obj_schema(props, required)}
+
+
+def stream_tools():
+    """W78：六条「内核就绪、用户态未接」的事件流订阅工具
+    （W78A 深挖报告 A 路落地：被推即应）"""
+    return [
+        tool_stream(
+            "event_listen",
+            "订阅 NETLINK_AI(31) 内核 AI 事件推送（AI_CMD_EVENT）：先 REG "
+            "登记 portid（需 root/CAP_SYS_ADMIN）再收推送事件。事件类别："
+            "category=1 策略执行结果（event_id=decision_id）、2 模型装载/"
+            "卸载。输出 JSON 行（ts/event_id/category/severity/code/param）。"
+            "须在 AIKernel 内核上运行（非 AIKernel 内核明确报错）。组合："
+            "sysfs_write_policy_think 触发决策→本工具收结果→"
+            "procfs_read_chains 溯源。",
+            {"timeout_ms": _tmo_schema(), "max_events": _mev_schema()}),
+        tool_stream(
+            "proc_watch",
+            "订阅进程事件流（proc connector CN_PROC，需 root/"
+            "CAP_NET_ADMIN）：实时捕获 fork/exec/exit/uid/comm 事件（含 "
+            "pid/tgid），补足轮询 procfs 的时点盲区，是『谁在动』的实时"
+            "感知面。组合：可疑进程→procfs_read_status 采样→"
+            "netlink_act_proc_freeze 隔离。",
+            {"timeout_ms": _tmo_schema(), "max_events": _mev_schema()}),
+        tool_stream(
+            "taskstats_sample",
+            "按 pid 拉取内核任务延迟记账（TASKSTATS netlink，"
+            "CONFIG_TASK_DELAY_ACCT=y）：CPU/阻塞IO/换入/缺页延迟累计(ns)"
+            "+上下文切换，单任务粒度归因『这个进程为什么卡』。组合："
+            "pressure 看全局压→本工具定位元凶→sched_nice/affinity 处置。",
+            {"pid": {"type": "integer", "description": "目标进程 pid",
+                     "minimum": 1, "maximum": 4194304}},
+            ["pid"]),
+        tool_stream(
+            "nflog_dump",
+            "订阅 NFLOG 包级取证流（nfnetlink_log CONFIG 绑定后内核单播回包）：需要 nftables "
+            "规则带 log/nflog 目标才有事件（无规则时返回 0 事件并提示）。"
+            "每事件含五元组/hook/mark/prefix，payload_bytes>0 时附载荷首 N "
+            "字节十六进制。组合：netlink_sense 异常→config_write_nftables "
+            "加临时 log 规则→本工具取证→撤规则。",
+            {"timeout_ms": _tmo_schema(), "max_events": _mev_schema(),
+             "payload_bytes": {"type": "integer",
+                               "description": "附载荷首 N 字节"
+                               "（0-256，0=不附）",
+                               "minimum": 0, "maximum": 256,
+                               "default": 0}}),
+        tool_stream(
+            "net_monitor",
+            "订阅 rtnetlink 组播（链路/地址/IPv4+IPv6 路由变化）：实时感知"
+            "网络拓扑变化（接口起落/地址增删/路由变更），输出 JSON 行"
+            "（event/ifindex/ifname/addr/prefixlen/dst/oif/gateway）。组合："
+            "断网/换网第一手信号→procfs_read_net_nf_conntrack 复核→"
+            "exec ip 诊断。",
+            {"timeout_ms": _tmo_schema(), "max_events": _mev_schema()}),
+        tool_stream(
+            "udev_monitor",
+            "订阅内核设备事件流（NETLINK_KOBJECT_UEVENT 组 1）：设备 "
+            "add/remove/change/bind/unbind 实时感知（含 DEVPATH/"
+            "SUBSYSTEM/DEVNAME 等属性），是『硬件在变』的感知面。组合："
+            "热插拔→exec lsblk 确认→策略响应；与 net_monitor 配对覆盖"
+            "网络设备特例。",
+            {"timeout_ms": _tmo_schema(), "max_events": _mev_schema()}),
+    ]
+
+
+
+def tool_macro(name, risk, desc, props=None, required=None):
+    """W78 宏工具构造（channel=macro）"""
+    return {"name": name, "channel": CH_MACRO, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def macro_tools():
+    """W78：13 件宏工具——高频组合升格为一等工具（R7/W1-2/W2-4）"""
+    return [
+        tool_macro(
+            "psi_snapshot", RISK_R,
+            "一次拿全系统压力快照：/proc/pressure/{cpu,memory,io} 三资源 "
+            "some/full 均值 + loadavg + MemTotal/MemAvailable，替代 res 域 "
+            "5 次单件采样（消除时点漂移）。W78 起 PSI 已编入。组合："
+            "本工具看全局压→taskstats_sample 定位元凶→处置→复测。"),
+        tool_macro(
+            "kernel_ai_healthcheck", RISK_R,
+            "in-kernel AI 子系统体检页：/proc/ai 的 status/control/hitrate/"
+            "latency/决策与遥测计数一次读全（AIKernel 内核上；非该内核时"
+            "各字段 unavailable）。aicore 域最高频前奏。"),
+        tool_macro(
+            "disk_hogs", RISK_R,
+            "存储占用快照：/proc/mounts 里 ext4/ext3/xfs/btrfs 挂载点逐个 "
+            "statvfs，输出 used_pct/总量/可用。存储排查首诊一次成型。"),
+        tool_macro(
+            "service_doctor", RISK_R,
+            "服务故障首诊：一次拿 is-active + status + 最近 20 行 journal。"
+            "参数 unit（如 sshd.service）。修复 combo-5 依赖：白名单已补 "
+            "sshd（sshd -t 只读预检）。组合：config_read_sshd_config→"
+            "（sshd -t 预检）→exec systemctl restart→复查。",
+            {"unit": {"type": "string", "description": "systemd unit 名"
+                      "（[A-Za-z0-9_.@-]）"}}, ["unit"]),
+        tool_macro(
+            "baseline_diff", RISK_R,
+            "把 sysctl_snapshot 的输出文本与当前 /proc/sys 实值逐键比对，"
+            "输出差异清单（equal/baseline/current）。变更窗口与漂移巡检。"
+            "组合：sysctl_snapshot 存基线→调参→本工具复核→sysctl_restore 回滚。",
+            {"baseline": {"type": "string", "description": "基线文本"
+                          "（sysctl_snapshot 输出，path=value 行）"}}),
+        tool_macro(
+            "sysctl_snapshot", RISK_R,
+            "按前缀递归快照 /proc/sys（如 prefix=net.ipv4 或 net），输出 "
+            "path=value 行（可喂给 baseline_diff/sysctl_restore）。R 只读。",
+            {"prefix": {"type": "string", "description": "sysctl 前缀"
+                        "（如 net / net.ipv4 / vm；空=全树，输出较大）"}}),
+        tool_macro(
+            "schedule_list", RISK_R,
+            "列出 aik-* 计划任务（systemd transient timers）。与 "
+            "schedule_create/remove 配套；出厂未启 cron 守护，AI 定时任务"
+            "统一走 systemd timer（W78 决策）。"),
+        tool_macro(
+            "sysctl_restore", RISK_W2,
+            "把 sysctl_snapshot 的输出整批写回 /proc/sys（逐键走既有 "
+            "sysctl_set 通道与崩溃黑名单，失败键如实列出）。变更回滚/"
+            "批量恢复。W2：逐次确认。",
+            {"snapshot": {"type": "string", "description": "快照文本"
+                          "（sysctl_snapshot 输出）"}}),
+        tool_macro(
+            "schedule_create", RISK_W2,
+            "创建 AI 定时任务：systemd-run transient timer（OnCalendar），"
+            "命令经 /bin/sh -c 执行；重启不保留（长期任务写 unit）。"
+            "替代出厂已移除的 cron 断链。W2：逐次确认。",
+            {"name": {"type": "string", "description": "任务名"
+                      "（[A-Za-z0-9_.@-]，生成 aik-<name>.timer）"},
+             "calendar": {"type": "string", "description": "OnCalendar 表达式"
+                          "（如 hourly / 'Mon *-*-* 03:00:00'）"},
+             "command": {"type": "string", "description": "定时执行的命令"
+                         "（/bin/sh -c）"}},
+            ["name", "calendar", "command"]),
+        tool_macro(
+            "schedule_remove", RISK_W1,
+            "停止并移除 aik-<name>.timer 计划任务（transient，stop 即除）。",
+            {"name": {"type": "string", "description": "任务名"}},
+            ["name"]),
+        tool_macro(
+            "ip_ban_verified", RISK_W2,
+            "封禁 IP 并复查：插入 nft 运行时规则 inet filter input "
+            "(ip|ip6) saddr <ip> drop，然后数 conntrack 残留（老化即消）。"
+            "运行时规则重启即清；持久化走 config_write_nftables。"
+            "W2：逐次确认。",
+            {"ip": {"type": "string", "description": "IPv4/IPv6 字面量"}},
+            ["ip"]),
+        tool_macro(
+            "process_quarantine", RISK_W2,
+            "可疑进程隔离三连：sched.nice=19 → proc.freeze=1 → 读 "
+            "/proc/<pid>/status 验证 State=F。比 kill 温和，可逆"
+            "（proc.freeze=0 解冻）。W2：逐次确认。",
+            {"pid": {"type": "integer", "description": "目标 pid（>1）",
+                     "minimum": 2, "maximum": 4194304}},
+            ["pid"]),
+        tool_macro(
+            "model_verify", RISK_W1,
+            "内核模型装载-推理-卸载闭环验证：model_load(path)→model_in("
+            "固定探针)→读 model_out→unload。输出各步结果与输出内容"
+            "（AIKernel 内核上）。combo-7 的固化。W1。",
+            {"path": {"type": "string", "description": "AIKWMDL 模型文件"
+                      "绝对路径"}},
+            ["path"]),
+    ]
 
 
 def tool_exec_run():
@@ -2355,6 +2608,7 @@ CHANNEL_RETURN = {
     CH_DESKTOP: "返回桌面 API 的 JSON（窗口/主题/截图 path+bytes+sha256 等）。",
     CH_CLARIFY: "返回用户选择 JSON；非 TTY 返回 CLARIFY_REQUIRED（本轮结束）。",
     CH_MODEL: "返回目录/推荐/安装/卸载/基准的文本结果；安装失败含原因与替代建议。",
+    CH_NETADMIN: "返回写前旧值（回滚凭据）+ 写回执 + 写后回读验证；nft_txn 返回校验/预检/应用/抽查逐步结果。",
 }
 
 
@@ -2943,6 +3197,123 @@ def tool_clarify():
     }
 
 
+def tool_netadmin(name, desc, props, required):
+    """W78 agent-E：P2 网络执行面构造（channel=netadmin，全 W2 高危写）"""
+    return {"name": name, "channel": CH_NETADMIN, "risk": RISK_W2,
+            "description": desc,
+            "parameters": obj_schema(props, required)}
+
+
+def netadmin_tools():
+    """W78 agent-E：P2 网络执行面 7 件——rtnetlink 写（net.iface/addr/
+    route/link 三族）+ nft 事务，全 W2。每件写前先 rtnetlink 读旧值落输出
+    （回滚凭据）、写后回读验证；iface 字符集白名单、addr/dst 用
+    inet_pton 双栈真校验、nft op 禁分号/换行/反引号/$()。"""
+    lock = ("断网卡/锁死风险场景：AI 识别→暂停→授权者确认，"
+            "SSH 放行规则是硬闸")
+    return [
+        tool_netadmin(
+            "net_iface",
+            "rtnetlink 网卡启停（RTM_NEWLINK 只动 IFF_UP 位）："
+            "state=up|down。写前 RTM_GETLINK 读旧 flags 落输出（回滚凭据），"
+            "写后回读验证 UP 位。" + lock + "。回滚=state 反向再调一次。"
+            "组合：net_monitor 感知接口起落→本工具处置→回读复核。",
+            {"iface": {"type": "string",
+                       "description": "接口名（[A-Za-z0-9._-]{1,15}）"},
+             "state": {"type": "string", "enum": ["up", "down"],
+                       "description": "目标状态"}},
+            ["iface", "state"]),
+        tool_netadmin(
+            "net_addr_add",
+            "rtnetlink 加地址（RTM_NEWADDR+IFA_LOCAL，NLM_F_EXCL：已存在"
+            "如实报 EEXIST 不重复加）。写前 dump 该接口全部现地址（回滚"
+            "凭据），写后回读验证在位。回滚=net_addr_del 同参数。" + lock +
+            "。组合：net_link 场景先本工具再 net_route_add。",
+            {"iface": {"type": "string",
+                       "description": "接口名（[A-Za-z0-9._-]{1,15}）"},
+             "addr": {"type": "string",
+                      "description": "CIDR 地址（如 192.168.5.9/24 或 "
+                      "fd00::9/64，前缀必填；inet_pton 双栈校验）"}},
+            ["iface", "addr"]),
+        tool_netadmin(
+            "net_addr_del",
+            "rtnetlink 删地址（RTM_DELADDR，按 IFA_LOCAL+前缀精确匹配）。"
+            "写前 dump 该接口全部现地址（回滚凭据），写后回读验证已移除；"
+            "地址本就不存在时报 EADDRNOTAVAIL。回滚=net_addr_add 同参数。"
+            + lock + "。",
+            {"iface": {"type": "string",
+                       "description": "接口名（[A-Za-z0-9._-]{1,15}）"},
+             "addr": {"type": "string",
+                      "description": "CIDR 地址（同 net_addr_add）"}},
+            ["iface", "addr"]),
+        tool_netadmin(
+            "net_route_add",
+            "rtnetlink 加路由（RTM_NEWROUTE+RTA_DST/GATEWAY/OIF，table 默认 "
+            "main；NLM_F_EXCL：同目标已存在如实报 EEXIST 不覆盖）。写前 "
+            "dump 目标路由表相关路由（回滚凭据），写后回读验证。回滚="
+            "net_route_del 同参数。改默认路由可致断网/流量劫持：" + lock +
+            "。组合：net_addr_add 配地址→本工具加路由→net_monitor 复核。",
+            {"dst": {"type": "string",
+                     "description": "目的网段 CIDR（如 192.168.99.0/24、"
+                     "fd00::/64；默认路由 0.0.0.0/0）"},
+             "gateway": {"type": "string",
+                         "description": "网关裸地址（可选；须与 dst 同栈，"
+                         "不带前缀）"},
+             "iface": {"type": "string",
+                       "description": "出接口名（可选）"},
+             "table": {"type": "string", "default": "main",
+                       "description": "路由表（main/local/default 或数字，"
+                       "默认 main）"}},
+            ["dst"]),
+        tool_netadmin(
+            "net_route_del",
+            "rtnetlink 删路由（RTM_DELROUTE，按 dst 前缀+table 匹配，gateway/"
+            "iface 给出时一并参与匹配）。写前 dump 目标路由表相关路由"
+            "（回滚凭据），写后回读验证已移除；路由本就不存在时报 ESRCH。"
+            "回滚=net_route_add 同参数。误删默认路由即断网：" + lock + "。",
+            {"dst": {"type": "string",
+                     "description": "目的网段 CIDR（同 net_route_add）"},
+             "gateway": {"type": "string",
+                         "description": "网关裸地址（可选，匹配用）"},
+             "iface": {"type": "string",
+                       "description": "出接口名（可选，匹配用）"},
+             "table": {"type": "string", "default": "main",
+                       "description": "路由表（默认 main）"}},
+            ["dst"]),
+        tool_netadmin(
+            "net_link_del",
+            "rtnetlink 删接口（RTM_DELLINK）。内核只允许删虚拟接口（dummy/"
+            "veth/vlan/bridge/wireguard 等 rtnl 创建的设备；物理网卡一律 "
+            "EOPNOTSUPP 拒绝——安全边界由内核保证）。写前读旧 flags+kind "
+            "落输出（重建凭据），写后回读验证已消失。回滚=按 kind 用 exec "
+            "「ip link add <name> type <kind>」重建，地址/路由需另行恢复。"
+            + lock + "。组合：诊断用 dummy 接口生命周期收尾（配 "
+            "net_addr_*/net_route_* 演练）。",
+            {"iface": {"type": "string",
+                       "description": "接口名（[A-Za-z0-9._-]{1,15}）"}},
+            ["iface"]),
+        tool_netadmin(
+            "nft_txn",
+            "nftables 规则级事务：ops 每条一个 nft 片段（如「add rule inet "
+            "filter input ip saddr 1.2.3.4 drop」），逐条内容校验（禁分号/"
+            "换行/反引号/$()）后写 0600 临时文件，先 nft -c -f 全量语法预检"
+            "（不生效，失败即拒绝并回显 nft 错误），dry_run=true 到此为止"
+            "输出「预检通过未应用」；否则 nft -f 正式应用（单文件单批次提交）"
+            "后 nft list ruleset 抽查关键串验证落位，输出每步结果；含 "
+            "delete/flush 的 op 显式标注警告。运行时规则重启即清，持久化另走 "
+            "config_write_nftables。" + lock + "（出厂 SSH 放行规则严禁删除）"
+            "。组合：netlink_sense/conntrack 发现异常源→本工具加 drop 规则"
+            "→nflog_dump 取证→撤规则。",
+            {"ops": {"type": "array",
+                     "items": {"type": "string"},
+                     "description": "nft 命令片段数组（每条一行，1-32 条，"
+                     "单条 ≤512 字节；禁分号/换行/反引号/$()）"},
+             "dry_run": {"type": "boolean", "default": False,
+                         "description": "只做 nft -c 语法预检不应用"}},
+            ["ops"]),
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -2971,6 +3342,11 @@ def build_tools(procfs_table, sysfs_table):
 
     tools.extend(tool_netlink(*p) for p in NETLINK_PARAMS)
     tools.append(tool_netlink_sense())
+    tools.extend(stream_tools())
+    # W78：宏工具 13 件（高频组合升格）
+    tools.extend(macro_tools())
+    # W78 agent-E：P2 网络执行面 7 件（rtnetlink 写 + nft 事务，全 W2）
+    tools.extend(netadmin_tools())
     # W11 网络细控：内核连接跟踪表查询（NF_CONNTRACK_PROCFS=y 时内核原生
     # 导出 /proc/net/nf_conntrack；procfs-read 通道零依赖直读内核态数据，
     # 比引入用户态 conntrack 工具包更诚实）

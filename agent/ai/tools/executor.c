@@ -64,6 +64,9 @@
 #include "ai_lang.h"
 #include "ai_trace.h"
 #include "netlink/ai_netlink_client.h"
+#include "netlink/ai_streams.h"
+#include "macro_tools.h"
+#include "net_admin.h"
 #include "memory/sme_client.h"
 #include "tools/executor.h"
 #include "ai_config.h"
@@ -759,7 +762,7 @@ done:
 	return rc;
 }
 
-static int exec_sysctl_write(const struct ai_tool *tool,
+int exec_sysctl_write(const struct ai_tool *tool,
 			     const char *args_json, char **out)
 {
 	char *key = arg_str(args_json, "key");
@@ -920,7 +923,7 @@ static int exec_sysctl_blacklist(char **out)
 
 /* ---- W48: sysfs/procfs 动态路径通道（R 读 / W2 写） ---- */
 
-static int exec_sysfs_dyn(const struct ai_tool *tool, const char *args_json,
+int exec_sysfs_dyn(const struct ai_tool *tool, const char *args_json,
 			  char **out)
 {
 	int is_set = tool->name && strcmp(tool->name, "sysfs_set") == 0;
@@ -1141,7 +1144,7 @@ static int exec_sysfs_write(const struct ai_tool *tool, const char *args_json,
 
 /* ---- netlink-act（v2：客户端值域钳制） ---- */
 
-static int exec_netlink_act(const struct ai_tool *tool, const char *args_json,
+int exec_netlink_act(const struct ai_tool *tool, const char *args_json, /* W78 去 static：macro_tools 组合复用 */
 			    char **out)
 {
 	struct ai_nl_client cli;
@@ -1306,6 +1309,48 @@ static int exec_netlink_act(const struct ai_tool *tool, const char *args_json,
 }
 
 /* ---- netlink-sense（v2 新增：AI_CMD_SENSE 拉遥测） ---- */
+
+/* W78：六条内核事件流（TOOL_CH_STREAM，全部只读订阅，参数统一钳制） */
+static int exec_stream_channel(const struct ai_tool *tool,
+			       const char *args_json, char **out)
+{
+	long long timeout_ms = ai_streams_clamp_ll(
+		arg_ll(args_json, "timeout_ms", 1000), 100, 10000, 1000);
+	long long max_events = ai_streams_clamp_ll(
+		arg_ll(args_json, "max_events", 32), 1, 256, 32);
+
+	if (strcmp(tool->name, "event_listen") == 0)
+		return ai_streams_event_listen((int)timeout_ms,
+					       (int)max_events, out);
+	if (strcmp(tool->name, "proc_watch") == 0)
+		return ai_streams_proc_watch((int)timeout_ms,
+					     (int)max_events, out);
+	if (strcmp(tool->name, "taskstats_sample") == 0) {
+		long long pid = arg_ll(args_json, "pid", 0);
+
+		if (pid <= 0) {
+			*out = strdup("ERROR: taskstats_sample 需要 pid"
+				      "（正整数）参数");
+			return AI_ERR_INVALID_ARG;
+		}
+		return ai_streams_taskstats(pid, out);
+	}
+	if (strcmp(tool->name, "nflog_dump") == 0) {
+		long long payload_bytes = ai_streams_clamp_ll(
+			arg_ll(args_json, "payload_bytes", 0), 0, 256, 0);
+
+		return ai_streams_nflog((int)timeout_ms, (int)max_events,
+					(int)payload_bytes, out);
+	}
+	if (strcmp(tool->name, "net_monitor") == 0)
+		return ai_streams_net_monitor((int)timeout_ms,
+					      (int)max_events, out);
+	if (strcmp(tool->name, "udev_monitor") == 0)
+		return ai_streams_udev_monitor((int)timeout_ms,
+					       (int)max_events, out);
+	*out = strdup("ERROR: 未知 stream 工具（注册表异常）");
+	return AI_ERR_INVALID_ARG;
+}
 
 static int exec_netlink_sense(const struct ai_tool *tool,
 			      const char *args_json, char **out)
@@ -5977,6 +6022,15 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		break;
 	case TOOL_CH_MODEL:
 		rc = exec_model(tool, args_json, out);
+		break;
+	case TOOL_CH_STREAM:
+		rc = exec_stream_channel(tool, args_json, out);
+		break;
+	case TOOL_CH_MACRO:
+		rc = exec_macro_channel(tool, args_json, out);
+		break;
+	case TOOL_CH_NETADMIN:
+		rc = exec_net_admin_channel(tool, args_json, out);
 		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调

@@ -1,3 +1,5 @@
+> 状态更新（2026-10-26，W78）：出厂 .config 已启用 DEBUG_INFO_BTF/PSI/FANOTIFY/INET_DIAG 家族/SCHED_CLASS_EXT；出厂 grub 命令行追加 lsm=ai（AI LSM 默认放行+决策表接管，dmesg 注册行可见）；psi.c 与 kernel/sched/ext.c overlay 由休眠转活跃（active/dormant 标注见 kernel-overlays/README.md）；修复 ai_psi_read 原型缺失（PSI 长期未编期间潜伏，ai_types.h 补原型+双条件卫）。内核 #60。
+
 # AIKernel 架构文档
 
 > 状态注记（2026-10-23，alpha.12.0）： 本文是内核侧 AIKernel/ 的滚动架构与波次记录，正文最后更新至 2026-10-04（内核 #37 / ISO v1.5.4 时点）。当前生产内核为 6.18.39 **#59**（alpha.9→12 内核侧未变），agent 侧注册表已演进到 **156 工具/9 域**；后续波次记录在项目工作区 `longterm/reports/`。正文中的历史快照数字（69/74/75/130 工具、#12-#37 内核号、旧 ISO md5）均为当时口径。

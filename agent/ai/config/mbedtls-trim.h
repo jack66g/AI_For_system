@@ -43,7 +43,20 @@
 #undef MBEDTLS_SSL_ALPN
 #undef MBEDTLS_SSL_MAX_FRAGMENT_LENGTH
 #undef MBEDTLS_SSL_CONTEXT_SERIALIZATION
-#undef MBEDTLS_SSL_SRV_C
+/* W78 回开（原 B2 裁剪项）：MBEDTLS_SSL_SRV_C。
+ * 原依据：E 波时 agent 仅做出站 TLS 客户端（http_client），无服务端引用方。
+ * W78 理由：恢复 agent 树 TLS 服务端能力，供 mTLS 入站面使用（授权远程
+ * 接入 AI 的安全通道）。依赖核验（2026-10-24，agent-D）：
+ *   - check_config.h:898 仅要求 MBEDTLS_SSL_TLS_C（在）；
+ *   - TLS1.3 证书模式 EPHEMERAL 前置（PSA ECDH + X509_CRT_PARSE +
+ *     ECDSA_SIGN/PKCS1_V21）全部在，客户端探针早已实证；
+ *   - 服务端自身私钥解析实证存留：PK_PARSE/PEM_PARSE/RSA/ECP 均在，
+ *     明文 EC/RSA 私钥可解析（B3 只裁了 PKCS5/PKCS12 加密容器与写侧，
+ *     见 evidence/w78/agent-d/logs/pk-parse-check-before.log）；
+ *   - KEEP_PEER_CERTIFICATE 维持开启（TLS1.3 硬依赖，B2 实证）。
+ * 仍保持裁剪：SESSION_TICKETS/TICKET_C/CACHE_C（网关逐连接新建，
+ * 无会话恢复需求，TLS1.3 无 NewSessionTicket 握手照常完成——已由
+ * tests/test_tls_srv.c 回环 mTLS 实证）、ALPN/DTLS/PSK 等维持原判。 */
 #undef MBEDTLS_SSL_ALL_ALERT_MESSAGES
 /* MBEDTLS_SSL_KEEP_PEER_CERTIFICATE 不可关: TLS1.3 硬依赖(check_config.h:833), B2 首跑实证 */
 #undef MBEDTLS_KEY_EXCHANGE_PSK_ENABLED

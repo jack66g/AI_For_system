@@ -424,7 +424,7 @@ static void ai_sched_sample_rq_depth(void)
 
 static void ai_sched_sample_psi(void)
 {
-#ifdef CONFIG_PSI
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
 	unsigned long some[3], full[3];
 	u8 res;
 

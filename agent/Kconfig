@@ -2,11 +2,11 @@
 #
 # AI Agent Subsystem Kconfig
 #
-# Top-level menu for AI Agent kernel integration.
+# AIKernel 用户态 agent（aikernel-shell）的构建入口；与 AIKernel/ 内核子系统的关系见 AIKernel/ARCHITECTURE.md（W78 菜单更名，符号 AI_AGENT 未变）。
 # When CONFIG_AI_AGENT is enabled, the kernel build descends into agent/ai/.
 #
 
-menu "AI Agent Support"
+menu "AIKernel Userspace Agent"
 
 config AI_AGENT
 	bool "AI Agent Support"

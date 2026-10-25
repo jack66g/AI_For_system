@@ -9,6 +9,7 @@
  *     桩恒放行，让 sandbox_spawn 的 W2 工具能走到执行段。
  */
 #include <stddef.h>
+#include <errno.h>
 #include <string.h>
 
 #include "netlink/ai_netlink_client.h"
@@ -44,6 +45,17 @@ int ai_nl_send_sense(struct ai_nl_client *cli,
 	(void)cli; (void)cpu; (void)max_records; (void)format; (void)ack;
 	(void)stream; (void)stream_cap; (void)stream_len; (void)kern_err;
 	return -1;
+}
+
+/* W78：event_listen 桩——非 AIKernel 环境（测试机）走诚实报错路径 */
+int ai_nl_send_reg(struct ai_nl_client *cli, __u32 flags,
+		   __s32 *ai_err, __u32 *count, int *kern_err)
+{
+	(void)cli; (void)flags;
+	if (ai_err) *ai_err = -1;
+	if (count) *count = 0;
+	if (kern_err) *kern_err = EACCES;
+	return AI_ERR_API;
 }
 
 const char *ai_nl_errno_hint(int errno_val)

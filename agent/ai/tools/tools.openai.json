@@ -1463,6 +1463,667 @@
   {
     "type": "function",
     "function": {
+      "name": "event_listen",
+      "description": "订阅 NETLINK_AI(31) 内核 AI 事件推送（AI_CMD_EVENT）：先 REG 登记 portid（需 root/CAP_SYS_ADMIN）再收推送事件。事件类别：category=1 策略执行结果（event_id=decision_id）、2 模型装载/卸载。输出 JSON 行（ts/event_id/category/severity/code/param）。须在 AIKernel 内核上运行（非 AIKernel 内核明确报错）。组合：sysfs_write_policy_think 触发决策→本工具收结果→procfs_read_chains 溯源。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "proc_watch",
+      "description": "订阅进程事件流（proc connector CN_PROC，需 root/CAP_NET_ADMIN）：实时捕获 fork/exec/exit/uid/comm 事件（含 pid/tgid），补足轮询 procfs 的时点盲区，是『谁在动』的实时感知面。组合：可疑进程→procfs_read_status 采样→netlink_act_proc_freeze 隔离。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "taskstats_sample",
+      "description": "按 pid 拉取内核任务延迟记账（TASKSTATS netlink，CONFIG_TASK_DELAY_ACCT=y）：CPU/阻塞IO/换入/缺页延迟累计(ns)+上下文切换，单任务粒度归因『这个进程为什么卡』。组合：pressure 看全局压→本工具定位元凶→sched_nice/affinity 处置。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 pid",
+            "minimum": 1,
+            "maximum": 4194304
+          }
+        },
+        "required": [
+          "pid"
+        ]
+      },
+      "sub": [
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nflog_dump",
+      "description": "订阅 NFLOG 包级取证流（nfnetlink_log CONFIG 绑定后内核单播回包）：需要 nftables 规则带 log/nflog 目标才有事件（无规则时返回 0 事件并提示）。每事件含五元组/hook/mark/prefix，payload_bytes>0 时附载荷首 N 字节十六进制。组合：netlink_sense 异常→config_write_nftables 加临时 log 规则→本工具取证→撤规则。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "description": "附载荷首 N 字节（0-256，0=不附）",
+            "minimum": 0,
+            "maximum": 256,
+            "default": 0
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_monitor",
+      "description": "订阅 rtnetlink 组播（链路/地址/IPv4+IPv6 路由变化）：实时感知网络拓扑变化（接口起落/地址增删/路由变更），输出 JSON 行（event/ifindex/ifname/addr/prefixlen/dst/oif/gateway）。组合：断网/换网第一手信号→procfs_read_net_nf_conntrack 复核→exec ip 诊断。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "udev_monitor",
+      "description": "订阅内核设备事件流（NETLINK_KOBJECT_UEVENT 组 1）：设备 add/remove/change/bind/unbind 实时感知（含 DEVPATH/SUBSYSTEM/DEVNAME 等属性），是『硬件在变』的感知面。组合：热插拔→exec lsblk 确认→策略响应；与 net_monitor 配对覆盖网络设备特例。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "psi_snapshot",
+      "description": "一次拿全系统压力快照：/proc/pressure/{cpu,memory,io} 三资源 some/full 均值 + loadavg + MemTotal/MemAvailable，替代 res 域 5 次单件采样（消除时点漂移）。W78 起 PSI 已编入。组合：本工具看全局压→taskstats_sample 定位元凶→处置→复测。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "kernel_ai_healthcheck",
+      "description": "in-kernel AI 子系统体检页：/proc/ai 的 status/control/hitrate/latency/决策与遥测计数一次读全（AIKernel 内核上；非该内核时各字段 unavailable）。aicore 域最高频前奏。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "disk_hogs",
+      "description": "存储占用快照：/proc/mounts 里 ext4/ext3/xfs/btrfs 挂载点逐个 statvfs，输出 used_pct/总量/可用。存储排查首诊一次成型。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "fs",
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "service_doctor",
+      "description": "服务故障首诊：一次拿 is-active + status + 最近 20 行 journal。参数 unit（如 sshd.service）。修复 combo-5 依赖：白名单已补 sshd（sshd -t 只读预检）。组合：config_read_sshd_config→（sshd -t 预检）→exec systemctl restart→复查。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string",
+            "description": "systemd unit 名（[A-Za-z0-9_.@-]）"
+          }
+        },
+        "required": [
+          "unit"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "baseline_diff",
+      "description": "把 sysctl_snapshot 的输出文本与当前 /proc/sys 实值逐键比对，输出差异清单（equal/baseline/current）。变更窗口与漂移巡检。组合：sysctl_snapshot 存基线→调参→本工具复核→sysctl_restore 回滚。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "baseline": {
+            "type": "string",
+            "description": "基线文本（sysctl_snapshot 输出，path=value 行）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sysctl_snapshot",
+      "description": "按前缀递归快照 /proc/sys（如 prefix=net.ipv4 或 net），输出 path=value 行（可喂给 baseline_diff/sysctl_restore）。R 只读。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "description": "sysctl 前缀（如 net / net.ipv4 / vm；空=全树，输出较大）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_list",
+      "description": "列出 aik-* 计划任务（systemd transient timers）。与 schedule_create/remove 配套；出厂未启 cron 守护，AI 定时任务统一走 systemd timer（W78 决策）。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sysctl_restore",
+      "description": "把 sysctl_snapshot 的输出整批写回 /proc/sys（逐键走既有 sysctl_set 通道与崩溃黑名单，失败键如实列出）。变更回滚/批量恢复。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "description": "快照文本（sysctl_snapshot 输出）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_create",
+      "description": "创建 AI 定时任务：systemd-run transient timer（OnCalendar），命令经 /bin/sh -c 执行；重启不保留（长期任务写 unit）。替代出厂已移除的 cron 断链。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务名（[A-Za-z0-9_.@-]，生成 aik-<name>.timer）"
+          },
+          "calendar": {
+            "type": "string",
+            "description": "OnCalendar 表达式（如 hourly / 'Mon *-*-* 03:00:00'）"
+          },
+          "command": {
+            "type": "string",
+            "description": "定时执行的命令（/bin/sh -c）"
+          }
+        },
+        "required": [
+          "name",
+          "calendar",
+          "command"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_remove",
+      "description": "停止并移除 aik-<name>.timer 计划任务（transient，stop 即除）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务名"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ip_ban_verified",
+      "description": "封禁 IP 并复查：插入 nft 运行时规则 inet filter input (ip|ip6) saddr <ip> drop，然后数 conntrack 残留（老化即消）。运行时规则重启即清；持久化走 config_write_nftables。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ip": {
+            "type": "string",
+            "description": "IPv4/IPv6 字面量"
+          }
+        },
+        "required": [
+          "ip"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "process_quarantine",
+      "description": "可疑进程隔离三连：sched.nice=19 → proc.freeze=1 → 读 /proc/<pid>/status 验证 State=F。比 kill 温和，可逆（proc.freeze=0 解冻）。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标 pid（>1）",
+            "minimum": 2,
+            "maximum": 4194304
+          }
+        },
+        "required": [
+          "pid"
+        ]
+      },
+      "sub": [
+        "res",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "model_verify",
+      "description": "内核模型装载-推理-卸载闭环验证：model_load(path)→model_in(固定探针)→读 model_out→unload。输出各步结果与输出内容（AIKernel 内核上）。combo-7 的固化。W1。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "AIKWMDL 模型文件绝对路径"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "model"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_iface",
+      "description": "rtnetlink 网卡启停（RTM_NEWLINK 只动 IFF_UP 位）：state=up|down。写前 RTM_GETLINK 读旧 flags 落输出（回滚凭据），写后回读验证 UP 位。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。回滚=state 反向再调一次。组合：net_monitor 感知接口起落→本工具处置→回读复核。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "description": "目标状态"
+          }
+        },
+        "required": [
+          "iface",
+          "state"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_addr_add",
+      "description": "rtnetlink 加地址（RTM_NEWADDR+IFA_LOCAL，NLM_F_EXCL：已存在如实报 EEXIST 不重复加）。写前 dump 该接口全部现地址（回滚凭据），写后回读验证在位。回滚=net_addr_del 同参数。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：net_link 场景先本工具再 net_route_add。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "addr": {
+            "type": "string",
+            "description": "CIDR 地址（如 192.168.5.9/24 或 fd00::9/64，前缀必填；inet_pton 双栈校验）"
+          }
+        },
+        "required": [
+          "iface",
+          "addr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_addr_del",
+      "description": "rtnetlink 删地址（RTM_DELADDR，按 IFA_LOCAL+前缀精确匹配）。写前 dump 该接口全部现地址（回滚凭据），写后回读验证已移除；地址本就不存在时报 EADDRNOTAVAIL。回滚=net_addr_add 同参数。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "addr": {
+            "type": "string",
+            "description": "CIDR 地址（同 net_addr_add）"
+          }
+        },
+        "required": [
+          "iface",
+          "addr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_route_add",
+      "description": "rtnetlink 加路由（RTM_NEWROUTE+RTA_DST/GATEWAY/OIF，table 默认 main；NLM_F_EXCL：同目标已存在如实报 EEXIST 不覆盖）。写前 dump 目标路由表相关路由（回滚凭据），写后回读验证。回滚=net_route_del 同参数。改默认路由可致断网/流量劫持：断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：net_addr_add 配地址→本工具加路由→net_monitor 复核。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dst": {
+            "type": "string",
+            "description": "目的网段 CIDR（如 192.168.99.0/24、fd00::/64；默认路由 0.0.0.0/0）"
+          },
+          "gateway": {
+            "type": "string",
+            "description": "网关裸地址（可选；须与 dst 同栈，不带前缀）"
+          },
+          "iface": {
+            "type": "string",
+            "description": "出接口名（可选）"
+          },
+          "table": {
+            "type": "string",
+            "default": "main",
+            "description": "路由表（main/local/default 或数字，默认 main）"
+          }
+        },
+        "required": [
+          "dst"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_route_del",
+      "description": "rtnetlink 删路由（RTM_DELROUTE，按 dst 前缀+table 匹配，gateway/iface 给出时一并参与匹配）。写前 dump 目标路由表相关路由（回滚凭据），写后回读验证已移除；路由本就不存在时报 ESRCH。回滚=net_route_add 同参数。误删默认路由即断网：断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dst": {
+            "type": "string",
+            "description": "目的网段 CIDR（同 net_route_add）"
+          },
+          "gateway": {
+            "type": "string",
+            "description": "网关裸地址（可选，匹配用）"
+          },
+          "iface": {
+            "type": "string",
+            "description": "出接口名（可选，匹配用）"
+          },
+          "table": {
+            "type": "string",
+            "default": "main",
+            "description": "路由表（默认 main）"
+          }
+        },
+        "required": [
+          "dst"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_link_del",
+      "description": "rtnetlink 删接口（RTM_DELLINK）。内核只允许删虚拟接口（dummy/veth/vlan/bridge/wireguard 等 rtnl 创建的设备；物理网卡一律 EOPNOTSUPP 拒绝——安全边界由内核保证）。写前读旧 flags+kind 落输出（重建凭据），写后回读验证已消失。回滚=按 kind 用 exec 「ip link add <name> type <kind>」重建，地址/路由需另行恢复。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：诊断用 dummy 接口生命周期收尾（配 net_addr_*/net_route_* 演练）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          }
+        },
+        "required": [
+          "iface"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_txn",
+      "description": "nftables 规则级事务：ops 每条一个 nft 片段（如「add rule inet filter input ip saddr 1.2.3.4 drop」），逐条内容校验（禁分号/换行/反引号/$()）后写 0600 临时文件，先 nft -c -f 全量语法预检（不生效，失败即拒绝并回显 nft 错误），dry_run=true 到此为止输出「预检通过未应用」；否则 nft -f 正式应用（单文件单批次提交）后 nft list ruleset 抽查关键串验证落位，输出每步结果；含 delete/flush 的 op 显式标注警告。运行时规则重启即清，持久化另走 config_write_nftables。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸（出厂 SSH 放行规则严禁删除）。组合：netlink_sense/conntrack 发现异常源→本工具加 drop 规则→nflog_dump 取证→撤规则。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ops": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "nft 命令片段数组（每条一行，1-32 条，单条 ≤512 字节；禁分号/换行/反引号/$()）"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "只做 nft -c 语法预检不应用"
+          }
+        },
+        "required": [
+          "ops"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "procfs_read_net_nf_conntrack",
       "description": "读取 /proc/net/nf_conntrack（只读）：内核连接跟踪表（nf_conntrack：每条连接的源/目的地址与端口、协议、状态与超时；查「当前有哪些网络连接/谁连着我/连接数多少」用它；补充手段：exec ss 查套接字级连接",
       "parameters": {
@@ -1529,6 +2190,10 @@
               "ethtool",
               "conntrack",
               "hostnamectl",
+              "sshd",
+              "networkctl",
+              "loginctl",
+              "udevadm",
               "resolvectl",
               "findmnt",
               "blkid",
@@ -1582,8 +2247,7 @@
               "aa-disable",
               "aik-backup",
               "aik-reset",
-              "aik-upgrade",
-              "crontab"
+              "aik-upgrade"
             ]
           },
           "args": {

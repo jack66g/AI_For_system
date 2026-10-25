@@ -30,7 +30,7 @@ tests=(
     test_utf8_body test_http_retry test_cloud_stream test_provider_stream
     test_parallel_toolcalls test_toolcall_backfill
     test_sandbox_programming test_sme_degraded test_export_path
-    test_paste_merge test_ask_repair test_memory_degraded_all
+    test_paste_merge test_ask_repair test_memory_degraded_all test_streams test_tls_srv test_macros test_net_admin
 )
 
 pass=0
@@ -84,7 +84,8 @@ for spec in \
     "tests/test_clarify_gate.py --agent-dir ." \
     "tests/test_api_clarify_e2e.py --agent-dir ." \
     "tests/test_registry_manifest.py" \
-    "tests/test_corpus_aliases.py"
+    'tests/test_corpus_aliases.py' \
+    'tests/test_tls_gateway.py'
 do
     # shellcheck disable=SC2086
     if timeout 300 python3 $spec > "/tmp/aik-$(basename "$spec" .py).log" 2>&1; then
