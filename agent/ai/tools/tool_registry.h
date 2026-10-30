@@ -44,6 +44,7 @@ enum tool_channel {
 	TOOL_CH_NETADMIN,	/* W78：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2） */
 	TOOL_CH_WORKSPACE,	/* W79：持久工作区（磁盘镜像 + 隔离执行） */
 	TOOL_CH_SCHED,		/* W79：双调度台（static/ml/off + 10 旋钮 + A/B） */
+	TOOL_CH_BPF,		/* W80：BPF loader（load/list/unload）+ nfqueue */
 	TOOL_CH_UNKNOWN,
 };
 

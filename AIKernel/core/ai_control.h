@@ -9,7 +9,8 @@
  *
  * 立即生效参数（内核行为实际修改）：
  *   sched.nice / sched.affinity / sched.oom_score（task_struct 字段）、
- *   mm.swappiness（vm_swappiness）。
+ *   mm.swappiness（vm_swappiness）、sec.ws_label（per-task 工作区标签，
+ *   W80；标签存 LSM blob，规则命中后由 ai LSM 的 socket/file hook 拦截）。
  * 接口预留参数（注册/安全/记录全量生效，内核行为接线在对应子系统步骤）：
  *   sched.timeslice、mm.readahead/thp/reclaim_prio、io.priority/bandwidth、
  *   net.cwnd/rto/qdisc/nftables、sec.lsm_override/seccomp/audit、
@@ -33,6 +34,8 @@
 #define AI_CTRL_F_REAL    (1U << 0)   /* 立即生效（真实修改内核行为） */
 #define AI_CTRL_F_TASK    (1U << 1)   /* task 作用域（data[0]=pid, data[1]=值） */
 #define AI_CTRL_F_EVENT   (1U << 2)   /* 事件型参数：重复同值仍执行（如信号投递） */
+#define AI_CTRL_F_IDENT   (1U << 3)   /* 标识型参数：跳过 max_impact 幅度限幅
+				       * （仅保留硬范围；如 sec.ws_label 标签） */
 
 /* ---- 参数描述符 ---- */
 

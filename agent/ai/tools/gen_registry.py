@@ -86,6 +86,7 @@ CH_MACRO = "macro"          # W78：宏工具（高频组合升格）
 CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2）
 CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行，六件）
 CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B 对照，五件）
+CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -385,6 +386,11 @@ SUB_MAP = {
     "sched_mode_set": ["res", "aicore"],
     "sched_snapshot": ["res"],
     "sched_ab_run": ["res", "aicore"],
+    # ---- bpf loader / nfqueue（四件，W80）----
+    "bpf_prog_load": ["netsec"],
+    "bpf_prog_list": ["netsec"],
+    "bpf_prog_unload": ["netsec"],
+    "nfqueue_pump": ["netsec"],
 }
 
 # ---------------------------------------------------------------------------
@@ -752,7 +758,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 193        # 主表 tools.json（W79：188 + 5 双调度台）
+EXPECTED_TOOL_COUNT = 197        # 主表 tools.json（W80：193 + 4 BPF/nfqueue）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -952,8 +958,12 @@ EXPECTED_TOOL_NAMES = [
     "sched_mode_set",
     "sched_snapshot",
     "sched_ab_run",
+    "bpf_prog_load",
+    "bpf_prog_list",
+    "bpf_prog_unload",
+    "nfqueue_pump",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "903a4c898d94cbe7ad383dc2dac8513d9c33d7c1ac58d48435a6bdd3689592b2"
+EXPECTED_TOOL_NAMES_SHA256 = "96f81f10c59dcde5919eeb8593358ee299d64d83f7896fa2873b83fe674da93f"
 
 
 def manifest_sha256(names):
@@ -2577,6 +2587,161 @@ def sched_tools():
     ]
 
 
+# ---------------------------------------------------------------------------
+# W80：用户态 BPF loader + nfqueue 消费者（bpf 通道，四件）
+#
+# 不引 libbpf / libnetfilter_queue：bpf() 系统调用 + NETLINK_NETFILTER(12)
+# 原始报文。文件加载只认自定义 AIKBPF01 格式（不解析 ELF）。LSM 的
+# attach_btf_id 由 /sys/kernel/btf/vmlinux 的最小 BTF 解析取得（指向
+# bpf_lsm_file_open），struct file.f_path 偏移同样来自 BTF，不硬编码。
+# 内核能力（CONFIG_BPF_LSM / CONFIG_NETFILTER_NETLINK_QUEUE /
+# unprivileged_bpf_disabled）在每个工具输出里真探测回报；#60 上预期
+# 失败的路径（LSM 加载、nfqueue 绑定）必须如实失败，待 #61 验证。
+# ---------------------------------------------------------------------------
+BPF_ATTACH_HELP = ("attach=true 时 LSM 走 BPF_LINK_CREATE(BPF_LSM_MAC)，"
+                   "TRACEPOINT 走 perf_event + BPF_LINK_CREATE("
+                   "BPF_PERF_EVENT)；附着失败会自动卸载，零残留。")
+
+
+def tool_bpf_prog_load():
+    return {
+        "name": "bpf_prog_load",
+        "channel": CH_BPF,
+        "risk": RISK_W2,
+        "description": "加载一个 BPF 程序（W2，不引 libbpf：直接 bpf() "
+                       "系统调用）。sample=minimal 为最小 TRACEPOINT 程序"
+                       "（r0=0;exit，验证 loader 链路）；sample=deny_path 为"
+                       "手写 LSM file_open 程序：路径前缀命中返回 -EPERM，"
+                       "attach_btf_id 从 /sys/kernel/btf/vmlinux 解析 "
+                       "bpf_lsm_file_open、struct file.f_path 偏移同样来自 "
+                       "BTF（不硬编码）。file=... 读取自定义 AIKBPF01 格式"
+                       "（8B magic + 头 + raw 指令；不解析 ELF）。" +
+                       BPF_ATTACH_HELP +
+                       " 输出带真实能力探测（unprivileged_bpf_disabled / "
+                       "vmlinux BTF / CONFIG_BPF_LSM / 活动 LSM）；当前 #60 "
+                       "内核 CONFIG_BPF_LSM=n 时加载如实失败并说明需 #61，"
+                       "绝不伪造成功。",
+        "parameters": obj_schema(
+            {
+                "sample": {"type": "string",
+                           "description": "内置样例：minimal=最小 TRACEPOINT；"
+                                          "deny_path=LSM file_open 路径前缀"
+                                          "拒绝（-EPERM）",
+                           "enum": ["minimal", "deny_path"]},
+                "file": {"type": "string",
+                         "description": "自定义 .bpf 文件绝对路径（AIKBPF01"
+                                        " 格式：magic+头+raw 指令；本 loader"
+                                        " 不解析 ELF）"},
+                "prog_type": {"type": "string",
+                              "description": "文件加载时校验/覆盖程序类型"
+                                             "（头里的 prog_type 为准，不一致"
+                                             "直接报错）",
+                              "enum": ["lsm", "tracepoint"]},
+                "prefix": {"type": "string",
+                           "description": "deny_path 命中路径前缀（1..32 "
+                                          "字节，默认 /tmp/aikbpf）"},
+                "tracepoint": {"type": "string",
+                               "description": "minimal 附着点 group/name"
+                                              "（默认自动选 syscalls/"
+                                              "sys_enter_openat 等）"},
+                "attach": {"type": "boolean",
+                           "description": "加载后立即附着（默认 true）；"
+                                          "失败会自动卸载并如实报错",
+                           "default": True},
+            },
+            []),
+    }
+
+
+def tool_bpf_prog_list():
+    return {
+        "name": "bpf_prog_list",
+        "channel": CH_BPF,
+        "risk": RISK_R,
+        "description": "列出已加载的 BPF 程序（R）：BPF_PROG_GET_NEXT_ID → "
+                       "BPF_PROG_GET_FD_BY_ID → BPF_OBJ_GET_INFO_BY_FD，返回 "
+                       "id/type/name/tag/created_by_uid 与 mine（是否本进程"
+                       "持有）；同时回报 unprivileged_bpf_disabled、"
+                       "vmlinux BTF 是否存在、CONFIG_BPF_LSM 与活动 LSM。"
+                       "非 root 在 unprivileged_bpf_disabled=2 时枚举会 "
+                       "EPERM，如实报错并给出 sudo ai 指引。",
+        "parameters": obj_schema({}, []),
+    }
+
+
+def tool_bpf_prog_unload():
+    return {
+        "name": "bpf_prog_unload",
+        "channel": CH_BPF,
+        "risk": RISK_W1,
+        "description": "卸载本进程加载的 BPF 程序（W1）：先解 link，再关闭 "
+                       "prog fd，最后用 BPF_PROG_GET_FD_BY_ID 复验 ENOENT"
+                       "（仍被他方引用时如实报'未完全卸载'）。只能卸载 "
+                       "mine=yes 的程序；他方程序拒绝并说明原因（关闭别人的"
+                       " fd 既无权限也做不到）。进程退出时 fd 自动关闭，"
+                       "同样零残留。",
+        "parameters": obj_schema(
+            {"id": {"type": "integer",
+                    "description": "程序 id（bpf_prog_load 的 prog_id 或 "
+                                   "bpf_prog_list 的 prog_id）",
+                    "minimum": 1}},
+            ["id"]),
+    }
+
+
+def tool_nfqueue_pump():
+    return {
+        "name": "nfqueue_pump",
+        "channel": CH_BPF,
+        "risk": RISK_W2,
+        "description": "绑定 NFQUEUE 并消费数据包（W2，不引 "
+                       "libnetfilter_queue：NETLINK_NETFILTER=12 原始 "
+                       "NFQNL_MSG_CONFIG/PACKET/VERDICT）。queue 0..65535、"
+                       "timeout_ms 100..60000、max_packets 1..1000 为硬上限"
+                       "（防挂死）；收到包打印五元组（IPv4/IPv6 + TCP/UDP "
+                       "端口）并按 policy=accept|drop 回 verdict；超时或达"
+                       "上限即 UNBIND 并关闭 socket（零残留）。注意：本工具"
+                       "不安装 nft/iptables 规则，没有规则引流的队列会等到"
+                       "超时（预期）；#60 内核未编 CONFIG_NETFILTER_"
+                       "NETLINK_QUEUE 时绑定失败并明确报'需 #61'。",
+        "parameters": obj_schema(
+            {
+                "queue": {"type": "integer",
+                          "description": "NFQUEUE 队列号（0..65535，默认 0）",
+                          "minimum": 0, "maximum": 65535, "default": 0},
+                "timeout_ms": {"type": "integer",
+                               "description": "硬超时毫秒（100..60000，"
+                                              "默认 3000）",
+                               "minimum": 100, "maximum": 60000,
+                               "default": 3000},
+                "max_packets": {"type": "integer",
+                                "description": "最多处理包数（1..1000，"
+                                               "默认 10）",
+                                "minimum": 1, "maximum": 1000,
+                                "default": 10},
+                "policy": {"type": "string",
+                           "description": "收到包后的 verdict：accept（放行）"
+                                          "| drop（丢弃）",
+                           "enum": ["accept", "drop"],
+                           "default": "accept"},
+                "family": {"type": "string",
+                           "description": "绑定/解析的地址族：ipv4 | ipv6",
+                           "enum": ["ipv4", "ipv6"],
+                           "default": "ipv4"},
+            },
+            []),
+    }
+
+
+def bpf_tools():
+    return [
+        tool_bpf_prog_load(),
+        tool_bpf_prog_list(),
+        tool_bpf_prog_unload(),
+        tool_nfqueue_pump(),
+    ]
+
+
 def memory_tools():
     """W50 SME 完整管理面 29 工具（+ memory_health = 30）"""
     id_param = {"id": {"type": "string",
@@ -2967,6 +3132,7 @@ CHANNEL_RETURN = {
     CH_NETADMIN: "返回写前旧值（回滚凭据）+ 写回执 + 写后回读验证；nft_txn 返回校验/预检/应用/抽查逐步结果。",
     CH_WORKSPACE: "返回工作区状态/详情或工作区内命令的 stdout/stderr 与退出码；destroy 幂等。",
     CH_SCHED: "返回台子状态/旋钮写回读（期望 vs 实际）/快照内容或 A/B 报告路径与关键指标；读回不一致一律 FAIL。",
+    CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
 }
 
 
@@ -3033,6 +3199,14 @@ TOOL_ALIASES.update({
     "sched_ab_run": "A/B 对照、对比两种调度参数、调度实验、吞吐延迟对比、"
                     "公平性、能耗代理、benchmark scheduling policies、"
                     "A/B test scheduler",
+    "bpf_prog_load": "加载 BPF 程序、eBPF 加载、BPF LSM、lsm/file_open、"
+                     "路径拦截、deny path、BPF loader、load bpf program",
+    "bpf_prog_list": "BPF 程序列表、已加载的 BPF、eBPF 程序查看、BPF 程序"
+                     "id/tag、list bpf programs",
+    "bpf_prog_unload": "卸载 BPF 程序、删除 eBPF、释放 BPF、unload bpf "
+                       "program、BPF 清理",
+    "nfqueue_pump": "NFQUEUE、netfilter 队列、收包 verdict、nfqueue 消费者、"
+                    "包过滤用户态、packet verdict、netfilter queue",
 })
 
 
@@ -3749,6 +3923,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(workspace_tools())
     # W79：双调度台五件（追加在清单末尾；锚点按装配顺序同步）
     tools.extend(sched_tools())
+    # W80：BPF loader + nfqueue 四件（追加在清单末尾；锚点按装配顺序同步）
+    tools.extend(bpf_tools())
     return tools
 
 
@@ -4070,7 +4246,7 @@ def main():
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
                CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
-               CH_SCHED):
+               CH_SCHED, CH_BPF):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

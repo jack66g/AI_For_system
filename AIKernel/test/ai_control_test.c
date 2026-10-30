@@ -214,6 +214,39 @@ static void lsm_seccomp_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ai_lsm_rule_del(424242), AI_OK);
 	KUNIT_EXPECT_EQ(test, ai_lsm_rule_count(), 0U);
 
+	/* W80：label/path 维度规则 + 非法参数 + clear（引擎与 lsm= 解耦） */
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_add_label(7,
+			AI_LSM_OP_SOCKET_CONNECT, true, "kunit-label"), AI_OK);
+	/* 同 label+op 再写 = 更新，不占新槽 */
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_add_label(7,
+			AI_LSM_OP_SOCKET_CONNECT, false, "kunit-label"), AI_OK);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_count(), 1U);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_add_path("/tmp/kunit",
+			AI_LSM_OP_FILE_WRITE, true, "kunit-path"), AI_OK);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_count(), 2U);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_add_label(0, AI_LSM_OP_ANY, true,
+			"bad"), AI_ERR_INVALID_ARG);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_add_path("", AI_LSM_OP_ANY, true,
+			"bad"), AI_ERR_INVALID_ARG);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_clear(), AI_OK);
+	KUNIT_EXPECT_EQ(test, ai_lsm_rule_count(), 0U);
+
+	/* W80：sec.ws_label = per-task REAL 参数 */
+	{
+		int idx = ai_control_find("sec.ws_label");
+		struct ai_control_param p;
+
+		KUNIT_EXPECT_GE(test, idx, 0);
+		if (idx >= 0) {
+			KUNIT_EXPECT_EQ(test,
+					ai_control_query((u32)idx, &p), AI_OK);
+			KUNIT_EXPECT_NE(test,
+					(u32)(p.flags & AI_CTRL_F_REAL), 0U);
+			KUNIT_EXPECT_NE(test,
+					(u32)(p.flags & AI_CTRL_F_TASK), 0U);
+		}
+	}
+
 	rc = execute_named("sec.lsm_override", AI_POLICY_DOMAIN_SECURITY,
 			   0, 0, 0);
 	KUNIT_EXPECT_EQ(test, rc, 1);

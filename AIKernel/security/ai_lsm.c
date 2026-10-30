@@ -6,7 +6,10 @@
  * 安全框架行为与原生完全一致（可插拔 LSM，lsm=ai,... 启动参数显式启用）。
  *
  * A 轨（重构计划 6.1/6.2/6.3/6.4/6.5/6.8）：
- *   - LSM 钩子（file_open/task_kill/ptrace_access_check）+ 行为建模与异常检测框架；
+ *   - LSM 钩子（W80：file_open/task_alloc/file_permission/socket_connect/
+ *     socket_sendmsg/task_kill/ptrace_access_check）+ 行为建模与异常检测框架；
+ *   - W80 三维规则（pid > label > path_prefix）与 per-task 工作区标签
+ *     （LSM blob，fork 继承、退出随 blob 释放）；
  *   - ai_sec_seccomp/cap/key/crypto_hook：AI 决策接入点（空实现=原样放行；
  *     sec.seccomp 参数已于 W49 如实降级 reserved，见文末说明）；
  *   - ai_sec_syscall_name()：syscall 号→名称（低频事件专用）。
@@ -25,7 +28,10 @@
 #include <linux/lsm_hooks.h>
 #include "ai_audit.h"
 #include <linux/fs.h>
+#include <linux/dcache.h>
 #include <linux/signal.h>
+#include <linux/sched/signal.h>
+#include <linux/pid.h>
 #include <linux/ptrace.h>
 #include <linux/kallsyms.h>
 #include <linux/spinlock.h>
@@ -35,10 +41,106 @@
 #include <linux/time.h>
 #include <linux/minmax.h>
 #include <linux/kernel.h>
+#include <linux/jump_label.h>
+#include <linux/net.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <uapi/linux/lsm.h>
 #include <asm/syscall.h>
 #include "ai_lsm.h"
 #include "../core/ai_control.h"
+
+/* ==================================================================
+ * 工作区标签（workspace label，W80）
+ *
+ * 存储：per-task LSM blob（lbs_task，1 字节），不改 task_struct 布局；
+ *       任务退出时 task->security 随 security_task_free() 释放，无泄漏。
+ * 继承：task_alloc 钩子从父任务复制（CLONE_THREAD 同线程组一致；
+ *       fork 后标签相同，之后各自独立）。
+ * 默认：0 = 无标签，不参与任何 label 规则（空表/无标签零回归）。
+ * 门控：仅 lsm= 启用 'ai' 时 prepare_lsm() 才分配 blob 偏移，
+ *       ai_lsm_init() 置 ai_lsm_blob_ready；未启用时设置返回
+ *       AI_ERR_DISABLED、读取恒为 0，规则引擎照常工作（pid 规则不受影响）。
+ * ================================================================== */
+
+struct ai_lsm_task_blob {
+	u8 ws_label;
+};
+
+static struct lsm_blob_sizes ai_lsm_blob_sizes __ro_after_init = {
+	.lbs_task = sizeof(struct ai_lsm_task_blob),
+};
+
+static bool ai_lsm_blob_ready __ro_after_init;
+
+static u8 *ai_lsm_task_label_ptr(struct task_struct *task)
+{
+	if (!ai_lsm_blob_ready || !task || !task->security)
+		return NULL;
+	return (u8 *)task->security + ai_lsm_blob_sizes.lbs_task;
+}
+
+static u8 ai_lsm_label_get(struct task_struct *task)
+{
+	u8 *p = ai_lsm_task_label_ptr(task);
+
+	return p ? READ_ONCE(*p) : 0;
+}
+
+int ai_lsm_ws_label_set(s32 pid, u8 label)
+{
+	struct task_struct *task, *t;
+
+	if (!ai_lsm_blob_ready)
+		return AI_ERR_DISABLED;
+	if (pid <= 0)
+		return AI_ERR_INVALID_ARG;
+
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return AI_ERR_NOT_FOUND;
+
+	/* 线程组一致：整组线程同标签（CLONE_THREAD 语义） */
+	rcu_read_lock();
+	for_each_thread(task, t) {
+		u8 *p = ai_lsm_task_label_ptr(t);
+
+		if (p)
+			WRITE_ONCE(*p, label);
+	}
+	rcu_read_unlock();
+	put_task_struct(task);
+	return AI_OK;
+}
+
+int ai_lsm_ws_label_get(s32 pid, u8 *label)
+{
+	struct task_struct *task;
+
+	if (!label)
+		return AI_ERR_INVALID_ARG;
+	if (!ai_lsm_blob_ready)
+		return AI_ERR_DISABLED;
+	if (pid <= 0)
+		return AI_ERR_INVALID_ARG;
+
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return AI_ERR_NOT_FOUND;
+	*label = ai_lsm_label_get(task);
+	put_task_struct(task);
+	return AI_OK;
+}
+
+static int ai_lsm_task_alloc(struct task_struct *task, u64 clone_flags)
+{
+	u8 *dst = ai_lsm_task_label_ptr(task);
+	u8 label = ai_lsm_label_get(current);
+
+	if (dst)
+		WRITE_ONCE(*dst, label);
+	return 0;
+}
 
 /* ==================================================================
  * 行为模型表（per-pid 计数 + 滑动基线；无分配，spinlock 保护）
@@ -113,43 +215,306 @@ static void ai_lsm_model_update(struct ai_lsm_model *m, u64 now, int kind)
 }
 
 /* ==================================================================
- * AI 决策规则表（subject pid → allow/deny；空表=全放行=零回归）
+ * AI 决策规则表（W80 三维：pid / label / path_prefix）
+ *
+ * 匹配顺序（冲突时"更具体的赢"，级别优先于同类内部得分）：
+ *   1) pid 精确规则（旧接口，向后兼容）
+ *   2) label 规则（工作区标签，label 0 不参与）
+ *   3) path_prefix 规则（最长前缀优先）
+ * 同级内：op 具体 > ANY；平手时 deny 优先（保守）。
+ *
+ * 执行语义：
+ *   - 旧 pid 规则保持 sec.lsm_override 档位（默认 observe 仅记录，
+ *     enforce 才拦截）；
+ *   - label/path 规则是显式工作区策略，命中 deny 立即拦截（不依赖
+ *     sec.lsm_override），否则 W80 "工作区进程内核强制禁网"无法成立。
+ *
+ * 空表零回归：所有新 hook 先 atomic_read(nr_rules) 快路径（空表=立即
+ * 返回 0），不做路径构造、不取标签、不扫表。
+ *
+ * 内存：64 槽 × 136B ≈ 8.5KiB（旧 72B/槽约 4.5KiB，增长约 4KiB，静态）。
  * ================================================================== */
 
+enum ai_lsm_rule_kind {
+	AI_LSM_RULE_FREE = 0,
+	AI_LSM_RULE_PID,
+	AI_LSM_RULE_LABEL,
+	AI_LSM_RULE_PATH,
+};
+
 struct ai_lsm_rule {
-	u32 pid;
+	u32 pid;			/* PID 规则目标 */
+	u8 kind;			/* enum ai_lsm_rule_kind */
+	u8 label;			/* LABEL 规则标签（1~255） */
+	u8 op_type;			/* enum ai_lsm_op_type */
 	bool deny;
+	char path_prefix[AI_LSM_PATH_PREFIX_LEN];
+	char detail[AI_SEC_DETAIL_LEN];
+};
+
+/* 一次规则查询的裁决结果 */
+struct ai_lsm_verdict {
+	bool deny;			/* 命中规则是否要求拒绝 */
+	u8 rule_kind;			/* 命中的规则类别 */
+	u8 label;			/* 查询时的任务标签 */
 	char detail[AI_SEC_DETAIL_LEN];
 };
 
 static struct ai_lsm_rule ai_lsm_rules[AI_LSM_RULE_MAX];
 static DEFINE_SPINLOCK(ai_lsm_rule_lock);
+/*
+ * 规则条数：所有 hook 的第一条指令是 atomic_read() 快路径（空表=全放行）。
+ * 不用 static key：规则增删可能发生在任意进程上下文，而 static key
+ * 的 inc/dec 可能睡眠，与自旋锁保护区无法原子配对；atomic_t 读在
+ * x86_64 是一条 MOV，代价与 jump label 同量级且无竞态。
+ */
+static atomic_t ai_lsm_nr_rules = ATOMIC_INIT(0);
+/* path 规则条数：无 path 规则时 file hook 跳过 d_path() 路径构造
+ * （读/写热路径上每 read()/write() 都会进 file_permission，路径构造
+ * 只在确有 path 规则时才付这笔钱）。 */
+static atomic_t ai_lsm_nr_path_rules = ATOMIC_INIT(0);
 static u32 ai_lsm_policy_version;
 
-static bool ai_lsm_rule_check(u32 pid, char *out_detail, size_t detail_size)
+static inline bool ai_lsm_rules_active(void)
 {
-	bool deny = false;
+	return atomic_read(&ai_lsm_nr_rules) != 0;
+}
+
+static inline bool ai_lsm_path_rules_active(void)
+{
+	return atomic_read(&ai_lsm_nr_path_rules) != 0;
+}
+
+static bool ai_lsm_path_match(const struct ai_lsm_rule *r, const char *path)
+{
+	size_t n = strlen(r->path_prefix);
+
+	if (!n || !path)
+		return false;
+	return strncmp(path, r->path_prefix, n) == 0;
+}
+
+/* 同类规则内选最具体的一条（调用者持 ai_lsm_rule_lock） */
+static struct ai_lsm_rule *ai_lsm_best_in_kind(u8 kind, u32 pid, u8 label,
+					       const char *path, u8 op)
+{
+	struct ai_lsm_rule *best = NULL;
+	int best_score = -1;
 	int i;
 
-	spin_lock(&ai_lsm_rule_lock);
 	for (i = 0; i < AI_LSM_RULE_MAX; i++) {
-		if (ai_lsm_rules[i].pid == pid) {
-			deny = ai_lsm_rules[i].deny;
-			if (out_detail && detail_size) {
-				strscpy(out_detail, ai_lsm_rules[i].detail,
-					detail_size);
-				out_detail[detail_size - 1] = '\0';
-			}
+		struct ai_lsm_rule *r = &ai_lsm_rules[i];
+		int score;
+
+		if (r->kind != kind)
+			continue;
+		if (r->op_type != AI_LSM_OP_ANY && r->op_type != op)
+			continue;
+
+		switch (kind) {
+		case AI_LSM_RULE_PID:
+			if (r->pid != pid)
+				continue;
+			score = r->op_type != AI_LSM_OP_ANY;
+			break;
+		case AI_LSM_RULE_LABEL:
+			if (!label || r->label != label)
+				continue;
+			score = r->op_type != AI_LSM_OP_ANY;
+			break;
+		default:
+			if (!ai_lsm_path_match(r, path))
+				continue;
+			/* 前缀越长越具体；等长时 op 具体者优先 */
+			score = (int)strlen(r->path_prefix) * 2 +
+				(r->op_type != AI_LSM_OP_ANY);
+			break;
+		}
+
+		if (score > best_score ||
+		    (score == best_score && best && r->deny && !best->deny)) {
+			best = r;
+			best_score = score;
+		}
+	}
+	return best;
+}
+
+static bool ai_lsm_rule_lookup(u32 pid, u8 label, const char *path, u8 op,
+			       struct ai_lsm_verdict *v)
+{
+	struct ai_lsm_rule *best;
+	unsigned long flags;
+
+	memset(v, 0, sizeof(*v));
+	v->label = label;
+
+	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
+	best = ai_lsm_best_in_kind(AI_LSM_RULE_PID, pid, label, path, op);
+	if (!best)
+		best = ai_lsm_best_in_kind(AI_LSM_RULE_LABEL, pid, label, path,
+					   op);
+	if (!best)
+		best = ai_lsm_best_in_kind(AI_LSM_RULE_PATH, pid, label, path,
+					   op);
+	if (best) {
+		v->rule_kind = best->kind;
+		v->deny = best->deny;
+		strscpy(v->detail, best->detail, sizeof(v->detail));
+	}
+	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
+
+	return best != NULL;
+}
+
+u32 ai_lsm_rule_count(void)
+{
+	return (u32)atomic_read(&ai_lsm_nr_rules);
+}
+
+static int ai_lsm_rule_add_internal(u8 kind, u32 pid, u8 label, u8 op_type,
+				    const char *path_prefix, bool deny,
+				    const char *detail)
+{
+	struct ai_lsm_rule *slot = NULL;
+	unsigned long flags;
+	bool added = false;
+	int i;
+
+	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
+	for (i = 0; i < AI_LSM_RULE_MAX; i++) {
+		struct ai_lsm_rule *r = &ai_lsm_rules[i];
+
+		if (r->kind != kind || r->op_type != op_type)
+			continue;
+		if (kind == AI_LSM_RULE_PID && r->pid == pid) {
+			slot = r;
+			break;
+		}
+		if (kind == AI_LSM_RULE_LABEL && r->label == label) {
+			slot = r;
+			break;
+		}
+		if (kind == AI_LSM_RULE_PATH && path_prefix &&
+		    !strcmp(r->path_prefix, path_prefix)) {
+			slot = r;
 			break;
 		}
 	}
-	spin_unlock(&ai_lsm_rule_lock);
-	return deny;
+	if (!slot) {
+		for (i = 0; i < AI_LSM_RULE_MAX; i++) {
+			if (ai_lsm_rules[i].kind == AI_LSM_RULE_FREE) {
+				slot = &ai_lsm_rules[i];
+				added = true;
+				break;
+			}
+		}
+	}
+	if (!slot) {
+		spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
+		return AI_ERR_MEMORY;
+	}
+
+	memset(slot, 0, sizeof(*slot));
+	slot->kind = kind;
+	slot->pid = pid;
+	slot->label = label;
+	slot->op_type = op_type;
+	slot->deny = deny;
+	if (path_prefix)
+		strscpy(slot->path_prefix, path_prefix,
+			sizeof(slot->path_prefix));
+	strscpy(slot->detail, detail ? detail : "ai rule",
+		sizeof(slot->detail));
+	if (added)
+		atomic_inc(&ai_lsm_nr_rules);
+	if (added && kind == AI_LSM_RULE_PATH)
+		atomic_inc(&ai_lsm_nr_path_rules);
+	ai_lsm_policy_version++;
+	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
+
+	ai_telemetry_lsm_policy_load(AI_LSM_NAME, ai_lsm_policy_version,
+				     (u32)atomic_read(&ai_lsm_nr_rules) *
+				     (u32)sizeof(struct ai_lsm_rule));
+	return AI_OK;
+}
+
+int ai_lsm_rule_add(u32 pid, bool deny, const char *detail)
+{
+	if (!pid)
+		return AI_ERR_INVALID_ARG;
+	return ai_lsm_rule_add_internal(AI_LSM_RULE_PID, pid, 0,
+					AI_LSM_OP_ANY, NULL, deny, detail);
+}
+
+int ai_lsm_rule_add_label(u8 label, u8 op_type, bool deny, const char *detail)
+{
+	if (!label || op_type >= AI_LSM_OP_MAX)
+		return AI_ERR_INVALID_ARG;
+	return ai_lsm_rule_add_internal(AI_LSM_RULE_LABEL, 0, label, op_type,
+					NULL, deny, detail);
+}
+
+int ai_lsm_rule_add_path(const char *path_prefix, u8 op_type, bool deny,
+			 const char *detail)
+{
+	if (!path_prefix || !path_prefix[0] ||
+	    strlen(path_prefix) >= AI_LSM_PATH_PREFIX_LEN ||
+	    op_type >= AI_LSM_OP_MAX)
+		return AI_ERR_INVALID_ARG;
+	return ai_lsm_rule_add_internal(AI_LSM_RULE_PATH, 0, 0, op_type,
+					path_prefix, deny, detail);
+}
+
+int ai_lsm_rule_del(u32 pid)
+{
+	unsigned long flags;
+	u32 removed = 0;
+	int i;
+
+	if (!pid)
+		return AI_ERR_INVALID_ARG;
+
+	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
+	for (i = 0; i < AI_LSM_RULE_MAX; i++) {
+		if (ai_lsm_rules[i].kind == AI_LSM_RULE_PID &&
+		    ai_lsm_rules[i].pid == pid) {
+			memset(&ai_lsm_rules[i], 0, sizeof(ai_lsm_rules[i]));
+			atomic_dec(&ai_lsm_nr_rules);
+			removed++;
+		}
+	}
+	ai_lsm_policy_version++;
+	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
+
+	if (!removed)
+		return AI_ERR_NOT_FOUND;
+
+	ai_telemetry_lsm_policy_load(AI_LSM_NAME, ai_lsm_policy_version,
+				     (u32)atomic_read(&ai_lsm_nr_rules) *
+				     (u32)sizeof(struct ai_lsm_rule));
+	return AI_OK;
+}
+
+int ai_lsm_rule_clear(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
+	memset(ai_lsm_rules, 0, sizeof(ai_lsm_rules));
+	atomic_set(&ai_lsm_nr_rules, 0);
+	atomic_set(&ai_lsm_nr_path_rules, 0);
+	ai_lsm_policy_version++;
+	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
+
+	ai_telemetry_lsm_policy_load(AI_LSM_NAME, ai_lsm_policy_version, 0);
+	return AI_OK;
 }
 
 /* ==================================================================
  * sec.lsm_override 执行档位（AIKernel 自家 LSM 的 enforce/observe）
- * observe（默认）：规则命中仅记录放行；enforce：规则命中拦截。
+ * observe（默认）：旧 pid 规则命中仅记录放行；enforce：命中拦截。
+ * 仅作用于旧 pid 规则；label/path 规则是显式工作区策略，始终拦截。
  * 不覆盖上游 LSM 决策，仅切换 AIKernel 自家 LSM 的执行档位（参数名
  * 保持，描述如实）；默认 observe 与规则表初始为空共同保证零回归。
  * ================================================================== */
@@ -165,91 +530,6 @@ int ai_lsm_enforce_set(bool on)
 	WRITE_ONCE(ai_lsm_enforce_mode, on);
 	pr_info("AIKernel: sec.lsm_override -> %s\n",
 		on ? "enforce" : "observe");
-	return AI_OK;
-}
-
-u32 ai_lsm_rule_count(void)
-{
-	u32 n = 0;
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
-	for (i = 0; i < AI_LSM_RULE_MAX; i++)
-		if (ai_lsm_rules[i].pid)
-			n++;
-	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-	return n;
-}
-
-int ai_lsm_rule_add(u32 pid, bool deny, const char *detail)
-{
-	struct ai_lsm_rule *free = NULL;
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
-	for (i = 0; i < AI_LSM_RULE_MAX; i++) {
-		if (ai_lsm_rules[i].pid == pid) {
-			ai_lsm_rules[i].deny = deny;
-			strscpy(ai_lsm_rules[i].detail,
-				detail ? detail : "ai rule",
-				sizeof(ai_lsm_rules[i].detail));
-			ai_lsm_policy_version++;
-			spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-			ai_telemetry_lsm_policy_load(AI_LSM_NAME,
-						     ai_lsm_policy_version,
-						     AI_LSM_RULE_MAX * sizeof(struct ai_lsm_rule));
-			return AI_OK;
-		}
-		if (!free && !ai_lsm_rules[i].pid)
-			free = &ai_lsm_rules[i];
-	}
-	if (!free) {
-		spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-		return AI_ERR_MEMORY;
-	}
-	free->pid = pid;
-	free->deny = deny;
-	strscpy(free->detail, detail ? detail : "ai rule",
-		sizeof(free->detail));
-	ai_lsm_policy_version++;
-	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-	ai_telemetry_lsm_policy_load(AI_LSM_NAME, ai_lsm_policy_version,
-				     AI_LSM_RULE_MAX * sizeof(struct ai_lsm_rule));
-	return AI_OK;
-}
-
-int ai_lsm_rule_del(u32 pid)
-{
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
-	for (i = 0; i < AI_LSM_RULE_MAX; i++) {
-		if (ai_lsm_rules[i].pid == pid) {
-			ai_lsm_rules[i].pid = 0;
-			ai_lsm_policy_version++;
-			spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-			ai_telemetry_lsm_policy_load(AI_LSM_NAME,
-						     ai_lsm_policy_version,
-						     AI_LSM_RULE_MAX * sizeof(struct ai_lsm_rule));
-			return AI_OK;
-		}
-	}
-	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-	return AI_ERR_NOT_FOUND;
-}
-
-int ai_lsm_rule_clear(void)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&ai_lsm_rule_lock, flags);
-	memset(ai_lsm_rules, 0, sizeof(ai_lsm_rules));
-	ai_lsm_policy_version++;
-	spin_unlock_irqrestore(&ai_lsm_rule_lock, flags);
-	ai_telemetry_lsm_policy_load(AI_LSM_NAME, ai_lsm_policy_version, 0);
 	return AI_OK;
 }
 
@@ -311,10 +591,59 @@ int ai_lsm_stats_read(char *buf, size_t len, size_t *out_len)
  * LSM 钩子（语义与原生一致：0=允许 -errno=拒绝；默认全放行）
  * ================================================================== */
 
+/**
+ * ai_lsm_file_path() - 取 file 的绝对路径（用于 path_prefix 规则/遥测）
+ *
+ * d_path() 失败时回退到 dentry 末节名（仍可做 object_label）。
+ * 只在规则表非空时调用，避免热路径无谓的路径构造。
+ */
+static const char *ai_lsm_file_path(struct file *file, char *buf, size_t size)
+{
+	char *p;
+
+	if (!file || !buf || !size)
+		return NULL;
+	p = d_path(&file->f_path, buf, (int)size);
+	if (IS_ERR(p))
+		return file->f_path.dentry ?
+			(const char *)file->f_path.dentry->d_name.name : "?";
+	return p;
+}
+
+/*
+ * 旧 pid 规则在 file_open 上保持 sec.lsm_override 档位（observe 仅记录）；
+ * ptrace/task_kill 历史上不看档位、命中即拦，此处保持原语义。
+ * label/path 规则是显式工作区策略，任何 hook 都立即拦截。
+ */
+static bool ai_lsm_verdict_block(const struct ai_lsm_verdict *v,
+				 bool honor_observe)
+{
+	if (!v->deny)
+		return false;
+	if (honor_observe && v->rule_kind == AI_LSM_RULE_PID &&
+	    !ai_lsm_enforce_get())
+		return false;
+	return true;
+}
+
+static void ai_lsm_report(const char *hook, const char *object,
+			  const char *av, const struct ai_lsm_verdict *v)
+{
+	char avbuf[AI_SEC_AV_LEN];
+
+	scnprintf(avbuf, sizeof(avbuf), "ws=%u,%s", v->label, av);
+	ai_telemetry_lsm_deny(hook, current->comm, object, avbuf, v->detail);
+}
+
+static void ai_lsm_report_observe(const char *hook, const char *object)
+{
+	ai_telemetry_lsm_check(hook, current->comm, object, 0,
+			       "observe-allow");
+}
+
 static int ai_lsm_file_open(struct file *file)
 {
 	u32 pid;
-	char detail[AI_SEC_DETAIL_LEN] = { 0 };
 	unsigned long flags;
 	struct ai_lsm_model *m;
 	u64 now;
@@ -324,18 +653,27 @@ static int ai_lsm_file_open(struct file *file)
 
 	pid = current->pid;
 
-	/* 1) 决策表（AI 规则；sec.lsm_override 档位：enforce 拦截 /
-	 *    observe 仅记录放行） */
-	if (ai_lsm_rule_check(pid, detail, sizeof(detail))) {
-		if (ai_lsm_enforce_get()) {
-			ai_telemetry_lsm_deny("file_open", current->comm,
-					      file->f_path.dentry->d_name.name,
-					      "open", detail);
-			return -EPERM;
+	/* 1) 决策表（pid/label/path 三维；旧 pid 规则看 sec.lsm_override） */
+	if (ai_lsm_rules_active()) {
+		char pathbuf[AI_SEC_PATH_LEN];
+		const char *path;
+		struct ai_lsm_verdict v;
+		u8 label;
+
+		if (ai_lsm_path_rules_active())
+			path = ai_lsm_file_path(file, pathbuf, sizeof(pathbuf));
+		else
+			path = (const char *)file->f_path.dentry->d_name.name;
+		label = ai_lsm_label_get(current);
+		if (ai_lsm_rule_lookup(pid, label, path, AI_LSM_OP_FILE_OPEN,
+				       &v)) {
+			if (ai_lsm_verdict_block(&v, true)) {
+				ai_lsm_report("file_open", path, "open", &v);
+				return -EPERM;
+			}
+			if (v.deny)
+				ai_lsm_report_observe("file_open", path);
 		}
-		ai_telemetry_lsm_check("file_open", current->comm,
-				       file->f_path.dentry->d_name.name,
-				       0, "observe-allow");
 	}
 
 	/* 2) 行为建模 */
@@ -356,7 +694,6 @@ static int ai_lsm_ptrace_access_check(struct task_struct *child,
 				      unsigned int mode)
 {
 	u32 pid;
-	char detail[AI_SEC_DETAIL_LEN] = { 0 };
 	unsigned long flags;
 	struct ai_lsm_model *m;
 	u64 now;
@@ -366,13 +703,21 @@ static int ai_lsm_ptrace_access_check(struct task_struct *child,
 
 	pid = current->pid;
 
-	if (ai_lsm_rule_check(pid, detail, sizeof(detail))) {
-		ai_telemetry_lsm_deny("ptrace_access_check", current->comm,
-				      child->comm,
-				      (mode & PTRACE_MODE_ATTACH) ? "attach" :
-				      "read",
-				      detail);
-		return -EPERM;
+	if (ai_lsm_rules_active()) {
+		struct ai_lsm_verdict v;
+		u8 label = ai_lsm_label_get(current);
+		const char *av = (mode & PTRACE_MODE_ATTACH) ? "attach" : "read";
+
+		if (ai_lsm_rule_lookup(pid, label, NULL, AI_LSM_OP_ANY, &v)) {
+			if (ai_lsm_verdict_block(&v, false)) {
+				ai_lsm_report("ptrace_access_check", child->comm,
+					      av, &v);
+				return -EPERM;
+			}
+			if (v.deny)
+				ai_lsm_report_observe("ptrace_access_check",
+						      child->comm);
+		}
 	}
 
 	now = ktime_get_ns();
@@ -391,7 +736,6 @@ static int ai_lsm_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 			    int sig, const struct cred *cred)
 {
 	u32 pid;
-	char detail[AI_SEC_DETAIL_LEN] = { 0 };
 	char av[AI_SEC_AV_LEN];
 	unsigned long flags;
 	struct ai_lsm_model *m;
@@ -401,12 +745,20 @@ static int ai_lsm_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 		return 0;
 
 	pid = current->pid;
+	scnprintf(av, sizeof(av), "sig=%d", sig);
 
-	if (ai_lsm_rule_check(pid, detail, sizeof(detail))) {
-		scnprintf(av, sizeof(av), "sig=%d", sig);
-		ai_telemetry_lsm_deny("task_kill", current->comm, p->comm,
-				      av, detail);
-		return -EPERM;
+	if (ai_lsm_rules_active()) {
+		struct ai_lsm_verdict v;
+		u8 label = ai_lsm_label_get(current);
+
+		if (ai_lsm_rule_lookup(pid, label, NULL, AI_LSM_OP_ANY, &v)) {
+			if (ai_lsm_verdict_block(&v, false)) {
+				ai_lsm_report("task_kill", p->comm, av, &v);
+				return -EPERM;
+			}
+			if (v.deny)
+				ai_lsm_report_observe("task_kill", p->comm);
+		}
 	}
 
 	now = ktime_get_ns();
@@ -416,8 +768,127 @@ static int ai_lsm_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 		ai_lsm_model_update(m, now, 1);
 	spin_unlock_irqrestore(&ai_lsm_model_lock, flags);
 
-	scnprintf(av, sizeof(av), "sig=%d", sig);
 	ai_telemetry_lsm_check("task_kill", current->comm, p->comm, 0, av);
+	return 0;
+}
+
+/*
+ * socket_connect（W80）：label/path/pid 规则按 AI_LSM_OP_SOCKET_CONNECT 裁决。
+ * 仅检查 AF_INET/AF_INET6 —— 工作区"禁网"不波及 AF_UNIX（X11/dbus 等
+ * 本地 IPC 仍可用），与 netns 方案的行为边界一致。
+ */
+static int ai_lsm_socket_connect(struct socket *sock, struct sockaddr *address,
+				 int addrlen)
+{
+	struct ai_lsm_verdict v;
+	char obj[AI_SEC_OBJ_LABEL_LEN];
+	unsigned int family;
+	u8 label;
+
+	if (!ai_lsm_rules_active() || !current || !sock || !sock->ops)
+		return 0;
+
+	family = sock->ops->family;
+	if (family != AF_INET && family != AF_INET6)
+		return 0;
+
+	label = ai_lsm_label_get(current);
+	if (!ai_lsm_rule_lookup(current->pid, label, NULL,
+				AI_LSM_OP_SOCKET_CONNECT, &v))
+		return 0;
+
+	if (address)
+		scnprintf(obj, sizeof(obj), "%pISc", address);
+	else
+		scnprintf(obj, sizeof(obj), "af=%u", family);
+
+	if (ai_lsm_verdict_block(&v, true)) {
+		ai_lsm_report("socket_connect", obj, "connect", &v);
+		return -EPERM;
+	}
+	if (v.deny)
+		ai_lsm_report_observe("socket_connect", obj);
+	return 0;
+}
+
+/*
+ * socket_sendmsg（W80）：覆盖 UDP/DNS 等无 connect 的发送路径；
+ * 仅 AF_INET/AF_INET6，理由同 socket_connect。
+ */
+static int ai_lsm_socket_sendmsg(struct socket *sock, struct msghdr *msg,
+				 int size)
+{
+	struct ai_lsm_verdict v;
+	char obj[AI_SEC_OBJ_LABEL_LEN];
+	unsigned int family;
+	u8 label;
+
+	if (!ai_lsm_rules_active() || !current || !sock || !sock->ops)
+		return 0;
+
+	family = sock->ops->family;
+	if (family != AF_INET && family != AF_INET6)
+		return 0;
+
+	label = ai_lsm_label_get(current);
+	if (!ai_lsm_rule_lookup(current->pid, label, NULL,
+				AI_LSM_OP_SOCKET_SENDMSG, &v))
+		return 0;
+
+	scnprintf(obj, sizeof(obj), "af=%u", family);
+	if (ai_lsm_verdict_block(&v, true)) {
+		ai_lsm_report("socket_sendmsg", obj, "sendmsg", &v);
+		return -EPERM;
+	}
+	if (v.deny)
+		ai_lsm_report_observe("socket_sendmsg", obj);
+	return 0;
+}
+
+/*
+ * file_permission（W80）：按 label + path_prefix 拦截越界读写。
+ * 用 file_permission 而非 inode_permission，因为只有 file 携带 f_path，
+ * 才能做路径前缀匹配；mask 归并为 READ/WRITE/EXEC 三类操作。
+ */
+static int ai_lsm_file_permission(struct file *file, int mask)
+{
+	struct ai_lsm_verdict v;
+	char pathbuf[AI_SEC_PATH_LEN];
+	const char *path, *av;
+	u8 op, label;
+
+	if (!ai_lsm_rules_active() || !current)
+		return 0;
+
+	if (mask & (MAY_WRITE | MAY_APPEND)) {
+		op = AI_LSM_OP_FILE_WRITE;
+		av = "write";
+	} else if (mask & MAY_READ) {
+		op = AI_LSM_OP_FILE_READ;
+		av = "read";
+	} else if (mask & MAY_EXEC) {
+		op = AI_LSM_OP_FILE_EXEC;
+		av = "exec";
+	} else {
+		return 0;
+	}
+
+	if (ai_lsm_path_rules_active())
+		path = ai_lsm_file_path(file, pathbuf, sizeof(pathbuf));
+	else if (file && file->f_path.dentry)
+		path = (const char *)file->f_path.dentry->d_name.name;
+	else
+		path = "?";
+	label = ai_lsm_label_get(current);
+	if (!ai_lsm_rule_lookup(current->pid, label, path, op, &v))
+		return 0;
+
+	if (ai_lsm_verdict_block(&v, true)) {
+		ai_lsm_report("file_permission", path, av, &v);
+		return -EPERM;
+	}
+	if (v.deny)
+		ai_lsm_report_observe("file_permission", path);
 	return 0;
 }
 
@@ -427,9 +898,13 @@ static const struct lsm_id ai_lsm_lsmid = {
 };
 
 static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
+	LSM_HOOK_INIT(task_alloc, ai_lsm_task_alloc),
 	LSM_HOOK_INIT(file_open, ai_lsm_file_open),
+	LSM_HOOK_INIT(file_permission, ai_lsm_file_permission),
 	LSM_HOOK_INIT(ptrace_access_check, ai_lsm_ptrace_access_check),
 	LSM_HOOK_INIT(task_kill, ai_lsm_task_kill),
+	LSM_HOOK_INIT(socket_connect, ai_lsm_socket_connect),
+	LSM_HOOK_INIT(socket_sendmsg, ai_lsm_socket_sendmsg),
 };
 
 /* ==================================================================
@@ -522,6 +997,48 @@ void ai_sec_syscall_name(int nr, char *buf, size_t size)
 fallback:
 	scnprintf(buf, size, "sys_%d", nr);
 }
+
+/* ---- 工作区标签只读查询：/proc/ai/ws_labels（W80） ----
+ *
+ * 格式：<pid> <label> <comm>，仅列非 0 标签（0=无标签，无信息量）。
+ * 未塞进 /proc/ai/control：后者是"每行一个参数 name/domain/min/max/
+ * current/default"的固定格式（用户态按行解析），追加异形行会破坏既有
+ * 解析器。故用独立 proc 文件；节点由 ai_procfs 创建，ai LSM 未启用时
+ * 只是空列表。
+ */
+#if IS_ENABLED(CONFIG_PROC_FS) && IS_ENABLED(CONFIG_AIKERNEL_USRIFACE)
+extern struct proc_dir_entry *ai_procfs_get_root(void);
+
+static int ai_lsm_ws_labels_show(struct seq_file *m, void *v)
+{
+	struct task_struct *p, *t;
+
+	rcu_read_lock();
+	for_each_process(p) {
+		for_each_thread(p, t) {
+			u8 label = ai_lsm_label_get(t);
+
+			if (label)
+				seq_printf(m, "%u %u %s\n", t->pid, label,
+					   t->comm);
+		}
+	}
+	rcu_read_unlock();
+	return 0;
+}
+
+static int __init ai_lsm_ws_labels_init(void)
+{
+	struct proc_dir_entry *root = ai_procfs_get_root();
+
+	if (!root)
+		return 0;	/* ai.enabled=0 或 usriface 未初始化 */
+	proc_create_single("ws_labels", 0444, root, ai_lsm_ws_labels_show);
+	return 0;
+}
+late_initcall(ai_lsm_ws_labels_init);
+#endif /* CONFIG_PROC_FS && CONFIG_AIKERNEL_USRIFACE */
+
 /* ==================================================================
  * LSM 注册（可插拔：默认不在 CONFIG_LSM 列表 → 运行时禁用 → 零影响；
  * lsm=ai,... 启动参数显式启用）
@@ -532,7 +1049,8 @@ static int __init ai_lsm_init(void)
 	/* 可控制参数表（数据计划 20.3 安全域）已移至 ai_sec_control_init()
 	 * （late_initcall）：DEFINE_LSM init 仅在 lsm= 启用 'ai' 时执行，
 	 * 默认 boot 不注册会导致 control 表缺 sec.* —— 与 LSM 启用状态解耦 */
-	pr_info("AIKernel: AI LSM (name=%s id=%d) registered, %d model slots, %d rule slots\n",
+	ai_lsm_blob_ready = true;
+	pr_info("AIKernel: AI LSM (name=%s id=%d) registered, %d model slots, %d rule slots, ws_label=on\n",
 		AI_LSM_NAME, AI_LSM_ID, AI_LSM_MODEL_SLOTS, AI_LSM_RULE_MAX);
 	security_add_hooks(ai_lsm_hooks, ARRAY_SIZE(ai_lsm_hooks), &ai_lsm_lsmid);
 	return 0;
@@ -541,6 +1059,7 @@ static int __init ai_lsm_init(void)
 DEFINE_LSM(ai) = {
 	.name = AI_LSM_NAME,
 	.init = ai_lsm_init,
+	.blobs = &ai_lsm_blob_sizes,
 };
 
 /* ---- sec.seccomp：W49 如实降级为 reserved（无 AI_CTRL_F_REAL） ----
@@ -591,6 +1110,28 @@ static int ai_sec_audit_apply(struct ai_control_param *p, s32 pid,
 	return AI_OK;
 }
 
+/*
+ * sec.ws_label（W80）：per-task 工作区标签，ACT data[0]=pid、data[1]=label。
+ * 0~255 由控制表硬范围保证；label=0 清除标签。
+ * 标志说明：
+ *   TASK  —— data[0]=pid / data[1]=值（与 sched.nice 同约定）；
+ *   EVENT —— 控制表 for TASK 参数的快路径会按"全局 cur"去重，同一 label
+ *            写给不同 pid 时会被误判为同值跳过；EVENT 保证每次都执行；
+ *   IDENT —— label 是标识符不是幅度，必须跳过 ai_policy_safety 的
+ *            "相对当前值 ±max_impact%" 限幅（否则 0→200 会被砍到 127）。
+ */
+static int ai_sec_ws_label_apply(struct ai_control_param *p, s32 pid,
+				 s64 value, s64 *eff)
+{
+	int rc;
+
+	rc = ai_lsm_ws_label_set(pid, (u8)value);
+	if (rc != AI_OK)
+		return rc;
+	*eff = value;
+	return AI_OK;
+}
+
 /* ---- 可控制参数表（数据计划 20.3 安全域）：全部立即生效 ----
  * 独立 late_initcall：不依赖 lsm= 启用 'ai'，control 表 23 参数全量可见；
  * lsm=ai 双启用时安全（本处为唯一注册点，无重名冲突）。
@@ -606,6 +1147,11 @@ static int __init ai_sec_control_init(void)
 			    AI_CTRL_F_TASK, 0, 1, 0, NULL);
 	ai_control_register("sec.audit", AI_POLICY_DOMAIN_SECURITY,
 			    AI_CTRL_F_REAL, 0, 1, 1, ai_sec_audit_apply);
+	/* W80：per-task 工作区标签（0=无标签）；见 ai_sec_ws_label_apply 注释 */
+	ai_control_register("sec.ws_label", AI_POLICY_DOMAIN_SECURITY,
+			    AI_CTRL_F_REAL | AI_CTRL_F_TASK | AI_CTRL_F_EVENT |
+			    AI_CTRL_F_IDENT, 0, AI_LSM_LABEL_MAX, 0,
+			    ai_sec_ws_label_apply);
 	return 0;
 }
 late_initcall(ai_sec_control_init);

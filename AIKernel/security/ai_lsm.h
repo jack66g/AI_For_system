@@ -55,6 +55,26 @@
 #define AI_LSM_MODEL_SLOTS	256
 #define AI_LSM_RULE_MAX		64
 
+/* W80 工作区标签与规则维度 */
+#define AI_LSM_LABEL_MAX	255	/* workspace 标签上限（0=无标签） */
+#define AI_LSM_PATH_PREFIX_LEN	64	/* 路径前缀规则最大长度（含 NUL） */
+
+/*
+ * 规则操作类型（规则可按操作收窄；AI_LSM_OP_ANY 匹配全部操作）。
+ * file_open/file_permission/socket_connect/socket_sendmsg 传入各自操作，
+ * ptrace_access_check/task_kill 传 AI_LSM_OP_ANY（只命中 ANY 规则）。
+ */
+enum ai_lsm_op_type {
+	AI_LSM_OP_ANY = 0,
+	AI_LSM_OP_FILE_OPEN,
+	AI_LSM_OP_FILE_READ,
+	AI_LSM_OP_FILE_WRITE,
+	AI_LSM_OP_FILE_EXEC,
+	AI_LSM_OP_SOCKET_CONNECT,
+	AI_LSM_OP_SOCKET_SENDMSG,
+	AI_LSM_OP_MAX,
+};
+
 /* ---- 第8类子事件枚举（payload 首字节 type，对齐数据计划 8.1~8.8） ---- */
 
 enum ai_sec_sub_event {
@@ -323,9 +343,58 @@ void ai_sec_syscall_name(int nr, char *buf, size_t size);
  * @deny:   true=拒绝 false=放行
  * @detail: 规则说明（决策日志用）
  *
- * 返回 AI_OK 或负错误码（表满 AI_ERR_NO_MEMORY）。
+ * 旧 pid 规则（向后兼容）：命中后仍受 sec.lsm_override 档位控制
+ * （observe 仅记录、enforce 拦截）。返回 AI_OK 或负错误码
+ * （表满 AI_ERR_MEMORY）。
  */
 int ai_lsm_rule_add(u32 pid, bool deny, const char *detail);
+
+/**
+ * ai_lsm_rule_add_label() - 添加工作区标签规则
+ * @label:  工作区标签（1~255；0 非法 = 无标签不参与 label 规则）
+ * @op_type: AI_LSM_OP_*（ANY=全部操作）
+ * @deny:   true=拒绝 false=放行
+ * @detail: 规则说明
+ *
+ * label/path 规则是显式工作区策略：命中 deny 立即拦截（不受
+ * sec.lsm_override observe 档位影响）；旧 pid 规则保持 observe 语义。
+ */
+int ai_lsm_rule_add_label(u8 label, u8 op_type, bool deny, const char *detail);
+
+/**
+ * ai_lsm_rule_add_path() - 添加路径前缀规则
+ * @path_prefix: 绝对路径前缀（非空，最长 AI_LSM_PATH_PREFIX_LEN-1）
+ * @op_type:     AI_LSM_OP_*（ANY=全部文件操作）
+ * @deny:        true=拒绝 false=放行
+ * @detail:      规则说明
+ *
+ * 规则匹配顺序：pid 精确规则 > label 规则 > path_prefix 规则；
+ * 同级内更具体者赢（op 具体 > ANY；path 前缀更长 > 更短；平手 deny 优先）。
+ */
+int ai_lsm_rule_add_path(const char *path_prefix, u8 op_type, bool deny,
+			 const char *detail);
+
+/**
+ * ai_lsm_ws_label_set() - 设置某任务（线程组）的工作区标签
+ * @pid:   目标 pid（线程组任一 tid；整组线程同时设置）
+ * @label: 0~255（0=清除标签）
+ *
+ * 标签存于 per-task LSM blob（不改 task_struct 布局）；fork/clone 从父
+ * 任务继承（CLONE_THREAD 同线程组一致），任务退出随 blob 释放。
+ * 返回 AI_OK、AI_ERR_NOT_FOUND（无此任务）或 AI_ERR_DISABLED
+ * （lsm= 未启用 'ai'，blob 未分配）。
+ */
+int ai_lsm_ws_label_set(s32 pid, u8 label);
+
+/**
+ * ai_lsm_ws_label_get() - 读取某任务的工作区标签
+ * @pid:   目标 pid
+ * @label: 输出 0~255
+ *
+ * 只读查询；未启用 ai LSM 时返回 AI_ERR_DISABLED。
+ * /proc/ai/ws_labels 提供全量标签列表（只列非 0 标签）。
+ */
+int ai_lsm_ws_label_get(s32 pid, u8 *label);
 
 /**
  * ai_lsm_rule_del() - 删除某 pid 的全部规则
@@ -441,6 +510,16 @@ static inline void ai_sec_syscall_name(int nr, char *buf, size_t size)
 
 static inline int ai_lsm_rule_add(u32 pid, bool deny, const char *detail)
 { return AI_OK; }
+static inline int ai_lsm_rule_add_label(u8 label, u8 op_type, bool deny,
+					const char *detail)
+{ return AI_OK; }
+static inline int ai_lsm_rule_add_path(const char *path_prefix, u8 op_type,
+				       bool deny, const char *detail)
+{ return AI_OK; }
+static inline int ai_lsm_ws_label_set(s32 pid, u8 label)
+{ return AI_ERR_DISABLED; }
+static inline int ai_lsm_ws_label_get(s32 pid, u8 *label)
+{ if (label) *label = 0; return AI_ERR_DISABLED; }
 static inline int ai_lsm_rule_del(u32 pid) { return AI_OK; }
 static inline int ai_lsm_rule_clear(void) { return AI_OK; }
 static inline bool ai_lsm_enforce_get(void) { return false; }

@@ -165,9 +165,17 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 	cur_val = READ_ONCE(p->cur);
 	pre = cur_val;
 
-	/* 安全边界限幅（硬范围 + 最大影响幅度） */
-	rc = ai_policy_safety_limit_value(p->min, p->max, cur_val,
-					  &requested, &clamped);
+	/* 安全边界限幅（硬范围 + 最大影响幅度；标识型参数只做硬范围） */
+	if (p->flags & AI_CTRL_F_IDENT) {
+		if (requested < p->min || requested > p->max) {
+			requested = clamp(requested, p->min, p->max);
+			clamped = 1;
+		}
+		rc = AI_OK;
+	} else {
+		rc = ai_policy_safety_limit_value(p->min, p->max, cur_val,
+						  &requested, &clamped);
+	}
 	if (rc != AI_OK)
 		return rc;
 	if (clamped)

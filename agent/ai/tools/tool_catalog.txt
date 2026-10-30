@@ -191,3 +191,7 @@ sched_knob_set 范围校验 -> 写 ->
 sched_mode_set static|ml|off
 sched_snapshot save 把当前 mode + cg
 sched_ab_run 2 个参数集 x 3 档
+bpf_prog_load 直接 bpf() 系统调
+bpf_prog_list BPF_PROG_GET_NEXT_ID →
+bpf_prog_unload 先解 link，再关闭 
+nfqueue_pump NETLINK_NETFILTER=12 原

@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-31T01:19:57",
+  "generated_at": "2026-10-31T04:07:40",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 193,
-  "tool_names_sha256": "903a4c898d94cbe7ad383dc2dac8513d9c33d7c1ac58d48435a6bdd3689592b2",
+  "tool_count": 197,
+  "tool_names_sha256": "96f81f10c59dcde5919eeb8593358ee299d64d83f7896fa2873b83fe674da93f",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -23,12 +23,13 @@
     "model": 5,
     "interaction": 1,
     "workspace": 6,
-    "sched": 5
+    "sched": 5,
+    "bpf": 4
   },
   "risk_counts": {
-    "R": 87,
-    "W1": 45,
-    "W2": 60,
+    "R": 88,
+    "W1": 46,
+    "W2": 62,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -5922,6 +5923,144 @@
       "sub": [
         "res",
         "aicore"
+      ]
+    },
+    {
+      "name": "bpf_prog_load",
+      "channel": "bpf",
+      "risk": "W2",
+      "description": "加载一个 BPF 程序（W2，不引 libbpf：直接 bpf() 系统调用）。sample=minimal 为最小 TRACEPOINT 程序（r0=0;exit，验证 loader 链路）；sample=deny_path 为手写 LSM file_open 程序：路径前缀命中返回 -EPERM，attach_btf_id 从 /sys/kernel/btf/vmlinux 解析 bpf_lsm_file_open、struct file.f_path 偏移同样来自 BTF（不硬编码）。file=... 读取自定义 AIKBPF01 格式（8B magic + 头 + raw 指令；不解析 ELF）。attach=true 时 LSM 走 BPF_LINK_CREATE(BPF_LSM_MAC)，TRACEPOINT 走 perf_event + BPF_LINK_CREATE(BPF_PERF_EVENT)；附着失败会自动卸载，零残留。 输出带真实能力探测（unprivileged_bpf_disabled / vmlinux BTF / CONFIG_BPF_LSM / 活动 LSM）；当前 #60 内核 CONFIG_BPF_LSM=n 时加载如实失败并说明需 #61，绝不伪造成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sample": {
+            "type": "string",
+            "description": "内置样例：minimal=最小 TRACEPOINT；deny_path=LSM file_open 路径前缀拒绝（-EPERM）",
+            "enum": [
+              "minimal",
+              "deny_path"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "自定义 .bpf 文件绝对路径（AIKBPF01 格式：magic+头+raw 指令；本 loader 不解析 ELF）"
+          },
+          "prog_type": {
+            "type": "string",
+            "description": "文件加载时校验/覆盖程序类型（头里的 prog_type 为准，不一致直接报错）",
+            "enum": [
+              "lsm",
+              "tracepoint"
+            ]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "deny_path 命中路径前缀（1..32 字节，默认 /tmp/aikbpf）"
+          },
+          "tracepoint": {
+            "type": "string",
+            "description": "minimal 附着点 group/name（默认自动选 syscalls/sys_enter_openat 等）"
+          },
+          "attach": {
+            "type": "boolean",
+            "description": "加载后立即附着（默认 true）；失败会自动卸载并如实报错",
+            "default": true
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "bpf_prog_list",
+      "channel": "bpf",
+      "risk": "R",
+      "description": "列出已加载的 BPF 程序（R）：BPF_PROG_GET_NEXT_ID → BPF_PROG_GET_FD_BY_ID → BPF_OBJ_GET_INFO_BY_FD，返回 id/type/name/tag/created_by_uid 与 mine（是否本进程持有）；同时回报 unprivileged_bpf_disabled、vmlinux BTF 是否存在、CONFIG_BPF_LSM 与活动 LSM。非 root 在 unprivileged_bpf_disabled=2 时枚举会 EPERM，如实报错并给出 sudo ai 指引。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "bpf_prog_unload",
+      "channel": "bpf",
+      "risk": "W1",
+      "description": "卸载本进程加载的 BPF 程序（W1）：先解 link，再关闭 prog fd，最后用 BPF_PROG_GET_FD_BY_ID 复验 ENOENT（仍被他方引用时如实报'未完全卸载'）。只能卸载 mine=yes 的程序；他方程序拒绝并说明原因（关闭别人的 fd 既无权限也做不到）。进程退出时 fd 自动关闭，同样零残留。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "程序 id（bpf_prog_load 的 prog_id 或 bpf_prog_list 的 prog_id）",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "nfqueue_pump",
+      "channel": "bpf",
+      "risk": "W2",
+      "description": "绑定 NFQUEUE 并消费数据包（W2，不引 libnetfilter_queue：NETLINK_NETFILTER=12 原始 NFQNL_MSG_CONFIG/PACKET/VERDICT）。queue 0..65535、timeout_ms 100..60000、max_packets 1..1000 为硬上限（防挂死）；收到包打印五元组（IPv4/IPv6 + TCP/UDP 端口）并按 policy=accept|drop 回 verdict；超时或达上限即 UNBIND 并关闭 socket（零残留）。注意：本工具不安装 nft/iptables 规则，没有规则引流的队列会等到超时（预期）；#60 内核未编 CONFIG_NETFILTER_NETLINK_QUEUE 时绑定失败并明确报'需 #61'。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "queue": {
+            "type": "integer",
+            "description": "NFQUEUE 队列号（0..65535，默认 0）",
+            "minimum": 0,
+            "maximum": 65535,
+            "default": 0
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "硬超时毫秒（100..60000，默认 3000）",
+            "minimum": 100,
+            "maximum": 60000,
+            "default": 3000
+          },
+          "max_packets": {
+            "type": "integer",
+            "description": "最多处理包数（1..1000，默认 10）",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10
+          },
+          "policy": {
+            "type": "string",
+            "description": "收到包后的 verdict：accept（放行）| drop（丢弃）",
+            "enum": [
+              "accept",
+              "drop"
+            ],
+            "default": "accept"
+          },
+          "family": {
+            "type": "string",
+            "description": "绑定/解析的地址族：ipv4 | ipv6",
+            "enum": [
+              "ipv4",
+              "ipv6"
+            ],
+            "default": "ipv4"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
       ]
     }
   ]

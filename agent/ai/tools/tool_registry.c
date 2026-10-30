@@ -71,6 +71,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_WORKSPACE;
 	if (strcmp(s, "sched") == 0)
 		return TOOL_CH_SCHED;
+	if (strcmp(s, "bpf") == 0)
+		return TOOL_CH_BPF;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -80,7 +82,7 @@ static const char *channel_str(enum tool_channel ch)
 		"procfs-read", "sysfs-write", "netlink-act", "netlink-sense",
 		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
 		"desktop", "interaction", "model", "stream", "macro",
-		"netadmin", "workspace", "sched", "unknown",
+		"netadmin", "workspace", "sched", "bpf", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)
@@ -106,9 +108,12 @@ static void tool_param_free(struct tool_param *p)
 	memset(p, 0, sizeof(*p));
 }
 
-/* 解析单个参数对象 {"name":..,"type":..,"description":..,...} */
+/* 解析单个参数对象 {"name":..,"type":..,"description":..,...}。
+ * W80：参数名权威来自 properties 的成员键（kname），值对象内的 name
+ * 字段只是兼容旧格式。 */
 static int parse_tool_param(const char *tok, size_t tlen,
-			    struct tool_param *p)
+			    struct tool_param *p,
+			    const char *kname, size_t kname_len)
 {
 	const char *v;
 	size_t vl;
@@ -119,6 +124,8 @@ static int parse_tool_param(const char *tok, size_t tlen,
 	if (ai_json_obj_get(tok, tlen, "name", &v, &vl, &vt) == 1 &&
 	    vt == AI_JSON_STR)
 		p->name = ai_json_strdup_str(v, vl);
+	if (!p->name && kname && kname_len)
+		p->name = ai_json_strdup_str(kname, kname_len);
 	if (ai_json_obj_get(tok, tlen, "type", &v, &vl, &vt) == 1 &&
 	    vt == AI_JSON_STR)
 		p->type = ai_json_strdup_str(v, vl);
@@ -198,6 +205,8 @@ static int parse_parameters(struct ai_tool *tool, const char *tok,
 	if (ai_json_obj_get(tok, tlen, "properties", &v, &vl, &vt) == 1 &&
 	    vt == AI_JSON_OBJ) {
 		for (i = 0; ; i++) {
+			const char *kt = NULL;
+			size_t kl = 0;
 			const char *pt;
 			size_t pl;
 			int pty;
@@ -205,12 +214,12 @@ static int parse_parameters(struct ai_tool *tool, const char *tok,
 			struct tool_param *np;
 			int rc;
 
-			if (ai_json_obj_member(v, vl, i, NULL, NULL,
+			if (ai_json_obj_member(v, vl, i, &kt, &kl,
 					       &pt, &pl, &pty) != 1)
 				break;
 			if (pty != AI_JSON_OBJ)
 				continue;
-			rc = parse_tool_param(pt, pl, &p);
+			rc = parse_tool_param(pt, pl, &p, kt, kl);
 			if (rc != AI_OK)
 				continue;
 			np = realloc(tool->params,
