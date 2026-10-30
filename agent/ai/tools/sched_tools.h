@@ -46,6 +46,10 @@ struct ai_sched_knob {
 	long long vmax;			/* 数值上界 */
 	const char *range;		/* 人类可读值域（status 展示） */
 	const char *dflt;		/* 内核默认值（off/初始态） */
+	/* 内核 ACT 取参口径：1 = AI_CTRL_F_TASK（data[0]=pid, data[1]=value），
+	 * 0 = 全局参数（data[0]=value，如 sched.timeslice）。与内核
+	 * core/ai_control.c:155 的判定一致；填错会把 pid 当值写进内核。 */
+	int is_task;
 };
 
 int ai_sched_knob_count(void);

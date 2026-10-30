@@ -309,7 +309,7 @@ test-e2e: all
 	cd .. && python3 tests/test_clarify_e2e.py --agent-dir .
 
 clean:
-	rm -f $(TESTS)
+	rm -f $(TESTS) test_sched_live netlink_probe
 
 .PHONY: all test test-e2e clean
 
@@ -345,3 +345,17 @@ test_net_admin: test_net_admin.c ../tools/net_admin.c \
 test_sched: test_sched.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_sched.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# W79：qemu 真内核 live（真 NETLINK_AI 客户端；不用 netlink 桩）。
+# 手动目标，不进 TESTS/run_all（需要 AIKernel 内核与 root）。
+test_sched_live: test_sched.c test_sandbox_stubs.c $(SB_EXEC_SRCS) \
+		../runtime/netlink/ai_netlink_client.c
+	$(CC) $(CFLAGS) -DAI_SB_REAL_NETLINK -I.. -I../runtime -o $@ \
+		test_sched.c test_sandbox_stubs.c $(SB_EXEC_SRCS) \
+		../runtime/netlink/ai_netlink_client.c -lpthread
+
+# W79：NETLINK_AI 逐层 errno 诊断（真客户端；手动目标）
+netlink_probe: netlink_probe.c ../runtime/netlink/ai_netlink_client.c \
+		../runtime/ai_types.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ netlink_probe.c \
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c

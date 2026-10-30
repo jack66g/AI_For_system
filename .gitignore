@@ -28,6 +28,7 @@ Image
 /agent/ai/ai
 /agent/ai/tests/test_*
 !/agent/ai/tests/test_*.c
+/agent/ai/tests/netlink_probe
 !/agent/ai/tests/test_*.h
 !/agent/ai/tests/test_*.py
 !/agent/ai/tests/test_*.sh

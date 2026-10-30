@@ -24,8 +24,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "ai_types.h"
 #include "tools/tool_registry.h"
@@ -35,6 +38,10 @@
 
 static int fails;
 static int checks;
+
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 
 #define CHECK(cond, msg) do { \
 	checks++; \
@@ -362,14 +369,112 @@ static void test_channel(void)
 	out = NULL;
 	rc = run_ch("sched_knob_set",
 		    "{\"knob\":\"cpu.max\",\"value\":\"20000 100000\"}", &out);
-	CHECK(rc == AI_ERR_API && out && strstr(out, "读回不一致") != NULL,
-	      "写成功但读回不一致 → FAIL（不假报成功）");
+	CHECK(rc == AI_ERR_API && out &&
+	      (strstr(out, "读回为空") != NULL ||
+	       strstr(out, "读回不一致") != NULL),
+	      "写成功但读回为空/不一致 → FAIL（不假报成功）");
 	CHECK(out && strstr(out, "20000 100000") != NULL,
 	      "失败文本含期望值 20000 100000");
 	free(out);
 	(void)unlink(path);
 
-	/* 写失败：/dev/full → ENOSPC */
+	/* C2：目标文件不存在 → N/A + 失败，且不得创建空文件 */
+	cgp("io.max", path, sizeof(path));
+	(void)unlink(path);
+	out = NULL;
+	rc = run_ch("sched_knob_set",
+		    "{\"knob\":\"io.max\",\"value\":\"8:0 rbps=1048576\"}",
+		    &out);
+	CHECK(rc == AI_ERR_NOT_IMPLEMENTED && out &&
+	      strstr(out, "N/A") != NULL,
+	      "io.max 文件不存在 → N/A + NOT_IMPLEMENTED（不假成功）");
+	CHECK(stat(path, &st) != 0, "N/A 时未创建空文件");
+	free(out);
+
+	/* 其余 cgroup 旋钮文件缺失同样 N/A 失败 */
+	cgp("cpu.max.burst", path, sizeof(path));
+	(void)unlink(path);
+	out = NULL;
+	rc = run_ch("sched_knob_set",
+		    "{\"knob\":\"cpu.max.burst\",\"value\":\"0\"}", &out);
+	CHECK(rc == AI_ERR_NOT_IMPLEMENTED && out &&
+	      strstr(out, "N/A") != NULL,
+	      "cpu.max.burst 文件缺失 → N/A + 失败");
+	free(out);
+	write_file(path, "0\n");
+
+	/* 五个 cgroup 旋钮共用 cg_apply：逐个把文件删掉，断言全部 N/A 失败
+	 * （覆盖"文件不存在仍报 OK"的同类路径） */
+	{
+		static const struct {
+			const char *knob;
+			const char *value;
+			const char *restore;
+		} knobs[] = {
+			{ "cpu.weight", "100", "100\n" },
+			{ "cpu.max", "max 100000", "max 100000\n" },
+			{ "cpu.max.burst", "0", "0\n" },
+			{ "io.weight", "default 100", "default 100\n" },
+			{ "io.max", "8:0 rbps=1048576", "\n" },
+		};
+		int k;
+
+		for (k = 0; k < (int)ARRAY_SIZE(knobs); k++) {
+			char args[128];
+
+			cgp(knobs[k].knob, path, sizeof(path));
+			(void)unlink(path);
+			out = NULL;
+			snprintf(args, sizeof(args),
+				 "{\"knob\":\"%s\",\"value\":\"%s\"}",
+				 knobs[k].knob, knobs[k].value);
+			rc = run_ch("sched_knob_set", args, &out);
+			CHECK(rc == AI_ERR_NOT_IMPLEMENTED && out &&
+			      strstr(out, "N/A") != NULL,
+			      "cgroup 旋钮文件缺失 → N/A 失败（该旋钮见下条）");
+			if (rc != AI_ERR_NOT_IMPLEMENTED)
+				printf("     ^ 失败旋钮 = %s\n", knobs[k].knob);
+			free(out);
+			write_file(path, knobs[k].restore);
+		}
+	}
+
+	/* io.max 清空请求（全 max）+ 文件可写但读回无限制行 → "已清空"，
+	 * 且绝不能出现"读回一致"字样 */
+	cgp("io.max", path, sizeof(path));
+	(void)unlink(path);
+	if (symlink("/dev/null", path) != 0)
+		printf("WARN: symlink /dev/null 失败\n");
+	out = NULL;
+	rc = run_ch("sched_knob_set",
+		    "{\"knob\":\"io.max\",\"value\":\"8:0 rbps=max wbps=max riops=max wiops=max\"}",
+		    &out);
+	CHECK(rc == AI_OK && out && strstr(out, "已清空") != NULL,
+	      "io.max 全 max 清空 → 已清空");
+	CHECK(out && strstr(out, "读回一致") == NULL,
+	      "已清空不得报\"读回一致\"（空读回不算一致）");
+	free(out);
+	(void)unlink(path);
+	write_file(path, "\n");
+
+	/* 同一 sysfs 位置、非清空请求 + 空读回 → 失败（不是 N/A） */
+	cgp("io.max", path, sizeof(path));
+	(void)unlink(path);
+	if (symlink("/dev/null", path) != 0)
+		printf("WARN: symlink /dev/null 失败\n");
+	out = NULL;
+	rc = run_ch("sched_knob_set",
+		    "{\"knob\":\"io.max\",\"value\":\"8:0 rbps=1048576\"}",
+		    &out);
+	CHECK(rc == AI_ERR_API && out && strstr(out, "读回为空") != NULL,
+	      "io.max 非清空 + 空读回 → 读回为空 + 失败");
+	free(out);
+	(void)unlink(path);
+	write_file(path, "\n");
+
+	/* 写失败：/dev/full → ENOSPC（指向 cpu.max；先确保目标不存在） */
+	cgp("cpu.max", path, sizeof(path));
+	(void)unlink(path);
 	if (symlink("/dev/full", path) != 0)
 		printf("WARN: symlink /dev/full 失败\n");
 	out = NULL;
@@ -380,6 +485,9 @@ static void test_channel(void)
 	free(out);
 	(void)unlink(path);
 	write_file(path, "max 100000\n");
+	cgp("io.max", path, sizeof(path));
+	if (stat(path, &st) != 0)
+		write_file(path, "\n");
 
 	/* 未知 mode / ml 未就绪：零状态变更 */
 	out = NULL;
@@ -602,6 +710,284 @@ static int live_call(const char *tool, const char *args, char **out)
 	return ok ? 0 : -1;
 }
 
+/* ---- 任务级旋钮的 /proc 读回（live 三态用） ---- */
+
+static int ts_nice(long long pid, char *buf, size_t cap)
+{
+	char path[64], raw[2048], *p, *end;
+	int field = 3;
+
+	snprintf(path, sizeof(path), "/proc/%lld/stat", pid);
+	if (read_file(path, raw, sizeof(raw)) != 0)
+		return -1;
+	p = strrchr(raw, ')');
+	if (!p)
+		return -1;
+	p += 2;
+	while (p && *p) {
+		end = strchr(p, ' ');
+		if (field == 19) {
+			size_t n = end ? (size_t)(end - p) : strlen(p);
+
+			if (n >= cap)
+				return -1;
+			memcpy(buf, p, n);
+			buf[n] = '\0';
+			return 0;
+		}
+		if (!end)
+			break;
+		p = end + 1;
+		field++;
+	}
+	return -1;
+}
+
+static int ts_oom(long long pid, char *buf, size_t cap)
+{
+	char path[64];
+
+	snprintf(path, sizeof(path), "/proc/%lld/oom_score_adj", pid);
+	return read_file(path, buf, cap);
+}
+
+static int ts_aff(long long pid, char *buf, size_t cap)
+{
+	char path[64], line[512];
+	FILE *fp;
+
+	snprintf(path, sizeof(path), "/proc/%lld/status", pid);
+	fp = fopen(path, "re");
+	if (!fp)
+		return -1;
+	buf[0] = '\0';
+	while (fgets(line, sizeof(line), fp)) {
+		if (strncmp(line, "Cpus_allowed_list:", 18) != 0)
+			continue;
+		snprintf(buf, cap, "%.63s", line + 18);
+		buf[strcspn(buf, "\r\n")] = '\0';
+		while (buf[0] == ' ' || buf[0] == '\t')
+			memmove(buf, buf + 1, strlen(buf));
+		fclose(fp);
+		return buf[0] ? 0 : -1;
+	}
+	fclose(fp);
+	return -1;
+}
+
+static int ts_timeslice(char *buf, size_t cap)
+{
+	FILE *fp = fopen("/proc/ai/control", "re");
+	char line[512];
+
+	if (!fp)
+		return -1;
+	buf[0] = '\0';
+	while (fgets(line, sizeof(line), fp)) {
+		char *c;
+
+		if (strncmp(line, "sched.timeslice ", 16) != 0)
+			continue;
+		c = strstr(line, "current=");
+		if (!c) {
+			fclose(fp);
+			return -1;
+		}
+		c += 8;
+		snprintf(buf, cap, "%s", c);
+		buf[strcspn(buf, "\r\n ")] = '\0';
+		fclose(fp);
+		return buf[0] ? 0 : -1;
+	}
+	fclose(fp);
+	return -1;
+}
+
+/* 单个任务级旋钮的三态：before → 写 → 读回 after → 恢复 → 读回 */
+static int live_task_one(const char *knob, long long pid, const char *value,
+			 const char *restore)
+{
+	char args[256], before[64] = "?", after[64] = "?", restored[64] = "?";
+	char *out = NULL;
+	int fail = 0, rc;
+
+	if (strcmp(knob, "timeslice") == 0) {
+		(void)ts_timeslice(before, sizeof(before));
+	} else if (strcmp(knob, "nice") == 0) {
+		(void)ts_nice(pid, before, sizeof(before));
+	} else if (strcmp(knob, "oom_score") == 0) {
+		(void)ts_oom(pid, before, sizeof(before));
+	} else if (strcmp(knob, "affinity") == 0) {
+		(void)ts_aff(pid, before, sizeof(before));
+	}
+	snprintf(args, sizeof(args),
+		 "{\"knob\":\"%s\",\"value\":\"%s\",\"pid\":%lld}",
+		 knob, value, pid);
+	rc = live_call("sched_knob_set", args, &out);
+	free(out);
+	out = NULL;
+	if (rc != 0) {
+		printf("  [三态] %-10s FAIL（写入失败，见上）\n", knob);
+		return 1;
+	}
+	if (strcmp(knob, "timeslice") == 0) {
+		(void)ts_timeslice(after, sizeof(after));
+	} else if (strcmp(knob, "nice") == 0) {
+		(void)ts_nice(pid, after, sizeof(after));
+	} else if (strcmp(knob, "oom_score") == 0) {
+		(void)ts_oom(pid, after, sizeof(after));
+	} else if (strcmp(knob, "affinity") == 0) {
+		(void)ts_aff(pid, after, sizeof(after));
+	}
+	if (strcmp(after, value) != 0) {
+		printf("  [三态] %-10s 读回不一致：期望 %s 实际 %s\n",
+		       knob, value, after);
+		fail = 1;
+	}
+	/* 恢复 */
+	snprintf(args, sizeof(args),
+		 "{\"knob\":\"%s\",\"value\":\"%s\",\"pid\":%lld}",
+		 knob, restore, pid);
+	if (live_call("sched_knob_set", args, &out) != 0)
+		fail = 1;
+	free(out);
+	if (strcmp(knob, "timeslice") == 0) {
+		(void)ts_timeslice(restored, sizeof(restored));
+	} else if (strcmp(knob, "nice") == 0) {
+		(void)ts_nice(pid, restored, sizeof(restored));
+	} else if (strcmp(knob, "oom_score") == 0) {
+		(void)ts_oom(pid, restored, sizeof(restored));
+	} else if (strcmp(knob, "affinity") == 0) {
+		(void)ts_aff(pid, restored, sizeof(restored));
+	}
+	printf("  [三态] %-10s before=%s → 写 %s → 读回 %s → 恢复 %s → 读回 %s  %s\n",
+	       knob, before, value, after, restore, restored,
+	       fail ? "FAIL" : (strcmp(restored, restore) == 0 ? "PASS" :
+			       "PARTIAL（恢复值读回不同）"));
+	if (!fail && strcmp(restored, restore) != 0)
+		fail = 1;
+	return fail;
+}
+
+static int live_task_knobs(void)
+{
+	pid_t target;
+	char *out = NULL;
+	int fail = 0, have_nl = 0, saved_pct = -1;
+	char orig_nice[32] = "0", orig_oom[32] = "0", orig_ts[32] = "20";
+	char orig_aff[64] = "?";
+
+	printf("\n=== 4b. 任务级旋钮（NETLINK_AI ACT）：写 → 读回 → 恢复 ===\n");
+	if (live_call("sched_status", "{}", &out) == 0 && out &&
+	    strstr(out, "netlink-ai:       可用") != NULL)
+		have_nl = 1;
+	free(out);
+	if (!have_nl) {
+		printf("  SKIP：sched_status 报告 NETLINK_AI 不可用（原因见上）——"
+		       "任务级旋钮按设计不执行\n");
+		return 0;
+	}
+	target = fork();
+	if (target == 0) {
+		(void)prctl(PR_SET_NAME, "aik-sched-tgt", 0, 0, 0);
+		for (;;)
+			pause();
+		_exit(0);
+	}
+	if (target < 0) {
+		printf("  FAIL：fork 目标进程失败\n");
+		return 1;
+	}
+	usleep(200000);
+	/* 内核安全预算：max_impact_pct 默认 50%，2 核时 affinity 范围 [0,1]
+	 * 的 50% = 0 → 请求 CPU1 会被 clamp 回 0 且因 requested==cur 不执行。
+	 * 为了让 affinity 真正走通写→读回，测试期间临时调到 100，结束恢复。 */
+	{
+		FILE *fp = fopen("/sys/kernel/ai/policy/max_impact_pct", "re");
+		int pct = -1;
+
+		if (fp) {
+			if (fscanf(fp, "%d", &pct) != 1)
+				pct = -1;
+			fclose(fp);
+		}
+		if (pct >= 0 && pct < 100) {
+			FILE *w = fopen("/sys/kernel/ai/policy/max_impact_pct",
+					"we");
+
+			if (w) {
+				fprintf(w, "100\n");
+				fclose(w);
+				saved_pct = pct;
+				printf("  （测试预算：max_impact_pct %d → 100，"
+				       "结束后恢复）\n", pct);
+			}
+		}
+	}
+	(void)ts_nice((long long)target, orig_nice, sizeof(orig_nice));
+	(void)ts_oom((long long)target, orig_oom, sizeof(orig_oom));
+	(void)ts_aff((long long)target, orig_aff, sizeof(orig_aff));
+	(void)ts_timeslice(orig_ts, sizeof(orig_ts));
+	printf("  目标进程 pid=%d 原始：nice=%s oom_score_adj=%s affinity=%s timeslice=%s\n",
+	       (int)target, orig_nice, orig_oom, orig_aff, orig_ts);
+
+	fail += live_task_one("nice", (long long)target, "10", orig_nice);
+	fail += live_task_one("oom_score", (long long)target, "500", orig_oom);
+	/* sched.affinity 是单 CPU 掩码：原始多核掩码无法用该 ACT 还原，
+	 * 恢复动作固定回 CPU 0（内核限制，报告里注明） */
+	fail += live_task_one("affinity", (long long)target, "1", "0");
+	if (strcmp(orig_ts, "20") != 0 && orig_ts[0])
+		fail += live_task_one("timeslice", (long long)target, "30",
+				      orig_ts);
+	else
+		fail += live_task_one("timeslice", (long long)target, "30",
+				      "20");
+
+	/* 历史路径对照：既有 netlink_act_sched_nice（W79 之前就有的工具，
+	 * executor 的 exec_netlink_act 路径）在本内核上是否也通。
+	 * 用于判定"ACT 不可用"是 W79 新引入还是既有缺陷。 */
+	printf("\n  -- 历史路径对照：netlink_act_sched_nice（既有工具）--\n");
+	{
+		char args[160];
+		char *hout = NULL;
+
+		snprintf(args, sizeof(args),
+			 "{\"pid\":%d,\"value\":5,\"confidence\":100}",
+			 (int)target);
+		if (live_call("netlink_act_sched_nice", args, &hout) == 0) {
+			printf("  → 历史工具在本内核执行成功（W79 之前就可用）\n");
+		} else if (hout && (strstr(hout, "CONFIRM_REQUIRED") ||
+				    strstr(hout, "已按您的选择") ||
+				    strstr(hout, "DENIED"))) {
+			printf("  → 被 W74 租约闸门拒绝（D3 需人工确认），"
+			       "未走到 NETLINK_AI——传输层可用性以 "
+			       "netlink_probe 的 ACT 为准\n");
+		} else {
+			printf("  → 历史工具调用失败（见上），需与 probe 对照\n");
+		}
+		free(hout);
+		snprintf(args, sizeof(args),
+			 "{\"pid\":%d,\"value\":%s,\"confidence\":100}",
+			 (int)target, orig_nice);
+		hout = NULL;
+		(void)live_call("netlink_act_sched_nice", args, &hout);
+		free(hout);
+	}
+	(void)kill(target, SIGKILL);
+	(void)waitpid(target, NULL, 0);
+	if (saved_pct >= 0) {
+		FILE *w = fopen("/sys/kernel/ai/policy/max_impact_pct", "we");
+
+		if (w) {
+			fprintf(w, "%d\n", saved_pct);
+			fclose(w);
+			printf("  （测试预算已恢复 max_impact_pct=%d）\n",
+			       saved_pct);
+		}
+	}
+	return fail;
+}
+
 static int live(void)
 {
 	const char *cgdir = "/sys/fs/cgroup/aikernel-sched";
@@ -716,12 +1102,19 @@ static int live(void)
 					 "{\"knob\":\"%s\",\"value\":\"%s\"}",
 					 kn[i], va[i]);
 			}
-			if (live_call("sched_knob_set", args, &out) != 0)
-				step_fail++;
+			if (live_call("sched_knob_set", args, &out) != 0) {
+				if (out && strncmp(out, "N/A:", 4) == 0)
+					printf("  → N/A（该内核不支持该旋钮），不计失败\n");
+				else
+					step_fail++;
+			}
 			free(out);
 		}
 	}
 	dump_cgroup(cgdir);
+
+	/* 4b. 任务级旋钮（NETLINK_AI ACT）：写→读回→恢复 三态 */
+	step_fail += live_task_knobs();
 
 	/* 5. mode off → 内核默认 */
 	printf("\n=== 5. mode_set off（撤销 AI 参数回默认）===\n");

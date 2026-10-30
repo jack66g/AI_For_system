@@ -370,47 +370,48 @@ static int str_eq_norm(const char *a, const char *b)
 static const struct ai_sched_knob g_knobs[] = {
 	{
 		"nice", AI_SCHED_KNOB_TASK, "sched.nice", NULL,
-		-20, 19, "[-20,19]（set_user_nice）", NULL
+		-20, 19, "[-20,19]（set_user_nice）", NULL, 1
 	},
 	{
 		"affinity", AI_SCHED_KNOB_TASK, "sched.affinity", NULL,
-		0, 4095, "[0,nproc-1]（单 CPU 掩码）", NULL
+		0, 4095, "[0,nproc-1]（单 CPU 掩码）", NULL, 1
 	},
 	{
 		"oom_score", AI_SCHED_KNOB_TASK, "sched.oom_score", NULL,
-		-1000, 1000, "[-1000,1000]（oom_score_adj）", NULL
+		-1000, 1000, "[-1000,1000]（oom_score_adj）", NULL, 1
 	},
 	{
 		"timeslice", AI_SCHED_KNOB_TASK, "sched.timeslice", NULL,
-		1, 1000, "[1,1000]（0.1ms；全局 EEVDF base_slice）", "7"
+		1, 1000, "[1,1000]（0.1ms；全局 EEVDF base_slice）", "7", 0
 	},
 	{
 		"cpu.weight", AI_SCHED_KNOB_CGROUP, NULL, "cpu.weight",
-		1, 10000, "[1,10000]", "100"
+		1, 10000, "[1,10000]", "100", 0
 	},
 	{
 		"cpu.max", AI_SCHED_KNOB_CGROUP, NULL, "cpu.max",
 		1000, 1000000,
 		"max [period] | quota(1000-1000000) period(1000-1000000)",
-		"max 100000"
+		"max 100000", 0
 	},
 	{
 		"cpu.max.burst", AI_SCHED_KNOB_CGROUP, NULL, "cpu.max.burst",
-		0, 1000000, "[0,1000000]", "0"
+		0, 1000000, "[0,1000000]", "0", 0
 	},
 	{
 		"io.weight", AI_SCHED_KNOB_CGROUP, NULL, "io.weight",
-		1, 10000, "default N | MAJ:MIN N（N 1-10000）", "default 100"
+		1, 10000, "default N | MAJ:MIN N（N 1-10000）",
+		"default 100", 0
 	},
 	{
 		"io.max", AI_SCHED_KNOB_CGROUP, NULL, "io.max",
 		0, 0,
 		"MAJ:MIN [rbps=|wbps=|riops=|wiops=]<N|max>（整盘设备，至少一项）",
-		NULL
+		NULL, 0
 	},
 	{
 		"sched.mode", AI_SCHED_KNOB_MODE, NULL, NULL,
-		0, 0, "static | ml | off", SCHED_MODE_OFF
+		0, 0, "static | ml | off", SCHED_MODE_OFF, 0
 	},
 };
 
@@ -768,6 +769,28 @@ static int cpulist_equals_one(const char *list, long long cpu)
 	return n == 1;
 }
 
+/* io.max 请求是否为"清空"（所有 key=max）：清空后内核会删掉该设备行，
+ * 读回为空是**预期状态**，但必须与"读回一致"区分开报告（见 cg_apply 返回 2） */
+static int iomax_is_clear(const char *value)
+{
+	char buf[SCHED_VALUE_MAX];
+	char *tok, *save = NULL;
+	int keys = 0, all_max = 1;
+
+	snprintf(buf, sizeof(buf), "%s", value ? value : "");
+	tok = strtok_r(buf, " \t", &save);	/* dev */
+	while ((tok = strtok_r(NULL, " \t", &save))) {
+		char *eq = strchr(tok, '=');
+
+		if (!eq)
+			return 0;
+		keys++;
+		if (strcmp(eq + 1, "max") != 0)
+			all_max = 0;
+	}
+	return keys > 0 && all_max;
+}
+
 int ai_sched_value_match(const struct ai_sched_knob *k, const char *want,
 			 const char *got)
 {
@@ -956,9 +979,11 @@ struct apply_rec {
 	char after[SCHED_VALUE_MAX];
 };
 
-/* 应用单个 cgroup 旋钮：预检（读旧值）→ 校验 → 写 → 读回 → 比对。
+/* 应用单个 cgroup 旋钮：预检（存在+可写+读旧值）→ 校验 → 写 → 读回 → 比对。
  * 不一致或写失败时用旧值回滚，并读回确认回滚结果。
- * 返回 0 成功；1 = N/A（内核/设备不支持，未写）；-1 失败（已回滚）。 */
+ * 返回：0 = 写入且读回一致；1 = N/A（文件不存在/设备不支持，未写）；
+ *       2 = 已清空（io.max 全 max，文件存在且可写，读回无限制行）；
+ *       -1 = 失败（已回滚）。空读回绝不返回 0。 */
 static int cg_apply(const struct ai_sched_knob *k, const char *value,
 		    struct apply_rec *rec, char *err, size_t errlen)
 {
@@ -968,6 +993,19 @@ static int cg_apply(const struct ai_sched_knob *k, const char *value,
 
 	if (cg_knob_path(k, path, sizeof(path)) != 0) {
 		set_err(err, errlen, "路径过长");
+		return -1;
+	}
+	/* C2：先确认目标文件存在且可写。不存在 = 该内核/设备不支持，明确 N/A，
+	 * 绝不进入写入路径（否则会退化成"写空文件也成功"的假成功）。 */
+	if (access(path, F_OK) != 0) {
+		set_err(err, errlen,
+			"%s 不可用：%s 不存在（该内核/该设备不支持 %s）",
+			k->name, path, k->name);
+		return 1;
+	}
+	if (access(path, W_OK) != 0) {
+		set_err(err, errlen, "%s 不可写：%s（%s；通常需要 root）",
+			k->name, path, strerror(errno));
 		return -1;
 	}
 	if (read_text(path, before, sizeof(before)) != 0) {
@@ -1002,6 +1040,29 @@ static int cg_apply(const struct ai_sched_knob *k, const char *value,
 		set_err(err, errlen, "%s 读回失败：%s（已回滚为 \"%s\"）",
 			k->name, strerror(errno), before);
 		return -1;
+	}
+	/* 空读回永远不算"一致"：
+	 *   - io.max 清空请求（全 max）且文件存在 → 返回 2（"已清空"，报告措辞
+	 *     与"一致"区分）；
+	 *   - 其余任何空读回 → 判定写入未生效，回滚并失败。 */
+	if (!after[0]) {
+		if (strcmp(k->name, "io.max") == 0 && iomax_is_clear(value)) {
+			if (rec)
+				snprintf(rec->after, sizeof(rec->after), "%s",
+					 "(已清空)");
+			return 2;
+		}
+		{
+			char rb[SCHED_VALUE_MAX];
+
+			(void)write_text(path, before);
+			rb[0] = '\0';
+			(void)read_text(path, rb, sizeof(rb));
+			set_err(err, errlen,
+				"%s 读回为空：期望 \"%s\" 但内核未返回任何值（写入未生效；已回滚为 \"%s\"，回滚读回 \"%s\"）",
+				k->name, value, before, rb);
+			return -1;
+		}
 	}
 	if (ai_sched_value_match(k, value, after) != 0) {
 		char rb[SCHED_VALUE_MAX];
@@ -1156,8 +1217,15 @@ static int nl_act_task(const struct ai_sched_knob *k, long long pid,
 	req.domain = 1;		/* AI_POLICY_DOMAIN_SCHED */
 	req.confidence = 100;
 	snprintf(req.param, sizeof(req.param), "%s", k->param);
-	req.data[0] = (__u64)pid;
-	req.data[1] = (__u64)value;
+	if (k->is_task) {
+		req.data[0] = (__u64)pid;
+		req.data[1] = (__u64)value;
+	} else {
+		/* 全局参数（如 sched.timeslice）：内核 core/ai_control.c:155
+		 * 按 !AI_CTRL_F_TASK 取 data[0] 为值；data[1] 被忽略。
+		 * 这里若照搬 data[0]=pid 会把 pid 写进 base_slice。 */
+		req.data[0] = (__u64)value;
+	}
 
 	memset(&cli, 0, sizeof(cli));
 	cli.fd = -1;
@@ -1203,7 +1271,7 @@ static int task_apply(const struct ai_sched_knob *k, const char *value,
 	char verr[SCHED_VALUE_MAX];
 	long long v;
 
-	if (pid <= 0) {
+	if (k->is_task && pid <= 0) {
 		set_err(err, errlen, "%s 是任务级旋钮，需要 pid>0", k->name);
 		return -1;
 	}
@@ -1435,12 +1503,21 @@ static int param_set_apply(const char *which, struct sbuf *log,
 		rc = cg_apply(k, items[i].value, &recs[i], err, errlen);
 		if (rc == 1) {
 			if (!items[i].best_effort) {
+				char nerr[SCHED_VALUE_MAX];
+
+				snprintf(nerr, sizeof(nerr), "%s", err);
 				set_err(err, errlen,
 					"%s 不可用（required）：%s",
-					k->name, err);
+					k->name, nerr);
 				return -1;
 			}
 			sb_add(log, "  %-14s N/A（%s）\n", k->name, err);
+			continue;
+		}
+		if (rc == 2) {
+			sb_add(log, "  %-14s %s → 已清空（读回无限制行，非\"一致\"判定）\n",
+			       k->name, recs[i].before[0] ? recs[i].before :
+			       "(空)");
 			continue;
 		}
 		if (rc < 0) {
@@ -1770,10 +1847,24 @@ static int snap_apply(const struct sched_snapshot *s, struct sbuf *log,
 		}
 		rc = cg_apply(&g_knobs[idx], s->items[i].value, &rec, aerr,
 			      sizeof(aerr));
-		if (rc != 0) {
+		if (rc < 0) {
 			sb_add(log, "  %-14s FAIL：%s\n", g_knobs[idx].name,
 			       aerr);
 			(*fail_n)++;
+			continue;
+		}
+		if (rc == 1) {
+			/* 快照里的值本该可写；文件消失/不支持视为恢复失败 */
+			sb_add(log, "  %-14s FAIL（N/A）：%s\n",
+			       g_knobs[idx].name, aerr);
+			(*fail_n)++;
+			continue;
+		}
+		if (rc == 2) {
+			sb_add(log,
+			       "  %-14s %s → 已清空（读回无限制行）\n",
+			       g_knobs[idx].name, rec.before);
+			(*ok_n)++;
 			continue;
 		}
 		sb_add(log, "  %-14s %s → %s（读回一致）\n", g_knobs[idx].name,
@@ -1809,6 +1900,17 @@ static void dump_knob_line(struct sbuf *b, const struct ai_sched_knob *k,
 		return;
 	}
 	if (k->kind == AI_SCHED_KNOB_TASK) {
+		if (!k->is_task) {
+			/* 全局参数（timeslice）：与 pid 无关，直接读当前值 */
+			if (task_readback(k, (long long)getpid(), v,
+					  sizeof(v)) == 0)
+				sb_add(b, "  %-14s %-42s 当前=%s（全局）\n",
+				       k->name, k->range, v);
+			else
+				sb_add(b, "  %-14s %-42s 当前=N/A（读回不可用）\n",
+				       k->name, k->range);
+			return;
+		}
 		if (pid > 0) {
 			if (task_readback(k, pid, v, sizeof(v)) == 0)
 				sb_add(b, "  %-14s %-42s pid=%lld 当前=%s\n",
@@ -1891,6 +1993,54 @@ static int snap_list(char names[][64], int max)
 }
 
 /* ------------------------------------------------------------------ */
+/* NETLINK_AI 可用性自检（sched_status 用）                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 只看 /proc/ai/control 存在是不够的：socket/bind/REG 任何一层失败，
+ * ACT 都会不可用。这里做一次真实握手（REG 只登记本进程 portid，幂等，
+ * 不改任何调度参数），失败时把确切的返回码/errno 交给 status 展示。
+ * 返回 0=可用，-1=不可用（reason 填原因）。
+ */
+static int nl_probe(char *reason, size_t cap)
+{
+	struct ai_nl_client cli;
+	int kern_err = 0, rc, e;
+	__s32 ai_err = 0;
+	__u32 count = 0;
+
+	if (!path_exists("/proc/ai/control")) {
+		set_err(reason, cap, "无 /proc/ai/control（非 AIKernel 内核）");
+		return -1;
+	}
+	memset(&cli, 0, sizeof(cli));
+	cli.fd = -1;
+	errno = 0;
+	rc = ai_nl_client_open(&cli);
+	e = errno;
+	if (rc != AI_OK) {
+		set_err(reason, cap,
+			"NETLINK_AI 打开失败：%s（errno=%d %s）",
+			ai_error_string(rc), e, e ? strerror(e) : "-");
+		return -1;
+	}
+	rc = ai_nl_send_reg(&cli, 0, &ai_err, &count, &kern_err);
+	ai_nl_client_close(&cli);
+	if (rc != AI_OK) {
+		const char *hint = ai_nl_errno_hint(kern_err);
+
+		set_err(reason, cap,
+			"REG 握手失败：%s（ai_err=%d kern_errno=%d %s%s%s）",
+			ai_error_string(rc), ai_err, kern_err,
+			kern_err ? strerror(kern_err) : "-",
+			hint ? "；" : "", hint ? hint : "");
+		return -1;
+	}
+	set_err(reason, cap, "REG 握手通过，内核已登记 portid 数=%u", count);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* sched_status                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -1964,10 +2114,16 @@ static int cmd_status(const char *args_json, char **out)
 			       mode, path);
 	}
 	sb_add(&b, "ml 台:            未就绪（W83）——当前可用 static|off；sched_mode_set ml 会被明确拒绝\n");
-	if (path_exists("/proc/ai/control"))
-		sb_add(&b, "netlink-ai:       可用（/proc/ai/control 存在）\n");
-	else
-		sb_add(&b, "netlink-ai:       unavailable（/proc/ai 不存在：非 AIKernel 内核；任务级旋钮会被拒绝，绝不假成功）\n");
+	{
+		char reason[SCHED_VALUE_MAX * 2];
+
+		if (nl_probe(reason, sizeof(reason)) == 0)
+			sb_add(&b, "netlink-ai:       可用（%s）\n", reason);
+		else
+			sb_add(&b,
+			       "netlink-ai:       unavailable（%s）——任务级旋钮会被明确拒绝，绝不假成功\n",
+			       reason);
+	}
 	if (is_dir(cg_dir())) {
 		char ctrl[SCHED_PATH_MAX], list[SCHED_VALUE_MAX];
 
@@ -2098,12 +2254,33 @@ static int cmd_knob_set(const char *args_json, char **out)
 				      sizeof(err));
 		}
 	}
+	if (rc == 1) {
+		/* C2：文件不存在 = 该内核/设备不支持。明确 N/A 并判失败，
+		 * 绝不返回 OK（历史上这里会落到下面的成功分支报"写后读回一致"）。 */
+		if (asprintf(out, "N/A: %s 未写入：%s", knob, err) < 0)
+			*out = NULL;
+		free(knob);
+		free(value);
+		return AI_ERR_NOT_IMPLEMENTED;
+	}
 	if (rc < 0) {
 		if (asprintf(out, "ERROR: %s 写入失败：%s", knob, err) < 0)
 			*out = NULL;
 		free(knob);
 		free(value);
 		return AI_ERR_API;
+	}
+	if (rc == 2) {
+		if (asprintf(out,
+			     "OK: %s %s → 已清空（读回无限制行；文件存在且可写，"
+			     "此为「清空」状态，不是「一致」判定）\n"
+			     "  机制: cgroup v2 控制文件\n  值域: %s\n",
+			     knob, rec.before[0] ? rec.before : "(空)",
+			     g_knobs[idx].range) < 0)
+			*out = NULL;
+		free(knob);
+		free(value);
+		return AI_OK;
 	}
 	{
 		char tail[64] = "";
@@ -2178,6 +2355,23 @@ static int param_verify(const char *which, struct sbuf *log, int *ok_n,
 		if (cg_read(&g_knobs[idx], got, sizeof(got)) != 0) {
 			sb_add(log, "  %-14s 复验 N/A（文件不可读；该内核不支持）\n",
 			       knobs[i]);
+			continue;
+		}
+		if (!got[0]) {
+			/* 空读回：io.max 全 max 清空请求视为"已清空"（不是一致），
+			 * 其余一律复验失败（写入未生效）。 */
+			if (strcmp(knobs[i], "io.max") == 0 &&
+			    iomax_is_clear(vals[i])) {
+				sb_add(log,
+				       "  %-14s 复验：已清空（读回无限制行）\n",
+				       knobs[i]);
+				(*ok_n)++;
+			} else {
+				sb_add(log,
+				       "  %-14s 复验失败：读回为空，写入未生效\n",
+				       knobs[i]);
+				(*fail_n)++;
+			}
 			continue;
 		}
 		if (ai_sched_value_match(&g_knobs[idx], vals[i], got) == 0) {

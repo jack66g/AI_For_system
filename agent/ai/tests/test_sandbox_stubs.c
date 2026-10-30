@@ -16,7 +16,10 @@
 #include "memory/sme_client.h"
 #include "policy/ai_user_policy.h"
 
-/* ---- netlink 桩 ---- */
+/* ---- netlink 桩 ----
+ * W79：qemu 真内核 live 用 -DAI_SB_REAL_NETLINK 编译本文件，此时不提供
+ * netlink 桩（改为链接 ../runtime/netlink/ai_netlink_client.c 真实现）。 */
+#ifndef AI_SB_REAL_NETLINK
 
 int ai_nl_client_open(struct ai_nl_client *cli)
 {
@@ -63,6 +66,8 @@ const char *ai_nl_errno_hint(int errno_val)
 	(void)errno_val;
 	return "(stub)";
 }
+
+#endif /* !AI_SB_REAL_NETLINK */
 
 /* ---- SME 记忆客户端桩（全部返回"不可用"） ---- */
 
