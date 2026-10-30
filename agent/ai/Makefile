@@ -148,6 +148,7 @@ COMMON_SRCS := \
 	$(RUNTIME_DIR)/netlink/ai_streams.c \
 	$(TOOLS_DIR)/macro_tools.c \
 	$(TOOLS_DIR)/net_admin.c \
+	$(TOOLS_DIR)/workspace_tools.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \
 	$(PROVIDER_DIR)/provider_core.c \

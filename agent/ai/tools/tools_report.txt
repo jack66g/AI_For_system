@@ -1,9 +1,9 @@
 AIKernel Agent 工具注册表生成报告（v2）
-生成时间: 2026-10-26T02:56:15
+生成时间: 2026-10-31T00:45:11
 来源: AIKernel 内核源码静态梳理
 QEMU dump: 未提供（使用内核源码默认表）
 
-工具总数: 182
+工具总数: 188
 分通道计数:
   procfs-read    36
   sysfs-write    25
@@ -18,22 +18,23 @@ QEMU dump: 未提供（使用内核源码默认表）
   desktop        20
   model          5
   interaction    1
+  workspace      6
 分风险级计数:
-  R              84
-  W1             40
-  W2             57
+  R              86
+  W1             43
+  W2             58
   exec按命令    1（exec.run，逐命令见 exec.commands）
 exec 白名单命令数: 100 (R=52 W1=13 W2=35)；单源: tools.json exec.commands
 
 能力域归属（W76 八域；主域 / 含多标签）:
   res         27 /  46
-  fs           9 /  18
+  fs           9 /  23
   netsec      26 /  32
   aicore      43 /  53
   model        5 /   6
   memory      30 /  30
-  sandbox      4 /   4
+  sandbox     10 /  10
   sysadmin    18 /  29
   desktop     20 /  20
-W51 语料: 区头 9 + 单件 182 + 配方 8 = 199 条 -> ./sme-seed-w51.jsonl
-目录页(tool_catalog): 182 行, 8136 字节（描述截断 24B）
+W51 语料: 区头 9 + 单件 188 + 配方 8 = 205 条 -> ./sme-seed-w51.jsonl
+目录页(tool_catalog): 188 行, 8379 字节（描述截断 24B）

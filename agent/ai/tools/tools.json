@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-26T02:56:15",
+  "generated_at": "2026-10-31T00:45:11",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 182,
-  "tool_names_sha256": "c3ce0b61a0e13ae4b0b92467f37821f28cefb12cf1fa54a8148d3130a64d4472",
+  "tool_count": 188,
+  "tool_names_sha256": "3e0f97db73d35708c1819010b8022a7829a177d68fb6d499fd15d10e2d5e6f02",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -21,12 +21,13 @@
     "sysfs": 2,
     "desktop": 20,
     "model": 5,
-    "interaction": 1
+    "interaction": 1,
+    "workspace": 6
   },
   "risk_counts": {
-    "R": 84,
-    "W1": 40,
-    "W2": 57,
+    "R": 86,
+    "W1": 43,
+    "W2": 58,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -5527,6 +5528,214 @@
       },
       "sub": [
         "sysadmin"
+      ]
+    },
+    {
+      "name": "workspace_create",
+      "channel": "workspace",
+      "risk": "W1",
+      "description": "创建工作区（W1）：在 /var/lib/aikernel/ws/<name>.img 建稀疏镜像，losetup 挂 loop、mkfs.ext4、预置可启动根骨架；一个文件就是一个盘，数据跨 workspace_run 持久。backing=disk（默认）走镜像；backing=tmpfs 为临时盘（run 结束即失，不持久）。ro_paths/rw_paths 为显式共享的宿主绝对路径（工作区内同路径 ro/rw bind）；net 支持 none（默认）|host，veth 未实现（按 none）；cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅登记展示。已存在则幂等返回，绝不重新格式化。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "size_mb": {
+            "type": "integer",
+            "description": "镜像容量 MB（16-8192；默认 256）",
+            "minimum": 16,
+            "maximum": 8192,
+            "default": 256
+          },
+          "backing": {
+            "type": "string",
+            "description": "disk=持久镜像（默认）；tmpfs=临时盘（不持久）",
+            "enum": [
+              "disk",
+              "tmpfs"
+            ],
+            "default": "disk"
+          },
+          "ro_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "只读共享的宿主绝对路径（最多 16 条）"
+          },
+          "rw_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "读写共享的宿主绝对路径（最多 16 条；慎用）"
+          },
+          "net": {
+            "type": "string",
+            "description": "none=新 netns 仅 lo（默认）；host=宿主网络；veth 已接受但按 none 执行",
+            "enum": [
+              "none",
+              "host",
+              "veth"
+            ],
+            "default": "none"
+          },
+          "cpu_max": {
+            "type": "number",
+            "description": "CPU 核数上限（0=不限，0.01-64；映射 cgroup cpu.max）",
+            "minimum": 0,
+            "maximum": 64,
+            "default": 1
+          },
+          "mem_max": {
+            "type": "integer",
+            "description": "内存上限 MB（0=不限；默认 1024）",
+            "minimum": 0,
+            "maximum": 1048576,
+            "default": 1024
+          },
+          "pids_max": {
+            "type": "integer",
+            "description": "进程数上限（0=不限；默认 256）",
+            "minimum": 0,
+            "maximum": 4000000,
+            "default": 256
+          },
+          "label": {
+            "type": "string",
+            "description": "标签（≤64 字符，字母数字 ._- 与空格；仅登记展示）"
+          }
+        },
+        "required": [
+          "name",
+          "size_mb"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    },
+    {
+      "name": "workspace_list",
+      "channel": "workspace",
+      "risk": "R",
+      "description": "列出工作区（只读）：名称/后端/容量/已用/创建时间/状态（running|ready）/标签",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    },
+    {
+      "name": "workspace_inspect",
+      "channel": "workspace",
+      "risk": "R",
+      "description": "工作区详情（只读）：镜像路径与是否存在、loop 设备、宿主挂载点、cgroup 路径与 cpu/mem/pids 限额、网络、标签、ro/rw 路径与运行状态",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    },
+    {
+      "name": "workspace_run",
+      "channel": "workspace",
+      "risk": "W2",
+      "description": "在工作区里执行命令（W2 高危写，逐次确认）：新 mount/pid/uts namespace，根 = 该工作区镜像的 ext4，/usr /etc /dev 只读白名单挂入，宿主 /root /home /var 不可见（除显式 ro/rw_paths），cgroup 限额生效；命令以 /bin/sh -c 执行，超时 SIGKILL 全组。写入镜像的数据跨调用持久（tmpfs 工作区除外）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "command": {
+            "type": "string",
+            "description": "在工作区内执行的 shell 命令（如 'echo hello > /data.txt'）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "description": "超时秒数（默认 120，上限 900）",
+            "minimum": 1,
+            "maximum": 900,
+            "default": 120
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    },
+    {
+      "name": "workspace_destroy",
+      "channel": "workspace",
+      "risk": "W1",
+      "description": "销毁工作区（W1，幂等）：杀进程/收 cgroup/卸挂载 → 解除 loop → 删除镜像与元数据。不存在时返回成功（本就干净），不报错。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    },
+    {
+      "name": "workspace_quota",
+      "channel": "workspace",
+      "risk": "W1",
+      "description": "查看/扩容工作区容量（W1）：不带 mb 只查看；带 mb 对镜像 truncate + LOOP_SET_CAPACITY + resize2fs。v0 只扩不缩（16-8192MB）；tmpfs 工作区不支持。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "mb": {
+            "type": "integer",
+            "description": "目标容量 MB（16-8192；省略=只查看）",
+            "minimum": 16,
+            "maximum": 8192
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
       ]
     }
   ]

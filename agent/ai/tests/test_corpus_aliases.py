@@ -31,12 +31,12 @@ def main() -> int:
             fails += 1
 
     print("==== test_corpus_aliases: W55 P4 ====")
-    check(len(records) == 199, "seed 为 199 条（区头 9 + 单件 182 + 配方 8，W78 agent-E）")
+    check(len(records) == 205, "seed 为 205 条（区头 9 + 单件 188 + 配方 8，W79 工作区）")
     kinds = {}
     for rec in records:
         kind = (rec.get("metadata") or {}).get("kind")
         kinds[kind] = kinds.get(kind, 0) + 1
-    check(kinds == {"domain-header": 9, "tool": 182, "combo": 8},
+    check(kinds == {"domain-header": 9, "tool": 188, "combo": 8},
           "kind 分布 = %r" % kinds)
 
     tools = [r for r in records if (r.get("metadata") or {}).get("kind") == "tool"]

@@ -67,6 +67,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_MACRO;
 	if (strcmp(s, "netadmin") == 0)
 		return TOOL_CH_NETADMIN;
+	if (strcmp(s, "workspace") == 0)
+		return TOOL_CH_WORKSPACE;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -76,7 +78,7 @@ static const char *channel_str(enum tool_channel ch)
 		"procfs-read", "sysfs-write", "netlink-act", "netlink-sense",
 		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
 		"desktop", "interaction", "model", "stream", "macro",
-		"netadmin", "unknown",
+		"netadmin", "workspace", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)

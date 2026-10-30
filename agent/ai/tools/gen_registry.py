@@ -84,6 +84,7 @@ CH_MODEL = "model"          # W77d：本地模型生命周期（目录/推荐/�
 CH_STREAM = "stream"        # W78：内核事件流订阅（六条流，只读）
 CH_MACRO = "macro"          # W78：宏工具（高频组合升格）
 CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2）
+CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行，六件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -370,6 +371,13 @@ SUB_MAP = {
     "desktop_input_key": ["desktop"],
     "desktop_clipboard_set": ["desktop"],
     "desktop_power": ["desktop"],
+    # ---- workspace 持久工作区（六件，W79）----
+    "workspace_create": ["sandbox", "fs"],
+    "workspace_list": ["sandbox", "fs"],
+    "workspace_inspect": ["sandbox", "fs"],
+    "workspace_run": ["sandbox"],
+    "workspace_destroy": ["sandbox", "fs"],
+    "workspace_quota": ["sandbox", "fs"],
 }
 
 # ---------------------------------------------------------------------------
@@ -737,7 +745,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 182        # 主表 tools.json（W78：156 + 6 流 + 13 宏 + 7 网络执行面）
+EXPECTED_TOOL_COUNT = 188        # 主表 tools.json（W79：182 + 6 工作区）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -926,8 +934,14 @@ EXPECTED_TOOL_NAMES = [
     "model_remove",
     "model_benchmark",
     "clarify",
+    "workspace_create",
+    "workspace_list",
+    "workspace_inspect",
+    "workspace_run",
+    "workspace_destroy",
+    "workspace_quota",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "c3ce0b61a0e13ae4b0b92467f37821f28cefb12cf1fa54a8148d3130a64d4472"
+EXPECTED_TOOL_NAMES_SHA256 = "3e0f97db73d35708c1819010b8022a7829a177d68fb6d499fd15d10e2d5e6f02"
 
 
 def manifest_sha256(names):
@@ -2221,6 +2235,170 @@ def sandbox_tools():
     ]
 
 
+# ---------------------------------------------------------------------------
+# W79：持久工作区（workspace 通道，六件）
+#
+# 工作区 = 宿主稀疏镜像 /var/lib/aikernel/ws/<name>.img，loop 挂 ext4，
+# 在 aik-sandbox 私有 mount/pid/uts namespace 里挂成根。"AI 一句话就有
+# 一个自己的持久盘"：workspace_run 两次调用看到同一份 /data.txt。
+# v0 真支持：backing=disk|tmpfs、size_mb、ro_paths、rw_paths、cpu_max、
+# mem_max、pids_max、label；net=veth 接受但按 none 执行（明确提示）。
+# ---------------------------------------------------------------------------
+WS_NAME_PARAM = {"name": {"type": "string",
+                          "description": "工作区名（[A-Za-z0-9_.-]{1,32}，"
+                                         "首字符不能是 . 或 -；如 ws-test）"}}
+WS_PATH_ARRAY = {"type": "array", "items": {"type": "string"},
+                 "description": "宿主绝对路径数组（最多 16 条）；"
+                                "挂到工作区内同路径"}
+
+
+def tool_workspace_create():
+    return {
+        "name": "workspace_create",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_W1,
+        "description": "创建工作区（W1）：在 /var/lib/aikernel/ws/<name>.img "
+                       "建稀疏镜像，losetup 挂 loop、mkfs.ext4、预置可启动根"
+                       "骨架；一个文件就是一个盘，数据跨 workspace_run 持久。"
+                       "backing=disk（默认）走镜像；backing=tmpfs 为临时盘"
+                       "（run 结束即失，不持久）。ro_paths/rw_paths 为显式"
+                       "共享的宿主绝对路径（工作区内同路径 ro/rw bind）；"
+                       "net 支持 none（默认）|host，veth 未实现（按 none）；"
+                       "cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅"
+                       "登记展示。已存在则幂等返回，绝不重新格式化。",
+        "parameters": obj_schema(
+            {
+                "name": WS_NAME_PARAM["name"],
+                "size_mb": {"type": "integer",
+                            "description": "镜像容量 MB（16-8192；默认 256）",
+                            "minimum": 16, "maximum": 8192,
+                            "default": 256},
+                "backing": {"type": "string",
+                            "description": "disk=持久镜像（默认）；"
+                                           "tmpfs=临时盘（不持久）",
+                            "enum": ["disk", "tmpfs"], "default": "disk"},
+                "ro_paths": dict(WS_PATH_ARRAY,
+                                 description="只读共享的宿主绝对路径"
+                                             "（最多 16 条）"),
+                "rw_paths": dict(WS_PATH_ARRAY,
+                                 description="读写共享的宿主绝对路径"
+                                             "（最多 16 条；慎用）"),
+                "net": {"type": "string",
+                        "description": "none=新 netns 仅 lo（默认）；host=宿主"
+                                       "网络；veth 已接受但按 none 执行",
+                        "enum": ["none", "host", "veth"],
+                        "default": "none"},
+                "cpu_max": {"type": "number",
+                            "description": "CPU 核数上限（0=不限，0.01-64；"
+                                           "映射 cgroup cpu.max）",
+                            "minimum": 0, "maximum": 64, "default": 1},
+                "mem_max": {"type": "integer",
+                            "description": "内存上限 MB（0=不限；默认 1024）",
+                            "minimum": 0, "maximum": 1048576,
+                            "default": 1024},
+                "pids_max": {"type": "integer",
+                             "description": "进程数上限（0=不限；默认 256）",
+                             "minimum": 0, "maximum": 4000000,
+                             "default": 256},
+                "label": {"type": "string",
+                          "description": "标签（≤64 字符，字母数字 ._- 与"
+                                         "空格；仅登记展示）"},
+            },
+            ["name", "size_mb"]),
+    }
+
+
+def tool_workspace_list():
+    return {
+        "name": "workspace_list",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_R,
+        "description": "列出工作区（只读）：名称/后端/容量/已用/创建时间/"
+                       "状态（running|ready）/标签",
+        "parameters": obj_schema({}, []),
+    }
+
+
+def tool_workspace_inspect():
+    return {
+        "name": "workspace_inspect",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_R,
+        "description": "工作区详情（只读）：镜像路径与是否存在、loop 设备、"
+                       "宿主挂载点、cgroup 路径与 cpu/mem/pids 限额、网络、"
+                       "标签、ro/rw 路径与运行状态",
+        "parameters": obj_schema(WS_NAME_PARAM, ["name"]),
+    }
+
+
+def tool_workspace_run():
+    return {
+        "name": "workspace_run",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_W2,
+        "description": "在工作区里执行命令（W2 高危写，逐次确认）：新 "
+                       "mount/pid/uts namespace，根 = 该工作区镜像的 ext4，"
+                       "/usr /etc /dev 只读白名单挂入，宿主 /root /home /var "
+                       "不可见（除显式 ro/rw_paths），cgroup 限额生效；"
+                       "命令以 /bin/sh -c 执行，超时 SIGKILL 全组。写入镜像"
+                       "的数据跨调用持久（tmpfs 工作区除外）。",
+        "parameters": obj_schema(
+            {
+                "name": WS_NAME_PARAM["name"],
+                "command": {"type": "string",
+                            "description": "在工作区内执行的 shell 命令"
+                                           "（如 'echo hello > /data.txt'）"},
+                "timeout_s": {"type": "integer",
+                              "description": "超时秒数（默认 120，上限 900）",
+                              "minimum": 1, "maximum": 900,
+                              "default": 120},
+            },
+            ["name", "command"]),
+    }
+
+
+def tool_workspace_destroy():
+    return {
+        "name": "workspace_destroy",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_W1,
+        "description": "销毁工作区（W1，幂等）：杀进程/收 cgroup/卸挂载 → "
+                       "解除 loop → 删除镜像与元数据。不存在时返回成功"
+                       "（本就干净），不报错。",
+        "parameters": obj_schema(WS_NAME_PARAM, ["name"]),
+    }
+
+
+def tool_workspace_quota():
+    return {
+        "name": "workspace_quota",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_W1,
+        "description": "查看/扩容工作区容量（W1）：不带 mb 只查看；带 mb "
+                       "对镜像 truncate + LOOP_SET_CAPACITY + resize2fs。"
+                       "v0 只扩不缩（16-8192MB）；tmpfs 工作区不支持。",
+        "parameters": obj_schema(
+            {
+                "name": WS_NAME_PARAM["name"],
+                "mb": {"type": "integer",
+                       "description": "目标容量 MB（16-8192；省略=只查看）",
+                       "minimum": 16, "maximum": 8192},
+            },
+            ["name"]),
+    }
+
+
+def workspace_tools():
+    return [
+        tool_workspace_create(),
+        tool_workspace_list(),
+        tool_workspace_inspect(),
+        tool_workspace_run(),
+        tool_workspace_destroy(),
+        tool_workspace_quota(),
+    ]
+
+
 def memory_tools():
     """W50 SME 完整管理面 29 工具（+ memory_health = 30）"""
     id_param = {"id": {"type": "string",
@@ -2609,6 +2787,7 @@ CHANNEL_RETURN = {
     CH_CLARIFY: "返回用户选择 JSON；非 TTY 返回 CLARIFY_REQUIRED（本轮结束）。",
     CH_MODEL: "返回目录/推荐/安装/卸载/基准的文本结果；安装失败含原因与替代建议。",
     CH_NETADMIN: "返回写前旧值（回滚凭据）+ 写回执 + 写后回读验证；nft_txn 返回校验/预检/应用/抽查逐步结果。",
+    CH_WORKSPACE: "返回工作区状态/详情或工作区内命令的 stdout/stderr 与退出码；destroy 幂等。",
 }
 
 
@@ -3368,6 +3547,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(model_tools())
     # W77c：结构化澄清（interaction 通道；追加在清单末尾，锚点同步）
     tools.append(tool_clarify())
+    # W79：持久工作区六件（追加在清单末尾；锚点按装配顺序同步）
+    tools.extend(workspace_tools())
     return tools
 
 
@@ -3688,7 +3869,7 @@ def main():
     ]
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
-               CH_DESKTOP, CH_MODEL, CH_CLARIFY):
+               CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

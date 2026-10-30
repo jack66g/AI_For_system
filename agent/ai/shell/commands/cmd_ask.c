@@ -896,6 +896,7 @@ static const char *ask_trace_channel(enum tool_channel ch)
 	case TOOL_CH_MEMORY:		return "memory";
 	case TOOL_CH_SHELL:		return "shell";
 	case TOOL_CH_SANDBOX:		return "sandbox";
+	case TOOL_CH_WORKSPACE:		return "workspace";
 	case TOOL_CH_CLARIFY:		return "interaction";
 	default:			return "unknown";
 	}

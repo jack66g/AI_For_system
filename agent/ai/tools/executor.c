@@ -67,6 +67,7 @@
 #include "netlink/ai_streams.h"
 #include "macro_tools.h"
 #include "net_admin.h"
+#include "workspace_tools.h"
 #include "memory/sme_client.h"
 #include "tools/executor.h"
 #include "ai_config.h"
@@ -5919,7 +5920,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 			act.danger = danger;
 			act.is_exec = (tool->channel == TOOL_CH_EXEC ||
 				       tool->channel == TOOL_CH_SHELL ||
-				       tool->channel == TOOL_CH_SANDBOX);
+				       tool->channel == TOOL_CH_SANDBOX ||
+				       tool->channel == TOOL_CH_WORKSPACE);
 			act.plan_mode = ai_policy_get_plan_mode();
 			act.worker = (sb_zone && sb_zone[0]) ? 1 : 0;
 
@@ -6032,6 +6034,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_NETADMIN:
 		rc = exec_net_admin_channel(tool, args_json, out);
 		break;
+	case TOOL_CH_WORKSPACE:
+		rc = exec_workspace_channel(tool, args_json, out);
+		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调
 		 * 也绝不提问/建租约/执行动作。 */
@@ -6060,6 +6065,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   tool->channel == TOOL_CH_SYSCTL ? "sysctl" :
 		   tool->channel == TOOL_CH_SYSFS_DYN ? "sysfs" :
 		   tool->channel == TOOL_CH_DESKTOP ? "desktop" :
+		   tool->channel == TOOL_CH_WORKSPACE ?
+		   "workspace（持久工作区+隔离执行）" :
 		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
 		   args_json,
 		   g_mem_degraded ? "degraded" :

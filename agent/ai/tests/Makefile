@@ -14,7 +14,7 @@ MBEDTLS_LIBS := $(MBEDTLS_DIR)/library/libmbedtls.a \
 	        $(MBEDTLS_DIR)/library/libmbedx509.a \
 	        $(MBEDTLS_DIR)/library/libmbedcrypto.a
 
-TESTS   := test_utf8_body test_http_retry test_cloud_stream test_provider_stream \
+TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_provider_stream \
 	   test_parallel_toolcalls test_toolcall_backfill test_toolname_map \
 	   test_sandbox_tools test_plan_mode test_sme_degraded test_export_path \
 	   test_memory_api test_trace test_router_activation test_router_cap \
@@ -101,7 +101,7 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
-SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/workspace_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
@@ -109,6 +109,12 @@ SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c 
 		 ../cloud/toolname_map.c ../trace/ai_trace.c ../local/local_http.c
 test_sandbox_tools: test_sandbox_tools.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_sandbox_tools.c \
+		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# W79：workspace 通道（纯函数校验 + 不存在/非法参数的诚实错误；
+# 真机持久性由 sudo ./test_workspace --live 走真 aik-sandbox 验证）
+test_workspace: test_workspace.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
 
 # W65 P2-01/P2-03/P2-04/P2-05: exec_run 参数契约 / stdin 别名 / 写回读 /
@@ -252,7 +258,7 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
-MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/workspace_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \

@@ -134,6 +134,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <linux/loop.h>
 
 /*
  * 本文件的路径全部以 PATH_MAX 级静态上界构造；base / cgroup root / name
@@ -154,6 +155,15 @@
 #define SB_DEF_CPUS_X100       100      /* 1.00 CPU */
 #define SB_DEF_MEM_MB          1024
 #define SB_DEF_PIDS            256
+
+/* W79：磁盘后端（工作区）。
+ * --backing=disk:<image> 把 tmpfs 空根换成稀疏镜像经 loop 挂载的 ext4 根：
+ * "一个文件就是一个盘"，数据跨 run 持久；镜像由 workspace_* 工具创建/
+ * 销毁（destroy 只解除挂载，绝不删用户数据），本工具只负责挂载与隔离。
+ * --backing=tmpfs 保持 W42 原有语义（默认）。 */
+#define SB_WS_MIN_MB           16
+#define SB_WS_MAX_MB           8192
+#define SB_MAX_BINDS           16
 
 /* openat2：静态构建下直接走 syscall，避免 libc 版本差异 */
 #ifndef SYS_openat2
@@ -201,6 +211,17 @@ struct sb_config {
 	int net_none;           /* 1 = CLONE_NEWNET */
 	int cgroup;             /* 1 = 尝试 cgroup */
 	int keep;               /* run --keep */
+
+	/* W79 磁盘后端与声明式 bind（显式路径均为宿主绝对路径） */
+	int backing_set;        /* 1 = 命令行显式给了 --backing（覆盖 meta） */
+	int backing_disk;       /* 1 = 镜像 ext4 根；0 = tmpfs（默认） */
+	char image[PATH_MAX];   /* 镜像路径（backing=disk 时必填） */
+	char loopdev[64];       /* 实际挂载使用的 /dev/loopN */
+	long disk_size_mb;      /* 新建镜像容量（16-8192 MB） */
+	char ro_paths[SB_MAX_BINDS][PATH_MAX];
+	int ro_n;
+	char rw_paths[SB_MAX_BINDS][PATH_MAX];
+	int rw_n;
 };
 
 struct sb_meta {
@@ -221,6 +242,11 @@ struct sb_meta {
 	int cgroup;
 	int exit_code;
 	char status[16];
+
+	/* W79：磁盘后端信息（run 时沿用 create 落盘的镜像/loop） */
+	int backing_disk;
+	char image[PATH_MAX];
+	char loopdev[64];
 };
 
 struct cg_state {
@@ -511,6 +537,574 @@ static int ensure_artifact_dir(const char *name, char *host, size_t hostsz)
 	return 0;
 }
 
+/* ---- W79：磁盘后端（镜像/loop/骨架/bind） ---- */
+
+/* 宿主绝对路径（镜像与显式 bind 源）：拒绝 ".." 段、控制字符、超长 */
+static int valid_host_path(const char *p)
+{
+	size_t n, i;
+	const char *seg;
+
+	if (!p || p[0] != '/')
+		return 0;
+	n = strlen(p);
+	if (n < 2 || n >= PATH_MAX)
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)p[i];
+
+		if (c < 0x20 || c == 0x7f)
+			return 0;
+	}
+	for (seg = p; (seg = strstr(seg, "/..")); seg += 3) {
+		if (seg[3] == '\0' || seg[3] == '/')
+			return 0;
+	}
+	return 1;
+}
+
+/*
+ * 显式 ro/rw bind 源：除绝对路径外，拒绝系统关键挂载点及其子树
+ * （否则会在沙盒内覆盖 /usr 等只读骨架，或把租约/元数据目录暴露
+ * 给工作区）。这是工作区的显式共享通道，默认仍只有产物区一个 rw。
+ */
+static int valid_bind_src(const char *p)
+{
+	static const char *const deny[] = {
+		"/proc", "/sys", "/dev", "/usr", "/bin", "/sbin",
+		"/lib", "/lib64", "/etc", "/root", "/boot",
+		"/var/lib/aikernel", "/var/ai/sandbox-artifacts", NULL,
+	};
+	size_t i;
+
+	if (!valid_host_path(p) || strcmp(p, "/") == 0)
+		return 0;
+	for (i = 0; deny[i]; i++) {
+		size_t n = strlen(deny[i]);
+
+		if (strncmp(p, deny[i], n) == 0 &&
+		    (p[n] == '\0' || p[n] == '/'))
+			return 0;
+	}
+	return 1;
+}
+
+/* 扫 /sys/block 下各 loopN 的 loop/backing_file：镜像是否已挂上 */
+static int loop_find_backing(const char *image, char *dev, size_t devsz)
+{
+	DIR *d = opendir("/sys/block");
+	struct dirent *e;
+	int found = -1;
+
+	if (!d)
+		return -1;
+	while ((e = readdir(d))) {
+		char p[PATH_MAX], b[PATH_MAX];
+
+		if (strncmp(e->d_name, "loop", 4) != 0)
+			continue;
+		snprintf(p, sizeof(p), "/sys/block/%s/loop/backing_file",
+			 e->d_name);
+		if (read_str(p, b, sizeof(b)) <= 0)
+			continue;
+		/* sysfs 通常回显完整路径；个别内核去掉前导 '/'，两者都认 */
+		if (strcmp(b, image) == 0 ||
+		    (b[0] != '/' && image[0] == '/' &&
+		     strcmp(b, image + 1) == 0)) {
+			snprintf(dev, devsz, "/dev/%s", e->d_name);
+			found = 0;
+			break;
+		}
+	}
+	closedir(d);
+	return found;
+}
+
+/* 把镜像接到空闲 loop 上（已接则复用）；返回 0 成功，dev 出参 */
+static int loop_attach(const char *image, char *dev, size_t devsz)
+{
+	int attempt;
+
+	if (loop_find_backing(image, dev, devsz) == 0) {
+		/* 复用已有 loop 时强制刷新容量：镜像可能被 quota/重建改过
+		 * 大小，loop 块设备的 capacity 不刷新会让 ext4 读到 EIO。 */
+		int fd = open(dev, O_RDWR | O_CLOEXEC);
+
+		if (fd >= 0) {
+			(void)ioctl(fd, LOOP_SET_CAPACITY, 0);
+			close(fd);
+		}
+		return 0;
+	}
+	for (attempt = 0; attempt < 3; attempt++) {
+		struct loop_info64 info;
+		int ctl, num, img, lfd;
+
+		ctl = open("/dev/loop-control", O_RDWR | O_CLOEXEC);
+		if (ctl < 0)
+			return -1;
+		num = ioctl(ctl, LOOP_CTL_GET_FREE);
+		close(ctl);
+		if (num < 0)
+			return -1;
+		snprintf(dev, devsz, "/dev/loop%d", num);
+		img = open(image, O_RDWR | O_CLOEXEC);
+		if (img < 0)
+			return -1;
+		lfd = open(dev, O_RDWR | O_CLOEXEC);
+		if (lfd < 0) {
+			close(img);
+			continue;       /* 设备被别人抢走：换一个 */
+		}
+		memset(&info, 0, sizeof(info));
+		snprintf((char *)info.lo_file_name,
+			 sizeof(info.lo_file_name), "%s", image);
+		if (ioctl(lfd, LOOP_SET_FD, img)) {
+			close(lfd);
+			close(img);
+			continue;
+		}
+		(void)ioctl(lfd, LOOP_SET_STATUS64, &info);
+		/* 显式按当前文件大小刷新 capacity（防止设备被快速复用时
+		 * 保留上一个 backing file 的旧容量）。 */
+		(void)ioctl(lfd, LOOP_SET_CAPACITY, 0);
+		close(lfd);
+		close(img);
+		return 0;
+	}
+	return -1;
+}
+
+/* 解除单个 loop（未接/已不存在视为成功；EBUSY 返回 -1） */
+static int loop_detach(const char *dev)
+{
+	int fd, rc = 0;
+
+	if (!dev || !dev[0])
+		return 0;
+	fd = open(dev, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return errno == ENOENT ? 0 : -1;
+	if (ioctl(fd, LOOP_CLR_FD, 0) && errno != ENXIO && errno != EINVAL)
+		rc = -1;
+	close(fd);
+	return rc;
+}
+
+/* 找出并解除镜像当前占用的 loop（幂等） */
+static int loop_detach_image(const char *image)
+{
+	char dev[64];
+	int rc = 0;
+
+	while (loop_find_backing(image, dev, sizeof(dev)) == 0) {
+		if (loop_detach(dev))
+			return -1;
+		rc = 0;
+	}
+	return rc;
+}
+
+/* 子进程 fork/exec 一个工具（mkfs/resize2fs），失败返回 -1 */
+static int run_prog(char *const argv[])
+{
+	pid_t pid;
+	int st;
+
+	pid = fork();
+	if (pid < 0)
+		return -1;
+	if (pid == 0) {
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	while (waitpid(pid, &st, 0) < 0) {
+		if (errno != EINTR)
+			return -1;
+	}
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+/* 根骨架（tmpfs 与 ext4 共用）：目录 + usrmerge 符号链接。
+ * 返回 0 成功；-1 失败（调用方决定 die 还是清理）。 */
+static int sb_make_root(const char *mnt)
+{
+	static const char *const flat[] = {
+		"usr", "proc", "sys", "etc", "tmp", "home",
+		"var", "opt", "srv", "dev", ".old", NULL,
+	};
+	char path[PATH_MAX];
+	int i;
+
+	snprintf(path, sizeof(path), "%s/etc/ssl/certs", mnt);
+	if (mkdir_p_soft(path, 0755))
+		return -1;
+	snprintf(path, sizeof(path), "%s/root/.aikernel", mnt);
+	if (mkdir_p_soft(path, 0700))
+		return -1;
+	for (i = 0; flat[i]; i++) {
+		snprintf(path, sizeof(path), "%s/%s", mnt, flat[i]);
+		if (mkdir_p_soft(path, 0755))
+			return -1;
+	}
+	snprintf(path, sizeof(path), "%s/bin", mnt);
+	if (symlink("usr/bin", path) && errno != EEXIST)
+		return -1;
+	snprintf(path, sizeof(path), "%s/sbin", mnt);
+	if (symlink("usr/sbin", path) && errno != EEXIST)
+		return -1;
+	snprintf(path, sizeof(path), "%s/lib", mnt);
+	if (symlink("usr/lib", path) && errno != EEXIST)
+		return -1;
+	if (file_exists("/lib64")) {
+		snprintf(path, sizeof(path), "%s/lib64", mnt);
+		if (symlink("usr/lib64", path) && errno != EEXIST)
+			return -1;
+	}
+	return 0;
+}
+
+static void reap_entry(const char *name, int verbose);   /* forward */
+
+/* 在 /usr/sbin、/sbin、/usr/bin、/bin 里找可执行工具；返回 0 成功 */
+static int tool_path(const char *name, char *buf, size_t n)
+{
+	static const char *const dirs[] = {
+		"/usr/sbin", "/sbin", "/usr/bin", "/bin", NULL,
+	};
+	int i;
+
+	for (i = 0; dirs[i]; i++) {
+		snprintf(buf, n, "%s/%s", dirs[i], name);
+		if (access(buf, X_OK) == 0)
+			return 0;
+	}
+	return -1;
+}
+
+/* fork/exec 并采集 stdout+stderr（截断到 outsz-1，但继续排干管道） */
+static int run_capture(char *const argv[], char *out, size_t outsz,
+		       int *exit_code)
+{
+	int p[2], st;
+	pid_t pid;
+	size_t off = 0;
+	ssize_t r;
+	char chunk[1024];
+
+	if (out && outsz)
+		out[0] = '\0';
+	if (exit_code)
+		*exit_code = -1;
+	if (pipe(p))
+		return -1;
+	pid = fork();
+	if (pid < 0) {
+		close(p[0]);
+		close(p[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		int dn = open("/dev/null", O_RDWR);
+
+		close(p[0]);
+		dup2(p[1], STDOUT_FILENO);
+		close(p[1]);
+		if (dn >= 0) {
+			dup2(dn, STDIN_FILENO);
+			dup2(dn, STDERR_FILENO);
+			close(dn);
+		}
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	close(p[1]);
+	while ((r = read(p[0], chunk, sizeof(chunk))) > 0) {
+		if (out && outsz > 1 && off < outsz - 1) {
+			size_t take = (size_t)r;
+
+			if (take > outsz - 1 - off)
+				take = outsz - 1 - off;
+			memcpy(out + off, chunk, take);
+			off += take;
+			out[off] = '\0';
+		}
+	}
+	close(p[0]);
+	while (waitpid(pid, &st, 0) < 0) {
+		if (errno != EINTR)
+			return -1;
+	}
+	if (exit_code)
+		*exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	return 0;
+}
+
+/*
+ * 镜像必须是 ext4：blkid 精确识别类型 + dumpe2fs -h 能读超级块。
+ * 只读校验，不挂载、不写盘。
+ */
+static int verify_ext4(const char *target, char *why, size_t whysz)
+{
+	char blkid[PATH_MAX], dumpe2fs[PATH_MAX], out[512];
+	char *bargv[8], *dargv[4];
+	char *p;
+	int code;
+
+	if (tool_path("blkid", blkid, sizeof(blkid))) {
+		snprintf(why, whysz, "找不到 blkid（util-linux）");
+		return -1;
+	}
+	bargv[0] = blkid;
+	bargv[1] = (char *)"-p";
+	bargv[2] = (char *)"-o";
+	bargv[3] = (char *)"value";
+	bargv[4] = (char *)"-s";
+	bargv[5] = (char *)"TYPE";
+	bargv[6] = (char *)target;
+	bargv[7] = NULL;
+	if (run_capture(bargv, out, sizeof(out), &code) || code != 0) {
+		snprintf(why, whysz, "blkid 无法识别 %s", target);
+		return -1;
+	}
+	for (p = out; *p; p++)
+		if (*p == '\n' || *p == '\r') {
+			*p = '\0';
+			break;
+		}
+	if (strcmp(out, "ext4") != 0) {
+		snprintf(why, whysz, "blkid 类型=%s（不是 ext4）",
+			 out[0] ? out : "unknown");
+		return -1;
+	}
+	if (tool_path("dumpe2fs", dumpe2fs, sizeof(dumpe2fs))) {
+		snprintf(why, whysz, "找不到 dumpe2fs（e2fsprogs）");
+		return -1;
+	}
+	dargv[0] = dumpe2fs;
+	dargv[1] = (char *)"-h";
+	dargv[2] = (char *)target;
+	dargv[3] = NULL;
+	if (run_capture(dargv, out, sizeof(out), &code) || code != 0) {
+		snprintf(why, whysz, "dumpe2fs -h %s 失败", target);
+		return -1;
+	}
+	return 0;
+}
+
+/* 清理一次失败 create 的全部痕迹：临时挂载点/loop/临时镜像/沙盒目录 */
+static void disk_cleanup(const char *name, const char *tmpimg,
+			 const char *dev, const char *stage)
+{
+	if (stage && is_dir(stage)) {
+		umount2(stage, MNT_DETACH);
+		rmdir(stage);
+	}
+	if (dev && dev[0])
+		loop_detach(dev);
+	if (tmpimg && tmpimg[0])
+		unlink(tmpimg);
+	reap_entry(name, 0);
+}
+
+/* 清掉上一次 create 被杀留下的 <image>.tmp.<pid>（先解其 loop 再删） */
+static void disk_clean_stale_temps(const char *image)
+{
+	char parent[PATH_MAX], base[PATH_MAX], path[PATH_MAX];
+	const char *slash = strrchr(image, '/');
+	DIR *d;
+	struct dirent *e;
+	size_t bl;
+
+	if (!slash)
+		return;
+	snprintf(parent, sizeof(parent), "%.*s", (int)(slash - image), image);
+	if (!parent[0])
+		snprintf(parent, sizeof(parent), "/");
+	snprintf(base, sizeof(base), "%s", slash + 1);
+	bl = strlen(base);
+	d = opendir(parent);
+	if (!d)
+		return;
+	while ((e = readdir(d))) {
+		if (strncmp(e->d_name, base, bl) != 0 ||
+		    strncmp(e->d_name + bl, ".tmp.", 5) != 0)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", parent, e->d_name);
+		/* 解 loop 成功才删；仍有引用时保留文件，下次再清 */
+		if (loop_detach_image(path) == 0)
+			unlink(path);
+	}
+	closedir(d);
+}
+
+/*
+ * 准备磁盘根（C6 三段式：预检 → 应用 → 验证/回滚）：
+ *   新建：临时名建稀疏文件 → loop → mkfs.ext4 → 验证（blkid=ext4 且
+ *   dumpe2fs -h 成功）→ 填根骨架 → 解 loop → 原子 rename 到正式名 →
+ *   重新接 loop。任一步失败：解 loop、删临时镜像、删沙盒目录，明确报错。
+ *   已有：blkid/dumpe2fs 校验必须是 ext4 才复用；不是 ext4 明确拒绝
+ *   （提示 workspace_destroy 清理），绝不静默复用或重新格式化。
+ */
+static void disk_prepare(const char *name, struct sb_config *c)
+{
+	char stage[PATH_MAX], parent[PATH_MAX], tmpimg[PATH_MAX];
+	char err[PATH_MAX + 256];
+	char why[256];
+	struct stat st;
+	int fd;
+
+	if (!c->backing_disk)
+		return;
+	if (!valid_host_path(c->image))
+		die(1, "非法镜像路径 '%s'（必须是绝对路径，无 ..）",
+		    c->image);
+	snprintf(parent, sizeof(parent), "%s", c->image);
+	{
+		char *slash = strrchr(parent, '/');
+
+		if (!slash || slash == parent)
+			die(1, "镜像路径缺少父目录: %s", c->image);
+		*slash = '\0';
+	}
+	if (!is_dir(parent))
+		die(1, "镜像父目录不存在: %s", parent);
+	snprintf(stage, sizeof(stage), "%s/.wsfmt-%s", sb_base(), name);
+	/* 上次 create 在 mkfs 中途被杀可能留下临时挂载点/临时镜像：先清掉 */
+	if (is_dir(stage)) {
+		umount2(stage, MNT_DETACH);
+		rmdir(stage);
+	}
+	disk_clean_stale_temps(c->image);
+
+	if (file_exists(c->image)) {
+		if (stat(c->image, &st) || !S_ISREG(st.st_mode)) {
+			snprintf(err, sizeof(err), "镜像 %s 不是普通文件",
+				 c->image);
+			disk_cleanup(name, NULL, NULL, stage);
+			die(1, "%s", err);
+		}
+		if (verify_ext4(c->image, why, sizeof(why))) {
+			snprintf(err, sizeof(err),
+				 "已有镜像 %s 不是可用 ext4（%s），拒绝复用；"
+				 "可用 workspace_destroy 清理后重建",
+				 c->image, why);
+			disk_cleanup(name, NULL, NULL, stage);
+			die(1, "%s", err);
+		}
+		if (loop_attach(c->image, c->loopdev, sizeof(c->loopdev))) {
+			snprintf(err, sizeof(err),
+				 "把已有镜像 %s 接到 loop 失败（%s）",
+				 c->image, strerror(errno));
+			disk_cleanup(name, NULL, NULL, stage);
+			die(2, "%s", err);
+		}
+		return;
+	}
+
+	if (c->disk_size_mb < SB_WS_MIN_MB ||
+	    c->disk_size_mb > SB_WS_MAX_MB) {
+		snprintf(err, sizeof(err),
+			 "新建镜像需要 --disk-size-mb %d..%d（当前 %ld）",
+			 SB_WS_MIN_MB, SB_WS_MAX_MB, c->disk_size_mb);
+		disk_cleanup(name, NULL, NULL, stage);
+		die(1, "%s", err);
+	}
+
+	snprintf(tmpimg, sizeof(tmpimg), "%s.tmp.%ld", c->image,
+		 (long)getpid());
+	fd = open(tmpimg, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		snprintf(err, sizeof(err), "创建临时镜像 %s: %s", tmpimg,
+			 strerror(errno));
+		disk_cleanup(name, NULL, NULL, stage);
+		die(1, "%s", err);
+	}
+	if (ftruncate(fd, c->disk_size_mb * 1024L * 1024L)) {
+		snprintf(err, sizeof(err), "truncate 临时镜像 %s: %s", tmpimg,
+			 strerror(errno));
+		close(fd);
+		disk_cleanup(name, tmpimg, NULL, stage);
+		die(1, "%s", err);
+	}
+	close(fd);
+
+	if (loop_attach(tmpimg, c->loopdev, sizeof(c->loopdev))) {
+		snprintf(err, sizeof(err),
+			 "把临时镜像 %s 接到 loop 失败（%s；需要 root 与 "
+			 "/dev/loop-control）", tmpimg, strerror(errno));
+		disk_cleanup(name, tmpimg, NULL, stage);
+		die(2, "%s", err);
+	}
+
+	{
+		char *argv[] = { (char *)"mkfs.ext4", (char *)"-F",
+				 (char *)"-q", (char *)"-L", (char *)"aikws",
+				 c->loopdev, NULL };
+
+		if (run_prog(argv)) {
+			snprintf(err, sizeof(err),
+				 "mkfs.ext4 %s 失败（临时镜像已回收）",
+				 c->loopdev);
+			disk_cleanup(name, tmpimg, c->loopdev, stage);
+			die(2, "%s", err);
+		}
+	}
+	if (verify_ext4(c->loopdev, why, sizeof(why))) {
+		snprintf(err, sizeof(err),
+			 "新镜像验证失败（%s；临时镜像已回收）", why);
+		disk_cleanup(name, tmpimg, c->loopdev, stage);
+		die(2, "%s", err);
+	}
+
+	mkdir_p(stage, 0700);
+	if (mount(c->loopdev, stage, "ext4",
+		  MS_NOSUID | MS_NODEV, NULL)) {
+		snprintf(err, sizeof(err),
+			 "挂载新镜像 %s 失败: %s（临时镜像已回收）",
+			 c->loopdev, strerror(errno));
+		disk_cleanup(name, tmpimg, c->loopdev, stage);
+		die(2, "%s", err);
+	}
+	if (sb_make_root(stage)) {
+		snprintf(err, sizeof(err),
+			 "初始化镜像根骨架失败: %s（临时镜像已回收）",
+			 strerror(errno));
+		disk_cleanup(name, tmpimg, c->loopdev, stage);
+		die(2, "%s", err);
+	}
+	if (umount2(stage, MNT_DETACH)) {
+		snprintf(err, sizeof(err), "卸载新镜像 %s 失败: %s"
+			 "（临时镜像已回收）", c->loopdev, strerror(errno));
+		disk_cleanup(name, tmpimg, c->loopdev, stage);
+		die(2, "%s", err);
+	}
+	rmdir(stage);
+
+	/* 解 loop 后原子改名；正式镜像只有"已验证 ext4"这一种形态 */
+	if (loop_detach(c->loopdev)) {
+		snprintf(err, sizeof(err), "解除临时镜像 loop %s 失败",
+			 c->loopdev);
+		disk_cleanup(name, tmpimg, c->loopdev, stage);
+		die(2, "%s", err);
+	}
+	c->loopdev[0] = '\0';
+	if (rename(tmpimg, c->image)) {
+		snprintf(err, sizeof(err), "原子改名 %s -> %s 失败: %s",
+			 tmpimg, c->image, strerror(errno));
+		disk_cleanup(name, tmpimg, NULL, stage);
+		die(2, "%s", err);
+	}
+	if (loop_attach(c->image, c->loopdev, sizeof(c->loopdev))) {
+		snprintf(err, sizeof(err),
+			 "正式镜像 %s 接 loop 失败（%s；已删除该次新建镜像）",
+			 c->image, strerror(errno));
+		unlink(c->image);
+		disk_cleanup(name, NULL, NULL, stage);
+		die(2, "%s", err);
+	}
+}
+
 /* ---- 元数据落盘（<base>/<name>/meta，原子替换） ---- */
 
 static void meta_path(const char *name, char *buf, size_t n)
@@ -533,12 +1127,14 @@ static int meta_write(const char *name, const struct sb_meta *m)
 		    "started=%ld\nended=%ld\ncpus=%.2f\nmem_mb=%ld\n"
 		    "pids_max=%ld\ncpu_limit=%d\nmem_limit=%d\n"
 		    "pids_limit=%d\nnet=%s\ncgroup_dir=%s\nexit_code=%d\n"
-		    "status=%s\n",
+		    "status=%s\nbacking=%s\nimage=%s\nloop=%s\n",
 		    name, m->pid, m->child_pid, m->created, m->started,
 		    m->ended, m->cpus_x100 / 100.0, m->mem_mb,
 		    m->pids_max, m->cpu_limit, m->mem_limit,
 		    m->pids_limit, m->net_none ? "none" : "host",
-		    m->cgroup ? "1" : "0", m->exit_code, m->status) < 0)
+		    m->cgroup ? "1" : "0", m->exit_code, m->status,
+		    m->backing_disk ? "disk" : "tmpfs",
+		    m->image, m->loopdev) < 0)
 		goto out;
 	if (!fsync(fd) && !close(fd)) {
 		fd = -1;
@@ -606,6 +1202,12 @@ static int meta_read(const char *name, struct sb_meta *m)
 			m->exit_code = (int)strtol(v, NULL, 10);
 		else if (strcmp(line, "status") == 0)
 			snprintf(m->status, sizeof(m->status), "%s", v);
+		else if (strcmp(line, "backing") == 0)
+			m->backing_disk = strcmp(v, "disk") == 0;
+		else if (strcmp(line, "image") == 0)
+			snprintf(m->image, sizeof(m->image), "%s", v);
+		else if (strcmp(line, "loop") == 0)
+			snprintf(m->loopdev, sizeof(m->loopdev), "%s", v);
 	}
 	fclose(fp);
 	m->have = 1;
@@ -1142,6 +1744,7 @@ static void bind_rw(const char *src, const char *dst, int restrict_dev)
 			" %s\n", dst, strerror(errno));
 }
 
+
 static void copy_file(const char *src, const char *dst, mode_t mode)
 {
 	char buf[8192];
@@ -1266,7 +1869,53 @@ struct child_args {
 	const char *cgroup_dir;                 /* fallback 自挂载；NULL = 不挂 */
 	const char *artifact_host;              /* 宿主产物目录；NULL = 不挂 */
 	int net_none;
+	/* W79：磁盘根 + 声明式 bind（源与目标同绝对路径） */
+	int backing_disk;
+	const char *loopdev;
+	const char *const *ro_paths;
+	int ro_n;
+	const char *const *rw_paths;
+	int rw_n;
 };
+
+/* W79：把显式声明的宿主路径 bind 到工作区同绝对路径（ro/rw 各一组）。
+ * 目标 inode 在镜像根上按源类型创建（目录 or 空文件），失败即 fail-closed
+ * ——显式共享路径没挂上，不能静默继续。 */
+static void sandbox_apply_binds(const struct child_args *a, const char *mnt)
+{
+	char dst[PATH_MAX], parent[PATH_MAX];
+	int pass, i;
+
+	for (pass = 0; pass < 2; pass++) {
+		const char *const *list = pass == 0 ? a->ro_paths : a->rw_paths;
+		int n = pass == 0 ? a->ro_n : a->rw_n;
+
+		for (i = 0; i < n; i++) {
+			const char *src = list[i];
+			struct stat st;
+			char *slash;
+
+			if (stat(src, &st))
+				die(2, "bind 源不存在: %s", src);
+			snprintf(dst, sizeof(dst), "%s%s", mnt, src);
+			if (S_ISDIR(st.st_mode)) {
+				mkdir_p(dst, 0755);
+			} else {
+				snprintf(parent, sizeof(parent), "%s", dst);
+				slash = strrchr(parent, '/');
+				if (slash && slash != parent) {
+					*slash = '\0';
+					mkdir_p(parent, 0755);
+				}
+				close(open(dst, O_CREAT | O_WRONLY, 0644));
+			}
+			if (pass == 0)
+				bind_ro(src, dst, 0);
+			else
+				bind_rw(src, dst, 1);
+		}
+	}
+}
 
 static int sandbox_child(void *argp)
 {
@@ -1302,42 +1951,21 @@ static int sandbox_child(void *argp)
 	if (mount("", "/", NULL, MS_REC | MS_PRIVATE, NULL))
 		die(2, "mount private: %s", strerror(errno));
 
-	/* 3. tmpfs 空根（nosuid+nodev；/dev 节点走独立 bind 挂载不受影响） */
-	if (mount("tmpfs", mnt, "tmpfs", MS_NOSUID | MS_NODEV,
-		  "mode=0755"))
+	/* 3. 根：W79 磁盘后端挂 ext4 镜像；默认仍为 tmpfs 空根
+	 *    （nosuid+nodev；/dev 节点走独立 bind 挂载不受影响） */
+	if (a->backing_disk) {
+		if (mount(a->loopdev, mnt, "ext4",
+			  MS_NOSUID | MS_NODEV, NULL))
+			die(2, "挂载工作区镜像 %s -> %s: %s", a->loopdev,
+			    mnt, strerror(errno));
+	} else if (mount("tmpfs", mnt, "tmpfs", MS_NOSUID | MS_NODEV,
+			 "mode=0755")) {
 		die(2, "tmpfs %s: %s", mnt, strerror(errno));
+	}
 
-	/* 4. 目录骨架 */
-	snprintf(path, sizeof(path), "%s/etc/ssl/certs", mnt);
-	mkdir_p(path, 0755);
-	snprintf(path, sizeof(path), "%s/root/.aikernel", mnt);
-	mkdir_p(path, 0700);
-	{
-		static const char *const flat[] = {
-			"usr", "proc", "sys", "etc", "tmp", "home",
-			"var", "opt", "srv", "dev", ".old", NULL,
-		};
-		for (i = 0; flat[i]; i++) {
-			snprintf(path, sizeof(path), "%s/%s", mnt, flat[i]);
-			mkdir_p(path, 0755);
-		}
-	}
-	/* usrmerge 符号链接（宿主 /bin /sbin /lib /lib64 → usr/… 布局，
-	 * 保证沙盒内 /bin/sh、动态装载器路径照常可解析） */
-	snprintf(path, sizeof(path), "%s/bin", mnt);
-	if (symlink("usr/bin", path) && errno != EEXIST)
-		die(2, "symlink bin: %s", strerror(errno));
-	snprintf(path, sizeof(path), "%s/sbin", mnt);
-	if (symlink("usr/sbin", path) && errno != EEXIST)
-		die(2, "symlink sbin: %s", strerror(errno));
-	snprintf(path, sizeof(path), "%s/lib", mnt);
-	if (symlink("usr/lib", path) && errno != EEXIST)
-		die(2, "symlink lib: %s", strerror(errno));
-	if (file_exists("/lib64")) {
-		snprintf(path, sizeof(path), "%s/lib64", mnt);
-		if (symlink("usr/lib64", path) && errno != EEXIST)
-			die(2, "symlink lib64: %s", strerror(errno));
-	}
+	/* 4. 目录骨架（ext4 上已由 workspace_create 预置；这里幂等补齐） */
+	if (sb_make_root(mnt))
+		die(2, "根目录骨架初始化失败: %s", strerror(errno));
 
 	/* 5. /usr：非递归 bind ro（顶层 superblock 整体只读；宿主在
 	 *    /usr 下的二级挂载不进沙盒）。
@@ -1404,7 +2032,11 @@ static int sandbox_child(void *argp)
 				" %s\n", src, strerror(errno));
 	}
 
-	/* 8. 产物通道：唯一的 rw 宿主目录，nodev+nosuid 限制 */
+	/* 7b. 显式声明的 ro/rw 宿主路径（工作区拓扑键值；目标同绝对路径）。
+	 *     放在 /usr /etc /dev 之后：系统白名单挂载不会被用户路径遮蔽。 */
+	sandbox_apply_binds(a, mnt);
+
+	/* 8. 产物通道：唯一的默认 rw 宿主目录，nodev+nosuid 限制 */
 	snprintf(path, sizeof(path), "%s%s/%s", mnt, SB_ARTIFACT_CANON,
 		 a->name);
 	mkdir_p(path, 0755);
@@ -1608,10 +2240,14 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 				snprintf(key, sizeof(key), "%s", a);
 			}
 		}
-		if (strcmp(key, "--cpus") == 0 ||
+			if (strcmp(key, "--cpus") == 0 ||
 		    strcmp(key, "--mem-mb") == 0 ||
 		    strcmp(key, "--pids") == 0 ||
-		    strcmp(key, "--net") == 0) {
+		    strcmp(key, "--net") == 0 ||
+		    strcmp(key, "--backing") == 0 ||
+		    strcmp(key, "--disk-size-mb") == 0 ||
+		    strcmp(key, "--ro-path") == 0 ||
+		    strcmp(key, "--rw-path") == 0) {
 			if (!val) {
 				if (++i >= argc)
 					die(1, "%s 需要参数", key);
@@ -1628,7 +2264,7 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 				if (parse_num(val, 0, 4000000,
 					      &c->lim.pids_max))
 					die(1, "非法 --pids '%s'", val);
-			} else {
+			} else if (strcmp(key, "--net") == 0) {
 				if (strcmp(val, "none") == 0)
 					c->net_none = 1;
 				else if (strcmp(val, "host") == 0)
@@ -1636,6 +2272,46 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 				else
 					die(1, "非法 --net '%s'"
 					    "（none|host）", val);
+			} else if (strcmp(key, "--backing") == 0) {
+				c->backing_set = 1;
+				if (strcmp(val, "tmpfs") == 0) {
+					c->backing_disk = 0;
+					c->image[0] = '\0';
+				} else if (strncmp(val, "disk:", 5) == 0 &&
+					   valid_host_path(val + 5)) {
+					c->backing_disk = 1;
+					snprintf(c->image, sizeof(c->image),
+						 "%s", val + 5);
+				} else {
+					die(1, "非法 --backing '%s'"
+					    "（tmpfs|disk:<绝对镜像路径>）",
+					    val);
+				}
+			} else if (strcmp(key, "--disk-size-mb") == 0) {
+				if (parse_num(val, SB_WS_MIN_MB, SB_WS_MAX_MB,
+					      &c->disk_size_mb))
+					die(1, "非法 --disk-size-mb '%s'"
+					    "（%d-%d）", val, SB_WS_MIN_MB,
+					    SB_WS_MAX_MB);
+			} else {
+				const char *what = strcmp(key,
+					"--ro-path") == 0 ? "ro" : "rw";
+				char (*arr)[PATH_MAX] =
+					strcmp(key, "--ro-path") == 0 ?
+					c->ro_paths : c->rw_paths;
+				int *np = strcmp(key, "--ro-path") == 0 ?
+					&c->ro_n : &c->rw_n;
+
+				if (!valid_bind_src(val))
+					die(1, "非法 %s-path '%s'（绝对路径；"
+					    "拒绝 /proc /sys /dev /usr /etc "
+					    "/root /var/lib/aikernel 等系统面）",
+					    what, val);
+				if (*np >= SB_MAX_BINDS)
+					die(1, "%s-path 数量超过上限 %d",
+					    what, SB_MAX_BINDS);
+				snprintf(arr[*np], PATH_MAX, "%s", val);
+				(*np)++;
 			}
 			continue;
 		}
@@ -1698,6 +2374,10 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 		return 1;
 	}
 
+	/* W79：磁盘后端（新建镜像 → loop → mkfs → 根骨架）。默认 tmpfs 路径
+	 * 不走这里，行为与 W42 完全一致。 */
+	disk_prepare(name, &cfg);
+
 	if (cfg.cgroup) {
 		if (cg_setup(name, &cfg.lim, &st, info, sizeof(info)) < 0)
 			snprintf(info, sizeof(info), "cgroup=off");
@@ -1723,13 +2403,20 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 	m.pids_limit = st.pids;
 	m.net_none = cfg.net_none;
 	m.cgroup = st.enabled;
+	m.backing_disk = cfg.backing_disk;
+	snprintf(m.image, sizeof(m.image), "%s", cfg.image);
+	snprintf(m.loopdev, sizeof(m.loopdev), "%s", cfg.loopdev);
 	snprintf(m.status, sizeof(m.status), "created");
 	if (meta_write(name, &m))
 		fprintf(stderr, "aik-sandbox: 警告: 元数据写入失败（%s）\n",
 			strerror(errno));
 
-	printf("create: %s 就绪（挂载点 %s；%s；net=%s；产物=%s）\n",
+	printf("create: %s 就绪（挂载点 %s；%s；net=%s；backing=%s%s%s；"
+	       "产物=%s）\n",
 	       name, mnt, info, cfg.net_none ? "none" : "host",
+	       cfg.backing_disk ? "disk" : "tmpfs",
+	       cfg.backing_disk ? " 镜像=" : "",
+	       cfg.backing_disk ? cfg.image : "",
 	       art[0] ? art : "(不可用)");
 	close(lockfd);
 	return 0;
@@ -1737,11 +2424,14 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 
 static int cmd_destroy(const char *name)
 {
+	struct sb_meta m;
 	char dir[PATH_MAX], cgdir[PATH_MAX], art[PATH_MAX];
-	int existed, lockfd;
+	int existed, lockfd, have_meta;
 
 	if (!valid_name(name))
 		die(1, "非法区名 '%s'", name ? name : "");
+	/* meta 在 reap 时会被删：先取出磁盘/loop 信息，回收后解挂 */
+	have_meta = meta_read(name, &m) == 0;
 	snprintf(dir, sizeof(dir), "%s/%s", sb_base(), name);
 	cg_dir_for(name, cgdir, sizeof(cgdir));
 	existed = file_exists(dir) || is_dir(cgdir);
@@ -1759,6 +2449,14 @@ static int cmd_destroy(const char *name)
 	if (is_dir(cgdir) || file_exists(dir))
 		fprintf(stderr, "aik-sandbox: 警告: %s 仍有残留（可能进程处于"
 			"D 状态），请稍后重试 destroy\n", name);
+
+	/* W79：进程/挂载回收后再解 loop（活跃 run 会持有 loop，先解会 EBUSY）。
+	 * 镜像本身是用户数据，sandbox destroy 绝不删除；由 workspace_destroy
+	 * 在确认无 run 后再删。幂等：没有 loop 时直接成功。 */
+	if (have_meta && m.backing_disk) {
+		if (loop_detach_image(m.image) && m.loopdev[0])
+			loop_detach(m.loopdev);
+	}
 
 	snprintf(art, sizeof(art), "%s/%s", artifact_root(), name);
 	if (existed)
@@ -1783,7 +2481,7 @@ static int cmd_status(void)
 	}
 	while ((e = readdir(d))) {
 		struct sb_meta m;
-		char pids[512], mnt[PATH_MAX], limits[256], state[64];
+		char pids[512], mnt[PATH_MAX], limits[512], state[64];
 		int live, procs, lockfd, meta_ok;
 
 		if (e->d_name[0] == '.')
@@ -1831,12 +2529,14 @@ static int cmd_status(void)
 			 e->d_name);
 		if (meta_ok)
 			snprintf(limits, sizeof(limits),
-				 "cpu=%.2f%s mem=%ldMB%s pids=%ld%s net=%s",
+				 "cpu=%.2f%s mem=%ldMB%s pids=%ld%s net=%s "
+				 "backing=%s",
 				 m.cpus_x100 / 100.0,
 				 m.cpu_limit ? "" : "(降级)",
 				 m.mem_mb, m.mem_limit ? "" : "(降级)",
 				 m.pids_max, m.pids_limit ? "" : "(降级)",
-				 m.net_none ? "none" : "host");
+				 m.net_none ? "none" : "host",
+				 m.backing_disk ? m.image : "tmpfs");
 		else
 			snprintf(limits, sizeof(limits), "-");
 		if (live)
@@ -1915,16 +2615,29 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	void *stack;
 	pid_t pid;
 	int st_status = 0, lockfd, ephemeral = 0;
-	int sep, have_meta, i;
+	int sep, have_meta, i, disk = 0;
 	long created0 = 0;
+	char old_image[PATH_MAX] = "";
+	char image[PATH_MAX] = "";
+	int old_disk = 0;
+	const char *img = NULL;
+	const char *ro_ptrs[SB_MAX_BINDS];
+	const char *rw_ptrs[SB_MAX_BINDS];
 	char *child_argv[256];
 	int child_argc = 0;
 
+	(void)ro_ptrs;
+	(void)rw_ptrs;
+
+	if (!valid_name(name))
+		die(1, "非法区名 '%s'", name ? name : "");
 	config_defaults(&cfg);
 	have_meta = meta_read(name, &m) == 0;
 	if (have_meta) {
 		lim_from_meta(&cfg, &m);
 		created0 = m.created;
+		old_disk = m.backing_disk;
+		snprintf(old_image, sizeof(old_image), "%s", m.image);
 	}
 	config_env(&cfg);
 
@@ -1938,8 +2651,35 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	child_argv[child_argc] = NULL;
 	if (child_argc < 1)
 		die(1, "run 需要 -- <cmd> [args...]");
-	if (!valid_name(name))
-		die(1, "非法区名 '%s'", name);
+	for (i = 0; i < cfg.ro_n; i++)
+		ro_ptrs[i] = cfg.ro_paths[i];
+	for (i = 0; i < cfg.rw_n; i++)
+		rw_ptrs[i] = cfg.rw_paths[i];
+
+	/* W79：磁盘根决策。命令行 --backing 优先；否则沿用 create 落盘的
+	 * backing；镜像不存在时明确失败，绝不静默退化为 tmpfs（否则用户
+	 * 以为写盘了，实际数据随进程消亡）。 */
+	if (cfg.backing_set) {
+		disk = cfg.backing_disk;
+		if (disk)
+			snprintf(image, sizeof(image), "%s", cfg.image);
+		img = disk ? image : NULL;
+	} else if (old_disk) {
+		disk = 1;
+		snprintf(image, sizeof(image), "%s", old_image);
+		img = image;
+	}
+	if (disk) {
+		if (!img || !img[0] || !valid_host_path(img))
+			die(1, "工作区磁盘后端缺少合法镜像路径");
+		if (!file_exists(img))
+			die(1, "工作区镜像不存在: %s", img);
+		if (loop_attach(img, cfg.loopdev, sizeof(cfg.loopdev)))
+			die(2, "把工作区镜像 %s 接到 loop 失败（%s；需要 root）",
+			    img, strerror(errno));
+		cfg.backing_disk = 1;
+		snprintf(cfg.image, sizeof(cfg.image), "%s", img);
+	}
 
 	snprintf(dir, sizeof(dir), "%s/%s", sb_base(), name);
 	snprintf(mnt, sizeof(mnt), "%s/root", dir);
@@ -1985,6 +2725,9 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	m.pids_limit = st.pids;
 	m.net_none = cfg.net_none;
 	m.cgroup = st.enabled;
+	m.backing_disk = disk;
+	snprintf(m.image, sizeof(m.image), "%s", disk ? img : "");
+	snprintf(m.loopdev, sizeof(m.loopdev), "%s", disk ? cfg.loopdev : "");
 	snprintf(m.status, sizeof(m.status), "starting");
 	if (meta_write(name, &m))
 		fprintf(stderr, "aik-sandbox: 警告: 元数据写入失败（%s）\n",
@@ -1996,6 +2739,12 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	a.cgroup_dir = st.enabled ? st.dir : NULL;
 	a.artifact_host = art[0] ? art : NULL;
 	a.net_none = cfg.net_none;
+	a.backing_disk = disk;
+	a.loopdev = cfg.loopdev;
+	a.ro_paths = (const char *const *)ro_ptrs;
+	a.ro_n = cfg.ro_n;
+	a.rw_paths = (const char *const *)rw_ptrs;
+	a.rw_n = cfg.rw_n;
 
 	stack = mmap(NULL, SB_STACK_SIZE, PROT_READ | PROT_WRITE,
 		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2339,6 +3088,11 @@ static void usage(FILE *fp)
 "  --pids N         任务数上限，0=不限（默认 256）\n"
 "  --net none|host  网络隔离（默认 host；none 时仅 lo 可用）\n"
 "  --no-cgroup      禁用 cgroup（明确告警降级）\n"
+"  --backing=disk:<image>  磁盘根（稀疏镜像经 loop 挂 ext4；新建需\n"
+"                  --disk-size-mb；默认 tmpfs 空根）\n"
+"  --disk-size-mb N 新建镜像容量（16-8192 MB）\n"
+"  --ro-path P      显式只读 bind 宿主路径 P（沙盒内同路径；可重复）\n"
+"  --rw-path P      显式读写 bind 宿主路径 P（可重复）\n"
 "\n"
 "环境变量：AIKERNEL_SANDBOX_CPUS/MEM_MB/PIDS/NET/NO_CGROUP，\n"
 "          AIKERNEL_SANDBOX_ARTIFACTS（宿主产物根，默认\n"
