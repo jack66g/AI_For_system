@@ -16,6 +16,7 @@
  *   sandbox | sysctl | sysfs | desktop（W76：桌面能力面，本机 HTTP） |
  *   interaction（W77c：clarify 结构化澄清，由 cmd_ask 交互层拦截） |
  *   workspace（W79：持久工作区，镜像 ext4 + 隔离执行）
+ *   sched（W79：双调度台，台子切换 + 旋钮 + 快照 + A/B 对照）
  * v2 起每个工具必带 "risk"（R/W1/W2），exec 工具内嵌 "exec" 单源白名单。
  */
 #ifndef _AI_TOOL_REGISTRY_H
@@ -42,6 +43,7 @@ enum tool_channel {
 	TOOL_CH_MACRO,		/* W78：宏工具（高频组合升格的一等工具） */
 	TOOL_CH_NETADMIN,	/* W78：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2） */
 	TOOL_CH_WORKSPACE,	/* W79：持久工作区（磁盘镜像 + 隔离执行） */
+	TOOL_CH_SCHED,		/* W79：双调度台（static/ml/off + 10 旋钮 + A/B） */
 	TOOL_CH_UNKNOWN,
 };
 

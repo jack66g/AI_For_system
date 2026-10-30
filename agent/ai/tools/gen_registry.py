@@ -85,6 +85,7 @@ CH_STREAM = "stream"        # W78：内核事件流订阅（六条流，只读�
 CH_MACRO = "macro"          # W78：宏工具（高频组合升格）
 CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 + nft 事务，全 W2）
 CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行，六件）
+CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B 对照，五件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -378,6 +379,12 @@ SUB_MAP = {
     "workspace_run": ["sandbox"],
     "workspace_destroy": ["sandbox", "fs"],
     "workspace_quota": ["sandbox", "fs"],
+    # ---- sched 双调度台（五件，W79）----
+    "sched_status": ["res", "aicore"],
+    "sched_knob_set": ["res"],
+    "sched_mode_set": ["res", "aicore"],
+    "sched_snapshot": ["res"],
+    "sched_ab_run": ["res", "aicore"],
 }
 
 # ---------------------------------------------------------------------------
@@ -745,7 +752,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 188        # 主表 tools.json（W79：182 + 6 工作区）
+EXPECTED_TOOL_COUNT = 193        # 主表 tools.json（W79：188 + 5 双调度台）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -940,8 +947,13 @@ EXPECTED_TOOL_NAMES = [
     "workspace_run",
     "workspace_destroy",
     "workspace_quota",
+    "sched_status",
+    "sched_knob_set",
+    "sched_mode_set",
+    "sched_snapshot",
+    "sched_ab_run",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "3e0f97db73d35708c1819010b8022a7829a177d68fb6d499fd15d10e2d5e6f02"
+EXPECTED_TOOL_NAMES_SHA256 = "903a4c898d94cbe7ad383dc2dac8513d9c33d7c1ac58d48435a6bdd3689592b2"
 
 
 def manifest_sha256(names):
@@ -2399,6 +2411,172 @@ def workspace_tools():
     ]
 
 
+# ---------------------------------------------------------------------------
+# W79：双调度台（sched 通道，五件）
+#
+# 计划书 V2.1-V2.3："两块台子并存——一块规则/固定参数，一块模型输出；
+# Agent 一句话切换，两者可做 A/B 对照"。本波只做台子 + 旋钮 + 对照能力：
+#   - 10 个真实可写旋钮：任务级 4（nice/affinity/oom_score/timeslice，走
+#     NETLINK_AI ACT）+ cgroup 级 5（cpu.weight/cpu.max/cpu.max.burst/
+#     io.weight/io.max，落 /sys/fs/cgroup/aikernel-sched）+ sched.mode；
+#   - 快照 save/list/restore（/var/lib/aikernel/sched/snap-<ts>.json，0600）；
+#   - A/B 对照：2 参数集 x 3 档负载，硬超时 180s，无论成败恢复实验前参数集。
+# ml 台未交付（W83）：mode=ml 与 ab 的 ml 臂必须明确拒绝（C2），绝不假成功。
+# ---------------------------------------------------------------------------
+SCHED_KNOBS = ["nice", "affinity", "oom_score", "timeslice",
+               "cpu.weight", "cpu.max", "cpu.max.burst",
+               "io.weight", "io.max", "sched.mode"]
+
+
+def tool_sched_status():
+    return {
+        "name": "sched_status",
+        "channel": CH_SCHED,
+        "risk": RISK_R,
+        "description": "双调度台状态总览（只读，全部真读文件）：当前 mode"
+                       "（static|ml|off）、cgroup 限额（cpu.weight/cpu.max/"
+                       "cpu.max.burst/io.weight/io.max 的当前值）、PSI"
+                       "（/proc/pressure/cpu|memory|io 的 some/full 三档均值）、"
+                       "NETLINK_AI 是否可用、10 个可写旋钮清单与值域、最近"
+                       "快照列表；带 pid 时额外读该进程 nice/affinity/"
+                       "oom_score 当前值。所有值来自内核接口，不由配置回显。",
+        "parameters": obj_schema(
+            {"pid": {"type": "integer",
+                     "description": "可选：读取该进程的任务级旋钮当前值",
+                     "minimum": 1}},
+            []),
+    }
+
+
+def tool_sched_knob_set():
+    return {
+        "name": "sched_knob_set",
+        "channel": CH_SCHED,
+        "risk": RISK_W1,
+        "description": "写单个调度旋钮（W1）：范围校验 -> 写 -> 读回验证，返回"
+                       "期望值与实际值；读回不一致会回滚并报失败（绝不"
+                       "写成功了事）。任务级旋钮 nice(-20..19)、affinity(0.."
+                       "nproc-1)、oom_score(-1000..1000)、timeslice(1..1000，"
+                       "0.1ms，全局 base_slice) 走 NETLINK_AI ACT，需 pid；"
+                       "cgroup 级旋钮 cpu.weight(1..10000)、cpu.max"
+                       "(max 100000 或 quota period)、cpu.max.burst"
+                       "(0..1000000)、io.weight(default N 或 MAJ:MIN N)、"
+                       "io.max(MAJ:MIN rbps=/wbps=/riops=/wiops=) 写 "
+                       "/sys/fs/cgroup/aikernel-sched；sched.mode 等价于 "
+                       "sched_mode_set。内核/设备不支持时诚实报 N/A。",
+        "parameters": obj_schema(
+            {"knob": {"type": "string",
+                      "description": "旋钮名（sched_status 可查全部清单）",
+                      "enum": SCHED_KNOBS},
+             "value": {"type": "string",
+                       "description": "目标值（整数或字符串；cpu.max 形如 "
+                                      "50000 100000，io.max 形如 "
+                                      "8:0 rbps=16777216）"},
+             "pid": {"type": "integer",
+                     "description": "任务级旋钮必填：目标进程 pid",
+                     "minimum": 1}},
+            ["knob", "value"]),
+    }
+
+
+def tool_sched_mode_set():
+    return {
+        "name": "sched_mode_set",
+        "channel": CH_SCHED,
+        "risk": RISK_W2,
+        "description": "切换台子模式（W2 高危写，逐次确认）：static|ml|off。"
+                       "static=规则/固定参数台（cpu.max=50000 100000、"
+                       "cpu.weight=100、cpu.max.burst=0、io.max=16MiB/s）；"
+                       "off=撤销 AI 施加的全部调度参数回到内核默认"
+                       "（cpu.max=max 100000、io.max 清空等）。切换前自动"
+                       "快照当前参数集到 /var/lib/aikernel/sched/"
+                       "snap-<ts>.json（0600），切换后逐项读回校验，失败"
+                       "自动回滚。ml 台未就绪（W83）时明确拒绝，绝不假成功。",
+        "parameters": obj_schema(
+            {"mode": {"type": "string",
+                      "description": "目标模式：static（规则台）| ml（未就绪，"
+                                     "会被拒绝）| off（回内核默认）",
+                      "enum": ["static", "ml", "off"]}},
+            ["mode"]),
+    }
+
+
+def tool_sched_snapshot():
+    return {
+        "name": "sched_snapshot",
+        "channel": CH_SCHED,
+        "risk": RISK_W1,
+        "description": "参数集快照（W1）：save 把当前 mode + cgroup 限额 + "
+                       "全局 timeslice 存为 /var/lib/aikernel/sched/"
+                       "snap-<ts>.json（0600）；list 列快照（时间倒序）；"
+                       "restore 按 id 或 latest 恢复快照并逐项读回校验"
+                       "（失败项明确列出）。任务级 per-pid 参数（nice/"
+                       "affinity/oom_score）不入快照。",
+        "parameters": obj_schema(
+            {"action": {"type": "string",
+                        "description": "save | list | restore",
+                        "enum": ["save", "list", "restore"]},
+             "id": {"type": "string",
+                    "description": "restore 用：快照 id（如 1761...）或 "
+                                   "latest；缺省=最新"}},
+            ["action"]),
+    }
+
+
+def tool_sched_ab_run():
+    return {
+        "name": "sched_ab_run",
+        "channel": CH_SCHED,
+        "risk": RISK_W2,
+        "description": "双调度台 A/B 对照实验（W2 高危写，逐次确认）：2 个"
+                       "参数集 x 3 档内置负载（cpu 自旋 / io pwrite+fdatasync / "
+                       "mix），测 4 个指标——吞吐（单元/秒）、p99 单元延迟"
+                       "（单工作单元墙钟耗时 99 分位，单元级近似）、公平性"
+                       "（各进程完成量变异系数 CV）、能耗代理（RAPL 包能量，"
+                       "不可读则 N/A）。总时长硬上限 180 秒；报告写 "
+                       "/var/lib/aikernel/sched/ab-<ts>.md。实验前自动快照，"
+                       "无论成败都恢复实验前参数集并逐项读回（C6）。ml 臂"
+                       "未就绪（W83），传 ml 会被明确拒绝。",
+        "parameters": obj_schema(
+            {"arm_a": {"type": "string",
+                       "description": "参数集 A（默认 static）",
+                       "enum": ["static", "baseline", "ml", "off"],
+                       "default": "static"},
+             "arm_b": {"type": "string",
+                       "description": "参数集 B（默认 baseline=内核默认）",
+                       "enum": ["static", "baseline", "ml", "off"],
+                       "default": "baseline"},
+             "loads": {"type": "string",
+                       "description": "负载档（逗号组合）：cpu,io,mix；"
+                                      "缺省三档全跑",
+                       "default": "cpu,io,mix"},
+             "duration_s": {"type": "integer",
+                            "description": "每档时长秒（2-20；总预算超 180s "
+                                           "时自动缩短并写明）",
+                            "minimum": 2, "maximum": 20, "default": 6},
+             "workers": {"type": "integer",
+                         "description": "每档并发进程数（1-8，默认 4）",
+                         "minimum": 1, "maximum": 8, "default": 4},
+             "inject_fail_after": {"type": "integer",
+                                   "description": "仅回滚演练用：在第 N 次 "
+                                                  "run 后强制失败以验证恢复"
+                                                  "路径（0=关闭）",
+                                   "minimum": 0, "maximum": 6,
+                                   "default": 0}},
+            []),
+    }
+
+
+def sched_tools():
+    return [
+        tool_sched_status(),
+        tool_sched_knob_set(),
+        tool_sched_mode_set(),
+        tool_sched_snapshot(),
+        tool_sched_ab_run(),
+    ]
+
+
 def memory_tools():
     """W50 SME 完整管理面 29 工具（+ memory_health = 30）"""
     id_param = {"id": {"type": "string",
@@ -2788,6 +2966,7 @@ CHANNEL_RETURN = {
     CH_MODEL: "返回目录/推荐/安装/卸载/基准的文本结果；安装失败含原因与替代建议。",
     CH_NETADMIN: "返回写前旧值（回滚凭据）+ 写回执 + 写后回读验证；nft_txn 返回校验/预检/应用/抽查逐步结果。",
     CH_WORKSPACE: "返回工作区状态/详情或工作区内命令的 stdout/stderr 与退出码；destroy 幂等。",
+    CH_SCHED: "返回台子状态/旋钮写回读（期望 vs 实际）/快照内容或 A/B 报告路径与关键指标；读回不一致一律 FAIL。",
 }
 
 
@@ -2838,6 +3017,25 @@ def _param_summary(parameters):
 # 域头是单件，Region 质心就是它自己；把真实问法重复 24 次后，它的
 # 向量/BM25 不再被长模板稀释，d02/d04/r01 从 miss 变为 Top-1。
 # 仅影响 seed 文本，不改工具定义。
+# W79：双调度台口语别名（检索用；只影响 seed 文本，不改工具定义）
+TOOL_ALIASES.update({
+    "sched_status": "调度台状态、双调度台、当前调度模式、cgroup 限额、"
+                    "PSI 压力、调度旋钮清单、scheduling status、"
+                    "dual scheduler",
+    "sched_knob_set": "调调度参数、设 nice、设 CPU 亲和、oom_score、"
+                      "时间片、cpu.weight、cpu.max、io.weight、io.max、"
+                      "改 cgroup 限额、set scheduling knob",
+    "sched_mode_set": "切换调度台、切换调度模式、static 台、模型台、"
+                      "ml 台、关掉 AI 调度、恢复默认调度、"
+                      "switch scheduler mode、turn off AI scheduling",
+    "sched_snapshot": "调度快照、保存当前参数集、恢复参数集、回滚调度参数、"
+                      "scheduler snapshot、restore scheduling params",
+    "sched_ab_run": "A/B 对照、对比两种调度参数、调度实验、吞吐延迟对比、"
+                    "公平性、能耗代理、benchmark scheduling policies、"
+                    "A/B test scheduler",
+})
+
+
 SUB_DOMAIN_QUERY_HINTS = {
     "res": ("常用问法：资源与调度能力区、资源与调度、进程调度、"
             "内存与 IO 压力、CPU 资源、resource scheduling", 24),
@@ -3549,6 +3747,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.append(tool_clarify())
     # W79：持久工作区六件（追加在清单末尾；锚点按装配顺序同步）
     tools.extend(workspace_tools())
+    # W79：双调度台五件（追加在清单末尾；锚点按装配顺序同步）
+    tools.extend(sched_tools())
     return tools
 
 
@@ -3869,7 +4069,8 @@ def main():
     ]
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
-               CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE):
+               CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
+               CH_SCHED):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

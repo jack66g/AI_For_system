@@ -280,8 +280,8 @@ int main(void)
 	setenv("AIKERNEL_TOOLS_JSON", "../tools/tools.json", 1);
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
-	      "tools.json 加载（188 件口径）");
-	CHECK(reg.tool_count == 188, "注册表总数 188");
+	      "tools.json 加载（193 件口径）");
+	CHECK(reg.tool_count == 193, "注册表总数 193");
 	{
 		int mem = 0;
 		const struct ai_tool *t;

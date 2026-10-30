@@ -31,6 +31,7 @@ tests=(
     test_parallel_toolcalls test_toolcall_backfill
     test_sandbox_programming test_sme_degraded test_export_path
     test_paste_merge test_ask_repair test_memory_degraded_all test_streams test_tls_srv test_macros test_net_admin
+    test_sched
 )
 
 pass=0
