@@ -88,6 +88,7 @@ CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行
 CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B 对照，五件）
 CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
 CH_NETINTENT = "netintent"  # W81 V3.1：网络意图 ↔ nft 双向编译（四件）
+CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -264,6 +265,10 @@ SUB_MAP = {
     "nft_intent_apply": ["netsec"],
     "nft_intent_confirm": ["netsec"],
     "nft_ruleset_summarize": ["netsec"],
+    # ---- W81 V4：应用静态/动态画像 + 差集风险报告（三件）----
+    "app_profile_static": ["sysadmin"],
+    "app_profile_dynamic": ["sysadmin", "sandbox"],
+    "app_profile_diff": ["sysadmin", "netsec"],
     # ---- aicore AI 内核面（40 主域）----
     "procfs_read_status": ["aicore", "res"],
     "procfs_read_decisions": ["aicore"],
@@ -764,7 +769,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 201        # 主表 tools.json（W81：197 + 4 netintent）
+EXPECTED_TOOL_COUNT = 204        # 主表 tools.json（W81c：201 + 3 appprofile）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -972,8 +977,11 @@ EXPECTED_TOOL_NAMES = [
     "nft_intent_apply",
     "nft_intent_confirm",
     "nft_ruleset_summarize",
+    "app_profile_static",
+    "app_profile_dynamic",
+    "app_profile_diff",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "9dc39e0c0de620ed396b7b3008db56073e4e93ad755ecbb059fbb4e31a9828e3"
+EXPECTED_TOOL_NAMES_SHA256 = "d033d4468f2ff165ae0edf426d0e16f64e07ccf5907348e87fdccd48c3c6477a"
 
 
 def manifest_sha256(names):
@@ -3144,6 +3152,7 @@ CHANNEL_RETURN = {
     CH_SCHED: "返回台子状态/旋钮写回读（期望 vs 实际）/快照内容或 A/B 报告路径与关键指标；读回不一致一律 FAIL。",
     CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
     CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要。",
+    CH_APPPROFILE: "static 返回 ELF/依赖/符号/能力/桌面/包来源与 declared 声明清单；dynamic 返回 JSON 事件流（文件读/写/映射、子进程、网络）+ 统计 + degraded 局限说明；diff 返回「要的/用的/偷偷碰的」三栏 + 0-100 风险分 + 放行条件建议（只读，不自动落策略）。",
 }
 
 
@@ -3982,6 +3991,131 @@ def netintent_tools():
     ]
 
 
+def tool_appprofile(name, risk, desc, props, required=None):
+    """W81 V4：应用静态/动态画像 + 差集风险报告构造（channel=appprofile）"""
+    return {"name": name, "channel": CH_APPPROFILE, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def appprofile_tools():
+    """W81 V4：三件——静态画像（R/D0）、动态画像（W2/D2）、差集报告
+    （W1/D1）。静态：自解析 ELF 程序头 + readelf -d/--dyn-syms + getcap/
+    xattr + setuid + .desktop + dpkg -S，全字段可降级；动态：现有
+    workspace（aik-sandbox）内跑一次无害目标，strace 优先、/proc 采样
+    退化，输出 JSON 事件流；差集：静态声明 vs 动态行为的风险分与放行
+    条件，只读分析。"""
+    static_props = {
+        "path": {
+            "type": "string",
+            "description": "目标可执行文件路径（绝对路径；也接受裸命令名"
+            "按 PATH 解析）。目录、脚本、非 ELF 一律如实标注，不崩"},
+        "format": {
+            "type": "string", "enum": ["text", "json"],
+            "default": "text",
+            "description": "输出格式（json 的 declared 清单可直接喂 "
+            "app_profile_diff）"},
+    }
+    dyn_props = {
+        "path": {
+            "type": "string",
+            "description": "目标可执行文件（必须是系统 bin 目录下的白名单"
+            "无害程序：ls/cat/head/tail/wc/sort/grep/tar/curl/readelf 等）"},
+        "args": {
+            "type": "array", "items": {"type": "string"},
+            "description": "目标参数（最多 16 项，每项 ≤255 字节；参数级"
+            "闸门：tar 只列表 -t、curl 只 --version/--help、sort 禁 -o、"
+            "date 禁 -s）"},
+        "workspace": {
+            "type": "string",
+            "description": "工作区名（默认 appprofile；不存在则以 tmpfs "
+            "后端创建，存在则复用，不覆盖）"},
+        "timeout_s": {
+            "type": "integer", "minimum": 1, "maximum": 60, "default": 10,
+            "description": "目标执行超时秒数（到点 SIGKILL 进程组）"},
+        "sample_ms": {
+            "type": "integer", "minimum": 20, "maximum": 1000,
+            "default": 50,
+            "description": "退化到 /proc 采样时的采样间隔（毫秒）"},
+        "mode": {
+            "type": "string", "enum": ["auto", "strace", "proc"],
+            "default": "auto",
+            "description": "文件访问来源：auto=沙盒内有 strace 就用、否则"
+            "/proc 采样；strace=强制 ptrace；proc=强制 /proc 采样"},
+        "net": {
+            "type": "string", "enum": ["none", "host"], "default": "none",
+            "description": "新建工作区的网络模式（none=无外连能力，默认；"
+            "host=共享宿主网络，会在结果里标注）"},
+        "cleanup": {
+            "type": "boolean", "default": False,
+            "description": "true=本次新建的工作区在跑完后销毁（复用的"
+            "既有工作区永不销毁）"},
+        "format": {
+            "type": "string", "enum": ["json", "text"],
+            "default": "json",
+            "description": "输出格式（json 事件流给 app_profile_diff）"},
+    }
+    diff_props = {
+        "path": {
+            "type": "string",
+            "description": "目标可执行文件（与静态/动态画像同一路径）"},
+        "dynamic": {
+            "type": "string",
+            "description": "app_profile_dynamic 的 JSON 输出（format=json，"
+            "≤512KB；缺 events 数组或拿静态画像充当会诚实报错）"},
+        "format": {
+            "type": "string", "enum": ["text", "json"],
+            "default": "text",
+            "description": "输出格式"},
+    }
+    return [
+        tool_appprofile(
+            "app_profile_static", RISK_R,
+            "应用静态画像（只读 R/D0，绝不执行目标）：把本机可执行文件"
+            "「要什么」一次说清——ELF 头（类型/架构/PIE/NX/RELRO/解释器，"
+            "自解析程序头，不依赖 readelf 也能出结论）、readelf -d 动态"
+            "依赖（NEEDED/SONAME/RPATH/RUNPATH/BIND_NOW/TEXTREL，绝不用"
+            "会执行加载器的 ldd）、动态符号概要、getcap 与 "
+            "security.capability xattr（含原始十六进制解码）、setuid/"
+            "setgid 位、.desktop 匹配（Exec/TryExec/autostart/sandbox "
+            "字段）、dpkg -S 包来源与版本。缺 readelf/dpkg/getcap、非 ELF、"
+            "权限不足、文件不存在一律降级明说并给出 warnings；输出含 "
+            "declared 静态声明清单，可直接喂 app_profile_diff。组合：本"
+            "工具→app_profile_dynamic→app_profile_diff。",
+            static_props, ["path"]),
+        tool_appprofile(
+            "app_profile_dynamic", RISK_W2,
+            "应用动态画像（W2/D2，只在现有 workspace 沙盒里跑一次）："
+            "目标程序在 aik-sandbox（独立 mount/pid/uts namespace、"
+            "no_new_privs、能力清空）内执行，程序与参数双重白名单（仅 "
+            "ls/cat/head/tail/grep/tar -t/curl --version/readelf 等无害"
+            "形态；tar 解包/创建、curl URL/-o、sort -o、date -s 一律"
+            "拒绝），超时 SIGKILL 进程组。文件访问优先用沙盒内 strace"
+            "（execve/open/openat/openat2/connect/bind/rename/unlink/"
+            "mkdir/chmod/chown 全量，区分读写与失败打开）；strace 不可用"
+            "退化为 /proc/<pid> 采样（fd+fdinfo 方向+maps+子进程树+"
+            "/proc/net/{tcp,tcp6,udp,udp6} 按 socket inode 归属）。输出 "
+            "JSON 事件流（file_read/file_write/file_mmap/proc_exec/"
+            "net_connect/net_listen/net_unix）+ 统计 + warnings/degraded"
+            "（fanotify 未实现、短命 fd 可能漏采等如实标注）。工作区不存在"
+            "时需要 root + loop/mkfs；失败给明确原因。",
+            dyn_props, ["path"]),
+        tool_appprofile(
+            "app_profile_diff", RISK_W1,
+            "静态 vs 动态差集风险报告（W1/D1，只读分析，不自动执行"
+            "策略）：输入目标路径 + app_profile_dynamic 的 JSON 事件流，"
+            "重新采集静态画像，输出三栏——要的（ELF/依赖/RUNPATH/能力/"
+            "setuid/包来源）、用的（实际文件读/写/映射、子进程 exec、"
+            "网络连接）、偷偷碰的（动态出现但静态没声明的路径/连接/"
+            "子进程，逐项给权重与理由），汇总 0-100 风险分（低/中/高/"
+            "严重）与放行条件建议（网络走 nft_intent_compile 白名单、"
+            "写路径走 workspace rw 或 W1 租约、敏感路径/setuid/能力走 "
+            "D3、无包归属要签名）。只读：不写 nft、不改权限、不执行任何"
+            "策略。",
+            diff_props, ["path", "dynamic"]),
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -4044,6 +4178,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(bpf_tools())
     # W81 V3.1：网络意图 ↔ nft 双向编译四件（追加在清单末尾；锚点同步）
     tools.extend(netintent_tools())
+    # W81 V4：应用静态/动态画像 + 差集风险报告三件（追加在清单末尾）
+    tools.extend(appprofile_tools())
     return tools
 
 
@@ -4365,7 +4501,8 @@ def main():
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
                CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
-               CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT):
+               CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT,
+               CH_APPPROFILE):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

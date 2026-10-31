@@ -199,3 +199,6 @@ nft_intent_compile 把一句话（「只允
 nft_intent_apply 重编译同一意图 
 nft_intent_confirm action=confirm 在保护
 nft_ruleset_summarize 读 nft -j list ruleset
+app_profile_static 把本机可执行文件
+app_profile_dynamic 目标程序在 aik-sand
+app_profile_diff 输入目标路径 + app

@@ -1178,28 +1178,134 @@ static int ws_cmd_inspect(const char *args_json, char **out)
 	return AI_OK;
 }
 
+/*
+ * W81c：在工作区内执行任意 argv（workspace_run 与 app_profile_dynamic
+ * 复用同一套隔离执行/限额/超时强杀逻辑）。
+ * 返回 AI_OK = 已执行（exit_code/timed_out/truncated 有效，子进程退出码
+ * 非 0 也算已执行）；其余为工作区/启动失败，err_out 给原因。
+ */
+int ai_ws_run_argv(const char *name, char *const argv[], int argc,
+		   int timeout_s, char **tail_out, int *exit_code,
+		   int *timed_out, int *truncated, char **err_out)
+{
+	struct ws_meta m;
+	char imagearg[PATH_MAX + 16], cpuarg[64], memarg[64], pidarg[64];
+	char roargs[WS_MAX_PATHS][PATH_MAX + 16];
+	char rwargs[WS_MAX_PATHS][PATH_MAX + 16];
+	char *sbargv[96];
+	int sn = 0, i;
+
+	if (tail_out)
+		*tail_out = NULL;
+	if (exit_code)
+		*exit_code = -1;
+	if (timed_out)
+		*timed_out = 0;
+	if (truncated)
+		*truncated = 0;
+	if (err_out)
+		*err_out = NULL;
+	if (!ai_ws_valid_name(name)) {
+		if (err_out && asprintf(err_out, "ERROR: 非法工作区名 name='%s'",
+				       name ? name : "(无)") < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	if (!argv || argc < 1) {
+		if (err_out && asprintf(err_out,
+				       "ERROR: 缺少 argv（在工作区内执行的命令）")
+		    < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	if (timeout_s < 1 || timeout_s > WS_RUN_TIMEOUT_MAX)
+		timeout_s = WS_RUN_TIMEOUT_DEF;
+	if (ws_meta_read(name, &m)) {
+		if (err_out && asprintf(err_out, "ERROR: 工作区 '%s' 不存在（先 "
+				       "workspace_create）", name) < 0)
+			*err_out = NULL;
+		return AI_ERR_NOT_FOUND;
+	}
+	if (strcmp(m.backing, "disk") == 0 &&
+	    !ws_image_under_root(m.image)) {
+		if (err_out && asprintf(err_out, "ERROR: 工作区 '%s' 的元数据"
+				       "镜像路径非法: %s", name, m.image) < 0)
+			*err_out = NULL;
+		return AI_ERR_STORAGE;
+	}
+	if (strcmp(m.backing, "disk") == 0 && !ws_file_exists(m.image)) {
+		if (err_out && asprintf(err_out, "ERROR: 工作区 '%s' 的镜像 %s"
+				       " 不存在（元数据损坏或镜像被外部删除）",
+				       name, m.image) < 0)
+			*err_out = NULL;
+		return AI_ERR_NOT_FOUND;
+	}
+	if (12 + m.ro_n + m.rw_n + argc >= 96) {
+		if (err_out && asprintf(err_out, "ERROR: argv 过多（%d）",
+				       argc) < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+
+	sbargv[sn++] = (char *)ws_sb_bin();
+	sbargv[sn++] = (char *)"run";
+	sbargv[sn++] = (char *)name;
+	if (strcmp(m.backing, "disk") == 0) {
+		snprintf(imagearg, sizeof(imagearg), "--backing=disk:%s",
+			 m.image);
+		sbargv[sn++] = imagearg;
+	} else {
+		sbargv[sn++] = (char *)"--backing=tmpfs";
+	}
+	snprintf(cpuarg, sizeof(cpuarg), "--cpus=%.2f",
+		 m.cpus_x100 / 100.0);
+	sbargv[sn++] = cpuarg;
+	snprintf(memarg, sizeof(memarg), "--mem-mb=%ld", m.mem_mb);
+	sbargv[sn++] = memarg;
+	snprintf(pidarg, sizeof(pidarg), "--pids=%ld", m.pids_max);
+	sbargv[sn++] = pidarg;
+	sbargv[sn++] = (char *)(m.net_none ? "--net=none" : "--net=host");
+	for (i = 0; i < m.ro_n; i++) {
+		snprintf(roargs[i], sizeof(roargs[i]), "--ro-path=%s", m.ro[i]);
+		sbargv[sn++] = roargs[i];
+	}
+	for (i = 0; i < m.rw_n; i++) {
+		snprintf(rwargs[i], sizeof(rwargs[i]), "--rw-path=%s", m.rw[i]);
+		sbargv[sn++] = rwargs[i];
+	}
+	sbargv[sn++] = (char *)"--";
+	for (i = 0; i < argc; i++)
+		sbargv[sn++] = argv[i];
+	sbargv[sn] = NULL;
+
+	if (access(sbargv[0], X_OK)) {
+		if (err_out && asprintf(err_out, "ERROR: 找不到 %s（%s）；工作区"
+				       "执行依赖 aik-sandbox", sbargv[0],
+				       strerror(errno)) < 0)
+			*err_out = NULL;
+		return AI_ERR_NOT_FOUND;
+	}
+	if (ws_spawn_capture(sbargv, timeout_s, tail_out, exit_code,
+			     timed_out, truncated)) {
+		if (err_out)
+			*err_out = strdup("ERROR: fork/pipe 失败（无法启动 "
+					  "aik-sandbox）");
+		return AI_ERR_GENERIC;
+	}
+	return AI_OK;
+}
+
 static int ws_cmd_run(const char *args_json, char **out)
 {
 	char *name = ws_arg_str(args_json, "name");
 	char *command = ws_arg_str(args_json, "command");
 	long long timeout_s = ws_arg_ll(args_json, "timeout_s",
 					WS_RUN_TIMEOUT_DEF);
-	struct ws_meta m;
-	char imagearg[PATH_MAX + 16], cpuarg[64], memarg[64], pidarg[64];
-	char roargs[WS_MAX_PATHS][PATH_MAX + 16];
-	char rwargs[WS_MAX_PATHS][PATH_MAX + 16];
-	char *argv[96];
-	char *tail = NULL;
-	int argc = 0, i, exit_code, timed_out, truncated;
+	char *sbargv[4];
+	char *tail = NULL, *err = NULL;
+	int rc, exit_code = -1, timed_out = 0, truncated = 0;
 
-	if (!ai_ws_valid_name(name)) {
-		if (asprintf(out, "ERROR: 非法工作区名 name='%s'",
-			     name ? name : "(无)") < 0)
-			*out = NULL;
-		free(name);
-		free(command);
-		return AI_ERR_INVALID_ARG;
-	}
+	*out = NULL;
 	if (!command || !command[0]) {
 		if (asprintf(out, "ERROR: 缺少 command（在工作区内执行的命令）")
 		    < 0)
@@ -1210,78 +1316,18 @@ static int ws_cmd_run(const char *args_json, char **out)
 	}
 	if (timeout_s < 1 || timeout_s > WS_RUN_TIMEOUT_MAX)
 		timeout_s = WS_RUN_TIMEOUT_DEF;
-	if (ws_meta_read(name, &m)) {
-		if (asprintf(out, "ERROR: 工作区 '%s' 不存在（先 "
-			     "workspace_create）", name) < 0)
-			*out = NULL;
+	sbargv[0] = (char *)"/bin/sh";
+	sbargv[1] = (char *)"-c";
+	sbargv[2] = command;
+	sbargv[3] = NULL;
+	rc = ai_ws_run_argv(name, sbargv, 3, (int)timeout_s, &tail,
+			    &exit_code, &timed_out, &truncated, &err);
+	if (rc != AI_OK) {
+		*out = err;
+		free(tail);
 		free(name);
 		free(command);
-		return AI_ERR_NOT_FOUND;
-	}
-	if (strcmp(m.backing, "disk") == 0 &&
-	    !ws_image_under_root(m.image)) {
-		if (asprintf(out, "ERROR: 工作区 '%s' 的元数据镜像路径非法: %s",
-			     name, m.image) < 0)
-			*out = NULL;
-		free(name);
-		free(command);
-		return AI_ERR_STORAGE;
-	}
-	if (strcmp(m.backing, "disk") == 0 && !ws_file_exists(m.image)) {
-		if (asprintf(out, "ERROR: 工作区 '%s' 的镜像 %s 不存在"
-			     "（元数据损坏或镜像被外部删除）", name, m.image) < 0)
-			*out = NULL;
-		free(name);
-		free(command);
-		return AI_ERR_NOT_FOUND;
-	}
-
-	argv[argc++] = (char *)ws_sb_bin();
-	argv[argc++] = (char *)"run";
-	argv[argc++] = name;
-	if (strcmp(m.backing, "disk") == 0) {
-		snprintf(imagearg, sizeof(imagearg), "--backing=disk:%s",
-			 m.image);
-		argv[argc++] = imagearg;
-	} else {
-		argv[argc++] = (char *)"--backing=tmpfs";
-	}
-	snprintf(cpuarg, sizeof(cpuarg), "--cpus=%.2f",
-		 m.cpus_x100 / 100.0);
-	argv[argc++] = cpuarg;
-	snprintf(memarg, sizeof(memarg), "--mem-mb=%ld", m.mem_mb);
-	argv[argc++] = memarg;
-	snprintf(pidarg, sizeof(pidarg), "--pids=%ld", m.pids_max);
-	argv[argc++] = pidarg;
-	argv[argc++] = (char *)(m.net_none ? "--net=none" : "--net=host");
-	for (i = 0; i < m.ro_n; i++) {
-		snprintf(roargs[i], sizeof(roargs[i]), "--ro-path=%s", m.ro[i]);
-		argv[argc++] = roargs[i];
-	}
-	for (i = 0; i < m.rw_n; i++) {
-		snprintf(rwargs[i], sizeof(rwargs[i]), "--rw-path=%s", m.rw[i]);
-		argv[argc++] = rwargs[i];
-	}
-	argv[argc++] = (char *)"--";
-	argv[argc++] = (char *)"/bin/sh";
-	argv[argc++] = (char *)"-c";
-	argv[argc++] = command;
-	argv[argc] = NULL;
-
-	if (access(argv[0], X_OK)) {
-		if (asprintf(out, "ERROR: 找不到 %s（%s）；工作区执行依赖 "
-			     "aik-sandbox", argv[0], strerror(errno)) < 0)
-			*out = NULL;
-		free(name);
-		free(command);
-		return AI_ERR_NOT_FOUND;
-	}
-	if (ws_spawn_capture(argv, (int)timeout_s, &tail, &exit_code,
-			     &timed_out, &truncated)) {
-		*out = strdup("ERROR: fork/pipe 失败（无法启动 aik-sandbox）");
-		free(name);
-		free(command);
-		return AI_ERR_GENERIC;
+		return rc;
 	}
 	if (timed_out) {
 		if (asprintf(out, "ERROR: 工具超时（超过 %lld 秒未完成），"
@@ -1732,6 +1778,79 @@ static int ws_cmd_quota(const char *args_json, char **out)
 }
 
 /* ---- 执行器入口 ---- */
+
+/*
+ * W81c：应用画像复用入口（见 workspace_tools.h）。
+ * ai_ws_ensure 只在工作区不存在时建 tmpfs 工作区（不覆盖既有状态）。
+ */
+int ai_ws_ensure(const char *name, int net_none, long long size_mb,
+		 char **out, int *created)
+{
+	struct ws_meta m;
+	char args[512];
+	char *discard = NULL;
+	char **o = out ? out : &discard;
+	int rc;
+
+	*o = NULL;
+	if (created)
+		*created = 0;
+	if (!ai_ws_valid_name(name)) {
+		if (asprintf(o, "ERROR: 非法工作区名 name='%s'",
+			     name ? name : "(无)") < 0)
+			*o = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	if (ws_meta_read(name, &m) == 0)
+		return AI_OK;
+	if (size_mb <= 0)
+		size_mb = 64;
+	if (size_mb < WS_MIN_MB)
+		size_mb = WS_MIN_MB;
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"%s\",\"backing\":\"tmpfs\",\"size_mb\":%lld,"
+		 "\"net\":\"%s\"}", name, size_mb,
+		 net_none ? "none" : "host");
+	rc = ws_cmd_create(args, o);
+	if (rc == AI_OK && created)
+		*created = 1;
+	free(discard);
+	return rc;
+}
+
+int ai_ws_meta_net(const char *name, int *net_none, char *backing,
+		   size_t cap)
+{
+	struct ws_meta m;
+
+	if (!ai_ws_valid_name(name) || ws_meta_read(name, &m) != 0)
+		return -1;
+	if (net_none)
+		*net_none = m.net_none;
+	if (backing)
+		snprintf(backing, cap, "%s", m.backing);
+	return 0;
+}
+
+int ai_ws_destroy(const char *name, char **out)
+{
+	char args[128];
+	char *discard = NULL;
+	char **o = out ? out : &discard;
+	int rc;
+
+	*o = NULL;
+	if (!ai_ws_valid_name(name)) {
+		if (asprintf(o, "ERROR: 非法工作区名 name='%s'",
+			     name ? name : "(无)") < 0)
+			*o = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	snprintf(args, sizeof(args), "{\"name\":\"%s\"}", name);
+	rc = ws_cmd_destroy(args, o);
+	free(discard);
+	return rc;
+}
 
 int exec_workspace_channel(const void *tool, const char *args_json,
 			   char **out)

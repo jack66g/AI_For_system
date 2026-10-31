@@ -36,6 +36,7 @@ static const char *ch_name(enum tool_channel ch)
 	case TOOL_CH_SCHED:		return "sched";
 	case TOOL_CH_BPF:		return "bpf";
 	case TOOL_CH_NETINTENT:		return "netintent";
+	case TOOL_CH_APPPROFILE:	return "appprofile";
 	default:			return "unknown";
 	}
 }

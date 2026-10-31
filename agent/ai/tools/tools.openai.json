@@ -5129,5 +5129,154 @@
         "netsec"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_static",
+      "description": "应用静态画像（只读 R/D0，绝不执行目标）：把本机可执行文件「要什么」一次说清——ELF 头（类型/架构/PIE/NX/RELRO/解释器，自解析程序头，不依赖 readelf 也能出结论）、readelf -d 动态依赖（NEEDED/SONAME/RPATH/RUNPATH/BIND_NOW/TEXTREL，绝不用会执行加载器的 ldd）、动态符号概要、getcap 与 security.capability xattr（含原始十六进制解码）、setuid/setgid 位、.desktop 匹配（Exec/TryExec/autostart/sandbox 字段）、dpkg -S 包来源与版本。缺 readelf/dpkg/getcap、非 ELF、权限不足、文件不存在一律降级明说并给出 warnings；输出含 declared 静态声明清单，可直接喂 app_profile_diff。组合：本工具→app_profile_dynamic→app_profile_diff。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件路径（绝对路径；也接受裸命令名按 PATH 解析）。目录、脚本、非 ELF 一律如实标注，不崩"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "输出格式（json 的 declared 清单可直接喂 app_profile_diff）"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_dynamic",
+      "description": "应用动态画像（W2/D2，只在现有 workspace 沙盒里跑一次）：目标程序在 aik-sandbox（独立 mount/pid/uts namespace、no_new_privs、能力清空）内执行，程序与参数双重白名单（仅 ls/cat/head/tail/grep/tar -t/curl --version/readelf 等无害形态；tar 解包/创建、curl URL/-o、sort -o、date -s 一律拒绝），超时 SIGKILL 进程组。文件访问优先用沙盒内 strace（execve/open/openat/openat2/connect/bind/rename/unlink/mkdir/chmod/chown 全量，区分读写与失败打开）；strace 不可用退化为 /proc/<pid> 采样（fd+fdinfo 方向+maps+子进程树+/proc/net/{tcp,tcp6,udp,udp6} 按 socket inode 归属）。输出 JSON 事件流（file_read/file_write/file_mmap/proc_exec/net_connect/net_listen/net_unix）+ 统计 + warnings/degraded（fanotify 未实现、短命 fd 可能漏采等如实标注）。工作区不存在时需要 root + loop/mkfs；失败给明确原因。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件（必须是系统 bin 目录下的白名单无害程序：ls/cat/head/tail/wc/sort/grep/tar/curl/readelf 等）"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "目标参数（最多 16 项，每项 ≤255 字节；参数级闸门：tar 只列表 -t、curl 只 --version/--help、sort 禁 -o、date 禁 -s）"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "工作区名（默认 appprofile；不存在则以 tmpfs 后端创建，存在则复用，不覆盖）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 10,
+            "description": "目标执行超时秒数（到点 SIGKILL 进程组）"
+          },
+          "sample_ms": {
+            "type": "integer",
+            "minimum": 20,
+            "maximum": 1000,
+            "default": 50,
+            "description": "退化到 /proc 采样时的采样间隔（毫秒）"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "strace",
+              "proc"
+            ],
+            "default": "auto",
+            "description": "文件访问来源：auto=沙盒内有 strace 就用、否则/proc 采样；strace=强制 ptrace；proc=强制 /proc 采样"
+          },
+          "net": {
+            "type": "string",
+            "enum": [
+              "none",
+              "host"
+            ],
+            "default": "none",
+            "description": "新建工作区的网络模式（none=无外连能力，默认；host=共享宿主网络，会在结果里标注）"
+          },
+          "cleanup": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=本次新建的工作区在跑完后销毁（复用的既有工作区永不销毁）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 事件流给 app_profile_diff）"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_diff",
+      "description": "静态 vs 动态差集风险报告（W1/D1，只读分析，不自动执行策略）：输入目标路径 + app_profile_dynamic 的 JSON 事件流，重新采集静态画像，输出三栏——要的（ELF/依赖/RUNPATH/能力/setuid/包来源）、用的（实际文件读/写/映射、子进程 exec、网络连接）、偷偷碰的（动态出现但静态没声明的路径/连接/子进程，逐项给权重与理由），汇总 0-100 风险分（低/中/高/严重）与放行条件建议（网络走 nft_intent_compile 白名单、写路径走 workspace rw 或 W1 租约、敏感路径/setuid/能力走 D3、无包归属要签名）。只读：不写 nft、不改权限、不执行任何策略。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件（与静态/动态画像同一路径）"
+          },
+          "dynamic": {
+            "type": "string",
+            "description": "app_profile_dynamic 的 JSON 输出（format=json，≤512KB；缺 events 数组或拿静态画像充当会诚实报错）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "输出格式"
+          }
+        },
+        "required": [
+          "path",
+          "dynamic"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
   }
 ]

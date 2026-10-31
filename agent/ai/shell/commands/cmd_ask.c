@@ -900,6 +900,7 @@ static const char *ask_trace_channel(enum tool_channel ch)
 	case TOOL_CH_SCHED:		return "sched";
 	case TOOL_CH_BPF:		return "bpf";
 	case TOOL_CH_NETINTENT:		return "netintent";
+	case TOOL_CH_APPPROFILE:	return "appprofile";
 	case TOOL_CH_CLARIFY:		return "interaction";
 	default:			return "unknown";
 	}

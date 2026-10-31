@@ -32,4 +32,26 @@ int ai_ws_valid_label(const char *s);
 int exec_workspace_channel(const void *tool, const char *args_json,
 			   char **out);
 
+/*
+ * W81c：应用画像动态画像复用入口（复用 workspace 的隔离执行，不新起
+ * 一套 mount/namespace 组装逻辑）。
+ *
+ * ai_ws_ensure  工作区不存在则以 tmpfs 后端创建（size_mb ≤0 取 64），
+ *               存在则直接复用；created 出参 1=本次新建。
+ * ai_ws_meta_net 读元数据：net_none/backing（不触碰进程）。
+ * ai_ws_destroy 幂等删除（薄封装 workspace_destroy 实现）。
+ * ai_ws_run_argv 在工作区内执行 argv（不经 shell 拼接参数）；
+ *               timeout 秒到即 SIGKILL 进程组；tail_out 为尾部输出，
+ *               exit_code/timed_out/truncated 出参；返回 AI_OK 表示
+ *               已执行（即使子进程退出码非 0），失败时 err_out 说明。
+ */
+int ai_ws_ensure(const char *name, int net_none, long long size_mb,
+		 char **out, int *created);
+int ai_ws_meta_net(const char *name, int *net_none, char *backing,
+		   size_t cap);
+int ai_ws_destroy(const char *name, char **out);
+int ai_ws_run_argv(const char *name, char *const argv[], int argc,
+		   int timeout_s, char **tail_out, int *exit_code,
+		   int *timed_out, int *truncated, char **err_out);
+
 #endif /* _AI_WORKSPACE_TOOLS_H */
