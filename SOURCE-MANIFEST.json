@@ -1,37 +1,38 @@
 {
-  "created": "2026-10-26T04:34:21+08:00",
-  "kernel": "6.18.39 #60",
+  "created": "2026-11-01T06:23:44+08:00",
+  "kernel": "6.18.39 #61",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
-    "kernel overlay manifest: kernel-overlays/MANIFEST.sha256 (unchanged in W78)",
-    "verification: run_all 45/45, audit W75 CHECK PASS (182 tools/9 domains/20 desktop/seed 199), qemu install 6/6 diskboot 7/7 contentcheck 56/56 deskcheck 15/15",
-    "registry.tools/registry.seed and repo.regular_files now carry current values (were stale alpha.11 numbers in prior manifests)",
-    "MANIFEST hashes canonical LF checkout bytes (8 files were hashed as CRLF working-tree copies in the first alpha.13.0 regen, caught by fresh-clone verify)"
+    "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
+    "verification: run_all 54/54, audit W75 CHECK PASS (215 tools/9 domains/20 desktop/seed 232)",
+    "W81 增补：网络意图编译/命中闭环/应用画像/工作区网络/攻击链关联/靶场（未发版，alpha.14.0 ISO 仍为 197 工具）",
+    "MANIFEST hashes canonical LF checkout bytes"
   ],
   "overlay_count": 168,
   "registry": {
     "desktop": 20,
     "domains": 9,
     "sandbox_tools": 7,
-    "seed": 199,
-    "seed_lines": 199,
-    "tool_count": 182,
-    "tools": 182
+    "seed": 232,
+    "seed_lines": 232,
+    "tool_count": 215,
+    "tools": 215
   },
   "release": {
-    "iso_bytes": 752271360,
-    "iso_md5": "ab6a98e7cebf6f147e10059ef5345d20",
-    "kernel": "6.18.39 #60",
+    "iso_bytes": 753551360,
+    "iso_md5": "0e6c9b298e842e951f8ddf56f4a854e8",
+    "kernel": "6.18.39 #61",
     "kernel_unchanged": false,
-    "shell_md5": "487b21b6f974ed78a20353449991b477",
-    "version": "0.1.0-alpha.13.0"
+    "note": "alpha.14.0 ISO 对应 197 工具；本清单对应 main（含 W81，215 工具，未发版）",
+    "shell_md5": "7e2f9a51704e1f070240c7726d950c0b",
+    "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 45838166,
-    "regular_files": 1066,
-    "source_files": 1064,
+    "bytes": 47082515,
+    "regular_files": 1093,
+    "source_files": 1093,
     "symlinks": 4,
-    "tracked_files": 1070
+    "tracked_files": 1097
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
@@ -53,5 +54,5 @@
       "target": "tools/tools.openai.json"
     }
   ],
-  "version": "0.1.0-alpha.13.0"
+  "version": "0.1.0-alpha.14.0"
 }
