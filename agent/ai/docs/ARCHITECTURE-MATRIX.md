@@ -1,3 +1,5 @@
+> 能力矩阵是 [`SYSTEM-ARCHITECTURE.md`](../../../SYSTEM-ARCHITECTURE.md) 的附录，入口与全景见该文；本文件只维护矩阵数据。
+
 # AIKernel 架构矩阵：能力 → 检索 → 执行 → 权限 → 追踪
 
 > 状态注记（2026-10-23，alpha.12.0）： 本文为 W68 系统逻辑收口快照（130 工具/7 域/10 通道）。当前注册表 **156 工具/9 域/11 通道**（W76 +desktop 域 20、W77c +clarify、W77d +model 域 5）；工具数与 sha 以 `tools/tools.json` 为准，后续演进见 `~/aikernel-longterm/reports/`。
