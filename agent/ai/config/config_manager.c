@@ -11,6 +11,7 @@
 #include <strings.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include "ai_config.h"
@@ -648,9 +649,21 @@ static void write_model_toml(struct ai_config *cfg)
 	if (strlen(path) + 4 < sizeof(tmp_path))
 		strcat(tmp_path, ".tmp");
 
-	fp = fopen(tmp_path, "w");
-	if (!fp)
-		return;
+	/* B-107: 临时文件必须以 0600 创建。rename() 会带着临时文件的权限
+	 * 覆盖正式文件，若用 fopen(path,"w")（0666 & ~umask = 0644）就会把
+	 * 含 api_key 的 model.toml 从 0600 放宽到 0644。 */
+	{
+		int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+		if (fd < 0)
+			return;
+		fp = fdopen(fd, "w");
+		if (!fp) {
+			close(fd);
+			unlink(tmp_path);
+			return;
+		}
+	}
 
 	fprintf(fp, "# AIKernel Model Configuration\n");
 	fprintf(fp, "# Auto-generated, do not edit while AI Shell is running\n\n");
@@ -755,6 +768,8 @@ static void write_model_toml(struct ai_config *cfg)
 
 	/* 原子替换：rename tmp -> target */
 	rename(tmp_path, path);
+	/* B-107 防御：无论临时文件历史权限如何，落盘后收紧到 0600 */
+	chmod(path, 0600);
 }
 
 int ai_config_save(struct ai_config *cfg)
