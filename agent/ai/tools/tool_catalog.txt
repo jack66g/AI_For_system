@@ -195,3 +195,7 @@ bpf_prog_load 直接 bpf() 系统调
 bpf_prog_list BPF_PROG_GET_NEXT_ID →
 bpf_prog_unload 先解 link，再关闭 
 nfqueue_pump NETLINK_NETFILTER=12 原
+nft_intent_compile 把一句话（「只允
+nft_intent_apply 重编译同一意图 
+nft_intent_confirm action=confirm 在保护
+nft_ruleset_summarize 读 nft -j list ruleset

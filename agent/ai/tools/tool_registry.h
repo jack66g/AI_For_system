@@ -17,6 +17,7 @@
  *   interaction（W77c：clarify 结构化澄清，由 cmd_ask 交互层拦截） |
  *   workspace（W79：持久工作区，镜像 ext4 + 隔离执行）
  *   sched（W79：双调度台，台子切换 + 旋钮 + 快照 + A/B 对照）
+ *   netintent（W81：自然语言意图 → nft 规则集双向编译 + 自动回滚）
  * v2 起每个工具必带 "risk"（R/W1/W2），exec 工具内嵌 "exec" 单源白名单。
  */
 #ifndef _AI_TOOL_REGISTRY_H
@@ -45,6 +46,7 @@ enum tool_channel {
 	TOOL_CH_WORKSPACE,	/* W79：持久工作区（磁盘镜像 + 隔离执行） */
 	TOOL_CH_SCHED,		/* W79：双调度台（static/ml/off + 10 旋钮 + A/B） */
 	TOOL_CH_BPF,		/* W80：BPF loader（load/list/unload）+ nfqueue */
+	TOOL_CH_NETINTENT,	/* W81：网络意图 ↔ nft 规则双向编译（4 件） */
 	TOOL_CH_UNKNOWN,
 };
 

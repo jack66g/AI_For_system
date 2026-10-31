@@ -1381,6 +1381,15 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 			why = "interactive_root_shell";
 			goto out;
 		}
+		/* W81 V3.1：网络规则下发/确认/回滚是系统级网络配置写，
+		 * 即使 risk=W2（默认 D2）也必须升到 D3（显式授权）；
+		 * nft_intent_compile / nft_ruleset_summarize 只读，保持 D0。 */
+		if (strcmp(tool_name, "nft_intent_apply") == 0 ||
+		    strcmp(tool_name, "nft_intent_confirm") == 0) {
+			d = AI_D3;
+			why = "network_rule_actuation";
+			goto out;
+		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {
 			d = AI_D2;
 			why = "telemetry_reset";

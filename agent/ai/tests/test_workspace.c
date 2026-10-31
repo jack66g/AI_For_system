@@ -4,7 +4,7 @@
  *
  * 默认（非 root）：纯函数校验 + 注册表接线 + 不存在/非法参数的诚实错误。
  *   - name 字符集/长度/点开头/..；size 边界；
- *   - tools.json 197 件、workspace 通道 6 件、risk R/R/R/W2/W1/W1；
+ *   - tools.json 201 件、workspace 通道 6 件、risk R/R/R/W2/W1/W1；
  *   - destroy 不存在 → AI_OK（幂等）；run/inspect/quota 不存在 →
  *     AI_ERR_NOT_FOUND；create 非法参数 → AI_ERR_INVALID_ARG 且零副作用。
  *
@@ -102,7 +102,7 @@ static void test_registry(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 197, "注册表总数 197");
+	CHECK(reg.tool_count == 201, "注册表总数 201");
 	CHECK(tool_channel_from_str("workspace") == TOOL_CH_WORKSPACE,
 	      "channel 字符串 workspace 映射");
 	for (i = 0; i < reg.tool_count; i++)

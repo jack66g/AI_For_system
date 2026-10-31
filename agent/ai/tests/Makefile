@@ -26,7 +26,7 @@ TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_
 	   test_desktop_tools test_w77_route test_w77_offline \
 	   test_w77_offline_gate test_model_lifecycle \
 	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv \
-	   test_sched test_bpf
+	   test_sched test_bpf test_net_intent
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -102,7 +102,7 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
-SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
@@ -259,7 +259,7 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
-MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \
@@ -338,6 +338,16 @@ test_net_admin: test_net_admin.c ../tools/net_admin.c \
 		../runtime/ai_types.c
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_net_admin.c \
 		../tools/net_admin.c ../runtime/netlink/ai_streams.c \
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
+
+# W81 V3.1：网络意图 ↔ nft 双向编译单测（纯函数 + 注入拒绝 +
+# 空/畸形/截断 JSON 摘要 + 非 root 诚实错误；零 side effect）
+test_net_intent: test_net_intent.c ../tools/net_intent.c ../tools/net_admin.c \
+		../runtime/netlink/ai_streams.c ../runtime/netlink/ai_netlink_client.c \
+		../runtime/ai_types.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_net_intent.c \
+		../tools/net_intent.c ../tools/net_admin.c \
+		../runtime/netlink/ai_streams.c \
 		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
 
 # W79：双调度台单测（真 sched_tools + 假 cgroup/状态目录；

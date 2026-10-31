@@ -87,6 +87,7 @@ CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 +
 CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行，六件）
 CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B 对照，五件）
 CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
+CH_NETINTENT = "netintent"  # W81 V3.1：网络意图 ↔ nft 双向编译（四件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -258,6 +259,11 @@ SUB_MAP = {
     "net_route_del": ["netsec"],
     "net_link_del": ["netsec"],
     "nft_txn": ["netsec"],
+    # ---- W81 V3.1：网络意图 ↔ nft 双向编译（四件）----
+    "nft_intent_compile": ["netsec"],
+    "nft_intent_apply": ["netsec"],
+    "nft_intent_confirm": ["netsec"],
+    "nft_ruleset_summarize": ["netsec"],
     # ---- aicore AI 内核面（40 主域）----
     "procfs_read_status": ["aicore", "res"],
     "procfs_read_decisions": ["aicore"],
@@ -758,7 +764,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 197        # 主表 tools.json（W80：193 + 4 BPF/nfqueue）
+EXPECTED_TOOL_COUNT = 201        # 主表 tools.json（W81：197 + 4 netintent）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -962,8 +968,12 @@ EXPECTED_TOOL_NAMES = [
     "bpf_prog_list",
     "bpf_prog_unload",
     "nfqueue_pump",
+    "nft_intent_compile",
+    "nft_intent_apply",
+    "nft_intent_confirm",
+    "nft_ruleset_summarize",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "96f81f10c59dcde5919eeb8593358ee299d64d83f7896fa2873b83fe674da93f"
+EXPECTED_TOOL_NAMES_SHA256 = "9dc39e0c0de620ed396b7b3008db56073e4e93ad755ecbb059fbb4e31a9828e3"
 
 
 def manifest_sha256(names):
@@ -3133,6 +3143,7 @@ CHANNEL_RETURN = {
     CH_WORKSPACE: "返回工作区状态/详情或工作区内命令的 stdout/stderr 与退出码；destroy 幂等。",
     CH_SCHED: "返回台子状态/旋钮写回读（期望 vs 实际）/快照内容或 A/B 报告路径与关键指标；读回不一致一律 FAIL。",
     CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
+    CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要。",
 }
 
 
@@ -3865,6 +3876,112 @@ def netadmin_tools():
     ]
 
 
+def tool_netintent(name, risk, desc, props, required=None):
+    """W81 V3.1：网络意图 ↔ nft 双向编译构造（channel=netintent）"""
+    return {"name": name, "channel": CH_NETINTENT, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def netintent_tools():
+    """W81 V3.1：四件——编译（R/D0）、下发（W2/D3）、确认/回滚（W2/D3）、
+    规则集摘要（R/D0）。正向复用 W78 nft_txn 的预检 → 应用 → 抽查 → 留
+    回滚凭据链路；反向走本地 JSON DOM 渲染成人话分段摘要。"""
+    intent_props = {
+        "intent": {
+            "type": "string",
+            "description": "自然语言意图，如「只允许 22 端口进来，其他全拒」"
+            "「放行 80,443 拒绝 8080」「allow 53/udp default deny」。"
+            "封闭语法：允许/放行/拒绝/禁止 + 端口或区间 + tcp/udp/icmp + "
+            "进来/出去 + 默认拒绝/默认放行；不允许原生 nft 片段"},
+        "allow_ports": {
+            "type": "string",
+            "description": "结构化放行端口（可选），逗号/空格分隔，支持区间"
+            "与 /tcp /udp 后缀，如 \"22,443,8080-8090,53/udp\""},
+        "deny_ports": {
+            "type": "string",
+            "description": "结构化拒绝端口（可选），格式同 allow_ports"},
+        "default_policy": {
+            "type": "string", "enum": ["drop", "accept"],
+            "description": "默认策略（可选）：drop=未匹配一律丢弃（白名单），"
+            "accept=未匹配一律放行（黑名单）。省略时按意图语义推导"},
+        "proto": {
+            "type": "string", "enum": ["tcp", "udp", "icmp", "both"],
+            "description": "无后缀端口的默认协议（默认 tcp）"},
+        "dir": {
+            "type": "string", "enum": ["in", "out"],
+            "description": "方向（默认 in 入站：hook input）"},
+        "table": {
+            "type": "string",
+            "description": "目标表名（可选，默认 aik_intent；"
+            "[a-z_][a-z0-9_]{0,14}）。只操作这一张表，绝不 flush ruleset"},
+    }
+    return [
+        tool_netintent(
+            "nft_intent_compile", RISK_R,
+            "网络意图 → nft 规则集编译（只读 R/D0，绝不写内核）：把一句话"
+            "（「只允许 22 端口进来，其他全拒」）解析成封闭语法（允许/拒绝 + "
+            "端口/区间 + tcp/udp/icmp + 进/出 + 默认策略），格式化成只作用于 "
+            "inet <table> 单链的规则集，与现网同表做行级 diff 预览"
+            "（- 现网 / + 目标），再用 nft -c -f 做语法预检（不生效）。输出含 "
+            "digest，可传 nft_intent_apply 的 expect_digest 防预览被掉包。"
+            "默认拒绝且未放行 22/tcp 时输出锁死警告（apply 会拒绝，除非 "
+            "allow_lockout=true）。组合：本工具→人工核对→nft_intent_apply。",
+            intent_props),
+        tool_netintent(
+            "nft_intent_apply", RISK_W2,
+            "网络意图下发（W2/D3 需显式授权）：重编译同一意图 → 读现网同表"
+            "存快照（回滚凭据）→ nft -c -f 语法校验（失败零副作用）→ nft -f "
+            "单批次应用（delete+add 原子）→ nft list 抽查 → fork setsid 看门狗："
+            "arm_seconds（默认 60，下限 10）内没有 nft_intent_confirm 的 "
+            "confirm 决定就自动回滚（防止把操作者关在门外）。只动 inet "
+            "<table> 一张表，绝不 flush ruleset、不碰其他表。默认拒绝且未"
+            "放行 22/tcp 一律拒发（除非 allow_lockout=true）。同名表已有 "
+            "armed 会话时拒发（避免覆盖回滚凭据）。",
+            intent_props | {
+                "arm_seconds": {
+                    "type": "integer", "minimum": 10, "maximum": 600,
+                    "default": 60,
+                    "description": "自动回滚窗口秒数（默认 60，下限 10；"
+                    "不允许关闭保护窗）"},
+                "expect_digest": {
+                    "type": "string",
+                    "description": "可选：compile 输出的 digest；不一致即"
+                    "拒发（防参数漂移/预览掉包）"},
+                "allow_lockout": {
+                    "type": "boolean", "default": False,
+                    "description": "显式认账「默认拒绝且不放行 22/tcp」的"
+                    "锁死风险；不传则拒绝下发"},
+            }),
+        tool_netintent(
+            "nft_intent_confirm", RISK_W2,
+            "确认或立即回滚已下发规则（W2/D3 需显式授权）：action=confirm "
+            "在保护窗内保留规则（取消自动回滚）；action=rollback 立即按快照"
+            "回滚（delete 本表 + 恢复快照，幂等）。table 省略时若只有一个 "
+            "armed 会话自动选中，多个必须显式指定。与看门狗用 O_EXCL 决定"
+            "文件抢占，任何一方先落定即唯一生效。",
+            {"action": {
+                "type": "string", "enum": ["confirm", "rollback"],
+                "description": "confirm=保留并取消自动回滚；"
+                "rollback=立即回滚"},
+             "table": {
+                 "type": "string",
+                 "description": "目标表名（可选；省略则选唯一 armed 会话）"}},
+            ["action"]),
+        tool_netintent(
+            "nft_ruleset_summarize", RISK_R,
+            "现网 nft 规则 → 人话摘要（只读 R/D0）：读 nft -j list ruleset，"
+            "按「默认策略 / 允许 / 拒绝 / 其他」分段渲染（连接状态、入/出"
+            "接口、源/目的地址与端口、前缀/区间/集合、计数、跳转、NAT 等），"
+            "并给表/链/规则计数小结。空规则集、畸形或截断 JSON、非对象数组"
+            "元素一律明说，不崩。table 参数可只摘要某一张表。组合：apply 后"
+            "用它复核，或安全审计时先读后改。",
+            {"table": {
+                "type": "string",
+                "description": "只摘要该表（可选；[a-z_][a-z0-9_]{0,14}）"}}),
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -3925,6 +4042,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(sched_tools())
     # W80：BPF loader + nfqueue 四件（追加在清单末尾；锚点按装配顺序同步）
     tools.extend(bpf_tools())
+    # W81 V3.1：网络意图 ↔ nft 双向编译四件（追加在清单末尾；锚点同步）
+    tools.extend(netintent_tools())
     return tools
 
 
@@ -4246,7 +4365,7 @@ def main():
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
                CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
-               CH_SCHED, CH_BPF):
+               CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

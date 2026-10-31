@@ -151,6 +151,7 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/workspace_tools.c \
 	$(TOOLS_DIR)/sched_tools.c \
 	$(TOOLS_DIR)/bpf_tools.c \
+	$(TOOLS_DIR)/net_intent.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \
 	$(PROVIDER_DIR)/provider_core.c \

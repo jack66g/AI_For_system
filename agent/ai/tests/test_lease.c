@@ -282,6 +282,18 @@ static enum ai_danger cls(const char *tool, const char *risk,
 
 static void test_danger_rules(void)
 {
+	/* W81 V3.1：网络规则下发/确认/回滚必须 D3（显式授权），
+	 * 只读的编译与规则集摘要保持 D0。 */
+	expect(cls("nft_intent_apply", "W2", "{}") == AI_D3,
+	       "danger: nft_intent_apply 下发 → D3");
+	expect(cls("nft_intent_confirm", "W2",
+		   "{\"action\":\"confirm\"}") == AI_D3,
+	       "danger: nft_intent_confirm 确认/回滚 → D3");
+	expect(cls("nft_intent_compile", "R", "{}") == AI_D0,
+	       "danger: nft_intent_compile 只读 → D0");
+	expect(cls("nft_ruleset_summarize", "R", "{}") == AI_D0,
+	       "danger: nft_ruleset_summarize 只读 → D0");
+
 	expect(cls("exec_run", "W2",
 		   "{\"command\":\"date\",\"args\":[\"-s\",\"2026-01-01\"]}")
 	       == AI_D3, "danger: date -s → D3");

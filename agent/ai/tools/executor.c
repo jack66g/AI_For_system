@@ -67,6 +67,7 @@
 #include "netlink/ai_streams.h"
 #include "macro_tools.h"
 #include "net_admin.h"
+#include "net_intent.h"
 #include "workspace_tools.h"
 #include "sched_tools.h"
 #include "bpf_tools.h"
@@ -6045,6 +6046,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_BPF:
 		rc = exec_bpf_channel(tool, args_json, out);
 		break;
+	case TOOL_CH_NETINTENT:
+		rc = exec_net_intent_channel(tool, args_json, out);
+		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调
 		 * 也绝不提问/建租约/执行动作。 */
@@ -6079,6 +6083,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   "sched（双调度台：台子+旋钮+快照+A/B）" :
 		   tool->channel == TOOL_CH_BPF ?
 		   "bpf（BPF loader + nfqueue）" :
+		   tool->channel == TOOL_CH_NETINTENT ?
+		   "netintent（意图 ↔ nft 双向编译）" :
 		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
 		   args_json,
 		   g_mem_degraded ? "degraded" :

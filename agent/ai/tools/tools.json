@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-31T04:07:40",
+  "generated_at": "2026-11-01T03:17:13",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 197,
-  "tool_names_sha256": "96f81f10c59dcde5919eeb8593358ee299d64d83f7896fa2873b83fe674da93f",
+  "tool_count": 201,
+  "tool_names_sha256": "9dc39e0c0de620ed396b7b3008db56073e4e93ad755ecbb059fbb4e31a9828e3",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -24,12 +24,13 @@
     "interaction": 1,
     "workspace": 6,
     "sched": 5,
-    "bpf": 4
+    "bpf": 4,
+    "netintent": 4
   },
   "risk_counts": {
-    "R": 88,
+    "R": 90,
     "W1": 46,
-    "W2": 62,
+    "W2": 64,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -6055,6 +6056,184 @@
               "ipv6"
             ],
             "default": "ipv4"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "nft_intent_compile",
+      "channel": "netintent",
+      "risk": "R",
+      "description": "网络意图 → nft 规则集编译（只读 R/D0，绝不写内核）：把一句话（「只允许 22 端口进来，其他全拒」）解析成封闭语法（允许/拒绝 + 端口/区间 + tcp/udp/icmp + 进/出 + 默认策略），格式化成只作用于 inet <table> 单链的规则集，与现网同表做行级 diff 预览（- 现网 / + 目标），再用 nft -c -f 做语法预检（不生效）。输出含 digest，可传 nft_intent_apply 的 expect_digest 防预览被掉包。默认拒绝且未放行 22/tcp 时输出锁死警告（apply 会拒绝，除非 allow_lockout=true）。组合：本工具→人工核对→nft_intent_apply。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "description": "自然语言意图，如「只允许 22 端口进来，其他全拒」「放行 80,443 拒绝 8080」「allow 53/udp default deny」。封闭语法：允许/放行/拒绝/禁止 + 端口或区间 + tcp/udp/icmp + 进来/出去 + 默认拒绝/默认放行；不允许原生 nft 片段"
+          },
+          "allow_ports": {
+            "type": "string",
+            "description": "结构化放行端口（可选），逗号/空格分隔，支持区间与 /tcp /udp 后缀，如 \"22,443,8080-8090,53/udp\""
+          },
+          "deny_ports": {
+            "type": "string",
+            "description": "结构化拒绝端口（可选），格式同 allow_ports"
+          },
+          "default_policy": {
+            "type": "string",
+            "enum": [
+              "drop",
+              "accept"
+            ],
+            "description": "默认策略（可选）：drop=未匹配一律丢弃（白名单），accept=未匹配一律放行（黑名单）。省略时按意图语义推导"
+          },
+          "proto": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "both"
+            ],
+            "description": "无后缀端口的默认协议（默认 tcp）"
+          },
+          "dir": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ],
+            "description": "方向（默认 in 入站：hook input）"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选，默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只操作这一张表，绝不 flush ruleset"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "nft_intent_apply",
+      "channel": "netintent",
+      "risk": "W2",
+      "description": "网络意图下发（W2/D3 需显式授权）：重编译同一意图 → 读现网同表存快照（回滚凭据）→ nft -c -f 语法校验（失败零副作用）→ nft -f 单批次应用（delete+add 原子）→ nft list 抽查 → fork setsid 看门狗：arm_seconds（默认 60，下限 10）内没有 nft_intent_confirm 的 confirm 决定就自动回滚（防止把操作者关在门外）。只动 inet <table> 一张表，绝不 flush ruleset、不碰其他表。默认拒绝且未放行 22/tcp 一律拒发（除非 allow_lockout=true）。同名表已有 armed 会话时拒发（避免覆盖回滚凭据）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "description": "自然语言意图，如「只允许 22 端口进来，其他全拒」「放行 80,443 拒绝 8080」「allow 53/udp default deny」。封闭语法：允许/放行/拒绝/禁止 + 端口或区间 + tcp/udp/icmp + 进来/出去 + 默认拒绝/默认放行；不允许原生 nft 片段"
+          },
+          "allow_ports": {
+            "type": "string",
+            "description": "结构化放行端口（可选），逗号/空格分隔，支持区间与 /tcp /udp 后缀，如 \"22,443,8080-8090,53/udp\""
+          },
+          "deny_ports": {
+            "type": "string",
+            "description": "结构化拒绝端口（可选），格式同 allow_ports"
+          },
+          "default_policy": {
+            "type": "string",
+            "enum": [
+              "drop",
+              "accept"
+            ],
+            "description": "默认策略（可选）：drop=未匹配一律丢弃（白名单），accept=未匹配一律放行（黑名单）。省略时按意图语义推导"
+          },
+          "proto": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "both"
+            ],
+            "description": "无后缀端口的默认协议（默认 tcp）"
+          },
+          "dir": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ],
+            "description": "方向（默认 in 入站：hook input）"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选，默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只操作这一张表，绝不 flush ruleset"
+          },
+          "arm_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 60,
+            "description": "自动回滚窗口秒数（默认 60，下限 10；不允许关闭保护窗）"
+          },
+          "expect_digest": {
+            "type": "string",
+            "description": "可选：compile 输出的 digest；不一致即拒发（防参数漂移/预览掉包）"
+          },
+          "allow_lockout": {
+            "type": "boolean",
+            "default": false,
+            "description": "显式认账「默认拒绝且不放行 22/tcp」的锁死风险；不传则拒绝下发"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "nft_intent_confirm",
+      "channel": "netintent",
+      "risk": "W2",
+      "description": "确认或立即回滚已下发规则（W2/D3 需显式授权）：action=confirm 在保护窗内保留规则（取消自动回滚）；action=rollback 立即按快照回滚（delete 本表 + 恢复快照，幂等）。table 省略时若只有一个 armed 会话自动选中，多个必须显式指定。与看门狗用 O_EXCL 决定文件抢占，任何一方先落定即唯一生效。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "confirm",
+              "rollback"
+            ],
+            "description": "confirm=保留并取消自动回滚；rollback=立即回滚"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选；省略则选唯一 armed 会话）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    },
+    {
+      "name": "nft_ruleset_summarize",
+      "channel": "netintent",
+      "risk": "R",
+      "description": "现网 nft 规则 → 人话摘要（只读 R/D0）：读 nft -j list ruleset，按「默认策略 / 允许 / 拒绝 / 其他」分段渲染（连接状态、入/出接口、源/目的地址与端口、前缀/区间/集合、计数、跳转、NAT 等），并给表/链/规则计数小结。空规则集、畸形或截断 JSON、非对象数组元素一律明说，不崩。table 参数可只摘要某一张表。组合：apply 后用它复核，或安全审计时先读后改。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "string",
+            "description": "只摘要该表（可选；[a-z_][a-z0-9_]{0,14}）"
           }
         },
         "required": []

@@ -231,6 +231,44 @@ static int run_argv(char *const argv[], int timeout_s, char *out, size_t cap)
 	return -99;
 }
 
+/* ---- W81 V3.1：nft 执行原语（导出给 net_intent.c 复用） ---- */
+
+/* nft [-c] -f <path>：与 nft_txn 完全同一条有界 fork/execv 链路。
+ * 返回 >=0 退出码 / -99 超时 / -1 启动失败。 */
+int ai_nft_run_file(const char *path, int check_only, int timeout_s,
+		    char *out, size_t cap)
+{
+	char *argv[5];
+	int n = 0;
+
+	if (out && cap)
+		out[0] = '\0';
+	if (!path)
+		return -1;
+	argv[n++] = (char *)NA_NFT;
+	if (check_only)
+		argv[n++] = (char *)"-c";
+	argv[n++] = (char *)"-f";
+	argv[n++] = (char *)path;
+	argv[n] = NULL;
+	return run_argv(argv, timeout_s, out, cap);
+}
+
+/* nft <args...>（只读查询用；args 以 NULL 结尾） */
+int ai_nft_list_args(const char *const *args, char *out, size_t cap)
+{
+	char *argv[12];
+	int n = 0, i;
+
+	if (out && cap)
+		out[0] = '\0';
+	argv[n++] = (char *)NA_NFT;
+	for (i = 0; args && args[i] && n < 10; i++)
+		argv[n++] = (char *)args[i];
+	argv[n] = NULL;
+	return run_argv(argv, 10, out, cap);
+}
+
 /* ---- 纯函数校验 ---- */
 
 int ai_net_admin_valid_iface(const char *s)
@@ -1465,7 +1503,6 @@ static int na_nft_txn(const char *args, char **out)
 	int nops, dry, i, rc = -1, fd, listed = 0;
 	char path[64];
 	FILE *f;
-	char *nargv[6];
 
 	dry = jbool(args, "dry_run", 0);
 	nops = jstr_array_get(args, "ops", ops, NA_MAX_OPS);
@@ -1540,12 +1577,7 @@ static int na_nft_txn(const char *args, char **out)
 
 	/* 第一步：nft -c -f 全量语法预检（不生效） */
 	memset(buf, 0, sizeof(buf));
-	nargv[0] = (char *)NA_NFT;
-	nargv[1] = (char *)"-c";
-	nargv[2] = (char *)"-f";
-	nargv[3] = path;
-	nargv[4] = NULL;
-	rc = run_argv(nargv, 15, buf, sizeof(buf));
+	rc = ai_nft_run_file(path, 1, 15, buf, sizeof(buf));
 	if (rc != 0) {
 		fprintf(f, "ERROR: 预检失败（nft -c -f，退出码 %d，"
 			"未应用任何变更）:\n%s\n", rc, buf);
@@ -1564,11 +1596,7 @@ static int na_nft_txn(const char *args, char **out)
 
 	/* 第二步：正式应用（nft -f 单文件单批次提交） */
 	memset(buf, 0, sizeof(buf));
-	nargv[0] = (char *)NA_NFT;
-	nargv[1] = (char *)"-f";
-	nargv[2] = path;
-	nargv[3] = NULL;
-	rc = run_argv(nargv, 15, buf, sizeof(buf));
+	rc = ai_nft_run_file(path, 0, 15, buf, sizeof(buf));
 	if (rc != 0) {
 		fprintf(f, "ERROR: 应用失败（nft -f，退出码 %d）:\n%s\n"
 			"（nft -f 按文件单批次提交，内核拒绝批次则整体不生效；"
@@ -1579,12 +1607,10 @@ static int na_nft_txn(const char *args, char **out)
 	fprintf(f, "应用完成（nft -f 退出码 0）\n");
 
 	/* 第三步：nft list ruleset 抽查关键串验证落位 */
+	static const char *const list_argv[] = { "list", "ruleset", NULL };
+
 	memset(rs, 0, sizeof(rs));
-	nargv[0] = (char *)NA_NFT;
-	nargv[1] = (char *)"list";
-	nargv[2] = (char *)"ruleset";
-	nargv[3] = NULL;
-	rc = run_argv(nargv, 10, rs, sizeof(rs));
+	rc = ai_nft_list_args(list_argv, rs, sizeof(rs));
 	if (rc == 0)
 		listed = 1;
 	else

@@ -26,6 +26,12 @@ int ai_net_admin_table_id(const char *name, int *id);
 					       /* main=254/local=255/
 						* default=253/数字 0..2^31 */
 
+/* ---- W81 V3.1：nft 执行原语（net_intent.c 复用同一有界 fork/execv
+ * + 超时链路，保证「意图 → 规则」与 nft_txn 两条路径行为一致） ---- */
+int ai_nft_run_file(const char *path, int check_only, int timeout_s,
+		    char *out, size_t cap);
+int ai_nft_list_args(const char *const *args, char *out, size_t cap);
+
 /* 执行器入口（executor.c 的 TOOL_CH_NETADMIN 分发调用） */
 int exec_net_admin_channel(const void *tool, const char *args_json,
 			   char **out);
