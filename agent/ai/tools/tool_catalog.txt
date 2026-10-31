@@ -206,3 +206,5 @@ net_hit_policy 设置 threshold/window/
 app_profile_static 把本机可执行文件
 app_profile_dynamic 目标程序在 aik-sand
 app_profile_diff 输入目标路径 + app
+net_chain_watch 按 interval（默认 2s
+net_chain_rules interval/scan_window/sca

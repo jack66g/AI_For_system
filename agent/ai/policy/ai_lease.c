@@ -1448,6 +1448,29 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 			}
 			goto out;
 		}
+		/* W81 E1：连接事件流 + 攻击链关联。纯观测：start/stop
+		 * 只写自有审计/状态（不写 nft、不封禁），status 只读 →
+		 * D0；start/stop 与 rules set 是 D1。 */
+		if (strcmp(tool_name, "net_chain_watch") == 0) {
+			if (json_has_value(args_json, "action", "status")) {
+				d = AI_D0;
+				why = "netchain_read_only";
+			} else {
+				d = AI_D1;
+				why = "netchain_observe";
+			}
+			goto out;
+		}
+		if (strcmp(tool_name, "net_chain_rules") == 0) {
+			if (json_has_value(args_json, "action", "set")) {
+				d = AI_D1;
+				why = "netchain_rules";
+			} else {
+				d = AI_D0;
+				why = "netchain_read_only";
+			}
+			goto out;
+		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {
 			d = AI_D2;
 			why = "telemetry_reset";

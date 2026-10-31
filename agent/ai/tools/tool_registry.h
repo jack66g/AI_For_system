@@ -19,6 +19,7 @@
  *   sched（W79：双调度台，台子切换 + 旋钮 + 快照 + A/B 对照）
  *   netintent（W81：自然语言意图 → nft 规则集双向编译 + 自动回滚 + 命中观测闭环）
  *   appprofile（W81c：静态画像 + 沙盒动态画像 + 差集风险报告）
+ *   netchain（W81e：conntrack 事件流 → 端口扫描/横向移动/突增攻击链关联）
  * v2 起每个工具必带 "risk"（R/W1/W2），exec 工具内嵌 "exec" 单源白名单。
  */
 #ifndef _AI_TOOL_REGISTRY_H
@@ -49,6 +50,7 @@ enum tool_channel {
 	TOOL_CH_BPF,		/* W80：BPF loader（load/list/unload）+ nfqueue */
 	TOOL_CH_NETINTENT,	/* W81：网络意图 ↔ nft 双向编译 + 命中观测（6 件） */
 	TOOL_CH_APPPROFILE,	/* W81c：应用静态/动态画像 + 差集报告（3 件） */
+	TOOL_CH_NETCHAIN,	/* W81e：conntrack 事件流 + 攻击链关联（2 件） */
 	TOOL_CH_UNKNOWN,
 };
 

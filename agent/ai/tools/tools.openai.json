@@ -5543,5 +5543,205 @@
         "netsec"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_chain_watch",
+      "description": "连接事件流 + 攻击链关联采样器（start/stop/status 合一，后台，只观测）：按 interval（默认 2s）轮询 conntrack——第一优先 /proc/net/nf_conntrack（解析五元组/状态/包数/字节）；装了 conntrack 命令则用 conntrack -L 快照（不强制依赖）；两者都不可用时用内置 ctnetlink dump（NETLINK_NETFILTER，无需外部库，需 root/CAP_NET_ADMIN）。维护滑动窗口并按三条可配规则关联：scan（同一源窗口内访问 ≥ scan_ports 个不同目的端口）、lateral（同一源窗口内连 ≥ lateral_hosts 个不同目的主机的同一端口）、burst（同一源→目的连接数从前窗低位跃变到当前高位，current≥burst_min 且 ≥burst_ratio×前窗）。命中写一条攻击链事件 JSON（type/src/dsts/ports/window/evidence_count）到 events.jsonl + audit.log。绝不写 nft、不封禁、不改网络配置。start 不阻塞会话（setsid 后台 + flock 单例 + 握手后返回）；status 逐档显示事件源可用性（不可用原因/权限/空表如实标注）；stop 停采样器（无规则需撤回）。事件源全部不可用时 start 明确失败并列出三档原因，绝不静默成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "description": "start=启动后台采样器（只观测）；stop=停止；status=只读查看运行态、事件源可用性与审计尾"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 2,
+            "description": "采样周期秒数（默认 2）"
+          },
+          "scan_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "端口扫描判定窗口秒数（默认 60）"
+          },
+          "scan_ports": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1024,
+            "default": 15,
+            "description": "窗口内同一源访问的不同目的端口数阈值（默认 15）"
+          },
+          "lateral_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "横向移动判定窗口秒数（默认 60）"
+          },
+          "lateral_hosts": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 256,
+            "default": 3,
+            "description": "窗口内同一源在同一目的端口上连接的不同目的主机数阈值（默认 3）"
+          },
+          "burst_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 30,
+            "description": "突增规则的当前/前一窗口秒数（默认 30）"
+          },
+          "burst_ratio": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000,
+            "default": 4,
+            "description": "当前窗口连接数相对前一窗口的倍数下限（默认 4）"
+          },
+          "burst_min": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000000,
+            "default": 8,
+            "description": "当前窗口连接数下限（默认 8，必须大于 burst_low）"
+          },
+          "burst_low": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 3,
+            "description": "前一窗口连接数上限（默认 3，即低位）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同类同键事件再次触发的最小间隔秒数（默认 60）"
+          },
+          "netns": {
+            "type": "string",
+            "description": "可选命名空间标注（[A-Za-z0-9._-]），只进事件/审计文本，不切换命名空间"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_chain_rules",
+      "description": "攻击链关联阈值配置（get/set，D1）：interval/scan_window/scan_ports/lateral_window/lateral_hosts/burst_window/burst_ratio/burst_min/burst_low/cooldown/netns 全部可配。set 校验范围与窗口/采样周期上限后写 rules.json（0600）；运行中的采样器每拍重读（≤interval 秒生效）。只改检测参数，不写 nft、不封禁；get 只读。默认 scan 15 端口/60s、lateral 3 主机同端口/60s、burst 30s 内 current≥8 且 ≥4× 前窗（前窗≤3 且≥1）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "default": "get",
+            "description": "get=查看当前阈值；set=修改并写 rules.json"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 2,
+            "description": "采样周期秒数（默认 2）"
+          },
+          "scan_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "端口扫描判定窗口秒数（默认 60）"
+          },
+          "scan_ports": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1024,
+            "default": 15,
+            "description": "窗口内同一源访问的不同目的端口数阈值（默认 15）"
+          },
+          "lateral_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "横向移动判定窗口秒数（默认 60）"
+          },
+          "lateral_hosts": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 256,
+            "default": 3,
+            "description": "窗口内同一源在同一目的端口上连接的不同目的主机数阈值（默认 3）"
+          },
+          "burst_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 30,
+            "description": "突增规则的当前/前一窗口秒数（默认 30）"
+          },
+          "burst_ratio": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000,
+            "default": 4,
+            "description": "当前窗口连接数相对前一窗口的倍数下限（默认 4）"
+          },
+          "burst_min": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000000,
+            "default": 8,
+            "description": "当前窗口连接数下限（默认 8，必须大于 burst_low）"
+          },
+          "burst_low": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 3,
+            "description": "前一窗口连接数上限（默认 3，即低位）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同类同键事件再次触发的最小间隔秒数（默认 60）"
+          },
+          "netns": {
+            "type": "string",
+            "description": "可选命名空间标注（[A-Za-z0-9._-]），只进事件/审计文本，不切换命名空间"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
   }
 ]

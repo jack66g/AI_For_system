@@ -89,6 +89,7 @@ CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B �
 CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
 CH_NETINTENT = "netintent"  # W81 V3.1/V3.2：网络意图 ↔ nft 双向编译（四件）+ 命中观测闭环（两件）
 CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
+CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -272,6 +273,9 @@ SUB_MAP = {
     "app_profile_static": ["sysadmin"],
     "app_profile_dynamic": ["sysadmin", "sandbox"],
     "app_profile_diff": ["sysadmin", "netsec"],
+    # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
+    "net_chain_watch": ["netsec"],
+    "net_chain_rules": ["netsec"],
     # ---- aicore AI 内核面（40 主域）----
     "procfs_read_status": ["aicore", "res"],
     "procfs_read_decisions": ["aicore"],
@@ -774,7 +778,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 208        # 主表 tools.json（W81d：206 + 2 工作区网络）
+EXPECTED_TOOL_COUNT = 210        # 主表 tools.json（W81e：208 + 2 攻击链关联）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -989,8 +993,10 @@ EXPECTED_TOOL_NAMES = [
     "app_profile_static",
     "app_profile_dynamic",
     "app_profile_diff",
+    "net_chain_watch",
+    "net_chain_rules",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "e5d44b8544b50a734d545eb33acc0062ae1c1ecdab486e67126b8e16d5a87e93"
+EXPECTED_TOOL_NAMES_SHA256 = "c71e21d5b4f854a01843d67a7c0b3fc26de42b3e6cdc13e795d488b983f004a0"
 
 
 def manifest_sha256(names):
@@ -3236,6 +3242,7 @@ CHANNEL_RETURN = {
     CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
     CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要；net_hit_watch 返回采样器 pid/运行态/触发与清理计数，status 返回运行态+剩余 TTL+降级清单+审计尾，net_hit_policy 返回阈值配置与生效说明。",
     CH_APPPROFILE: "static 返回 ELF/依赖/符号/能力/桌面/包来源与 declared 声明清单；dynamic 返回 JSON 事件流（文件读/写/映射、子进程、网络）+ 统计 + degraded 局限说明；diff 返回「要的/用的/偷偷碰的」三栏 + 0-100 风险分 + 放行条件建议（只读，不自动落策略）。",
+    CH_NETCHAIN: "start 返回采样器 pid/事件源逐档可用性与规则；status 返回运行态、事件源探测（procfs/命令/ctnetlink，不可用/空表如实标注）、最近采样计数与审计尾；stop 返回停止结果。命中事件含 type/src/dsts/ports/window/evidence_count，写 events.jsonl + audit.log；只观测不封禁。",
 }
 
 
@@ -4297,6 +4304,105 @@ def appprofile_tools():
     ]
 
 
+
+def tool_netchain(name, risk, desc, props, required=None):
+    """W81 E1：conntrack 事件流 + 攻击链关联构造（channel=netchain）"""
+    return {"name": name, "channel": CH_NETCHAIN, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def netchain_tools():
+    """W81 E1：两件——观测采样器（start/stop/status，W1/D1，只观测）
+    + 阈值配置（get/set，W1/D1）。事件源 procfs 优先、conntrack 命令可选、
+    内置 ctnetlink 兜底；三档可用性逐条如实标注，全部不可用时 start 明确
+    失败。命中只写 events.jsonl + audit.log，绝不写 nft/封禁。"""
+    tune_props = {
+        "interval": {
+            "type": "integer", "minimum": 1, "maximum": 300,
+            "default": 2, "description": "采样周期秒数（默认 2）"},
+        "scan_window": {
+            "type": "integer", "minimum": 1, "maximum": 3600,
+            "default": 60, "description": "端口扫描判定窗口秒数（默认 60）"},
+        "scan_ports": {
+            "type": "integer", "minimum": 2, "maximum": 1024,
+            "default": 15,
+            "description": "窗口内同一源访问的不同目的端口数阈值（默认 15）"},
+        "lateral_window": {
+            "type": "integer", "minimum": 1, "maximum": 3600,
+            "default": 60, "description": "横向移动判定窗口秒数（默认 60）"},
+        "lateral_hosts": {
+            "type": "integer", "minimum": 2, "maximum": 256,
+            "default": 3,
+            "description": "窗口内同一源在同一目的端口上连接的不同目的"
+            "主机数阈值（默认 3）"},
+        "burst_window": {
+            "type": "integer", "minimum": 1, "maximum": 3600,
+            "default": 30,
+            "description": "突增规则的当前/前一窗口秒数（默认 30）"},
+        "burst_ratio": {
+            "type": "integer", "minimum": 2, "maximum": 1000,
+            "default": 4,
+            "description": "当前窗口连接数相对前一窗口的倍数下限（默认 4）"},
+        "burst_min": {
+            "type": "integer", "minimum": 2, "maximum": 1000000,
+            "default": 8,
+            "description": "当前窗口连接数下限（默认 8，必须大于 "
+            "burst_low）"},
+        "burst_low": {
+            "type": "integer", "minimum": 0, "maximum": 1000000,
+            "default": 3,
+            "description": "前一窗口连接数上限（默认 3，即低位）"},
+        "cooldown": {
+            "type": "integer", "minimum": 0, "maximum": 86400,
+            "default": 60,
+            "description": "同类同键事件再次触发的最小间隔秒数（默认 60）"},
+        "netns": {
+            "type": "string",
+            "description": "可选命名空间标注（[A-Za-z0-9._-]），只进事件/"
+            "审计文本，不切换命名空间"},
+    }
+    watch_props = {"action": {
+        "type": "string", "enum": ["start", "stop", "status"],
+        "description": "start=启动后台采样器（只观测）；stop=停止；"
+        "status=只读查看运行态、事件源可用性与审计尾"}} | tune_props
+    rules_props = {"action": {
+        "type": "string", "enum": ["get", "set"], "default": "get",
+        "description": "get=查看当前阈值；set=修改并写 rules.json"}} | {
+        k: v for k, v in tune_props.items()
+    }
+    return [
+        tool_netchain(
+            "net_chain_watch", RISK_W1,
+            "连接事件流 + 攻击链关联采样器（start/stop/status 合一，后台，"
+            "只观测）：按 interval（默认 2s）轮询 conntrack——第一优先 "
+            "/proc/net/nf_conntrack（解析五元组/状态/包数/字节）；装了 "
+            "conntrack 命令则用 conntrack -L 快照（不强制依赖）；两者都不"
+            "可用时用内置 ctnetlink dump（NETLINK_NETFILTER，无需外部库，"
+            "需 root/CAP_NET_ADMIN）。维护滑动窗口并按三条可配规则关联："
+            "scan（同一源窗口内访问 ≥ scan_ports 个不同目的端口）、"
+            "lateral（同一源窗口内连 ≥ lateral_hosts 个不同目的主机的同一"
+            "端口）、burst（同一源→目的连接数从前窗低位跃变到当前高位，"
+            "current≥burst_min 且 ≥burst_ratio×前窗）。命中写一条攻击链"
+            "事件 JSON（type/src/dsts/ports/window/evidence_count）到 "
+            "events.jsonl + audit.log。绝不写 nft、不封禁、不改网络配置。"
+            "start 不阻塞会话（setsid 后台 + flock 单例 + 握手后返回）；"
+            "status 逐档显示事件源可用性（不可用原因/权限/空表如实标注）；"
+            "stop 停采样器（无规则需撤回）。事件源全部不可用时 start 明确"
+            "失败并列出三档原因，绝不静默成功。",
+            watch_props, ["action"]),
+        tool_netchain(
+            "net_chain_rules", RISK_W1,
+            "攻击链关联阈值配置（get/set，D1）：interval/scan_window/"
+            "scan_ports/lateral_window/lateral_hosts/burst_window/"
+            "burst_ratio/burst_min/burst_low/cooldown/netns 全部可配。"
+            "set 校验范围与窗口/采样周期上限后写 rules.json（0600）；运行中"
+            "的采样器每拍重读（≤interval 秒生效）。只改检测参数，不写 nft、"
+            "不封禁；get 只读。默认 scan 15 端口/60s、lateral 3 主机同端口/"
+            "60s、burst 30s 内 current≥8 且 ≥4× 前窗（前窗≤3 且≥1）。",
+            rules_props),
+    ]
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -4361,6 +4467,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(netintent_tools())
     # W81 V4：应用静态/动态画像 + 差集风险报告三件（追加在清单末尾）
     tools.extend(appprofile_tools())
+    # W81 E1：conntrack 事件流 + 攻击链关联两件（追加在清单末尾）
+    tools.extend(netchain_tools())
     return tools
 
 
@@ -4683,7 +4791,7 @@ def main():
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
                CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
                CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT,
-               CH_APPPROFILE):
+               CH_APPPROFILE, CH_NETCHAIN):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):

@@ -27,7 +27,7 @@ TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_
 	   test_w77_offline_gate test_model_lifecycle \
 	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv \
 	   test_sched test_bpf test_net_intent test_net_hit test_app_profile \
-	   test_workspace_net
+	   test_net_chain test_workspace_net
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -103,7 +103,7 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
-SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/app_profile.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/app_profile.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
@@ -267,7 +267,7 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
-MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/app_profile.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/app_profile.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \
@@ -366,6 +366,10 @@ test_net_hit: test_net_hit.c ../tools/net_hit.c ../tools/net_intent.c ../tools/n
 		../tools/net_hit.c ../tools/net_intent.c ../tools/net_admin.c \
 		../runtime/netlink/ai_streams.c \
 		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
+
+# W81 E1：conntrack 事件流 + 攻击链关联单测（阈值/文本解析/三规则/工具 IO）
+test_net_chain: test_net_chain.c ../tools/net_chain.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_net_chain.c ../tools/net_chain.c
 
 # W81c：应用静态/动态画像 + 差集风险报告单测（纯函数 + 静态真文件 +
 # 动态白名单拒绝 + 非 root 诚实错误 + 差集三栏；零 side effect）
