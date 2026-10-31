@@ -5743,5 +5743,155 @@
         "netsec"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_status",
+      "description": "靶场状态（只读 D0）：是否启用、声明 CIDR、剩余 TTL、累计动作数、LSM socket hook 用户态接线状态、审计路径。未启用时返回「未启用 + 如何启用」原文（工具已注册，不是缺失也不是桩）；启用后显示 enabled=1/remaining_seconds/actions。只读：不发包、不改网络。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_enable",
+      "description": "启用靶场通道（D3，需授权者确认）：cidr 必须在硬编码允许清单内（10.231.0.0/16 / 10.99.0.0/16 / 127.0.0.0/8），ttl_minutes 1..60（默认 30）。写 state.json（0600）+ 起后台 watchdog；到期自动关闭（watchdog + 惰性 expires_at 双重检查）。已有启用状态时拒绝，须先 range_disable。启用时尝试给当前进程打 sec.ws_label=226（NETLINK_AI ACT）作内核 socket hook 第二道闸门；宿主无该 hook 时如实记录「待 #61 环境验证」，不静默假装成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cidr": {
+            "type": "string",
+            "enum": [
+              "10.231.0.0/16",
+              "10.99.0.0/16",
+              "127.0.0.0/8"
+            ],
+            "description": "启用时声明的靶场 CIDR；必须在硬编码允许清单内（10.231.0.0/16=D 棒工作区，10.99.0.0/16=A 棒 netns，127.0.0.0/8 仅限 netns 内）。其它值（含 192.168.245.0/24、10.0.0.0/8、公网）一律拒绝。"
+          },
+          "ttl_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 30,
+            "description": "启用时长（分钟），默认 30，上限 60；到期由 watchdog 与每次调用的惰性检查自动关闭。"
+          }
+        },
+        "required": [
+          "cidr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_disable",
+      "description": "立即关闭靶场通道（D1）：停 watchdog、删 state.json、尝试清零 sec.ws_label。关闭后 scan/inject 立即拒绝，重新使用需 range_enable（D3）。未启用时返回「未启用 + 如何启用」原文。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_scan",
+      "description": "靶场端口扫描（D3）：目标必须在启用时声明的 CIDR 内且在硬编码允许清单内（代码硬校验，越界在发包前拒绝并审计）。TCP=非阻塞 connect 探测；UDP=connect + 1 字节探测（ICMP port unreachable=closed，超时=open|filtered，如实标注不确定性）。timeout_ms 默认 200（上限 1000），端口上限 1024。只探测声明 CIDR 内的单个目标，不扫描宿主 LAN、不做 DoS。逐端口全量审计（目标/端口/协议/rc）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "数字 IPv4 目标（拒绝主机名/IPv6）。必须在启用时声明的 CIDR 内，且必须在硬编码允许清单内；192.168.245.0/24 显式拒绝。"
+          },
+          "ports": {
+            "type": "string",
+            "description": "端口列表，如 22,80,8000-8010（单次上限 1024 个，端口 1..65535）"
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp"
+            ],
+            "default": "tcp",
+            "description": "tcp=connect 探测；udp=connect+1 字节探测（open|filtered 表示不确定）"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 200,
+            "description": "每端口探测超时毫秒（默认 200）"
+          }
+        },
+        "required": [
+          "target",
+          "ports"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_inject",
+      "description": "构造并发送单个报文（D3）：UDP / TCP SYN / ICMP，payload 自定义（payload_hex，≤4096 字节）。目标必须先通过启用 CIDR + 硬编码清单双重校验；越界目标在构造报文前拒绝并审计。UDP 用 SOCK_DGRAM（普通用户可发）；TCP SYN/ICMP 用raw socket（需 root/CAP_NET_RAW，缺权如实报 EPERM）。发送前先写 attempt 审计（payload 十六进制全文），发送后写 rc 与字节数；审计写失败则拒绝发送（fail-closed）。不做漏洞利用、不打真实服务、不做 DoS。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "数字 IPv4 目标（拒绝主机名/IPv6）。必须在启用时声明的 CIDR 内，且必须在硬编码允许清单内；192.168.245.0/24 显式拒绝。"
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "udp",
+              "tcp_syn",
+              "icmp"
+            ],
+            "default": "udp",
+            "description": "udp=SOCK_DGRAM；tcp_syn=raw TCP SYN；icmp=raw echo request（后两者需 root）"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "目的端口；udp/tcp_syn 必填，icmp 忽略"
+          },
+          "payload_hex": {
+            "type": "string",
+            "maxLength": 8192,
+            "description": "payload 十六进制全文（偶数长度，≤4096 字节）；空/省略=空 payload。审计按实际发送字节记录。"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
   }
 ]

@@ -79,6 +79,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_APPPROFILE;
 	if (strcmp(s, "netchain") == 0)
 		return TOOL_CH_NETCHAIN;
+	if (strcmp(s, "range") == 0)
+		return TOOL_CH_RANGE;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -89,7 +91,7 @@ static const char *channel_str(enum tool_channel ch)
 		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
 		"desktop", "interaction", "model", "stream", "macro",
 		"netadmin", "workspace", "sched", "bpf", "netintent",
-		"appprofile", "netchain", "unknown",
+		"appprofile", "netchain", "range", "unknown",
 	};
 
 	if (ch < 0 || ch > TOOL_CH_UNKNOWN)

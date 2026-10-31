@@ -70,6 +70,7 @@
 #include "net_intent.h"
 #include "app_profile.h"
 #include "net_chain.h"
+#include "net_range.h"
 #include "workspace_tools.h"
 #include "sched_tools.h"
 #include "bpf_tools.h"
@@ -6057,6 +6058,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_NETCHAIN:
 		rc = exec_net_chain_channel(tool, args_json, out);
 		break;
+	case TOOL_CH_RANGE:
+		rc = exec_net_range_channel(tool, args_json, out);
+		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调
 		 * 也绝不提问/建租约/执行动作。 */
@@ -6097,6 +6101,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   "appprofile（静态/动态画像+差集）" :
 		   tool->channel == TOOL_CH_NETCHAIN ?
 		   "netchain（conntrack 事件流+攻击链关联）" :
+		   tool->channel == TOOL_CH_RANGE ?
+		   "range（靶场攻击面：默认关闭+TTL+硬 CIDR+全量审计）" :
 		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
 		   args_json,
 		   g_mem_degraded ? "degraded" :

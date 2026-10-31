@@ -90,6 +90,7 @@ CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
 CH_NETINTENT = "netintent"  # W81 V3.1/V3.2：网络意图 ↔ nft 双向编译（四件）+ 命中观测闭环（两件）
 CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
 CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
+CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -276,6 +277,11 @@ SUB_MAP = {
     # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
     "net_chain_watch": ["netsec"],
     "net_chain_rules": ["netsec"],
+    "range_status": ["netsec"],
+    "range_enable": ["netsec"],
+    "range_disable": ["netsec"],
+    "range_scan": ["netsec"],
+    "range_inject": ["netsec"],
     # ---- aicore AI 内核面（40 主域）----
     "procfs_read_status": ["aicore", "res"],
     "procfs_read_decisions": ["aicore"],
@@ -778,7 +784,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 210        # 主表 tools.json（W81e：208 + 2 攻击链关联）
+EXPECTED_TOOL_COUNT = 215        # 主表 tools.json（W81 E2：210 + 5 靶场）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -995,8 +1001,13 @@ EXPECTED_TOOL_NAMES = [
     "app_profile_diff",
     "net_chain_watch",
     "net_chain_rules",
+    "range_status",
+    "range_enable",
+    "range_disable",
+    "range_scan",
+    "range_inject",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "c71e21d5b4f854a01843d67a7c0b3fc26de42b3e6cdc13e795d488b983f004a0"
+EXPECTED_TOOL_NAMES_SHA256 = "f157db1afd5f9058c001b02973535469040c473196402f02002392e5235b67da"
 
 
 def manifest_sha256(names):
@@ -4403,6 +4414,113 @@ def netchain_tools():
             rules_props),
     ]
 
+def tool_range(name, risk, desc, props, required=None):
+    """W81 E2：靶场攻击面（channel=range；默认关闭，D3 管辖）"""
+    return {"name": name, "channel": CH_RANGE, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def range_tools():
+    """W81 E2：五件——status(D0) / enable(D3) / disable(D1) /
+    scan(D3) / inject(D3)。允许 CIDR 硬编码为 10.231.0.0/16、
+    10.99.0.0/16、127.0.0.0/8（仅 netns 内）；出厂默认关闭，
+    启用需授权者确认，TTL 默认 30 上限 60 分钟，到期 watchdog +
+    惰性检查双重自动关闭。每次动作（含拒绝）全量写 audit.log：
+    目标/端口/协议/payload 十六进制全文/返回码，无关闭开关。"""
+    cidr_prop = {
+        "type": "string",
+        "enum": ["10.231.0.0/16", "10.99.0.0/16", "127.0.0.0/8"],
+        "description": "启用时声明的靶场 CIDR；必须在硬编码允许清单内"
+        "（10.231.0.0/16=D 棒工作区，10.99.0.0/16=A 棒 netns，"
+        "127.0.0.0/8 仅限 netns 内）。其它值（含 192.168.245.0/24、"
+        "10.0.0.0/8、公网）一律拒绝。",
+    }
+    ttl_prop = {
+        "type": "integer", "minimum": 1, "maximum": 60, "default": 30,
+        "description": "启用时长（分钟），默认 30，上限 60；到期由 "
+        "watchdog 与每次调用的惰性检查自动关闭。",
+    }
+    target_prop = {
+        "type": "string",
+        "description": "数字 IPv4 目标（拒绝主机名/IPv6）。必须在启用时"
+        "声明的 CIDR 内，且必须在硬编码允许清单内；192.168.245.0/24 "
+        "显式拒绝。",
+    }
+    return [
+        tool_range(
+            "range_status", RISK_R,
+            "靶场状态（只读 D0）：是否启用、声明 CIDR、剩余 TTL、"
+            "累计动作数、LSM socket hook 用户态接线状态、审计路径。"
+            "未启用时返回「未启用 + 如何启用」原文（工具已注册，不是"
+            "缺失也不是桩）；启用后显示 enabled=1/remaining_seconds/"
+            "actions。只读：不发包、不改网络。",
+            {}),
+        tool_range(
+            "range_enable", RISK_W2,
+            "启用靶场通道（D3，需授权者确认）：cidr 必须在硬编码允许"
+            "清单内（10.231.0.0/16 / 10.99.0.0/16 / 127.0.0.0/8），"
+            "ttl_minutes 1..60（默认 30）。写 state.json（0600）+ 起"
+            "后台 watchdog；到期自动关闭（watchdog + 惰性 expires_at "
+            "双重检查）。已有启用状态时拒绝，须先 range_disable。"
+            "启用时尝试给当前进程打 sec.ws_label=226（NETLINK_AI ACT）"
+            "作内核 socket hook 第二道闸门；宿主无该 hook 时如实记录"
+            "「待 #61 环境验证」，不静默假装成功。",
+            {"cidr": cidr_prop, "ttl_minutes": ttl_prop}, ["cidr"]),
+        tool_range(
+            "range_disable", RISK_W1,
+            "立即关闭靶场通道（D1）：停 watchdog、删 state.json、"
+            "尝试清零 sec.ws_label。关闭后 scan/inject 立即拒绝，"
+            "重新使用需 range_enable（D3）。未启用时返回「未启用 + "
+            "如何启用」原文。",
+            {}),
+        tool_range(
+            "range_scan", RISK_W2,
+            "靶场端口扫描（D3）：目标必须在启用时声明的 CIDR 内且"
+            "在硬编码允许清单内（代码硬校验，越界在发包前拒绝并审计）。"
+            "TCP=非阻塞 connect 探测；UDP=connect + 1 字节探测"
+            "（ICMP port unreachable=closed，超时=open|filtered，"
+            "如实标注不确定性）。timeout_ms 默认 200（上限 1000），"
+            "端口上限 1024。只探测声明 CIDR 内的单个目标，不扫描宿主 "
+            "LAN、不做 DoS。逐端口全量审计（目标/端口/协议/rc）。",
+            {"target": target_prop,
+             "ports": {"type": "string",
+                       "description": "端口列表，如 22,80,8000-8010"
+                       "（单次上限 1024 个，端口 1..65535）"},
+             "protocol": {"type": "string", "enum": ["tcp", "udp"],
+                          "default": "tcp",
+                          "description": "tcp=connect 探测；udp=connect+"
+                          "1 字节探测（open|filtered 表示不确定）"},
+             "timeout_ms": {"type": "integer", "minimum": 1,
+                            "maximum": 1000, "default": 200,
+                            "description": "每端口探测超时毫秒（默认 200）"}},
+            ["target", "ports"]),
+        tool_range(
+            "range_inject", RISK_W2,
+            "构造并发送单个报文（D3）：UDP / TCP SYN / ICMP，payload "
+            "自定义（payload_hex，≤4096 字节）。目标必须先通过启用 "
+            "CIDR + 硬编码清单双重校验；越界目标在构造报文前拒绝并"
+            "审计。UDP 用 SOCK_DGRAM（普通用户可发）；TCP SYN/ICMP 用"
+            "raw socket（需 root/CAP_NET_RAW，缺权如实报 EPERM）。发送前"
+            "先写 attempt 审计（payload 十六进制全文），发送后写 rc 与"
+            "字节数；审计写失败则拒绝发送（fail-closed）。不做漏洞利用、"
+            "不打真实服务、不做 DoS。",
+            {"target": target_prop,
+             "protocol": {"type": "string",
+                          "enum": ["udp", "tcp_syn", "icmp"],
+                          "default": "udp",
+                          "description": "udp=SOCK_DGRAM；tcp_syn=raw TCP "
+                          "SYN；icmp=raw echo request（后两者需 root）"},
+             "port": {"type": "integer", "minimum": 0, "maximum": 65535,
+                      "description": "目的端口；udp/tcp_syn 必填，icmp 忽略"},
+             "payload_hex": {"type": "string", "maxLength": 8192,
+                             "description": "payload 十六进制全文（偶数"
+                             "长度，≤4096 字节）；空/省略=空 payload。"
+                             "审计按实际发送字节记录。"}},
+            ["target"]),
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -4469,6 +4587,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(appprofile_tools())
     # W81 E1：conntrack 事件流 + 攻击链关联两件（追加在清单末尾）
     tools.extend(netchain_tools())
+    # W81 E2：V3.6 靶场攻击面五件（追加在清单末尾）
+    tools.extend(range_tools())
     return tools
 
 

@@ -1471,6 +1471,28 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 			}
 			goto out;
 		}
+		/* W81 E2：V3.6 靶场攻击面。status 只读 D0；disable 关闭
+		 * D1；enable（需 CIDR+TTL 确认）、scan、inject 会改变外部
+		 * 状态/发包，一律 D3（显式授权，不因 risk=W2 降到 D2）。
+		 * 真正的默认关闭与 CIDR 硬校验在 net_range.c 内，网关
+		 * 只负责危险级。 */
+		if (strcmp(tool_name, "range_status") == 0) {
+			d = AI_D0;
+			why = "range_read_only";
+			goto out;
+		}
+		if (strcmp(tool_name, "range_disable") == 0) {
+			d = AI_D1;
+			why = "range_disable";
+			goto out;
+		}
+		if (strcmp(tool_name, "range_enable") == 0 ||
+		    strcmp(tool_name, "range_scan") == 0 ||
+		    strcmp(tool_name, "range_inject") == 0) {
+			d = AI_D3;
+			why = "range_actuation";
+			goto out;
+		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {
 			d = AI_D2;
 			why = "telemetry_reset";

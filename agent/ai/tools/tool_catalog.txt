@@ -208,3 +208,8 @@ app_profile_dynamic 目标程序在 aik-sand
 app_profile_diff 输入目标路径 + app
 net_chain_watch 按 interval（默认 2s
 net_chain_rules interval/scan_window/sca
+range_status 是否启用、声明 CI
+range_enable cidr 必须在硬编码
+range_disable 停 watchdog、删 state
+range_scan 目标必须在启用时
+range_inject UDP / TCP SYN / ICMP，p

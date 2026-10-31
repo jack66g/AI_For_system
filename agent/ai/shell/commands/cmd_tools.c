@@ -38,6 +38,7 @@ static const char *ch_name(enum tool_channel ch)
 	case TOOL_CH_NETINTENT:		return "netintent";
 	case TOOL_CH_APPPROFILE:	return "appprofile";
 	case TOOL_CH_NETCHAIN:		return "netchain";
+	case TOOL_CH_RANGE:		return "range";
 	default:			return "unknown";
 	}
 }
