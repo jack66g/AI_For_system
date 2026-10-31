@@ -152,6 +152,7 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/sched_tools.c \
 	$(TOOLS_DIR)/bpf_tools.c \
 	$(TOOLS_DIR)/net_intent.c \
+	$(TOOLS_DIR)/net_hit.c \
 	$(TOOLS_DIR)/app_profile.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \

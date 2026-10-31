@@ -41,6 +41,7 @@
 #include "tool_registry.h"
 #include "net_admin.h"
 #include "net_intent.h"
+#include "net_hit.h"
 
 /* ======================================================================
  * 0) 小工具
@@ -1087,8 +1088,6 @@ static void render_match(const struct jv *m, char *out, size_t cap)
 }
 
 /* 规则 → 动作分类 + 人话动作 */
-enum ni_rule_kind { NI_R_ALLOW = 0, NI_R_DENY, NI_R_OTHER };
-
 static int render_action(const struct jv *expr, char *out, size_t cap)
 {
 	const char *k = jv_single_key(expr);
@@ -1411,6 +1410,132 @@ int ni_summarize(const char *json, const char *only_table, char *buf,
 	db_free(&allow);
 	db_free(&deny);
 	db_free(&other);
+	return 0;
+}
+
+/* ----------------------------------------------------------------------
+ * 3b) 规则级计数器快照（W81 V3.2 命中观测闭环）
+ *
+ * 与 ni_summarize 共用同一 mini-DOM：不新增解析器、不新增 nft 调用。
+ * 规则没有显式 counter 表达式时 packets/bytes=-1（has_counter=0），
+ * 调用方必须把这类规则排除在阈值判定之外（看不到命中不能假装看到）。
+ * -------------------------------------------------------------------- */
+int ni_ruleset_snapshot(const char *json, const char *only_table,
+			struct ni_rule_sample *out, int max, int *n,
+			char *err, size_t errcap)
+{
+	struct jv *root, *arr;
+	int i, count = 0;
+
+	if (err && errcap)
+		err[0] = '\0';
+	if (n)
+		*n = 0;
+	if (!json || !*json || !out || max <= 0 || !n) {
+		if (err)
+			snprintf(err, errcap, "参数为空（json/out/max）");
+		return -1;
+	}
+	root = jp_root(json, strlen(json), err, errcap);
+	if (!root)
+		return -1;
+	arr = jv_get(root, "nftables");
+	if (!arr || arr->t != JV_ARR) {
+		if (err)
+			snprintf(err, errcap,
+				 "nft -j 输出缺少 nftables 数组");
+		jv_free(root);
+		return -1;
+	}
+	for (i = 0; i < arr->n && count < max; i++) {
+		struct jv *e = arr->val[i];
+		struct jv *r = jv_get(e, "rule");
+		struct jv *exprs;
+		const char *tab, *chn;
+		struct ni_rule_sample *s;
+		char cond[512] = "";
+		char act[128] = "未知";
+		struct sbuf cb;
+		int j, kind = NI_R_OTHER;
+
+		if (!r || r->t != JV_OBJ)
+			continue;
+		tab = jv_str(r, "table");
+		chn = jv_str(r, "chain");
+		if (!tab)
+			continue;
+		if (only_table && *only_table && strcmp(tab, only_table) != 0)
+			continue;
+		exprs = jv_get(r, "expr");
+		if (!exprs || exprs->t != JV_ARR)
+			continue;
+		s = &out[count];
+		memset(s, 0, sizeof(*s));
+		snprintf(s->table, sizeof(s->table), "%s", tab);
+		snprintf(s->chain, sizeof(s->chain), "%s", chn ? chn : "?");
+		s->handle = jv_int(r, "handle", -1);
+		s->packets = -1;
+		s->bytes = -1;
+		s->has_counter = 0;
+		sb_init(&cb, cond, sizeof(cond));
+		for (j = 0; j < exprs->n; j++) {
+			struct jv *x = exprs->val[j];
+			const char *k = jv_single_key(x);
+			char one[384];
+
+			if (!k)
+				continue;
+			if (strcmp(k, "match") == 0 || strcmp(k, "cmp") == 0) {
+				struct jv *m = jv_single_val(x);
+
+				render_match(m, one, sizeof(one));
+				sb_printf(&cb, "%s%s", cb.used ? " 且 " : "",
+					  one);
+				continue;
+			}
+			if (strcmp(k, "counter") == 0) {
+				struct jv *cv = jv_single_val(x);
+
+				s->packets = jv_int(cv, "packets", 0);
+				s->bytes = jv_int(cv, "bytes", 0);
+				s->has_counter = 1;
+				continue;
+			}
+			if (strcmp(k, "comment") == 0) {
+				struct jv *cv = jv_single_val(x);
+
+				if (cv && cv->t == JV_STR)
+					snprintf(s->comment,
+						 sizeof(s->comment), "%s",
+						 cv->s ? cv->s : "");
+				continue;
+			}
+			if (strcmp(k, "log") == 0)
+				continue;
+			if (strcmp(k, "meta") == 0 ||
+			    strcmp(k, "payload") == 0 ||
+			    strcmp(k, "ct") == 0) {
+				jv_dump(x, one, sizeof(one), &(size_t){0});
+				sb_printf(&cb, "%s%s", cb.used ? " 且 " : "",
+					  one);
+				continue;
+			}
+			{
+				char a2[128];
+				int kd = render_action(x, a2, sizeof(a2));
+
+				if (kd != NI_R_OTHER || kind == NI_R_OTHER)
+					kind = kd;
+				snprintf(act, sizeof(act), "%s", a2);
+			}
+		}
+		s->kind = kind;
+		snprintf(s->desc, sizeof(s->desc), "%s → %s",
+			 cb.used ? cond : "（无条件）", act);
+		count++;
+	}
+	jv_free(root);
+	*n = count;
 	return 0;
 }
 
@@ -3165,6 +3290,9 @@ int exec_net_intent_channel(const void *tool_v, const char *args_json,
 		return ni_tool_confirm(args_json, out);
 	if (strcmp(tool->name, "nft_ruleset_summarize") == 0)
 		return ni_tool_summarize(args_json, out);
+	/* W81 V3.2：命中观测闭环（同通道，工具实现在 net_hit.c） */
+	if (strncmp(tool->name, "net_hit_", 8) == 0)
+		return exec_net_hit_tool(tool->name, args_json, out);
 	if (asprintf(out, "ERROR: 未知 netintent 工具（注册表异常）") < 0)
 		*out = NULL;
 	return -1;

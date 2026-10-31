@@ -1313,6 +1313,34 @@ static int ip_write_verb(const char *verb)
 	return cmd_in(verb, w);
 }
 
+/* 扁平 JSON 里 key 的字符串值是否等于 val（容忍空白；W81 V3.2） */
+static int json_has_value(const char *json, const char *key, const char *val)
+{
+	char pat[64];
+	const char *p;
+	size_t vl;
+
+	if (!json || !key || !val)
+		return 0;
+	snprintf(pat, sizeof(pat), "\"%s\"", key);
+	p = strstr(json, pat);
+	if (!p)
+		return 0;
+	p += strlen(pat);
+	while (*p == ' ' || *p == '\t' || *p == '\n')
+		p++;
+	if (*p != ':')
+		return 0;
+	p++;
+	while (*p == ' ' || *p == '\t' || *p == '\n')
+		p++;
+	if (*p != '"')
+		return 0;
+	p++;
+	vl = strlen(val);
+	return strncmp(p, val, vl) == 0 && p[vl] == '"';
+}
+
 enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 				  const char *effective_risk,
 				  const char *args_json,
@@ -1388,6 +1416,36 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 		    strcmp(tool_name, "nft_intent_confirm") == 0) {
 			d = AI_D3;
 			why = "network_rule_actuation";
+			goto out;
+		}
+		/* W81 V3.2：命中观测闭环。status 只读 → D0；alert 只审计 →
+		 * D1；escalate/degrade 会改规则 → D3（必须走租约确认）。
+		 * net_hit_policy 改阈值是 D1，get 是 D0；level 故意不在
+		 * 策略文件里，避免 D1 配置悄悄放开规则写权限。 */
+		if (strcmp(tool_name, "net_hit_watch") == 0) {
+			if (json_has_value(args_json, "action", "status")) {
+				d = AI_D0;
+				why = "hitloop_read_only";
+				goto out;
+			}
+			if (json_has_value(args_json, "level", "escalate") ||
+			    json_has_value(args_json, "level", "degrade")) {
+				d = AI_D3;
+				why = "network_rule_actuation";
+				goto out;
+			}
+			d = AI_D1;
+			why = "hitloop_alert";
+			goto out;
+		}
+		if (strcmp(tool_name, "net_hit_policy") == 0) {
+			if (json_has_value(args_json, "action", "set")) {
+				d = AI_D1;
+				why = "hitloop_policy";
+			} else {
+				d = AI_D0;
+				why = "hitloop_read_only";
+			}
 			goto out;
 		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {

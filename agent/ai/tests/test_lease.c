@@ -293,6 +293,27 @@ static void test_danger_rules(void)
 	       "danger: nft_intent_compile 只读 → D0");
 	expect(cls("nft_ruleset_summarize", "R", "{}") == AI_D0,
 	       "danger: nft_ruleset_summarize 只读 → D0");
+	expect(cls("net_hit_watch", "W1", "{\"action\":\"status\"}") == AI_D0,
+	       "danger: net_hit_watch status 只读 → D0");
+	expect(cls("net_hit_watch", "W1",
+		   "{\"action\":\"start\",\"level\":\"alert\"}") == AI_D1,
+	       "danger: net_hit_watch start alert 只审计 → D1");
+	expect(cls("net_hit_watch", "W1",
+		   "{\"action\": \"start\", \"level\": \"escalate\", "
+		   "\"escalate_src\": \"10.0.0.0/8\"}") == AI_D3,
+	       "danger: net_hit_watch start escalate → D3");
+	expect(cls("net_hit_watch", "W1",
+		   "{\"action\":\"start\",\"level\":\"degrade\"}") == AI_D3,
+	       "danger: net_hit_watch start degrade → D3");
+	expect(cls("net_hit_watch", "W1", "{\"action\":\"start\"}") == AI_D1,
+	       "danger: net_hit_watch start 默认 alert → D1");
+	expect(cls("net_hit_watch", "W1", "{\"action\":\"stop\"}") == AI_D1,
+	       "danger: net_hit_watch stop 清理 → D1");
+	expect(cls("net_hit_policy", "W1", "{\"action\":\"get\"}") == AI_D0,
+	       "danger: net_hit_policy get 只读 → D0");
+	expect(cls("net_hit_policy", "W1",
+		   "{\"action\":\"set\",\"threshold\":3}") == AI_D1,
+	       "danger: net_hit_policy set 阈值 → D1");
 
 	expect(cls("exec_run", "W2",
 		   "{\"command\":\"date\",\"args\":[\"-s\",\"2026-01-01\"]}")

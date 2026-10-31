@@ -141,7 +141,7 @@ int main(void)
 		printf("FATAL: exec_run missing\n");
 		return 2;
 	}
-	CHECK(reg.tool_count == 204, "主表 204 件（W81c：201 + 3 appprofile，manifest 未漂移）");
+	CHECK(reg.tool_count == 206, "主表 206 件（W81c：201 + 3 appprofile，manifest 未漂移）");
 
 	/* ---- 1. 参数契约 ---- */
 	check_param_error(t, "{}", "MISSING", "command", "缺 command → 结构化拒绝");

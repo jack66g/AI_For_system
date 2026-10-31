@@ -87,7 +87,7 @@ CH_NETADMIN = "netadmin"    # W78 agent-E：P2 网络执行面（rtnetlink 写 +
 CH_WORKSPACE = "workspace"  # W79：持久工作区（镜像 ext4 + 隔离执行，六件）
 CH_SCHED = "sched"            # W79：双调度台（台子+旋钮+快照+A/B 对照，五件）
 CH_BPF = "bpf"              # W80：用户态 BPF loader + nfqueue（四件）
-CH_NETINTENT = "netintent"  # W81 V3.1：网络意图 ↔ nft 双向编译（四件）
+CH_NETINTENT = "netintent"  # W81 V3.1/V3.2：网络意图 ↔ nft 双向编译（四件）+ 命中观测闭环（两件）
 CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
 
 RISK_R = "R"        # 只读
@@ -265,6 +265,9 @@ SUB_MAP = {
     "nft_intent_apply": ["netsec"],
     "nft_intent_confirm": ["netsec"],
     "nft_ruleset_summarize": ["netsec"],
+    # ---- W81 V3.2：规则命中观测闭环（两件）----
+    "net_hit_watch": ["netsec"],
+    "net_hit_policy": ["netsec"],
     # ---- W81 V4：应用静态/动态画像 + 差集风险报告（三件）----
     "app_profile_static": ["sysadmin"],
     "app_profile_dynamic": ["sysadmin", "sandbox"],
@@ -769,7 +772,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 204        # 主表 tools.json（W81c：201 + 3 appprofile）
+EXPECTED_TOOL_COUNT = 206        # 主表 tools.json（W81b：204 + 2 hitloop）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -977,11 +980,13 @@ EXPECTED_TOOL_NAMES = [
     "nft_intent_apply",
     "nft_intent_confirm",
     "nft_ruleset_summarize",
+    "net_hit_watch",
+    "net_hit_policy",
     "app_profile_static",
     "app_profile_dynamic",
     "app_profile_diff",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "d033d4468f2ff165ae0edf426d0e16f64e07ccf5907348e87fdccd48c3c6477a"
+EXPECTED_TOOL_NAMES_SHA256 = "bc74158530aa326923996ad71d8cafe8551d1cf94936f9cec19b2b70a1c31280"
 
 
 def manifest_sha256(names):
@@ -3151,7 +3156,7 @@ CHANNEL_RETURN = {
     CH_WORKSPACE: "返回工作区状态/详情或工作区内命令的 stdout/stderr 与退出码；destroy 幂等。",
     CH_SCHED: "返回台子状态/旋钮写回读（期望 vs 实际）/快照内容或 A/B 报告路径与关键指标；读回不一致一律 FAIL。",
     CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
-    CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要。",
+    CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要；net_hit_watch 返回采样器 pid/运行态/触发与清理计数，status 返回运行态+剩余 TTL+降级清单+审计尾，net_hit_policy 返回阈值配置与生效说明。",
     CH_APPPROFILE: "static 返回 ELF/依赖/符号/能力/桌面/包来源与 declared 声明清单；dynamic 返回 JSON 事件流（文件读/写/映射、子进程、网络）+ 统计 + degraded 局限说明；diff 返回「要的/用的/偷偷碰的」三栏 + 0-100 风险分 + 放行条件建议（只读，不自动落策略）。",
 }
 
@@ -3988,6 +3993,104 @@ def netintent_tools():
             {"table": {
                 "type": "string",
                 "description": "只摘要该表（可选；[a-z_][a-z0-9_]{0,14}）"}}),
+        tool_netintent(
+            "net_hit_watch", RISK_W1,
+            "规则命中观测闭环（start/stop/status 合一，后台采样器）：按 "
+            "interval（默认 5s）读 nft -j list ruleset，提取每条规则 "
+            "counter 与上一拍比较，按滑动窗口（默认 60s）累计；某条 drop "
+            "规则命中 ≥ threshold（默认 10 包）即触发。三档响应：alert"
+            "（D1，只写 audit.log/events.jsonl + 快照，绝不动规则）；"
+            "escalate（D3，向命中规则所在链追加 ip saddr <escalate_src> "
+            "counter drop 临时规则，comment=aikhit-esc-*，TTL 到期自动撤）；"
+            "degrade（D3，把命中 drop/reject 规则换成 counter+log 只记日志"
+            "规则，stop/清理时按原动作恢复）。start 不阻塞会话（setsid "
+            "后台进程 + flock 单例 + 握手后立刻返回）；status 显示运行态/"
+            "升级规则剩余 TTL/降级规则/审计尾；stop 停进程 + 撤升级规则 + "
+            "恢复降级规则；进程被杀后 status 标 orphan，下一次 start/stop "
+            "先按持久化记录清残。",
+            {"action": {
+                "type": "string", "enum": ["start", "stop", "status"],
+                "description": "start=启动采样器（alert=D1；escalate/"
+                "degrade=D3）；stop=停止并清理；status=只读查看运行态"},
+             "table": {
+                 "type": "string",
+                 "description": "观测表（默认 aik_intent；"
+                 "[a-z_][a-z0-9_]{0,14}）。只读该表计数器/规则文本"},
+             "level": {
+                 "type": "string",
+                 "enum": ["alert", "escalate", "degrade"],
+                 "default": "alert",
+                 "description": "响应档位（start 时显式给出，不从策略文件"
+                 "继承）：alert=D1 只审计；escalate/degrade=D3 需租约确认"},
+             "interval": {
+                 "type": "integer", "minimum": 1, "maximum": 300,
+                 "default": 5, "description": "采样周期秒数（默认 5）"},
+             "threshold": {
+                 "type": "integer", "minimum": 1, "maximum": 1000000000,
+                 "default": 10,
+                 "description": "窗口内命中包数阈值（默认 10）"},
+             "window": {
+                 "type": "integer", "minimum": 1, "maximum": 3600,
+                 "default": 60,
+                 "description": "判定窗口秒数（默认 60；window/interval "
+                 "不得超过 256 拍）"},
+             "cooldown": {
+                 "type": "integer", "minimum": 0, "maximum": 86400,
+                 "default": 60,
+                 "description": "同一规则再次触发的最小间隔秒数（默认 60）"},
+             "chain": {
+                 "type": "string",
+                 "description": "只观测该链（可选；空=任意链）"},
+             "handle": {
+                 "type": "integer", "minimum": 0, "default": 0,
+                 "description": "只观测该规则 handle（可选；0=任意）"},
+             "escalate_src": {
+                 "type": "string",
+                 "description": "escalate 隔离源（IPv4/IPv6 地址或前缀，"
+                 "如 10.0.0.0/8）；level=escalate 时必填"},
+             "escalate_ttl": {
+                 "type": "integer", "minimum": 5, "maximum": 3600,
+                 "default": 60,
+                 "description": "escalate 临时规则 TTL 秒数（默认 60，"
+                 "到期自动撤）"}},
+            ["action"]),
+        tool_netintent(
+            "net_hit_policy", RISK_W1,
+            "命中观测阈值配置（get/set，D1）：设置 threshold/window/"
+            "interval/cooldown/chain/handle/escalate_src/escalate_ttl。"
+            "set 只改检测参数与下一次 start 的升级参数；运行中的采样器"
+            "每拍重读检测参数（≤interval 秒生效），level/escalate_src/"
+            "escalate_ttl 固定在 start 时。level 不放进策略——每次 start "
+            "显式给出（alert=D1；escalate/degrade=D3 必须租约确认），"
+            "避免 D1 配置悄悄放开规则写权限。",
+            {"action": {
+                "type": "string", "enum": ["get", "set"], "default": "get",
+                "description": "get=查看当前策略；set=修改（校验后写 "
+                "policy.json）"},
+             "threshold": {
+                 "type": "integer", "minimum": 1, "maximum": 1000000000,
+                 "description": "窗口内命中包数阈值"},
+             "window": {
+                 "type": "integer", "minimum": 1, "maximum": 3600,
+                 "description": "判定窗口秒数"},
+             "interval": {
+                 "type": "integer", "minimum": 1, "maximum": 300,
+                 "description": "采样周期秒数"},
+             "cooldown": {
+                 "type": "integer", "minimum": 0, "maximum": 86400,
+                 "description": "同一规则再次触发的最小间隔秒数"},
+             "chain": {
+                 "type": "string",
+                 "description": "只观测该链（空=任意）"},
+             "handle": {
+                 "type": "integer", "minimum": 0,
+                 "description": "只观测该规则 handle（0=任意）"},
+             "escalate_src": {
+                 "type": "string",
+                 "description": "escalate 隔离源（IPv4/IPv6 地址或前缀）"},
+             "escalate_ttl": {
+                 "type": "integer", "minimum": 5, "maximum": 3600,
+                 "description": "escalate 临时规则 TTL 秒数"}}),
     ]
 
 

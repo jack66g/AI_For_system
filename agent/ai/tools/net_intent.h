@@ -74,6 +74,29 @@ int ni_summarize(const char *json, const char *only_table, char *buf,
 		 size_t cap, char *err, size_t errcap);
 int ni_valid_table(const char *name);
 
+/* W81 V3.2：规则级计数器快照（命中观测闭环用）。从 nft -j list ruleset
+ * 的 JSON 里提取每条规则的 table/chain/handle/counter/动作/comment/描述。
+ * 只读；wanted_table 非空时只返回该表。 */
+enum ni_rule_kind { NI_R_ALLOW = 0, NI_R_DENY, NI_R_OTHER };
+
+#define NI_SNAP_MAX 256
+
+struct ni_rule_sample {
+	char table[NI_TABLE_LEN];
+	char chain[64];
+	char comment[96];
+	long long handle;
+	long long packets;	/* -1 = 无 counter 表达式 */
+	long long bytes;
+	int has_counter;
+	int kind;		/* NI_R_ALLOW / NI_R_DENY / NI_R_OTHER */
+	char desc[256];		/* 人话匹配条件 → 动作 */
+};
+
+int ni_ruleset_snapshot(const char *json, const char *only_table,
+			struct ni_rule_sample *out, int max, int *n,
+			char *err, size_t errcap);
+
 /* 执行器入口（executor.c 的 TOOL_CH_NETINTENT 分发调用） */
 int exec_net_intent_channel(const void *tool, const char *args_json, char **out);
 

@@ -5133,6 +5133,164 @@
   {
     "type": "function",
     "function": {
+      "name": "net_hit_watch",
+      "description": "规则命中观测闭环（start/stop/status 合一，后台采样器）：按 interval（默认 5s）读 nft -j list ruleset，提取每条规则 counter 与上一拍比较，按滑动窗口（默认 60s）累计；某条 drop 规则命中 ≥ threshold（默认 10 包）即触发。三档响应：alert（D1，只写 audit.log/events.jsonl + 快照，绝不动规则）；escalate（D3，向命中规则所在链追加 ip saddr <escalate_src> counter drop 临时规则，comment=aikhit-esc-*，TTL 到期自动撤）；degrade（D3，把命中 drop/reject 规则换成 counter+log 只记日志规则，stop/清理时按原动作恢复）。start 不阻塞会话（setsid 后台进程 + flock 单例 + 握手后立刻返回）；status 显示运行态/升级规则剩余 TTL/降级规则/审计尾；stop 停进程 + 撤升级规则 + 恢复降级规则；进程被杀后 status 标 orphan，下一次 start/stop 先按持久化记录清残。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "description": "start=启动采样器（alert=D1；escalate/degrade=D3）；stop=停止并清理；status=只读查看运行态"
+          },
+          "table": {
+            "type": "string",
+            "description": "观测表（默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只读该表计数器/规则文本"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "alert",
+              "escalate",
+              "degrade"
+            ],
+            "default": "alert",
+            "description": "响应档位（start 时显式给出，不从策略文件继承）：alert=D1 只审计；escalate/degrade=D3 需租约确认"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 5,
+            "description": "采样周期秒数（默认 5）"
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000,
+            "default": 10,
+            "description": "窗口内命中包数阈值（默认 10）"
+          },
+          "window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "判定窗口秒数（默认 60；window/interval 不得超过 256 拍）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同一规则再次触发的最小间隔秒数（默认 60）"
+          },
+          "chain": {
+            "type": "string",
+            "description": "只观测该链（可选；空=任意链）"
+          },
+          "handle": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "只观测该规则 handle（可选；0=任意）"
+          },
+          "escalate_src": {
+            "type": "string",
+            "description": "escalate 隔离源（IPv4/IPv6 地址或前缀，如 10.0.0.0/8）；level=escalate 时必填"
+          },
+          "escalate_ttl": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600,
+            "default": 60,
+            "description": "escalate 临时规则 TTL 秒数（默认 60，到期自动撤）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_hit_policy",
+      "description": "命中观测阈值配置（get/set，D1）：设置 threshold/window/interval/cooldown/chain/handle/escalate_src/escalate_ttl。set 只改检测参数与下一次 start 的升级参数；运行中的采样器每拍重读检测参数（≤interval 秒生效），level/escalate_src/escalate_ttl 固定在 start 时。level 不放进策略——每次 start 显式给出（alert=D1；escalate/degrade=D3 必须租约确认），避免 D1 配置悄悄放开规则写权限。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "default": "get",
+            "description": "get=查看当前策略；set=修改（校验后写 policy.json）"
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000,
+            "description": "窗口内命中包数阈值"
+          },
+          "window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "description": "判定窗口秒数"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "description": "采样周期秒数"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "description": "同一规则再次触发的最小间隔秒数"
+          },
+          "chain": {
+            "type": "string",
+            "description": "只观测该链（空=任意）"
+          },
+          "handle": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "只观测该规则 handle（0=任意）"
+          },
+          "escalate_src": {
+            "type": "string",
+            "description": "escalate 隔离源（IPv4/IPv6 地址或前缀）"
+          },
+          "escalate_ttl": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600,
+            "description": "escalate 临时规则 TTL 秒数"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "app_profile_static",
       "description": "应用静态画像（只读 R/D0，绝不执行目标）：把本机可执行文件「要什么」一次说清——ELF 头（类型/架构/PIE/NX/RELRO/解释器，自解析程序头，不依赖 readelf 也能出结论）、readelf -d 动态依赖（NEEDED/SONAME/RPATH/RUNPATH/BIND_NOW/TEXTREL，绝不用会执行加载器的 ldd）、动态符号概要、getcap 与 security.capability xattr（含原始十六进制解码）、setuid/setgid 位、.desktop 匹配（Exec/TryExec/autostart/sandbox 字段）、dpkg -S 包来源与版本。缺 readelf/dpkg/getcap、非 ELF、权限不足、文件不存在一律降级明说并给出 warnings；输出含 declared 静态声明清单，可直接喂 app_profile_diff。组合：本工具→app_profile_dynamic→app_profile_diff。",
       "parameters": {

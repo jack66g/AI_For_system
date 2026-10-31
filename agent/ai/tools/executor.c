@@ -6088,7 +6088,7 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   tool->channel == TOOL_CH_BPF ?
 		   "bpf（BPF loader + nfqueue）" :
 		   tool->channel == TOOL_CH_NETINTENT ?
-		   "netintent（意图 ↔ nft 双向编译）" :
+		   "netintent（意图 ↔ nft 双向编译 + 命中观测闭环）" :
 		   tool->channel == TOOL_CH_APPPROFILE ?
 		   "appprofile（静态/动态画像+差集）" :
 		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
