@@ -394,6 +394,8 @@ SUB_MAP = {
     "workspace_run": ["sandbox"],
     "workspace_destroy": ["sandbox", "fs"],
     "workspace_quota": ["sandbox", "fs"],
+    "workspace_net_allow": ["sandbox", "netsec"],
+    "workspace_net_status": ["sandbox", "netsec"],
     # ---- sched 双调度台（五件，W79）----
     "sched_status": ["res", "aicore"],
     "sched_knob_set": ["res"],
@@ -772,7 +774,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 206        # 主表 tools.json（W81b：204 + 2 hitloop）
+EXPECTED_TOOL_COUNT = 208        # 主表 tools.json（W81d：206 + 2 工作区网络）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -967,6 +969,8 @@ EXPECTED_TOOL_NAMES = [
     "workspace_run",
     "workspace_destroy",
     "workspace_quota",
+    "workspace_net_allow",
+    "workspace_net_status",
     "sched_status",
     "sched_knob_set",
     "sched_mode_set",
@@ -986,7 +990,7 @@ EXPECTED_TOOL_NAMES = [
     "app_profile_dynamic",
     "app_profile_diff",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "bc74158530aa326923996ad71d8cafe8551d1cf94936f9cec19b2b70a1c31280"
+EXPECTED_TOOL_NAMES_SHA256 = "e5d44b8544b50a734d545eb33acc0062ae1c1ecdab486e67126b8e16d5a87e93"
 
 
 def manifest_sha256(names):
@@ -2287,7 +2291,12 @@ def sandbox_tools():
 # 在 aik-sandbox 私有 mount/pid/uts namespace 里挂成根。"AI 一句话就有
 # 一个自己的持久盘"：workspace_run 两次调用看到同一份 /data.txt。
 # v0 真支持：backing=disk|tmpfs、size_mb、ro_paths、rw_paths、cpu_max、
-# mem_max、pids_max、label；net=veth 接受但按 none 执行（明确提示）。
+# mem_max、pids_max、label。
+# W81d：net 支持 none|veth|host。veth = 每个工作区独立 netns（aikws-<name>）
+# + 一对 veth（宿主侧 aikv<hash> 挂专用网桥 aikbr0，工作区侧 aikc<hash>）+
+# netns 内 inet aik_ws_<name> 表缺省拒出站，只放行 lo / 已建立连接 / 白名单
+# （allow=[{dst,port,proto}]）。配套 workspace_net_allow（W2）与
+# workspace_net_status（R）。
 # ---------------------------------------------------------------------------
 WS_NAME_PARAM = {"name": {"type": "string",
                           "description": "工作区名（[A-Za-z0-9_.-]{1,32}，"
@@ -2308,7 +2317,10 @@ def tool_workspace_create():
                        "backing=disk（默认）走镜像；backing=tmpfs 为临时盘"
                        "（run 结束即失，不持久）。ro_paths/rw_paths 为显式"
                        "共享的宿主绝对路径（工作区内同路径 ro/rw bind）；"
-                       "net 支持 none（默认）|host，veth 未实现（按 none）；"
+                       "net 支持 none（默认）|veth|host：veth = 独立 netns +"
+                       " 一对 veth + 专用网桥 aikbr0，netns 内 nft 表缺省拒"
+                       "出站（只放行 lo/已建立连接/allow 白名单），不设 NAT、"
+                       "不做转发；"
                        "cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅"
                        "登记展示。已存在则幂等返回，绝不重新格式化。",
         "parameters": obj_schema(
@@ -2329,10 +2341,24 @@ def tool_workspace_create():
                                  description="读写共享的宿主绝对路径"
                                              "（最多 16 条；慎用）"),
                 "net": {"type": "string",
-                        "description": "none=新 netns 仅 lo（默认）；host=宿主"
-                                       "网络；veth 已接受但按 none 执行",
+                        "description": "none=新 netns 仅 lo（默认）；veth=独立"
+                                       " netns+veth+aikbr0，缺省拒出站；"
+                                       "host=宿主网络",
                         "enum": ["none", "host", "veth"],
                         "default": "none"},
+                "allow": {"type": "array",
+                          "description": "net=veth 的出站白名单（最多 32 条；"
+                                         "缺省策略仍是拒出站）",
+                          "items": {"type": "object",
+                                    "properties": {
+                                        "dst": {"type": "string"},
+                                        "port": {"type": "integer",
+                                                 "minimum": 0,
+                                                 "maximum": 65535},
+                                        "proto": {"type": "string",
+                                                  "enum": ["tcp", "udp",
+                                                           "icmp", "any"]}},
+                                    "required": ["dst"]}},
                 "cpu_max": {"type": "number",
                             "description": "CPU 核数上限（0=不限，0.01-64；"
                                            "映射 cgroup cpu.max）",
@@ -2433,6 +2459,56 @@ def tool_workspace_quota():
     }
 
 
+def tool_workspace_net_allow():
+    return {
+        "name": "workspace_net_allow",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_W2,
+        "description": "工作区网络白名单增删（W2/D2，仅 net=veth）：在 netns 内"
+                       "的 inet aik_ws_<name> 表里维护显式放行条目；缺省策略"
+                       "始终是拒出站（只放行 lo、已建立连接与白名单）。"
+                       "action=add|del|list|clear|rebuild。dst 为 IPv4/IPv6 "
+                       "地址或 CIDR（10.231.0.1、192.168.1.0/24）；port 0-65535"
+                       "（0/省略=任意）；proto=tcp|udp|icmp|any（省略时：有 "
+                       "port 视为 tcp，无 port 视为 any）。rebuild 用于重启后"
+                       "重建 netns/veth/规则。不提供 NAT/转发语义。",
+        "parameters": obj_schema(
+            {
+                "name": WS_NAME_PARAM["name"],
+                "action": {"type": "string",
+                           "description": "add=加（默认）；del=删（省略 "
+                                          "port/proto 即按 dst 全删）；list="
+                                          "只看；clear=清空；rebuild=重建运行时"
+                                          "拓扑",
+                           "enum": ["add", "del", "list", "clear",
+                                    "rebuild"], "default": "add"},
+                "dst": {"type": "string",
+                        "description": "目标 IPv4/IPv6 地址或 CIDR"
+                                       "（add/del 必填）"},
+                "port": {"type": "integer",
+                         "description": "目标端口（0-65535；0/省略=任意）",
+                         "minimum": 0, "maximum": 65535},
+                "proto": {"type": "string",
+                          "description": "协议 tcp|udp|icmp|any（省略时按 "
+                                         "port 推导）",
+                          "enum": ["tcp", "udp", "icmp", "any"]},
+            },
+            ["name"]),
+    }
+
+
+def tool_workspace_net_status():
+    return {
+        "name": "workspace_net_status",
+        "channel": CH_WORKSPACE,
+        "risk": RISK_R,
+        "description": "工作区网络状态（只读）：net 模式、netns 是否存在、veth "
+                       "两侧接口、地址、aikbr0 成员、inet aik_ws_<name> 表与"
+                       "规则原文（含 counter 包/字节计数）、白名单条目。",
+        "parameters": obj_schema(WS_NAME_PARAM, ["name"]),
+    }
+
+
 def workspace_tools():
     return [
         tool_workspace_create(),
@@ -2441,6 +2517,8 @@ def workspace_tools():
         tool_workspace_run(),
         tool_workspace_destroy(),
         tool_workspace_quota(),
+        tool_workspace_net_allow(),
+        tool_workspace_net_status(),
     ]
 
 

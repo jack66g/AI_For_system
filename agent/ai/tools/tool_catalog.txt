@@ -186,6 +186,8 @@ workspace_inspect 镜像路径与是否存
 workspace_run 新 mount/pid/uts namesp
 workspace_destroy 杀进程/收 cgroup/卸
 workspace_quota 不带 mb 只查看
+workspace_net_allow 在 netns 内的 inet ai
+workspace_net_status net 模式、netns 是
 sched_status 当前 mode（static|ml|
 sched_knob_set 范围校验 -> 写 -> 
 sched_mode_set static|ml|off

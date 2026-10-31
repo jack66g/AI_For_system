@@ -4,7 +4,7 @@
  *
  * 默认（非 root）：纯函数校验 + 注册表接线 + 不存在/非法参数的诚实错误。
  *   - name 字符集/长度/点开头/..；size 边界；
- *   - tools.json 206 件、workspace 通道 6 件、risk R/R/R/W2/W1/W1；
+ *   - tools.json 208 件、workspace 通道 8 件、risk R/R/R/W2/W1/W1/W2/R；
  *   - destroy 不存在 → AI_OK（幂等）；run/inspect/quota 不存在 →
  *     AI_ERR_NOT_FOUND；create 非法参数 → AI_ERR_INVALID_ARG 且零副作用。
  *
@@ -93,30 +93,31 @@ static void test_registry(void)
 	static const char *const want[] = {
 		"workspace_create", "workspace_list", "workspace_inspect",
 		"workspace_run", "workspace_destroy", "workspace_quota",
+		"workspace_net_allow", "workspace_net_status",
 	};
 	static const char *const want_risk[] = {
-		"W1", "R", "R", "W2", "W1", "W1",
+		"W1", "R", "R", "W2", "W1", "W1", "W2", "R",
 	};
 
 	setenv("AIKERNEL_TOOLS_JSON", "../tools/tools.json", 1);
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 206, "注册表总数 206");
+	CHECK(reg.tool_count == 208, "注册表总数 208");
 	CHECK(tool_channel_from_str("workspace") == TOOL_CH_WORKSPACE,
 	      "channel 字符串 workspace 映射");
 	for (i = 0; i < reg.tool_count; i++)
 		if (reg.tools[i].channel == TOOL_CH_WORKSPACE)
 			ws++;
-	CHECK(ws == 6, "workspace 通道恰 6 件");
-	for (i = 0; i < 6; i++) {
+	CHECK(ws == 8, "workspace 通道恰 8 件");
+	for (i = 0; i < 8; i++) {
 		t = tool_registry_find(&reg, want[i]);
 		if (!t || t->channel != TOOL_CH_WORKSPACE ||
 		    !t->risk || strcmp(t->risk, want_risk[i]) != 0 ||
 		    t->sub_count < 1)
 			risks_ok = 0;
 	}
-	CHECK(risks_ok, "六件工具注册/channel/risk/sub 齐全");
+	CHECK(risks_ok, "八件工具注册/channel/risk/sub 齐全");
 	t = tool_registry_find(&reg, "workspace_run");
 	CHECK(t && strcmp(tool_exec_effective_risk(t, "{}"), "W2") == 0,
 	      "workspace_run 有效风险 = W2");

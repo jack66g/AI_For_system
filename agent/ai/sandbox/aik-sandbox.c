@@ -89,7 +89,7 @@
  *   --cpus N         CPU 配额（0=不限；默认 1.0）
  *   --mem-mb N       内存上限 MB（0=不限；默认 1024）
  *   --pids N         任务数上限（0=不限；默认 256）
- *   --net none|host  网络隔离（默认 host）
+ *   --net none|host|join:<ns>  网络隔离（默认 host；join 加入已有 netns）
  *   --no-cgroup      禁用 cgroup（明确告警）
  *   --keep           （仅 run）保留宿主挂载点目录
  *
@@ -149,6 +149,9 @@
 #define SB_CG_DEFAULT_ROOT     "/sys/fs/cgroup"
 #define SB_ARTIFACT_DEFAULT    "/var/ai/sandbox-artifacts"
 #define SB_ARTIFACT_CANON      "/var/ai/sandbox-artifacts"
+/* W81d：具名 netns 目录（ip netns 的标准挂载点）与名字长度上限 */
+#define SB_NETNS_DIR           "/var/run/netns"
+#define SB_NETNS_NAME_MAX      63
 #define SB_CGROUP2_MAGIC       0x63677270U
 #define SB_STACK_SIZE          (4 * 1024 * 1024)
 
@@ -212,6 +215,11 @@ struct sb_config {
 	int cgroup;             /* 1 = 尝试 cgroup */
 	int keep;               /* run --keep */
 
+	/* W81d：--net=join:<ns> 加入已存在的具名 netns（工作区 veth 拓扑）。
+	 * 与 net_none 互斥：join 时不在 clone 里新建 NET ns，改为子进程
+	 * setns() 进入 /var/run/netns/<ns>（失败即 fail-closed）。 */
+	char net_join[SB_NETNS_NAME_MAX + 1];
+
 	/* W79 磁盘后端与声明式 bind（显式路径均为宿主绝对路径） */
 	int backing_set;        /* 1 = 命令行显式给了 --backing（覆盖 meta） */
 	int backing_disk;       /* 1 = 镜像 ext4 根；0 = tmpfs（默认） */
@@ -242,6 +250,7 @@ struct sb_meta {
 	int cgroup;
 	int exit_code;
 	char status[16];
+	char net_join[SB_NETNS_NAME_MAX + 1];
 
 	/* W79：磁盘后端信息（run 时沿用 create 落盘的镜像/loop） */
 	int backing_disk;
@@ -515,6 +524,17 @@ static const char *artifact_root(void)
 	memcpy(buf, e, n + 1);
 	while (n > 1 && buf[n - 1] == '/')
 		buf[--n] = '\0';
+	return buf;
+}
+
+/* W81d：net 展示串（none|host|join:<ns>），供 meta/status/create 统一口径 */
+static const char *net_mode_str(const char *join, int none, char *buf,
+				size_t n)
+{
+	if (join && join[0])
+		snprintf(buf, n, "join:%s", join);
+	else
+		snprintf(buf, n, "%s", none ? "none" : "host");
 	return buf;
 }
 
@@ -1115,8 +1135,15 @@ static void meta_path(const char *name, char *buf, size_t n)
 static int meta_write(const char *name, const struct sb_meta *m)
 {
 	char path[PATH_MAX], tmp[PATH_MAX];
+	char netdesc[SB_NETNS_NAME_MAX + 8];
 	int fd, rc = -1;
 
+	/* W81d：net 取值 none|host|join:<ns>（join 优先，与 net_none 互斥） */
+	if (m->net_join[0])
+		snprintf(netdesc, sizeof(netdesc), "join:%s", m->net_join);
+	else
+		snprintf(netdesc, sizeof(netdesc), "%s",
+			 m->net_none ? "none" : "host");
 	meta_path(name, path, sizeof(path));
 	snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
 	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -1131,7 +1158,7 @@ static int meta_write(const char *name, const struct sb_meta *m)
 		    name, m->pid, m->child_pid, m->created, m->started,
 		    m->ended, m->cpus_x100 / 100.0, m->mem_mb,
 		    m->pids_max, m->cpu_limit, m->mem_limit,
-		    m->pids_limit, m->net_none ? "none" : "host",
+		    m->pids_limit, netdesc,
 		    m->cgroup ? "1" : "0", m->exit_code, m->status,
 		    m->backing_disk ? "disk" : "tmpfs",
 		    m->image, m->loopdev) < 0)
@@ -1194,8 +1221,15 @@ static int meta_read(const char *name, struct sb_meta *m)
 			m->pids_limit = atoi(v);
 		else if (strcmp(line, "cpus") == 0)
 			m->cpus_x100 = (int)(strtod(v, NULL) * 100.0 + 0.5);
-		else if (strcmp(line, "net") == 0)
-			m->net_none = strcmp(v, "none") == 0;
+		else if (strcmp(line, "net") == 0) {
+			if (strncmp(v, "join:", 5) == 0) {
+				m->net_none = 0;
+				snprintf(m->net_join, sizeof(m->net_join),
+					 "%s", v + 5);
+			} else {
+				m->net_none = strcmp(v, "none") == 0;
+			}
+		}
 		else if (strcmp(line, "cgroup_dir") == 0)
 			m->cgroup = strcmp(v, "1") == 0;
 		else if (strcmp(line, "exit_code") == 0)
@@ -1768,6 +1802,31 @@ static void copy_file(const char *src, const char *dst, mode_t mode)
 	chmod(dst, mode);
 }
 
+/*
+ * W81d：--net=join:<ns> —— 加入宿主上已存在的具名 netns（工作区 veth 拓扑）。
+ * 只读打开 /var/run/netns/<ns> 后 setns(CLONE_NEWNET)。失败一律 die(2)：
+ * 绝不允许 "join 失败就退回宿主 netns" 的 fail-open 路径。
+ */
+static void sandbox_join_netns(const char *nsname)
+{
+	char path[PATH_MAX];
+	int fd;
+
+	if (!valid_name(nsname))
+		die(2, "非法 --net=join 名字 '%s'"
+		    "（[A-Za-z0-9._-]，不许点/横线开头或连续点）",
+		    nsname ? nsname : "");
+	snprintf(path, sizeof(path), "%s/%s", SB_NETNS_DIR, nsname);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		die(2, "打开 netns %s: %s（工作区网络未就绪？先 "
+		    "workspace_net_allow action=rebuild，或销毁重建工作区）",
+		    path, strerror(errno));
+	if (setns(fd, CLONE_NEWNET))
+		die(2, "setns(CLONE_NEWNET, %s): %s", path, strerror(errno));
+	close(fd);
+}
+
 /* --net none：新 netns 里只有 lo（down 状态），用 ioctl 拉起 */
 static void bring_loopback_up(void)
 {
@@ -1869,6 +1928,8 @@ struct child_args {
 	const char *cgroup_dir;                 /* fallback 自挂载；NULL = 不挂 */
 	const char *artifact_host;              /* 宿主产物目录；NULL = 不挂 */
 	int net_none;
+	/* W81d：非空 = setns 进该具名 netns（veth 拓扑；net_none 同时为 0） */
+	const char *net_join;
 	/* W79：磁盘根 + 声明式 bind（源与目标同绝对路径） */
 	int backing_disk;
 	const char *loopdev;
@@ -1943,8 +2004,11 @@ static int sandbox_child(void *argp)
 				"本次无资源限额\n", strerror(errno));
 	}
 
-	/* 1. 网络隔离时拉起 lo（新 netns 内默认 down） */
-	if (a->net_none)
+	/* 1. 网络：join 模式先进目标 netns（lo/veth 已由宿主侧准备好），
+	 *    否则 --net none 时新建 netns 里 lo 默认 down，用 ioctl 拉起 */
+	if (a->net_join && a->net_join[0])
+		sandbox_join_netns(a->net_join);
+	else if (a->net_none)
 		bring_loopback_up();
 
 	/* 2. 挂载传播收口：本 namespace 内一切挂载不进不出 */
@@ -2191,13 +2255,21 @@ static void config_env(struct sb_config *c)
 	}
 	e = getenv("AIKERNEL_SANDBOX_NET");
 	if (e && e[0]) {
-		if (strcmp(e, "none") == 0)
+		if (strcmp(e, "none") == 0) {
 			c->net_none = 1;
-		else if (strcmp(e, "host") == 0)
+			c->net_join[0] = '\0';
+		} else if (strcmp(e, "host") == 0) {
 			c->net_none = 0;
-		else
+			c->net_join[0] = '\0';
+		} else if (strncmp(e, "join:", 5) == 0 && valid_name(e + 5)) {
+			c->net_none = 0;
+			snprintf(c->net_join, sizeof(c->net_join), "%s",
+				 e + 5);
+		} else {
 			fprintf(stderr, "aik-sandbox: 警告: 忽略非法 "
-				"AIKERNEL_SANDBOX_NET=%s（none|host）\n", e);
+				"AIKERNEL_SANDBOX_NET=%s（none|host|join:<ns>）\n",
+				e);
+		}
 	}
 	e = getenv("AIKERNEL_SANDBOX_NO_CGROUP");
 	if (e && e[0] && strcmp(e, "0") != 0 && strcmp(e, "no") != 0 &&
@@ -2265,13 +2337,22 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 					      &c->lim.pids_max))
 					die(1, "非法 --pids '%s'", val);
 			} else if (strcmp(key, "--net") == 0) {
-				if (strcmp(val, "none") == 0)
+				if (strcmp(val, "none") == 0) {
 					c->net_none = 1;
-				else if (strcmp(val, "host") == 0)
+					c->net_join[0] = '\0';
+				} else if (strcmp(val, "host") == 0) {
 					c->net_none = 0;
-				else
+					c->net_join[0] = '\0';
+				} else if (strncmp(val, "join:", 5) == 0 &&
+					   valid_name(val + 5)) {
+					c->net_none = 0;
+					snprintf(c->net_join,
+						 sizeof(c->net_join), "%s",
+						 val + 5);
+				} else {
 					die(1, "非法 --net '%s'"
-					    "（none|host）", val);
+					    "（none|host|join:<netns 名>）", val);
+				}
 			} else if (strcmp(key, "--backing") == 0) {
 				c->backing_set = 1;
 				if (strcmp(val, "tmpfs") == 0) {
@@ -2326,6 +2407,7 @@ static void lim_from_meta(struct sb_config *c, const struct sb_meta *m)
 	c->lim.mem_mb = m->mem_mb;
 	c->lim.pids_max = m->pids_max;
 	c->net_none = m->net_none;
+	snprintf(c->net_join, sizeof(c->net_join), "%s", m->net_join);
 }
 
 /* ---- 子命令 ---- */
@@ -2337,6 +2419,7 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 	struct cg_state st;
 	char dir[PATH_MAX], mnt[PATH_MAX], art[PATH_MAX], info[PATH_MAX];
 	char pids[512], cgdir[PATH_MAX];
+	char netbuf[SB_NETNS_NAME_MAX + 8];
 	int lockfd, cgexists, stop;
 
 	config_defaults(&cfg);
@@ -2402,6 +2485,7 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 	m.mem_limit = st.mem;
 	m.pids_limit = st.pids;
 	m.net_none = cfg.net_none;
+	snprintf(m.net_join, sizeof(m.net_join), "%s", cfg.net_join);
 	m.cgroup = st.enabled;
 	m.backing_disk = cfg.backing_disk;
 	snprintf(m.image, sizeof(m.image), "%s", cfg.image);
@@ -2413,7 +2497,9 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 
 	printf("create: %s 就绪（挂载点 %s；%s；net=%s；backing=%s%s%s；"
 	       "产物=%s）\n",
-	       name, mnt, info, cfg.net_none ? "none" : "host",
+	       name, mnt, info,
+	       net_mode_str(cfg.net_join, cfg.net_none, netbuf,
+			    sizeof(netbuf)),
 	       cfg.backing_disk ? "disk" : "tmpfs",
 	       cfg.backing_disk ? " 镜像=" : "",
 	       cfg.backing_disk ? cfg.image : "",
@@ -2473,6 +2559,7 @@ static int cmd_status(void)
 	struct dirent *e;
 	int count = 0;
 	char parent[PATH_MAX], cgdir[PATH_MAX];
+	char netbuf[SB_NETNS_NAME_MAX + 8];
 
 	d = opendir(sb_base());
 	if (!d) {
@@ -2535,7 +2622,8 @@ static int cmd_status(void)
 				 m.cpu_limit ? "" : "(降级)",
 				 m.mem_mb, m.mem_limit ? "" : "(降级)",
 				 m.pids_max, m.pids_limit ? "" : "(降级)",
-				 m.net_none ? "none" : "host",
+				 net_mode_str(m.net_join, m.net_none, netbuf,
+					      sizeof(netbuf)),
 				 m.backing_disk ? m.image : "tmpfs");
 		else
 			snprintf(limits, sizeof(limits), "-");
@@ -2724,6 +2812,7 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	m.mem_limit = st.mem;
 	m.pids_limit = st.pids;
 	m.net_none = cfg.net_none;
+	snprintf(m.net_join, sizeof(m.net_join), "%s", cfg.net_join);
 	m.cgroup = st.enabled;
 	m.backing_disk = disk;
 	snprintf(m.image, sizeof(m.image), "%s", disk ? img : "");
@@ -2739,6 +2828,7 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	a.cgroup_dir = st.enabled ? st.dir : NULL;
 	a.artifact_host = art[0] ? art : NULL;
 	a.net_none = cfg.net_none;
+	a.net_join = cfg.net_join[0] ? cfg.net_join : NULL;
 	a.backing_disk = disk;
 	a.loopdev = cfg.loopdev;
 	a.ro_paths = (const char *const *)ro_ptrs;
@@ -3086,7 +3176,8 @@ static void usage(FILE *fp)
 "  --cpus N         CPU 配额，0=不限（默认 1.0）\n"
 "  --mem-mb N       内存上限 MB，0=不限（默认 1024）\n"
 "  --pids N         任务数上限，0=不限（默认 256）\n"
-"  --net none|host  网络隔离（默认 host；none 时仅 lo 可用）\n"
+"  --net none|host|join:<ns>  网络隔离（默认 host；none 时仅 lo 可用；"
+	"join:<ns> 加入已存在的 /var/run/netns/<ns>）\n"
 "  --no-cgroup      禁用 cgroup（明确告警降级）\n"
 "  --backing=disk:<image>  磁盘根（稀疏镜像经 loop 挂 ext4；新建需\n"
 "                  --disk-size-mb；默认 tmpfs 空根）\n"

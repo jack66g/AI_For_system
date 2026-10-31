@@ -26,7 +26,8 @@ TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_
 	   test_desktop_tools test_w77_route test_w77_offline \
 	   test_w77_offline_gate test_model_lifecycle \
 	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv \
-	   test_sched test_bpf test_net_intent test_net_hit test_app_profile
+	   test_sched test_bpf test_net_intent test_net_hit test_app_profile \
+	   test_workspace_net
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -116,6 +117,13 @@ test_sandbox_tools: test_sandbox_tools.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 # 真机持久性由 sudo ./test_workspace --live 走真 aik-sandbox 验证）
 test_workspace: test_workspace.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace.c \
+		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# W81d：工作区网络（net=veth）。默认非 root 只测纯函数/注册表/元数据往返/
+# 诚实错误；真网络拓扑由 sudo ./test_workspace_net --live 验证（netns +
+# veth + aikbr0 + 缺省拒出站 nft + 零残留 + 宿主 ruleset/路由逐字节一致）
+test_workspace_net: test_workspace_net.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace_net.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
 
 # W65 P2-01/P2-03/P2-04/P2-05: exec_run 参数契约 / stdin 别名 / 写回读 /

@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-01T04:21:19",
+  "generated_at": "2026-11-01T05:01:55",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 206,
-  "tool_names_sha256": "bc74158530aa326923996ad71d8cafe8551d1cf94936f9cec19b2b70a1c31280",
+  "tool_count": 208,
+  "tool_names_sha256": "e5d44b8544b50a734d545eb33acc0062ae1c1ecdab486e67126b8e16d5a87e93",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -22,16 +22,16 @@
     "desktop": 20,
     "model": 5,
     "interaction": 1,
-    "workspace": 6,
+    "workspace": 8,
     "sched": 5,
     "bpf": 4,
     "netintent": 6,
     "appprofile": 3
   },
   "risk_counts": {
-    "R": 91,
+    "R": 92,
     "W1": 49,
-    "W2": 65,
+    "W2": 66,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -5538,7 +5538,7 @@
       "name": "workspace_create",
       "channel": "workspace",
       "risk": "W1",
-      "description": "创建工作区（W1）：在 /var/lib/aikernel/ws/<name>.img 建稀疏镜像，losetup 挂 loop、mkfs.ext4、预置可启动根骨架；一个文件就是一个盘，数据跨 workspace_run 持久。backing=disk（默认）走镜像；backing=tmpfs 为临时盘（run 结束即失，不持久）。ro_paths/rw_paths 为显式共享的宿主绝对路径（工作区内同路径 ro/rw bind）；net 支持 none（默认）|host，veth 未实现（按 none）；cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅登记展示。已存在则幂等返回，绝不重新格式化。",
+      "description": "创建工作区（W1）：在 /var/lib/aikernel/ws/<name>.img 建稀疏镜像，losetup 挂 loop、mkfs.ext4、预置可启动根骨架；一个文件就是一个盘，数据跨 workspace_run 持久。backing=disk（默认）走镜像；backing=tmpfs 为临时盘（run 结束即失，不持久）。ro_paths/rw_paths 为显式共享的宿主绝对路径（工作区内同路径 ro/rw bind）；net 支持 none（默认）|veth|host：veth = 独立 netns + 一对 veth + 专用网桥 aikbr0，netns 内 nft 表缺省拒出站（只放行 lo/已建立连接/allow 白名单），不设 NAT、不做转发；cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅登记展示。已存在则幂等返回，绝不重新格式化。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -5578,13 +5578,42 @@
           },
           "net": {
             "type": "string",
-            "description": "none=新 netns 仅 lo（默认）；host=宿主网络；veth 已接受但按 none 执行",
+            "description": "none=新 netns 仅 lo（默认）；veth=独立 netns+veth+aikbr0，缺省拒出站；host=宿主网络",
             "enum": [
               "none",
               "host",
               "veth"
             ],
             "default": "none"
+          },
+          "allow": {
+            "type": "array",
+            "description": "net=veth 的出站白名单（最多 32 条；缺省策略仍是拒出站）",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dst": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "proto": {
+                  "type": "string",
+                  "enum": [
+                    "tcp",
+                    "udp",
+                    "icmp",
+                    "any"
+                  ]
+                }
+              },
+              "required": [
+                "dst"
+              ]
+            }
           },
           "cpu_max": {
             "type": "number",
@@ -5740,6 +5769,82 @@
       "sub": [
         "sandbox",
         "fs"
+      ]
+    },
+    {
+      "name": "workspace_net_allow",
+      "channel": "workspace",
+      "risk": "W2",
+      "description": "工作区网络白名单增删（W2/D2，仅 net=veth）：在 netns 内的 inet aik_ws_<name> 表里维护显式放行条目；缺省策略始终是拒出站（只放行 lo、已建立连接与白名单）。action=add|del|list|clear|rebuild。dst 为 IPv4/IPv6 地址或 CIDR（10.231.0.1、192.168.1.0/24）；port 0-65535（0/省略=任意）；proto=tcp|udp|icmp|any（省略时：有 port 视为 tcp，无 port 视为 any）。rebuild 用于重启后重建 netns/veth/规则。不提供 NAT/转发语义。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "action": {
+            "type": "string",
+            "description": "add=加（默认）；del=删（省略 port/proto 即按 dst 全删）；list=只看；clear=清空；rebuild=重建运行时拓扑",
+            "enum": [
+              "add",
+              "del",
+              "list",
+              "clear",
+              "rebuild"
+            ],
+            "default": "add"
+          },
+          "dst": {
+            "type": "string",
+            "description": "目标 IPv4/IPv6 地址或 CIDR（add/del 必填）"
+          },
+          "port": {
+            "type": "integer",
+            "description": "目标端口（0-65535；0/省略=任意）",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "proto": {
+            "type": "string",
+            "description": "协议 tcp|udp|icmp|any（省略时按 port 推导）",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "any"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "netsec"
+      ]
+    },
+    {
+      "name": "workspace_net_status",
+      "channel": "workspace",
+      "risk": "R",
+      "description": "工作区网络状态（只读）：net 模式、netns 是否存在、veth 两侧接口、地址、aikbr0 成员、inet aik_ws_<name> 表与规则原文（含 counter 包/字节计数）、白名单条目。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "netsec"
       ]
     },
     {
