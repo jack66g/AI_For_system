@@ -1493,6 +1493,14 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 			why = "range_actuation";
 			goto out;
 		}
+		/* W82 V5.2：USB 驱动绑定/解绑是设备级写（改 driver_override
+		 * 或驱动 bind/unbind 表），错绑可让设备掉线 → D3；dev_restore
+		 * 按快照恢复，风险收敛为 D2（W2 默认），不再升级。 */
+		if (strcmp(tool_name, "dev_bind") == 0) {
+			d = AI_D3;
+			why = "usb_driver_actuation";
+			goto out;
+		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {
 			d = AI_D2;
 			why = "telemetry_reset";

@@ -92,6 +92,7 @@ CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风�
 CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
 CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
 CH_APPCTL = "appctl"        # W82 V4.4/V4.5：控制面适配器三件 + 画像→策略两件
+CH_DEVICE = "device"        # W82 V5.1/V5.2：USB 设备身份 + 驱动绑定（四件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -282,6 +283,11 @@ SUB_MAP = {
     # ---- W82 V4.5：画像结论 → 自动策略（两件）----
     "app_policy_generate": ["sysadmin", "netsec"],
     "app_policy_apply": ["sysadmin", "netsec"],
+    # ---- W82 V5.1/V5.2：USB 设备身份 + 驱动绑定（四件）----
+    "dev_list": ["sysadmin"],
+    "dev_identify": ["sysadmin"],
+    "dev_bind": ["sysadmin", "res"],
+    "dev_restore": ["sysadmin", "res"],
     # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
     "net_chain_watch": ["netsec"],
     "net_chain_rules": ["netsec"],
@@ -792,7 +798,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 220        # 主表 tools.json（W82 V4.5：218 + 2 策略）
+EXPECTED_TOOL_COUNT = 224        # 主表 tools.json（W82 V5.1/V5.2：220 + 4 设备）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -1019,8 +1025,12 @@ EXPECTED_TOOL_NAMES = [
     "app_policy_generate",
     "app_policy_apply",
     "app_ctl_task",
+    "dev_list",
+    "dev_identify",
+    "dev_bind",
+    "dev_restore",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "5c21de40bfd264d7ca4a85f9cf08c4f4c8d1f72fd8fe3740085ea54b7c47fba3"
+EXPECTED_TOOL_NAMES_SHA256 = "f2b0b78cc1020730530979430d47e1a7f76720de08cfcc4ce0bacf17faed743a"
 
 
 def manifest_sha256(names):
@@ -4541,6 +4551,113 @@ def appctl_tools():
     ]
 
 
+def tool_device(name, risk, desc, props, required=None):
+    """W82 V5.1/V5.2：USB 设备通道（channel=device，四件）。"""
+    return {"name": name, "channel": CH_DEVICE, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def device_tools():
+    """W82 V5.1/V5.2：设备身份 + 绑定控制面（USB 先行）。
+
+    dev_list/dev_identify 只读枚举与识别；dev_bind 写 driver_override/
+    new_id/bind/unbind，dev_restore 按快照恢复。所有写操作先落快照、
+    写后读回、失败自动回滚；只允许非 hub 且单接口的叶子设备，根 hub
+    与 class=9 一律拒绝。"""
+    fmt_prop = {
+        "type": "string", "enum": ["json", "text"], "default": "json",
+        "description": "输出格式（json 为结构化契约，text 为人读摘要）"}
+    list_props = {"format": fmt_prop}
+    identify_props = {
+        "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名"
+            "（如 1-1:1.0）；只接受 sysfs 节点名，不接受路径"},
+        "format": fmt_prop,
+    }
+    bind_props = {
+        "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名"
+            "（1-1:1.0）。传设备名时自动解析到唯一接口（绑定发生在"
+            "接口上，绝不 unbind 设备级 usb 驱动）"},
+        "driver": {
+            "type": "string",
+            "description": "目标驱动名（action=bind 必填，如 usbhid / "
+            "usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"},
+        "mode": {
+            "type": "string", "enum": ["override", "new_id", "bind"],
+            "default": "override",
+            "description": "override=写 driver_override 后 bind；"
+            "new_id=向驱动 new_id 写 idVendor:idProduct 触发匹配"
+            "（可选再 bind）；bind=直接写驱动 bind（要求 modalias 匹配）"},
+        "action": {
+            "type": "string", "enum": ["bind", "unbind"], "default": "bind",
+            "description": "bind=绑定到 driver；unbind=撤销当前接口驱动"
+            "（同样先落快照）"},
+        "bind": {
+            "type": "boolean", "default": True,
+            "description": "mode=new_id 时：写完 new_id 后是否再显式写"
+            " bind（默认 true；false 只加动态 id 交给内核自动匹配）"},
+        "dry_run": {
+            "type": "boolean", "default": False,
+            "description": "true=只做安全检查与计划，不落快照、不写 /sys"},
+    }
+    restore_props = {
+        "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）；按状态目录里该设备"
+            "最近一次快照恢复"},
+        "snapshot": {
+            "type": "string",
+            "description": "可选：显式快照 JSON（内联文本，或 @绝对路径）；"
+            "不填则读状态目录最近一次快照"},
+        "dry_run": {
+            "type": "boolean", "default": False,
+            "description": "true=只校验快照与当前状态，不写 /sys"},
+    }
+    return [
+        tool_device(
+            "dev_list", RISK_R,
+            "枚举 USB 设备与接口（R/D0，只读）：按 /sys/bus/usb/devices "
+            "列出全部节点（设备 + 接口），给出 idVendor:idProduct、"
+            "modalias、bDeviceClass/bInterfaceClass、当前 driver、"
+            "driver_override、是否 hub/根 hub、bNumInterfaces 与接口清单，"
+            "并给出 bindable（非 hub 且单接口）判定。只读属性与软链，"
+            "不写任何文件；认不出的字段如实置 null/unknown。",
+            list_props, []),
+        tool_device(
+            "dev_identify", RISK_R,
+            "识别 USB 设备类别与人话名称（R/D0，只读）：类别推断 "
+            "hub/hid/storage/net/audio/other（hub 优先：根 hub、"
+            "bDeviceClass=9、任一接口 class=9 一律判 hub；多接口异类判 "
+            "other），名称来自 sysfs product/manufacturer 真读 + 内置"
+            "最小 vendor:product ids 表。认不出就报 confidence=unknown/"
+            "vendor-only，绝不编造型号。同时给出 class_evidence 与 "
+            "bindable/bindable_reason（hub/多接口不可绑定）。",
+            identify_props, ["device"]),
+        tool_device(
+            "dev_bind", RISK_W2,
+            "USB 接口驱动绑定/解绑（W2/D3）：先校验目标是非 hub、单接口的"
+            "叶子设备（根 hub/class=9/多接口一律拒绝），把快照（原驱动、"
+            "driver_override、new_id）落盘后才允许写 /sys；mode=override "
+            "写 driver_override+bind，mode=new_id 写驱动 new_id（可选 bind），"
+            "mode=bind 直接 bind；action=unbind 撤销当前接口驱动。每次写"
+            "后读回 driver/override/设备节点/输入设备，失败自动回滚到原"
+            "驱动并读回校验；回滚失败如实标 rollback.ok=false，绝不粉饰。"
+            "真实 /sys 写要求 root。",
+            bind_props, ["device"]),
+        tool_device(
+            "dev_restore", RISK_W2,
+            "按快照恢复 USB 接口绑定（W2/D2）：读取 dev_bind 落盘的快照"
+            "（或显式 snapshot），撤掉当前错误驱动 → 撤 new_id → 还原 "
+            "driver_override → 绑回原驱动，最后逐项读回校验；不一致时"
+            "verified=false 并保留 error_code=restore_unverified，不假成功。",
+            restore_props, ["device"]),
+    ]
+
+
 def netchain_tools():
     """W81 E1：两件——观测采样器（start/stop/status，W1/D1，只观测）
     + 阈值配置（get/set，W1/D1）。事件源 procfs 优先、conntrack 命令可选、
@@ -4809,6 +4926,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(range_tools())
     # W82 V4.4：控制面适配器三件（追加在清单末尾；锚点同步）
     tools.extend(appctl_tools())
+    # W82 V5.1/V5.2：USB 设备身份 + 驱动绑定四件（追加在清单末尾）
+    tools.extend(device_tools())
     return tools
 
 

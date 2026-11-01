@@ -3,7 +3,7 @@
  * test_sched.c - W79 双调度台（sched 通道）回归
  *
  * 默认（非 root，假 cgroup/状态目录）：
- *   - 注册表接线：220 件、sched 通道 5 件、risk R/W1/W2/W1/W2、
+ *   - 注册表接线：224 件、sched 通道 5 件、risk R/W1/W2/W1/W2、
  *     channel 字符串 sched 映射；
  *   - 纯函数：10 旋钮存在、值域校验（各旋钮上下界/格式）、读回比对
  *     （含 io.max 内核补全 max 字段、affinity 单 CPU 掩码）、负载名解析；
@@ -291,7 +291,7 @@ static void test_registry(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 220, "注册表总数 220");
+	CHECK(reg.tool_count == 224, "注册表总数 224");
 	CHECK(tool_channel_from_str("sched") == TOOL_CH_SCHED,
 	      "channel 字符串 sched 映射到 TOOL_CH_SCHED");
 	for (i = 0; i < reg.tool_count; i++)

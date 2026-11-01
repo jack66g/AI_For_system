@@ -218,3 +218,7 @@ app_ctl_call backend=cli 时 fork+exe
 app_policy_generate 输入一个 APP 的静
 app_policy_apply 先探测内核 LSM 列
 app_ctl_task 按 steps 顺序执行
+dev_list 按 /sys/bus/usb/devices
+dev_identify 类别推断 hub/hid/sto
+dev_bind 先校验目标是非 hu
+dev_restore 读取 dev_bind 落盘

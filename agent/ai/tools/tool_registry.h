@@ -21,6 +21,7 @@
  *   appprofile（W81c：静态画像 + 沙盒动态画像 + 差集风险报告）
  *   netchain（W81e：conntrack 事件流 → 端口扫描/横向移动/突增攻击链关联）
  *   range（W81 E2：V3.6 靶场攻击面——默认关闭 + TTL + 硬 CIDR 校验 + 全量审计）
+ *   device（W82 V5.1/V5.2：USB 设备身份 + 驱动绑定控制面，四件）
  * v2 起每个工具必带 "risk"（R/W1/W2），exec 工具内嵌 "exec" 单源白名单。
  */
 #ifndef _AI_TOOL_REGISTRY_H
@@ -54,6 +55,7 @@ enum tool_channel {
 	TOOL_CH_NETCHAIN,	/* W81e：conntrack 事件流 + 攻击链关联（2 件） */
 	TOOL_CH_RANGE,		/* W81 E2：靶场攻击面（5 件；默认关闭/D3/TTL） */
 	TOOL_CH_APPCTL,		/* W82：控制面适配器（CLI/HTTP 探测·调用·任务，3 件） */
+	TOOL_CH_DEVICE,		/* W82：USB 设备身份 + 绑定控制面（4 件） */
 	TOOL_CH_UNKNOWN,
 };
 

@@ -293,6 +293,16 @@ static void test_danger_rules(void)
 	       "danger: nft_intent_compile 只读 → D0");
 	expect(cls("nft_ruleset_summarize", "R", "{}") == AI_D0,
 	       "danger: nft_ruleset_summarize 只读 → D0");
+	/* W82 V5.1/V5.2：USB 身份只读 D0；绑定/解绑写驱动表 → D3；
+	 * 按快照恢复收敛为 D2（W2 默认）。 */
+	expect(cls("dev_list", "R", "{}") == AI_D0,
+	       "danger: dev_list 只读 → D0");
+	expect(cls("dev_identify", "R", "{\"device\":\"1-1\"}") == AI_D0,
+	       "danger: dev_identify 只读 → D0");
+	expect(cls("dev_bind", "W2", "{\"device\":\"1-1\"}") == AI_D3,
+	       "danger: dev_bind 驱动绑定 → D3");
+	expect(cls("dev_restore", "W2", "{\"device\":\"1-1\"}") == AI_D2,
+	       "danger: dev_restore 按快照恢复 → D2");
 	expect(cls("net_hit_watch", "W1", "{\"action\":\"status\"}") == AI_D0,
 	       "danger: net_hit_watch status 只读 → D0");
 	expect(cls("net_hit_watch", "W1",

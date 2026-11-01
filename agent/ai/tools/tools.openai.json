@@ -6160,5 +6160,149 @@
         "sandbox"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_list",
+      "description": "枚举 USB 设备与接口（R/D0，只读）：按 /sys/bus/usb/devices 列出全部节点（设备 + 接口），给出 idVendor:idProduct、modalias、bDeviceClass/bInterfaceClass、当前 driver、driver_override、是否 hub/根 hub、bNumInterfaces 与接口清单，并给出 bindable（非 hub 且单接口）判定。只读属性与软链，不写任何文件；认不出的字段如实置 null/unknown。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 为结构化契约，text 为人读摘要）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_identify",
+      "description": "识别 USB 设备类别与人话名称（R/D0，只读）：类别推断 hub/hid/storage/net/audio/other（hub 优先：根 hub、bDeviceClass=9、任一接口 class=9 一律判 hub；多接口异类判 other），名称来自 sysfs product/manufacturer 真读 + 内置最小 vendor:product ids 表。认不出就报 confidence=unknown/vendor-only，绝不编造型号。同时给出 class_evidence 与 bindable/bindable_reason（hub/多接口不可绑定）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（如 1-1:1.0）；只接受 sysfs 节点名，不接受路径"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 为结构化契约，text 为人读摘要）"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_bind",
+      "description": "USB 接口驱动绑定/解绑（W2/D3）：先校验目标是非 hub、单接口的叶子设备（根 hub/class=9/多接口一律拒绝），把快照（原驱动、driver_override、new_id）落盘后才允许写 /sys；mode=override 写 driver_override+bind，mode=new_id 写驱动 new_id（可选 bind），mode=bind 直接 bind；action=unbind 撤销当前接口驱动。每次写后读回 driver/override/设备节点/输入设备，失败自动回滚到原驱动并读回校验；回滚失败如实标 rollback.ok=false，绝不粉饰。真实 /sys 写要求 root。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）。传设备名时自动解析到唯一接口（绑定发生在接口上，绝不 unbind 设备级 usb 驱动）"
+          },
+          "driver": {
+            "type": "string",
+            "description": "目标驱动名（action=bind 必填，如 usbhid / usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "override",
+              "new_id",
+              "bind"
+            ],
+            "default": "override",
+            "description": "override=写 driver_override 后 bind；new_id=向驱动 new_id 写 idVendor:idProduct 触发匹配（可选再 bind）；bind=直接写驱动 bind（要求 modalias 匹配）"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "bind",
+              "unbind"
+            ],
+            "default": "bind",
+            "description": "bind=绑定到 driver；unbind=撤销当前接口驱动（同样先落快照）"
+          },
+          "bind": {
+            "type": "boolean",
+            "default": true,
+            "description": "mode=new_id 时：写完 new_id 后是否再显式写 bind（默认 true；false 只加动态 id 交给内核自动匹配）"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=只做安全检查与计划，不落快照、不写 /sys"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_restore",
+      "description": "按快照恢复 USB 接口绑定（W2/D2）：读取 dev_bind 落盘的快照（或显式 snapshot），撤掉当前错误驱动 → 撤 new_id → 还原 driver_override → 绑回原驱动，最后逐项读回校验；不一致时verified=false 并保留 error_code=restore_unverified，不假成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）；按状态目录里该设备最近一次快照恢复"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "可选：显式快照 JSON（内联文本，或 @绝对路径）；不填则读状态目录最近一次快照"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=只校验快照与当前状态，不写 /sys"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
   }
 ]

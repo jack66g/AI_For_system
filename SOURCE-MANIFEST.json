@@ -4,10 +4,11 @@
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
     "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
-    "verification: run_all 56/56, audit W75 CHECK PASS (220 tools/9 domains/20 desktop/seed 237)",
+    "verification: run_all 57/57, audit W75 CHECK PASS (224 tools/9 domains/20 desktop/seed 241)",
     "W81 增补：网络意图编译/命中闭环/应用画像/工作区网络/攻击链关联/靶场（未发版，alpha.14.0 ISO 仍为 197 工具）",
     "W82 增补：appctl 控制面适配器 probe/call/task（218 工具，未发版）",
     "W82b 增补：app_policy_generate/apply（画像→策略 + LSM 下发，fail-closed；本机无 ai LSM 实测拒绝）（220 工具，未发版）",
+    "W82c 增补：device 通道 dev_list/dev_identify/dev_bind/dev_restore（USB 身份+绑定，快照/读回/自动回滚；224 工具，未发版）",
     "MANIFEST hashes canonical LF checkout bytes"
   ],
   "overlay_count": 168,
@@ -15,17 +16,17 @@
     "desktop": 20,
     "domains": 9,
     "sandbox_tools": 7,
-    "seed": 237,
-    "seed_lines": 237,
-    "tool_count": 220,
-    "tools": 220
+    "seed": 241,
+    "seed_lines": 241,
+    "tool_count": 224,
+    "tools": 224
   },
   "release": {
     "iso_bytes": 753551360,
     "iso_md5": "0e6c9b298e842e951f8ddf56f4a854e8",
     "kernel": "6.18.39 #61",
     "kernel_unchanged": false,
-    "note": "alpha.14.0 ISO 对应 197 工具；本清单对应 main（含 W81/W82/W82b，220 工具，未发版）",
+    "note": "alpha.14.0 ISO 对应 197 工具；本清单对应 main（含 W81/W82/W82b/W82c，224 工具，未发版）",
     "shell_md5": "7e2f9a51704e1f070240c7726d950c0b",
     "version": "0.1.0-alpha.14.0"
   },

@@ -40,6 +40,7 @@ static const char *ch_name(enum tool_channel ch)
 	case TOOL_CH_NETCHAIN:		return "netchain";
 	case TOOL_CH_RANGE:		return "range";
 	case TOOL_CH_APPCTL:		return "appctl";
+	case TOOL_CH_DEVICE:		return "device";
 	default:			return "unknown";
 	}
 }
