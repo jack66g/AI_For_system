@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-02T00:57:52+08:00",
+  "created": "2026-11-02T02:07:44+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -8,7 +8,8 @@
     "W81+W82+W82B 增补未发版（alpha.14.0 ISO 仍 197 工具）；B-117 内核 #62 已含 /proc/ai/lsm/rules 注入面",
     "T2 存储层 C 实现：json(dtoa)/gzip/npz/snapshot/WAL/sqlite；6 套差分测试全绿（json 40148·npz 104·snapshot 89·wal 57·snapshot_write 21·sqlite 196+）；尚未接入产品构建（T4 接线）",
     "MANIFEST hashes canonical LF checkout bytes",
-    "T3a: hashing(BLAKE2b-64bit)+Unicode 13 lower+tokenize+BM25；1765/42/18 全绿（tag t3a-hashing）"
+    "T3a: hashing(BLAKE2b-64bit)+Unicode 13 lower+tokenize+BM25；1765/42/18 全绿（tag t3a-hashing）",
+    "T3b: Region 几何/演化 + 两阶段检索 + ranker + PPR/BFS；space 4252/ranker 118/ppr 12/retrieval 全绿（tag t3b-retrieval）"
   ],
   "overlay_count": 168,
   "registry": {
@@ -30,11 +31,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 57238884,
-    "regular_files": 1144,
-    "source_files": 1144,
+    "bytes": 57464222,
+    "regular_files": 1159,
+    "source_files": 1159,
     "symlinks": 4,
-    "tracked_files": 1148
+    "tracked_files": 1163
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",

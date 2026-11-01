@@ -21,8 +21,8 @@ LDLIBS := -lz -lm
 
 STORE_LIB := ../store/libaikstore.a
 LIB := libaikretrieval.a
-OBJS := text.o bm25.o embed_hash.o blake2b.o unicode.o
-TESTS := tests/test_embed_hash tests/test_text tests/test_bm25
+OBJS := text.o bm25.o embed_hash.o blake2b.o unicode.o ranker.o ppr.o retriever.o
+TESTS := tests/test_embed_hash tests/test_text tests/test_bm25 tests/test_ranker tests/test_ppr tests/test_retrieval
 
 all: $(LIB)
 
@@ -47,6 +47,18 @@ unicode.o: ../memory/unicode.c ../memory/unicode.h \
 	../memory/unicode_lower_table.h
 	$(CC) $(CFLAGS) -c -o $@ ../memory/unicode.c
 
+ranker.o: ranker.c ../include/retrieval/ranker.h ../include/store/store_json.h
+	$(CC) $(CFLAGS) -c -o $@ ranker.c
+
+ppr.o: ppr.c ../include/retrieval/ppr.h
+	$(CC) $(CFLAGS) -c -o $@ ppr.c
+
+retriever.o: retriever.c ../include/retrieval/retriever.h \
+	../include/retrieval/ranker.h ../include/retrieval/bm25.h \
+	../include/retrieval/text.h ../include/retrieval/ppr.h \
+	../include/space/space.h ../include/store/store_json.h
+	$(CC) $(CFLAGS) -c -o $@ retriever.c
+
 $(STORE_LIB):
 	$(MAKE) -C ../store -j1 all
 
@@ -59,10 +71,23 @@ tests/test_text: tests/test_text.c $(LIB) $(STORE_LIB)
 tests/test_bm25: tests/test_bm25.c $(LIB) $(STORE_LIB)
 	$(CC) $(CFLAGS) -o $@ tests/test_bm25.c $(LIB) $(STORE_LIB) $(LDLIBS)
 
+tests/test_ranker: tests/test_ranker.c $(LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_ranker.c $(LIB) $(STORE_LIB) $(LDLIBS)
+
+tests/test_ppr: tests/test_ppr.c $(LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_ppr.c $(LIB) $(STORE_LIB) $(LDLIBS)
+
+tests/test_retrieval: tests/test_retrieval.c $(LIB) $(STORE_LIB) \
+	../space/libaikspace.a
+	$(CC) $(CFLAGS) -o $@ tests/test_retrieval.c ../space/libaikspace.a $(LIB) $(STORE_LIB) $(LDLIBS)
+
 test: $(TESTS)
 	./tests/test_embed_hash
 	./tests/test_text
 	./tests/test_bm25
+	./tests/test_ranker
+	./tests/test_ppr
+	./tests/test_retrieval
 
 clean:
 	rm -f $(OBJS) $(LIB) $(TESTS)
