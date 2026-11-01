@@ -30,7 +30,7 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
   `dev_task`（W1/D1，异步 status/log/cancel，取消即恢复到任务前驱动）；
   W82 V1.8 把 `aik-sandbox` 收敛为 workspace 的 tmpfs backend（单一销毁路径，
   `sandbox_*` 保留为薄适配层）。
-- **回归**：`tests/run_all` **58/58**；能力审计 PASS（gaps P0=0）。
+- **回归**：`tests/run_all` **59/59**；能力审计 PASS（gaps P0=0）。
 - **qemu**：install **6/6**、diskboot **7/7**、contentcheck **58/58**、deskcheck **15/15**。
   真内核实测 `lsm=selinux,ai,bpf` → `capability,selinux,ai,bpf`；overlay CoW 挂载成功。
 - **发布件**：ISO `2f2c6cde7fea1618d2af1f1d5205d9cc`（753,551,360 B）、
