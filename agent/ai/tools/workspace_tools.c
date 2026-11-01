@@ -116,6 +116,9 @@ struct ws_meta {
 	char net_ip[64];                /* 工作区侧地址（不带掩码） */
 	char net_host_if[32];
 	char net_ws_if[32];
+	/* W82e（V1.8）：sandbox 区名的原样别名。仅当区名超过 workspace 名
+	 * 上限（32）需要映射成短名时写入；≤32 字符时为空（区名=工作区名）。 */
+	char alias[65];
 	struct ws_allow allow[WS_ALLOW_MAX];
 	int allow_n;
 	char ro[WS_MAX_PATHS][PATH_MAX];
@@ -379,6 +382,10 @@ static int ws_meta_write(const char *name, const struct ws_meta *m)
 		    m->mem_mb, m->pids_max,
 		    ws_net_mode_str(m->net_mode)) < 0)
 		goto out;
+	/* W82e：只有发生「区名 → 短工作区名」映射时才写 alias，
+	 * 旧元数据（无 alias 行）读副作用为零 */
+	if (m->alias[0] && dprintf(fd, "alias=%s\n", m->alias) < 0)
+		goto out;
 	if (m->net_mode == WS_NET_VETH) {
 		if (dprintf(fd, "net_ns=%s\nnet_ip=%s\nnet_host_if=%s\n"
 			    "net_ws_if=%s\n",
@@ -451,6 +458,8 @@ static int ws_meta_read(const char *name, struct ws_meta *m)
 			m->created = strtol(v, NULL, 10);
 		else if (strcmp(line, "label") == 0)
 			snprintf(m->label, sizeof(m->label), "%s", v);
+		else if (strcmp(line, "alias") == 0)
+			snprintf(m->alias, sizeof(m->alias), "%s", v);
 		else if (strcmp(line, "cpus") == 0)
 			m->cpus_x100 = (int)(strtod(v, NULL) * 100.0 + 0.5);
 		else if (strcmp(line, "mem_mb") == 0)
@@ -653,11 +662,22 @@ static int ws_loop_detach_image(const char *image)
 }
 
 /*
+ * W82e（V1.8）：统一子进程采集。
+ *
  * fork + exec argv，采集 stdout/stderr 合流（尾部 ≤out_max 字节）。
- * 超时/取消 SIGKILL 整个进程组；返回 0=已执行（exit_code 有效）。
+ * 子进程 setsid 自成进程组；超时 / 取消（*cancel_flag 置位）→ SIGKILL
+ * 整组（连泄漏的孙进程一起收掉）。extra_env 在子进程内注入（"K=V"）。
+ * 传入 NULL 的出参会被忽略；返回 0=已执行（exit_code 有效）。
+ *
+ * 这份实现原先是两份（executor.c 的 sb_spawn_capture 与本文的
+ * ws_spawn_capture）。V1.8 把 sandbox 通道收口到 workspace 后只留这一份，
+ * 两条通道（workspace_run / sandbox_spawn）共用。
  */
-static int ws_spawn_capture(char **argv, int timeout_sec, char **out,
-			    int *exit_code, int *timed_out, int *truncated)
+int ai_ws_spawn_capture(char **argv, char *const extra_env[], int extra_env_n,
+			int timeout_sec, size_t out_max,
+			volatile sig_atomic_t *cancel_flag, char **tail_out,
+			int *exit_code, int *timed_out, int *cancelled,
+			int *truncated)
 {
 	int pipefd[2];
 	pid_t pid;
@@ -665,13 +685,21 @@ static int ws_spawn_capture(char **argv, int timeout_sec, char **out,
 	char *ring;
 	size_t ring_off = 0, ring_fill = 0;
 	long long deadline_ms;
-	ssize_t n;
+	int cancel_local = 0, timed_local = 0, trunc_local = 0;
 
-	*out = NULL;
-	*exit_code = -1;
-	*timed_out = 0;
-	*truncated = 0;
-	ring = malloc(WS_OUT_MAX);
+	if (tail_out)
+		*tail_out = NULL;
+	if (exit_code)
+		*exit_code = -1;
+	if (timed_out)
+		*timed_out = 0;
+	if (cancelled)
+		*cancelled = 0;
+	if (truncated)
+		*truncated = 0;
+	if (!out_max)
+		out_max = WS_OUT_MAX;
+	ring = malloc(out_max);
 	if (!ring)
 		return -1;
 	if (pipe(pipefd)) {
@@ -699,25 +727,41 @@ static int ws_spawn_capture(char **argv, int timeout_sec, char **out,
 			dup2(devnull, STDIN_FILENO);
 			close(devnull);
 		}
+		for (i = 0; i < extra_env_n; i++) {
+			char *eq = strchr(extra_env[i], '=');
+
+			if (eq) {
+				*eq = '\0';
+				setenv(extra_env[i], eq + 1, 1);
+				*eq = '=';
+			}
+		}
 		execv(argv[0], argv);
 		fprintf(stderr, "ERROR: exec %s: %s\n", argv[0],
 			strerror(errno));
 		_exit(127);
 	}
 	close(pipefd[1]);
+
+	/* 读端非阻塞：子进程（如 exec 成 sleep 的长任务）长期持写端但
+	 * 不出数据时，排空循环的 read() 不得阻塞到 deadline 之后 */
 	fcntl(pipefd[0], F_SETFL,
 	      fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+
 	deadline_ms = (long long)time(NULL) * 1000 +
 		      (long long)timeout_sec * 1000;
-	for (;;) {
+	while (1) {
 		struct pollfd pfd = { .fd = pipefd[0], .events = POLLIN };
 		char chunk[4096];
-		long long now_ms = (long long)time(NULL) * 1000;
+		ssize_t n;
+		long long now_ms;
 
-		if (now_ms >= deadline_ms) {
+		now_ms = (long long)time(NULL) * 1000;
+		/* 取消：SIGKILL 整个进程组 */
+		if (cancel_flag && *cancel_flag) {
 			kill(-(pid_t)pid, SIGKILL);
 			kill((pid_t)pid, SIGKILL);
-			*timed_out = 1;
+			cancel_local = 1;
 			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
 				;
 			while ((n = read(pipefd[0], chunk,
@@ -725,46 +769,94 @@ static int ws_spawn_capture(char **argv, int timeout_sec, char **out,
 				;
 			break;
 		}
+		if (now_ms >= deadline_ms) {
+			/* 超时：SIGKILL 全组（子进程 setsid 后 pgid=pid，
+			 * 组内孙进程一并收掉），防孤儿拖死会话 */
+			kill(-(pid_t)pid, SIGKILL);
+			kill((pid_t)pid, SIGKILL);
+			timed_local = 1;
+			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+				;
+			/* 击杀后写端全关，把管道残余排干（read 到 0 为止） */
+			while ((n = read(pipefd[0], chunk,
+					 sizeof(chunk))) > 0) {
+				for (i = 0; i < (int)n; i++) {
+					if (ring_fill >= out_max)
+						trunc_local = 1;
+					ring[ring_off] = chunk[i];
+					ring_off = (ring_off + 1) % out_max;
+					if (ring_fill < out_max)
+						ring_fill++;
+				}
+			}
+			break;
+		}
 		if (poll(&pfd, 1, 200) > 0 &&
 		    (pfd.revents & (POLLIN | POLLHUP))) {
 			while ((n = read(pipefd[0], chunk,
 					 sizeof(chunk))) > 0) {
 				for (i = 0; i < (int)n; i++) {
-					if (ring_fill >= WS_OUT_MAX)
-						*truncated = 1;
+					if (ring_fill >= out_max)
+						trunc_local = 1;
 					ring[ring_off] = chunk[i];
-					ring_off = (ring_off + 1) % WS_OUT_MAX;
-					if (ring_fill < WS_OUT_MAX)
+					ring_off = (ring_off + 1) % out_max;
+					if (ring_fill < out_max)
 						ring_fill++;
 				}
 			}
 		}
 		if (pfd.revents & POLLHUP) {
+			/* 写端全关（子进程及全部孙进程都已退出）：
+			 * 排空完成，收尸退出 */
 			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
 				;
 			break;
 		}
+		/* 子进程本体退出但写端仍被孙进程持有：先记尸不收，
+		 * 继续等到 deadline——输出未完即任务未完，语义一致 */
 		waitpid(pid, &st, WNOHANG);
 	}
 	close(pipefd[0]);
-	{
-		size_t start = (ring_fill < WS_OUT_MAX) ? 0 : ring_off;
 
-		*out = malloc(ring_fill + 1);
-		if (!*out) {
+	/* 尾部取出（环缓冲 → 连续缓冲） */
+	if (tail_out) {
+		size_t start = (ring_fill < out_max) ? 0 : ring_off;
+
+		*tail_out = malloc(ring_fill + 1);
+		if (!*tail_out) {
 			free(ring);
 			return -1;
 		}
 		for (i = 0; (size_t)i < ring_fill; i++)
-			(*out)[i] = ring[(start + (size_t)i) % WS_OUT_MAX];
-		(*out)[ring_fill] = '\0';
+			(*tail_out)[i] = ring[(start + (size_t)i) % out_max];
+		(*tail_out)[ring_fill] = '\0';
 	}
 	free(ring);
-	if (WIFEXITED(st))
-		*exit_code = WEXITSTATUS(st);
-	else if (WIFSIGNALED(st))
-		*exit_code = 128 + WTERMSIG(st);
+
+	if (timed_out)
+		*timed_out = timed_local;
+	if (cancelled)
+		*cancelled = cancel_local;
+	if (truncated)
+		*truncated = trunc_local;
+	if (exit_code) {
+		if (WIFEXITED(st))
+			*exit_code = WEXITSTATUS(st);
+		else if (WIFSIGNALED(st))
+			*exit_code = 128 + WTERMSIG(st);
+	}
 	return 0;
+}
+
+/* workspace 内部调用面：固定 256KB 尾部、不取消、不注入环境 */
+static int ws_spawn_capture(char **argv, int timeout_sec, char **out,
+			    int *exit_code, int *timed_out, int *truncated)
+{
+	int cancelled = 0;
+
+	return ai_ws_spawn_capture(argv, NULL, 0, timeout_sec, WS_OUT_MAX,
+				   NULL, out, exit_code, timed_out,
+				   &cancelled, truncated);
 }
 
 /* ======================================================================
@@ -2468,6 +2560,67 @@ static int ws_cmd_inspect(const char *args_json, char **out)
 }
 
 /*
+ * W82e（V1.8）：run 参数面只有一份翻译。
+ * workspace_run 与 sandbox_spawn 都经这里把「元数据 + 用户 argv」翻译成
+ * aik-sandbox 的 getopt 参数面；调用方保证 b 的生命周期覆盖 spawn。
+ */
+struct ws_run_buf {
+	char image[PATH_MAX + 16];
+	char cpus[64], mem[64], pids[64];
+	char net[WS_NET_NS_MAX + 16];
+	char ro[WS_MAX_PATHS][PATH_MAX + 16];
+	char rw[WS_MAX_PATHS][PATH_MAX + 16];
+};
+
+static int ws_build_run_argv(const char *name, const struct ws_meta *m,
+			     char *const argv[], int argc, char *sbargv[],
+			     int cap, struct ws_run_buf *b)
+{
+	int sn = 0, i;
+
+	if (8 + m->ro_n + m->rw_n + argc >= cap)
+		return -1;
+	sbargv[sn++] = (char *)ws_sb_bin();
+	sbargv[sn++] = (char *)"run";
+	sbargv[sn++] = (char *)name;
+	if (strcmp(m->backing, "disk") == 0) {
+		snprintf(b->image, sizeof(b->image), "--backing=disk:%s",
+			 m->image);
+		sbargv[sn++] = b->image;
+	} else {
+		sbargv[sn++] = (char *)"--backing=tmpfs";
+	}
+	snprintf(b->cpus, sizeof(b->cpus), "--cpus=%.2f",
+		 m->cpus_x100 / 100.0);
+	sbargv[sn++] = b->cpus;
+	snprintf(b->mem, sizeof(b->mem), "--mem-mb=%ld", m->mem_mb);
+	sbargv[sn++] = b->mem;
+	snprintf(b->pids, sizeof(b->pids), "--pids=%ld", m->pids_max);
+	sbargv[sn++] = b->pids;
+	if (m->net_mode == WS_NET_VETH) {
+		snprintf(b->net, sizeof(b->net), "--net=join:%s", m->net_ns);
+		sbargv[sn++] = b->net;
+	} else if (m->net_mode == WS_NET_NONE) {
+		sbargv[sn++] = (char *)"--net=none";
+	} else {
+		sbargv[sn++] = (char *)"--net=host";
+	}
+	for (i = 0; i < m->ro_n; i++) {
+		snprintf(b->ro[i], sizeof(b->ro[i]), "--ro-path=%s", m->ro[i]);
+		sbargv[sn++] = b->ro[i];
+	}
+	for (i = 0; i < m->rw_n; i++) {
+		snprintf(b->rw[i], sizeof(b->rw[i]), "--rw-path=%s", m->rw[i]);
+		sbargv[sn++] = b->rw[i];
+	}
+	sbargv[sn++] = (char *)"--";
+	for (i = 0; i < argc; i++)
+		sbargv[sn++] = argv[i];
+	sbargv[sn] = NULL;
+	return 0;
+}
+
+/*
  * W81c：在工作区内执行任意 argv（workspace_run 与 app_profile_dynamic
  * 复用同一套隔离执行/限额/超时强杀逻辑）。
  * 返回 AI_OK = 已执行（exit_code/timed_out/truncated 有效，子进程退出码
@@ -2478,12 +2631,8 @@ int ai_ws_run_argv(const char *name, char *const argv[], int argc,
 		   int *timed_out, int *truncated, char **err_out)
 {
 	struct ws_meta m;
-	char imagearg[PATH_MAX + 16], cpuarg[64], memarg[64], pidarg[64];
-	char netarg[WS_NET_NS_MAX + 16];
-	char roargs[WS_MAX_PATHS][PATH_MAX + 16];
-	char rwargs[WS_MAX_PATHS][PATH_MAX + 16];
+	struct ws_run_buf b;
 	char *sbargv[96];
-	int sn = 0, i;
 
 	if (tail_out)
 		*tail_out = NULL;
@@ -2537,23 +2686,6 @@ int ai_ws_run_argv(const char *name, char *const argv[], int argc,
 		return AI_ERR_INVALID_ARG;
 	}
 
-	sbargv[sn++] = (char *)ws_sb_bin();
-	sbargv[sn++] = (char *)"run";
-	sbargv[sn++] = (char *)name;
-	if (strcmp(m.backing, "disk") == 0) {
-		snprintf(imagearg, sizeof(imagearg), "--backing=disk:%s",
-			 m.image);
-		sbargv[sn++] = imagearg;
-	} else {
-		sbargv[sn++] = (char *)"--backing=tmpfs";
-	}
-	snprintf(cpuarg, sizeof(cpuarg), "--cpus=%.2f",
-		 m.cpus_x100 / 100.0);
-	sbargv[sn++] = cpuarg;
-	snprintf(memarg, sizeof(memarg), "--mem-mb=%ld", m.mem_mb);
-	sbargv[sn++] = memarg;
-	snprintf(pidarg, sizeof(pidarg), "--pids=%ld", m.pids_max);
-	sbargv[sn++] = pidarg;
 	if (m.net_mode == WS_NET_VETH) {
 		/* 运行时状态（netns/veth）可能在重启后丢失：先幂等补齐
 		 * （规则只在表缺失时重建，保留既有计数与白名单语义） */
@@ -2575,25 +2707,14 @@ int ai_ws_run_argv(const char *name, char *const argv[], int argc,
 			m = fix;
 			(void)ws_meta_write(name, &m);
 		}
-		snprintf(netarg, sizeof(netarg), "--net=join:%s", m.net_ns);
-		sbargv[sn++] = netarg;
-	} else if (m.net_mode == WS_NET_NONE) {
-		sbargv[sn++] = (char *)"--net=none";
-	} else {
-		sbargv[sn++] = (char *)"--net=host";
 	}
-	for (i = 0; i < m.ro_n; i++) {
-		snprintf(roargs[i], sizeof(roargs[i]), "--ro-path=%s", m.ro[i]);
-		sbargv[sn++] = roargs[i];
+
+	if (ws_build_run_argv(name, &m, argv, argc, sbargv, 96, &b)) {
+		if (err_out && asprintf(err_out, "ERROR: argv 过多（%d）",
+				       argc) < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
 	}
-	for (i = 0; i < m.rw_n; i++) {
-		snprintf(rwargs[i], sizeof(rwargs[i]), "--rw-path=%s", m.rw[i]);
-		sbargv[sn++] = rwargs[i];
-	}
-	sbargv[sn++] = (char *)"--";
-	for (i = 0; i < argc; i++)
-		sbargv[sn++] = argv[i];
-	sbargv[sn] = NULL;
 
 	if (access(sbargv[0], X_OK)) {
 		if (err_out && asprintf(err_out, "ERROR: 找不到 %s（%s）；工作区"
@@ -2689,20 +2810,69 @@ static int ws_cmd_run(const char *args_json, char **out)
 	return AI_OK;
 }
 
-static int ws_cmd_destroy(const char *args_json, char **out)
+/*
+ * W82e：aik-sandbox destroy 的唯一调用点（后端回收执行体）。
+ * 幂等：区目录/挂载/cgroup 都交给它收；输出可交回调用方。
+ */
+static void ws_backend_destroy(const char *name, char **tail)
 {
-	char *name = ws_arg_str(args_json, "name");
+	char *dargv[4];
+	char *t = NULL;
+	int exit_code = -1, timed_out = 0, truncated = 0;
+
+	dargv[0] = (char *)ws_sb_bin();
+	dargv[1] = (char *)"destroy";
+	dargv[2] = (char *)name;
+	dargv[3] = NULL;
+	if (access(dargv[0], X_OK) == 0)
+		(void)ws_spawn_capture(dargv, WS_SIMPLE_TIMEOUT, &t, &exit_code,
+				       &timed_out, &truncated);
+	if (tail)
+		*tail = t;
+	else
+		free(t);
+}
+
+/* 追加后端原文到已有输出（不覆盖、不重复分配泄漏） */
+static void ws_append(char **dst, const char *add)
+{
+	char *merged = NULL;
+
+	if (!add || !add[0])
+		return;
+	if (*dst && (*dst)[0]) {
+		if (asprintf(&merged, "%s\n%s", *dst, add) < 0)
+			return;
+	} else {
+		merged = strdup(add);
+		if (!merged)
+			return;
+	}
+	free(*dst);
+	*dst = merged;
+}
+
+/*
+ * W82e（V1.8）：唯一的销毁实现。workspace_destroy（JSON 面）与
+ * sandbox_destroy（区名适配面）都走这里——不存在第二条销毁路径。
+ *
+ * bin_tail 非空时，把 aik-sandbox destroy 的输出一并交回（sandbox 通道
+ * 的文案需要后端原文）；workspace 面传 NULL，输出与旧版逐字一致。
+ */
+static int ws_destroy_impl(const char *name, char **out, char **bin_tail)
+{
 	struct ws_meta m;
 	char sdir[PATH_MAX], cgdir[PATH_MAX], meta[PATH_MAX], image[PATH_MAX];
 	char artdir[PATH_MAX], netnote[512];
 	char nc_note[640];
 	int have_meta, had_state, art_state = 0, ws_net_was = 0;
 
+	if (bin_tail)
+		*bin_tail = NULL;
 	if (!ai_ws_valid_name(name)) {
 		if (asprintf(out, "ERROR: 非法工作区名 name='%s'",
 			     name ? name : "(无)") < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_INVALID_ARG;
 	}
 	have_meta = ws_meta_read(name, &m) == 0;
@@ -2714,28 +2884,19 @@ static int ws_cmd_destroy(const char *args_json, char **out)
 	had_state = have_meta || ws_is_dir(sdir) || ws_is_dir(cgdir) ||
 		    ws_file_exists(image);
 
-	if (ws_is_dir(sdir) || ws_is_dir(cgdir)) {
-		char *dargv[4];
-		char *tail = NULL;
-		int exit_code, timed_out, truncated;
-
-		dargv[0] = (char *)ws_sb_bin();
-		dargv[1] = (char *)"destroy";
-		dargv[2] = name;
-		dargv[3] = NULL;
-		if (access(dargv[0], X_OK) == 0) {
-			(void)ws_spawn_capture(dargv, WS_SIMPLE_TIMEOUT, &tail,
-					       &exit_code, &timed_out,
-					       &truncated);
-		}
-		free(tail);
+	/* 后端回收：aik-sandbox destroy 是「杀 run/cgroup/挂载/区目录」的
+	 * 唯一执行体。V1.8 起无条件调用（幂等）：即便状态目录已被外部清掉，
+	 * 仍让后端把残留 mount/cgroup 收干净；输出按调用方需要交回。 */
+	if (bin_tail) {
+		ws_backend_destroy(name, bin_tail);
+	} else {
+		ws_backend_destroy(name, NULL);
 	}
 
 	if (ws_running(name)) {
 		if (asprintf(out, "ERROR: 工作区 %s 仍被执行进程占用（锁忙），"
 			     "已拒绝删除镜像；请稍后重试 destroy", name) < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_API;
 	}
 	/* 元数据镜像路径只允许在工作区根下 */
@@ -2743,7 +2904,6 @@ static int ws_cmd_destroy(const char *args_json, char **out)
 		if (asprintf(out, "ERROR: 元数据镜像路径非法，拒绝删除: %s",
 			     m.image) < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_STORAGE;
 	}
 
@@ -2780,21 +2940,18 @@ static int ws_cmd_destroy(const char *args_json, char **out)
 		if (asprintf(out, "ERROR: 删除镜像 %s 失败: %s", m.image,
 			     strerror(errno)) < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_STORAGE;
 	}
 	if (!have_meta && unlink(image) && errno != ENOENT) {
 		if (asprintf(out, "ERROR: 删除镜像 %s 失败: %s", image,
 			     strerror(errno)) < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_STORAGE;
 	}
 	if (unlink(meta) && errno != ENOENT) {
 		if (asprintf(out, "ERROR: 删除元数据 %s 失败: %s", meta,
 			     strerror(errno)) < 0)
 			*out = NULL;
-		free(name);
 		return AI_ERR_STORAGE;
 	}
 
@@ -2827,8 +2984,21 @@ static int ws_cmd_destroy(const char *args_json, char **out)
 			     art_state == 1 ? "；删除遗留空产物目录" : "") < 0)
 			*out = NULL;
 	}
-	free(name);
 	return AI_OK;
+}
+
+static int ws_cmd_destroy(const char *args_json, char **out)
+{
+	char *name = ws_arg_str(args_json, "name");
+	int rc;
+
+	if (!name) {
+		*out = strdup("ERROR: 缺少 name");
+		return AI_ERR_INVALID_ARG;
+	}
+	rc = ws_destroy_impl(name, out, NULL);
+	free(name);
+	return rc;
 }
 
 /* 追加某 netns 内 nft 表原文（含 counter 计数）；未下发时留空 */
@@ -3583,6 +3753,319 @@ int ai_ws_destroy(const char *name, char **out)
 	rc = ws_cmd_destroy(args, o);
 	free(discard);
 	return rc;
+}
+
+/* ======================================================================
+ * W82e（V1.8）：sandbox 通道 = workspace 的一个 backend（backing=tmpfs）
+ *
+ * 这里只做「参数翻译 + 委托」：
+ *   区名 → 工作区名（≤32 同名；33-64 映射短名 + alias）
+ *   create → ws_cmd_create({backing:tmpfs, net:host})
+ *   destroy → ws_destroy_impl（全仓唯一销毁路径）
+ *   status → workspace 元数据区表 + aik-sandbox status 原文
+ *   run → ws_build_run_argv（run 参数面唯一翻译）+ ai_ws_spawn_capture
+ * 没有任何第二份生命周期/销毁/限额逻辑。
+ * ====================================================================== */
+
+/* 区名合法性：与 aik-sandbox 侧 valid_name 同规则（≤64，[A-Za-z0-9._-]，
+ * 不以 . / - 开头，不含 ".."）。workspace 名更严（≤32），故需映射。 */
+static int ws_zone_name_ok(const char *s)
+{
+	size_t i, n;
+
+	if (!s || !s[0])
+		return 0;
+	n = strlen(s);
+	if (n > 64 || s[0] == '.' || s[0] == '-')
+		return 0;
+	for (i = 0; i < n; i++) {
+		char c = s[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+		      c == '.'))
+			return 0;
+	}
+	return !strstr(s, "..");
+}
+
+int ai_ws_zone_name(const char *zone, char *ws, size_t cap)
+{
+	char trunc[24];
+
+	if (!ws || cap < 2)
+		return 0;
+	ws[0] = '\0';
+	if (!ws_zone_name_ok(zone))
+		return 0;
+	/* ≤32：区名即工作区名（历史行为逐字保留，/sandbox 目录不变） */
+	if (strlen(zone) <= WS_MAX_NAME) {
+		snprintf(ws, cap, "%s", zone);
+		return 1;
+	}
+	/* 33-64：确定性短名 "前 23 字符-<fnv32:08x>"（总长 32），
+	 * 原区名记进元数据 alias；create/run/destroy 都经同一映射。 */
+	snprintf(trunc, sizeof(trunc), "%.23s", zone);
+	snprintf(ws, cap, "%s-%08x", trunc, ws_fnv32(zone));
+	return 1;
+}
+
+int ai_ws_zone_create(const char *zone, char **out)
+{
+	char ws[WS_MAX_NAME + 1];
+	char args[256];
+	struct ws_meta m;
+	int rc;
+
+	*out = NULL;
+	if (!ai_ws_zone_name(zone, ws, sizeof(ws))) {
+		if (asprintf(out, "ERROR: 非法隔离区名 name='%s'（允许字母数字"
+			     ".-_，≤64 字符，不以 . 或 - 开头）",
+			     zone ? zone : "(无)") < 0)
+			*out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	/* 同名持久盘绝不覆盖：sandbox_create 只建 tmpfs 后端 */
+	if (ws_meta_read(ws, &m) == 0 && strcmp(m.backing, "tmpfs") != 0) {
+		if (asprintf(out, "ERROR: 名字 '%s' 已被持久工作区占用"
+			     "（backing=%s）；sandbox_create 不覆盖持久盘，"
+			     "请换名或先 workspace_destroy",
+			     zone, m.backing) < 0)
+			*out = NULL;
+		return AI_ERR_API;
+	}
+	/* 无元数据但留着实镜像：可能是元数据被外部删掉的持久盘。
+	 * 不覆盖、不吞掉用户数据，直接拒绝（由人确认后再清）。 */
+	if (ws_meta_read(ws, &m) != 0) {
+		char img[PATH_MAX];
+
+		ws_image_path(ws, img, sizeof(img));
+		if (ws_file_exists(img)) {
+			if (asprintf(out, "ERROR: 名字 '%s' 下存在无元数据的"
+				     "镜像 %s；sandbox_create 不覆盖，请先人工"
+				     "确认并清理", zone, img) < 0)
+				*out = NULL;
+			return AI_ERR_STORAGE;
+		}
+	}
+	/* 与 W42 默认对齐：net=host（沙盒保留宿主网络） */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"%s\",\"backing\":\"tmpfs\",\"net\":\"host\"}",
+		 ws);
+	rc = ws_cmd_create(args, out);
+	if (rc != AI_OK)
+		return rc;
+	/* 区名被映射成短名时补记 alias（status/inspect 展示用） */
+	if (strcmp(ws, zone) != 0 && ws_meta_read(ws, &m) == 0) {
+		snprintf(m.alias, sizeof(m.alias), "%s", zone);
+		(void)ws_meta_write(ws, &m);
+	}
+	return AI_OK;
+}
+
+int ai_ws_zone_destroy(const char *zone, char **out)
+{
+	char ws[WS_MAX_NAME + 1];
+	struct ws_meta m;
+	char *tail = NULL;
+	int rc;
+
+	*out = NULL;
+	if (!ai_ws_zone_name(zone, ws, sizeof(ws))) {
+		if (asprintf(out, "ERROR: 非法隔离区名 name='%s'",
+			     zone ? zone : "(无)") < 0)
+			*out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	/* 持久数据保护：同名 backing=disk 的工作区不归 sandbox 管 */
+	if (ws_meta_read(ws, &m) == 0 && strcmp(m.backing, "tmpfs") != 0) {
+		if (asprintf(out, "ERROR: 名字 '%s' 是持久工作区"
+			     "（backing=%s），sandbox_destroy 拒绝删除；"
+			     "请用 workspace_destroy", zone, m.backing) < 0)
+			*out = NULL;
+		return AI_ERR_API;
+	}
+	rc = ws_destroy_impl(ws, out, &tail);
+	if (rc == AI_OK)
+		ws_append(out, tail);
+	free(tail);
+	/* V1.8 之前的 33-64 字符区直接以原名存在 /sandbox 下：升级后首次
+	 * destroy 仍按原名交给同一个后端回收，避免“映射改名后老区清不掉”。 */
+	if (strcmp(ws, zone) != 0) {
+		char ldir[PATH_MAX];
+		char *ltail = NULL;
+
+		snprintf(ldir, sizeof(ldir), "%s/%s", ws_sb_base(), zone);
+		if (ws_is_dir(ldir)) {
+			ws_backend_destroy(zone, &ltail);
+			if (rc == AI_OK)
+				ws_append(out, ltail);
+			free(ltail);
+		}
+	}
+	return rc;
+}
+
+int ai_ws_zone_status(char **out)
+{
+	DIR *d = opendir(ws_root());
+	struct dirent *e;
+	char *buf = NULL;
+	size_t len = 0;
+	FILE *mem = open_memstream(&buf, &len);
+	char *tail = NULL;
+	int exit_code = -1, timed_out = 0, truncated = 0, count = 0;
+
+	if (!mem) {
+		*out = strdup("ERROR: open_memstream 失败");
+		return AI_ERR_GENERIC;
+	}
+	fprintf(mem, "sandbox_status: 隔离区 = workspace tmpfs backend"
+		"（元数据/销毁统一由 workspace 管理）\n");
+	if (d) {
+		while ((e = readdir(d))) {
+			struct ws_meta m;
+			char name[WS_MAX_NAME + 1];
+			size_t nl = strlen(e->d_name);
+
+			if (e->d_name[0] == '.' || nl <= 5 ||
+			    strcmp(e->d_name + nl - 5, ".meta") != 0)
+				continue;
+			nl -= 5;
+			if (nl == 0 || nl > WS_MAX_NAME)
+				continue;
+			memcpy(name, e->d_name, nl);
+			name[nl] = '\0';
+			if (!ai_ws_valid_name(name) || ws_meta_read(name, &m))
+				continue;
+			if (strcmp(m.backing, "tmpfs") != 0)
+				continue;
+			fprintf(mem, "  [%s] backing=tmpfs status=%s "
+				"mount=%s/%s/root%s%s%s\n",
+				m.alias[0] ? m.alias : m.name,
+				ws_running(m.name) ? "running" : "ready",
+				ws_sb_base(), m.name,
+				m.alias[0] ? " (ws=" : "",
+				m.alias[0] ? m.name : "",
+				m.alias[0] ? ")" : "");
+			count++;
+		}
+		closedir(d);
+	}
+	if (!count)
+		fprintf(mem, "  (暂无 tmpfs 后端隔离区)\n");
+	fprintf(mem, "--- aik-sandbox status ---\n");
+	{
+		char *sargv[3];
+
+		sargv[0] = (char *)ws_sb_bin();
+		sargv[1] = (char *)"status";
+		sargv[2] = NULL;
+		if (access(sargv[0], X_OK) == 0)
+			(void)ws_spawn_capture(sargv, WS_SIMPLE_TIMEOUT, &tail,
+					       &exit_code, &timed_out,
+					       &truncated);
+	}
+	fprintf(mem, "%s%s", tail ? tail : "(后端不可用：未找到 aik-sandbox)\n",
+		(tail && tail[0] && tail[strlen(tail) - 1] != '\n') ? "\n" : "");
+	free(tail);
+	fclose(mem);
+	*out = buf;
+	return AI_OK;
+}
+
+int ai_ws_zone_run(const char *zone, char *const argv[], int argc,
+		   int timeout_s, size_t out_max, char *const extra_env[],
+		   int extra_env_n, volatile sig_atomic_t *cancel_flag,
+		   char **tail_out, int *exit_code, int *timed_out,
+		   int *cancelled, int *truncated, char **err_out)
+{
+	char ws[WS_MAX_NAME + 1];
+	struct ws_meta m;
+	struct ws_run_buf b;
+	char *sbargv[96];
+	int have_meta;
+
+	if (tail_out)
+		*tail_out = NULL;
+	if (exit_code)
+		*exit_code = -1;
+	if (timed_out)
+		*timed_out = 0;
+	if (cancelled)
+		*cancelled = 0;
+	if (truncated)
+		*truncated = 0;
+	if (err_out)
+		*err_out = NULL;
+	if (!ai_ws_zone_name(zone, ws, sizeof(ws))) {
+		if (err_out && asprintf(err_out, "ERROR: 非法隔离区名 name='%s'",
+				       zone ? zone : "(无)") < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	if (!argv || argc < 1) {
+		if (err_out && asprintf(err_out,
+				       "ERROR: 缺少 argv（在隔离区内执行的命令）")
+		    < 0)
+			*err_out = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
+	if (timeout_s < 1 || timeout_s > WS_RUN_TIMEOUT_MAX)
+		timeout_s = WS_RUN_TIMEOUT_DEF;
+	have_meta = ws_meta_read(ws, &m) == 0;
+	/* 同名持久工作区不允许被 sandbox_spawn 当临时区跑 */
+	if (have_meta && strcmp(m.backing, "disk") == 0) {
+		if (err_out && asprintf(err_out, "ERROR: 名字 '%s' 是持久工作区"
+				       "（backing=disk），sandbox_spawn 不在其"
+				       "上派子智能体；请改用 workspace_run 或"
+				       "换名", zone) < 0)
+			*err_out = NULL;
+		return AI_ERR_API;
+	}
+	if (have_meta) {
+		if (ws_build_run_argv(ws, &m, argv, argc, sbargv, 96, &b)) {
+			if (err_out && asprintf(err_out, "ERROR: argv 过多（%d）",
+					       argc) < 0)
+				*err_out = NULL;
+			return AI_ERR_INVALID_ARG;
+		}
+	} else {
+		/* 未 create 直接 run：与 aik-sandbox 的临时区语义一致，
+		 * 不加任何限额/backing 参数（run 自己建临时区） */
+		int sn = 0, i;
+
+		if (4 + argc >= 96) {
+			if (err_out && asprintf(err_out, "ERROR: argv 过多（%d）",
+					       argc) < 0)
+				*err_out = NULL;
+			return AI_ERR_INVALID_ARG;
+		}
+		sbargv[sn++] = (char *)ws_sb_bin();
+		sbargv[sn++] = (char *)"run";
+		sbargv[sn++] = ws;
+		sbargv[sn++] = (char *)"--";
+		for (i = 0; i < argc; i++)
+			sbargv[sn++] = argv[i];
+		sbargv[sn] = NULL;
+	}
+	if (access(sbargv[0], X_OK)) {
+		if (err_out && asprintf(err_out, "ERROR: 找不到 %s（%s）；隔离区"
+				       "执行依赖 aik-sandbox", sbargv[0],
+				       strerror(errno)) < 0)
+			*err_out = NULL;
+		return AI_ERR_NOT_FOUND;
+	}
+	if (ai_ws_spawn_capture(sbargv, extra_env, extra_env_n, timeout_s,
+				out_max ? out_max : WS_OUT_MAX, cancel_flag,
+				tail_out, exit_code, timed_out, cancelled,
+				truncated)) {
+		if (err_out)
+			*err_out = strdup("ERROR: fork/pipe 失败（无法启动 "
+					  "aik-sandbox）");
+		return AI_ERR_GENERIC;
+	}
+	return AI_OK;
 }
 
 /*

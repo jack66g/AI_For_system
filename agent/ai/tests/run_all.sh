@@ -22,7 +22,7 @@ fi
 tests=(
     test_clarify test_lease test_lease_gate
     test_w77_route test_w77_offline test_w77_offline_gate
-    test_workspace test_desktop_tools test_sandbox_tools test_exec_contract test_exec_risk_matrix
+    test_workspace test_workspace_backend test_desktop_tools test_sandbox_tools test_exec_contract test_exec_risk_matrix
     test_ask_autocompact test_compact_loop test_compact_20turns
     test_router_activation test_router_cap test_max_rounds
     test_ask_status_budget test_prompt_policy

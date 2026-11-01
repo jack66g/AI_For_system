@@ -24,6 +24,7 @@
 #define _AI_WORKSPACE_TOOLS_H
 
 #include <stddef.h>
+#include <signal.h>
 
 /* 纯函数（导出供单测；不触碰文件系统） */
 int ai_ws_valid_name(const char *s);
@@ -68,5 +69,48 @@ int ai_ws_destroy(const char *name, char **out);
 int ai_ws_run_argv(const char *name, char *const argv[], int argc,
 		   int timeout_s, char **tail_out, int *exit_code,
 		   int *timed_out, int *truncated, char **err_out);
+
+/*
+ * W82e（V1.8）：sandbox 通道的隔离区 = workspace 的一个 backend。
+ *
+ * 隔离区（zone）不再是第二套生命周期：它只是 backing=tmpfs 的 workspace。
+ * 元数据（<workspace 根>/<name>.meta）、cgroup 路径、产物目录 B-109
+ * 清理、销毁路径全部由 workspace 工具统一管理；aik-sandbox 只作为
+ * tmpfs 根 + pivot_root 的执行后端。下面五个入口是 sandbox_* 四个工具
+ * 的薄适配面——只做「参数翻译 + 委托」，不复制任何生命周期逻辑。
+ *
+ * ai_ws_zone_name    zone 名 → workspace 名（≤32 且合法时同名；33-64 字符
+ *                    的旧名映射为 "<前 23 字符>-<fnv32:08x>"，并在元数据
+ *                    记 alias，保证历史 64 字符区名仍可用）。返回 1=合法。
+ * ai_ws_zone_create  以 backing=tmpfs 建区（net=host，与 W42 默认一致）；
+ *                    名字已被 backing=disk 工作区占用时拒绝（不误伤持久盘）。
+ * ai_ws_zone_destroy 唯一销毁路径（委托 ws_destroy_impl）；backing=disk
+ *                    的同名工作区拒绝删除，避免 sandbox_destroy 误删持久数据。
+ * ai_ws_zone_status  统一状态视图：tmpfs 后端的区表（来自 workspace 元数据）
+ *                    + aik-sandbox status 原文（存活 pid/挂载）。
+ * ai_ws_zone_run     在区内执行 argv：有元数据时按元数据下发 backing/限额/
+ *                    net；无元数据时按 aik-sandbox run 的临时区语义执行。
+ *                    cancel_flag 非空时轮询该标志并 SIGKILL 全组。
+ */
+int ai_ws_zone_name(const char *zone, char *ws, size_t cap);
+int ai_ws_zone_create(const char *zone, char **out);
+int ai_ws_zone_destroy(const char *zone, char **out);
+int ai_ws_zone_status(char **out);
+int ai_ws_zone_run(const char *zone, char *const argv[], int argc,
+		   int timeout_s, size_t out_max, char *const extra_env[],
+		   int extra_env_n, volatile sig_atomic_t *cancel_flag,
+		   char **tail_out, int *exit_code, int *timed_out,
+		   int *cancelled, int *truncated, char **err_out);
+
+/*
+ * 统一子进程采集：setsid + 输出环形尾部（≤out_max）+ 超时 SIGKILL 全组
+ * + 可选取消轮询 + 可选环境注入。workspace 与 sandbox 两条通道共用这一份
+ * 实现（原先各有一份，V1.8 收口）。
+ */
+int ai_ws_spawn_capture(char **argv, char *const extra_env[], int extra_env_n,
+			int timeout_sec, size_t out_max,
+			volatile sig_atomic_t *cancel_flag, char **tail_out,
+			int *exit_code, int *timed_out, int *cancelled,
+			int *truncated);
 
 #endif /* _AI_WORKSPACE_TOOLS_H */

@@ -28,7 +28,7 @@ TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_
 	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv \
 	   test_sched test_bpf test_net_intent test_net_hit test_app_profile \
 	   test_net_chain test_workspace_net test_range test_app_ctl \
-	   test_app_policy test_device_tools
+	   test_app_policy test_device_tools test_workspace_backend
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
@@ -125,6 +125,13 @@ test_workspace: test_workspace.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 # veth + aikbr0 + 缺省拒出站 nft + 零残留 + 宿主 ruleset/路由逐字节一致）
 test_workspace_net: test_workspace_net.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace_net.c \
+		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# W82e（V1.8）：sandbox = workspace 的 tmpfs backend。区名映射 / 建区元数据 /
+# run 参数面翻译 / 单一销毁路径 / 持久盘保护 / 长区名历史兼容 / 统一采集。
+# 纯 mock（AIKERNEL_SANDBOX_BIN），无需 root。
+test_workspace_backend: test_workspace_backend.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace_backend.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
 
 # W65 P2-01/P2-03/P2-04/P2-05: exec_run 参数契约 / stdin 别名 / 写回读 /

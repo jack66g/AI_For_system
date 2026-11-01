@@ -398,6 +398,22 @@ int main(void)
 		perror("mkdtemp");
 		return 2;
 	}
+	/* W82e：sandbox_create/destroy/status 已委托 workspace backend
+	 * （backing=tmpfs），元数据/产物落在工作区状态根。非 root 单测把
+	 * 这些根指向临时目录，不触碰 /var/lib/aikernel 与 /sandbox；
+	 * 既有断言与期望值一条不改。 */
+	{
+		char p[256];
+
+		snprintf(p, sizeof(p), "%s/ws", tmpdir);
+		setenv("AIKERNEL_WORKSPACE_ROOT", p, 1);
+		snprintf(p, sizeof(p), "%s/sb", tmpdir);
+		setenv("AIKERNEL_SANDBOX_BASE", p, 1);
+		snprintf(p, sizeof(p), "%s/art", tmpdir);
+		setenv("AIKERNEL_SANDBOX_ARTIFACTS", p, 1);
+		setenv("AIKERNEL_SANDBOX_CGROUP_ROOT",
+		       "/nonexistent-w82e-cgroup", 1);
+	}
 	snprintf(mockbin, sizeof(mockbin), "%s/mock-aik-sandbox", tmpdir);
 	snprintf(mockai, sizeof(mockai), "%s/mock-ai", tmpdir);
 	write_file(mockbin,

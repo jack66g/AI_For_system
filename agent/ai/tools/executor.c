@@ -4608,163 +4608,11 @@ static int sb_name_ok(const char *s)
 }
 
 /*
- * fork + exec argv，采集 stdout/stderr 合流输出的尾部（≤out_max 字节）。
- * 子进程 setsid 自成进程组；timeout_sec>0 时超时 kill(-pid, SIGKILL)。
- * 返回 0 成功（*timed_out 置位表示超时击杀）；-1 fork/pipe 失败。
+ * W82e（V1.8）：子进程采集已收口到 workspace（ai_ws_spawn_capture）。
+ * sandbox 通道的 spawn 经 ai_ws_zone_run 复用同一份采集实现（setsid +
+ * 环形尾部 + 超时/取消 SIGKILL 全组 + 环境注入），此处不再保留副本。
  */
-static int sb_spawn_capture(char **argv, char **extra_env, int extra_env_n,
-			    int timeout_sec, size_t out_max,
-			    char **tail, int *timed_out, int *cancelled,
-			    int *exit_code)
-{
-	int pipefd[2];
-	pid_t pid;
-	int st = 0;
-	char *ring;
-	size_t ring_off = 0, ring_fill = 0;
-	long long deadline_ms;
-	int i;
 
-	*timed_out = 0;
-	*cancelled = 0;
-	*exit_code = -1;
-	ring = malloc(out_max);
-	if (!ring)
-		return -1;
-	if (pipe(pipefd)) {
-		free(ring);
-		return -1;
-	}
-	fflush(stdout);
-	fflush(stderr);
-	pid = fork();
-	if (pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		free(ring);
-		return -1;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDONLY);
-
-		close(pipefd[0]);
-		setsid();
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			close(devnull);
-		}
-		for (i = 0; i < extra_env_n; i++) {
-			char *eq = strchr(extra_env[i], '=');
-
-			if (eq) {
-				*eq = '\0';
-				setenv(extra_env[i], eq + 1, 1);
-				*eq = '=';
-			}
-		}
-		execv(argv[0], argv);
-		fprintf(stderr, "ERROR: exec %s: %s\n", argv[0],
-			strerror(errno));
-		_exit(127);
-	}
-	close(pipefd[1]);
-
-	/* 读端非阻塞：子进程（如 exec 成 sleep 的长任务）长期持写端但
-	 * 不出数据时，排空循环的 read() 不得阻塞到 deadline 之后 */
-	fcntl(pipefd[0], F_SETFL,
-	      fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
-
-	deadline_ms = (long long)time(NULL) * 1000 +
-		      (long long)timeout_sec * 1000;
-	while (1) {
-		struct pollfd pfd = { .fd = pipefd[0], .events = POLLIN };
-		char chunk[2048];
-		ssize_t n;
-		long long now_ms;
-
-		now_ms = (long long)time(NULL) * 1000;
-		/* W65 P1：Ctrl-C 取消——SIGKILL 整个沙盒进程组 */
-		if (ai_cancel_requested) {
-			kill(-(pid_t)pid, SIGKILL);
-			kill((pid_t)pid, SIGKILL);
-			*cancelled = 1;
-			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-				;
-			while ((n = read(pipefd[0], chunk,
-					 sizeof(chunk))) > 0)
-				;
-			break;
-		}
-		if (now_ms >= deadline_ms) {
-			/* 超时：SIGKILL 全组（子进程 setsid 后 pgid=pid，
-			 * 组内孙进程一并收掉），防孤儿拖死会话 */
-			kill(-(pid_t)pid, SIGKILL);
-			kill((pid_t)pid, SIGKILL);
-			*timed_out = 1;
-			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-				;
-			/* 击杀后写端全关，把管道残余排干（read 到 0 为止） */
-			while ((n = read(pipefd[0], chunk,
-					 sizeof(chunk))) > 0) {
-				for (i = 0; i < (int)n; i++) {
-					ring[ring_off] = chunk[i];
-					ring_off = (ring_off + 1) % out_max;
-					if (ring_fill < out_max)
-						ring_fill++;
-				}
-			}
-			break;
-		}
-		if (poll(&pfd, 1, 200) > 0 &&
-		    (pfd.revents & (POLLIN | POLLHUP))) {
-			while ((n = read(pipefd[0], chunk,
-					 sizeof(chunk))) > 0) {
-				for (i = 0; i < (int)n; i++) {
-					ring[ring_off] = chunk[i];
-					ring_off = (ring_off + 1) % out_max;
-					if (ring_fill < out_max)
-						ring_fill++;
-				}
-			}
-		}
-		if (pfd.revents & POLLHUP) {
-			/* 写端全关（子进程及全部孙进程都已退出）：
-			 * 排空完成，收尸退出 */
-			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-				;
-			break;
-		}
-		/* 子进程本体退出但写端仍被孙进程持有：先记尸不收，
-		 * 继续等到 deadline——输出未完即任务未完，语义一致 */
-		waitpid(pid, &st, WNOHANG);
-	}
-	close(pipefd[0]);
-
-	/* 尾部取出（环缓冲 → 连续缓冲） */
-	{
-		size_t start = (ring_fill < out_max) ?
-			       0 : ring_off;
-
-		*tail = malloc(ring_fill + 1);
-		if (!*tail) {
-			free(ring);
-			return -1;
-		}
-		for (i = 0; (size_t)i < ring_fill; i++)
-			(*tail)[i] = ring[(start + (size_t)i) % out_max];
-		(*tail)[ring_fill] = '\0';
-	}
-	free(ring);
-
-	if (WIFEXITED(st))
-		*exit_code = WEXITSTATUS(st);
-	else if (WIFSIGNALED(st))
-		*exit_code = 128 + WTERMSIG(st);
-	return 0;
-}
 
 /*
  * W72：解析子智能体 stdout 末尾的机器可读状态行：
@@ -4833,94 +4681,73 @@ static int exec_sandbox(const struct ai_tool *tool, const char *args_json,
 	char *argv[16];
 
 	if (strcmp(tool->name, "sandbox_spawn") != 0) {
-		/* status / create / destroy：薄包装直接透传 */
-		char *tail = NULL;
-		int timed_out = 0, cancelled = 0, exit_code = -1;
+		/* status / create / destroy：V1.8 起是 workspace backend 的
+		 * 薄适配层——本函数只做参数翻译与文案，元数据/cgroup/销毁/
+		 * 产物清理全部由 workspace 工具统一管理（不再直连 aik-sandbox
+		 * 的第二套生命周期）。 */
+		char *body = NULL;
+		int rc;
 
 		if (strcmp(tool->name, "sandbox_status") == 0) {
-			argv[0] = (char *)sb_bin();
-			argv[1] = (char *)"status";
-			argv[2] = NULL;
-		} else {
-			name = arg_str(args_json, "name");
-			if (!sb_name_ok(name)) {
-				if (asprintf(out, "ERROR: 非法或缺失的隔离区名"
-					     " name='%s'（允许字母数字.-_，"
-					     "≤64 字符）",
-					     name ? name : "(无)") < 0)
+			if (ai_ws_zone_status(&body) != AI_OK || !body) {
+				if (asprintf(out, "%s", body ? body :
+					     "ERROR: 状态读取失败") < 0)
+					*out = NULL;
+			} else {
+				*out = body;
+				body = NULL;
+			}
+			free(body);
+			return AI_OK;
+		}
+		name = arg_str(args_json, "name");
+		if (!sb_name_ok(name)) {
+			if (asprintf(out, "ERROR: 非法或缺失的隔离区名"
+				     " name='%s'（允许字母数字.-_，"
+				     "≤64 字符）",
+				     name ? name : "(无)") < 0)
+				*out = NULL;
+			free(name);
+			return AI_ERR_INVALID_ARG;
+		}
+		/* W69 P1-2：沙箱子进程只能焚毁自身隔离区
+		 * （AIKERNEL_SANDBOX 为 aik-sandbox run 注入的
+		 * 自身区名），禁止跨区销毁宿主/兄弟区。 */
+		if (strcmp(tool->name, "sandbox_destroy") == 0) {
+			const char *self = getenv("AIKERNEL_SANDBOX");
+
+			if (self && self[0] && strcmp(self, name) != 0) {
+				if (asprintf(out, TOOL_ERR_DENIED_PREFIX
+					     " sandbox_destroy 只能销毁"
+					     "自身隔离区（当前 %s，请求 "
+					     "%s），禁止跨区销毁",
+					     self, name) < 0)
 					*out = NULL;
 				free(name);
-				return AI_ERR_INVALID_ARG;
+				return AI_ERR_API;
 			}
-			/* W69 P1-2：沙箱子进程只能焚毁自身隔离区
-			 * （AIKERNEL_SANDBOX 为 aik-sandbox run 注入的
-			 * 自身区名），禁止跨区销毁宿主/兄弟区。 */
-			if (strcmp(tool->name, "sandbox_destroy") == 0) {
-				const char *self = getenv("AIKERNEL_SANDBOX");
-
-				if (self && self[0] && strcmp(self, name) != 0) {
-					if (asprintf(out, TOOL_ERR_DENIED_PREFIX
-						     " sandbox_destroy 只能销毁"
-						     "自身隔离区（当前 %s，请求 "
-						     "%s），禁止跨区销毁",
-						     self, name) < 0)
-						*out = NULL;
-					free(name);
-					return AI_ERR_API;
-				}
-			}
-			argv[0] = (char *)sb_bin();
-			argv[1] = (char *)(strcmp(tool->name,
-						  "sandbox_create") == 0 ?
-					   "create" : "destroy");
-			argv[2] = name;
-			argv[3] = NULL;
 		}
-		if (access(argv[0], X_OK)) {
-			if (asprintf(out, "ERROR: 找不到 %s（%s）。请先安装 "
-				     "aik-sandbox，或用 AIKERNEL_SANDBOX_BIN "
-				     "指定路径", argv[0], strerror(errno)) < 0)
-				*out = NULL;
+		if (strcmp(tool->name, "sandbox_create") == 0)
+			rc = ai_ws_zone_create(name, &body);
+		else
+			rc = ai_ws_zone_destroy(name, &body);
+		if (rc != AI_OK) {
+			/* 失败原样上报（不谎报“已建立/已焚毁”） */
+			*out = body ? body :
+			       strdup("ERROR: 沙盒操作失败");
 			free(name);
-			return AI_ERR_NOT_FOUND;
+			return rc;
 		}
-		if (sb_spawn_capture(argv, NULL, 0, SB_SIMPLE_TIMEOUT,
-				     8192, &tail, &timed_out, &cancelled,
-				     &exit_code)) {
-			*out = strdup("ERROR: fork/pipe 失败（沙盒工具无法"
-				      "启动）");
-			free(name);
-			return AI_ERR_GENERIC;
-		}
-		if (cancelled) {
-			*out = strdup("ERROR: 已取消（用户 Ctrl-C），沙盒操作"
-				      "已终止");
-			free(tail);
-			free(name);
-			return AI_ERR_GENERIC;
-		}
-		if (exit_code == 127) {
-			if (asprintf(out, "ERROR: %s 执行失败（见上方诊断）",
-				     argv[0]) < 0)
-				*out = NULL;
-		} else if (strcmp(tool->name, "sandbox_create") == 0) {
-			char *bin_out = tail ? tail : (char *)"";
-
-			if (asprintf(out, "%s%s",
-				     tr(TR_SB_CREATED), bin_out) < 0)
-				*out = NULL;
-		} else if (strcmp(tool->name, "sandbox_destroy") == 0) {
-			char *bin_out = tail ? tail : (char *)"";
-
-			if (asprintf(out, "%s%s",
-				     tr(TR_SB_DESTROYED), bin_out) < 0)
+		if (strcmp(tool->name, "sandbox_create") == 0) {
+			if (asprintf(out, "%s%s", tr(TR_SB_CREATED),
+				     body ? body : "") < 0)
 				*out = NULL;
 		} else {
-			/* status：原样透传（已在输出里） */
-			if (asprintf(out, "%s", tail ? tail : "(无输出)") < 0)
+			if (asprintf(out, "%s%s", tr(TR_SB_DESTROYED),
+				     body ? body : "") < 0)
 				*out = NULL;
 		}
-		free(tail);
+		free(body);
 		free(name);
 		return AI_OK;
 	}
@@ -4934,7 +4761,7 @@ static int exec_sandbox(const struct ai_tool *tool, const char *args_json,
 		char sess[96];
 		char envbuf[512];
 		char *tail = NULL;
-		int timed_out = 0, cancelled = 0, exit_code = -1;
+		int timed_out = 0, cancelled = 0, exit_code = -1, truncated = 0;
 		time_t t0, t1;
 		char *extra_env[2];
 		int extra_env_n = 0;
@@ -4973,29 +4800,37 @@ static int exec_sandbox(const struct ai_tool *tool, const char *args_json,
 			 sb_tools_json());
 		extra_env[extra_env_n++] = envbuf;
 
-		argv[0] = (char *)sb_bin();
-		argv[1] = (char *)"run";
-		argv[2] = name;
-		argv[3] = (char *)"--";
-		argv[4] = (char *)sb_ai_bin();
-		argv[5] = (char *)"-p";
-		argv[6] = task;
-		argv[7] = (char *)"-s";
-		argv[8] = sess;
-		argv[9] = (char *)"-N";
-		argv[10] = NULL;
+		/* 子智能体命令行：外层 aik-sandbox run 的组装（backing/限额/
+		 * net/ro/rw + --）由 workspace backend 统一翻译；这里只给
+		 * 「区内要跑什么」——与 workspace_run 同一条 run 路径 */
+		argv[0] = (char *)sb_ai_bin();
+		argv[1] = (char *)"-p";
+		argv[2] = task;
+		argv[3] = (char *)"-s";
+		argv[4] = sess;
+		argv[5] = (char *)"-N";
+		argv[6] = NULL;
 
 		time(&t0);
-		if (sb_spawn_capture(argv, extra_env, extra_env_n,
-				     (int)maxsec, SB_SPAWN_TAIL_MAX,
-				     &tail, &timed_out, &cancelled,
-				     &exit_code)) {
-			*out = strdup("ERROR: fork/pipe 失败（子智能体无法"
-				      "启动）");
-			free(name);
-			free(task);
-			free(model);
-			return AI_ERR_GENERIC;
+		{
+			char *err = NULL;
+			int rc = ai_ws_zone_run(name, argv, 6, (int)maxsec,
+						SB_SPAWN_TAIL_MAX, extra_env,
+						extra_env_n, &ai_cancel_requested,
+						&tail, &exit_code, &timed_out,
+						&cancelled, &truncated, &err);
+
+			if (rc != AI_OK) {
+				if (asprintf(out, "%s", err ? err :
+					     "ERROR: 子智能体无法启动") < 0)
+					*out = NULL;
+				free(err);
+				free(name);
+				free(task);
+				free(model);
+				return rc;
+			}
+			free(err);
 		}
 		if (cancelled) {
 			*out = strdup("ERROR: 已取消（用户 Ctrl-C），子智能体"
