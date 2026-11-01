@@ -1,15 +1,11 @@
 {
-  "created": "2026-11-01T06:23:44+08:00",
+  "created": "2026-11-01T15:01:49+08:00",
   "kernel": "6.18.39 #61",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
     "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
-    "verification: run_all 57/57, audit W75 CHECK PASS (226 tools/9 domains/20 desktop/seed 243)",
-    "W81 增补：网络意图编译/命中闭环/应用画像/工作区网络/攻击链关联/靶场（未发版，alpha.14.0 ISO 仍为 197 工具）",
-    "W82 增补：appctl 控制面适配器 probe/call/task（218 工具，未发版）",
-    "W82b 增补：app_policy_generate/apply（画像→策略 + LSM 下发，fail-closed；本机无 ai LSM 实测拒绝）（220 工具，未发版）",
-    "W82c 增补：device 通道 dev_list/dev_identify/dev_bind/dev_restore（USB 身份+绑定，快照/读回/自动回滚；224 工具，未发版）",
-    "W82d 增补：device 通道 dev_adapt/dev_task（四级递进适配 + 异步任务/进度/取消回滚；226 工具，未发版）",
+    "verification: run_all 58/58, audit W75 CHECK PASS (226 tools/9 domains/20 desktop/seed 243)",
+    "W81+W82 增补未发版（alpha.14.0 ISO 仍为 197 工具）：网络闭环/APP 画像/控制面/画像策略/设备强绑/沙箱收敛",
     "MANIFEST hashes canonical LF checkout bytes"
   ],
   "overlay_count": 168,
@@ -32,11 +28,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 47499893,
-    "regular_files": 1099,
-    "source_files": 1099,
+    "bytes": 47660281,
+    "regular_files": 1103,
+    "source_files": 1103,
     "symlinks": 4,
-    "tracked_files": 1103
+    "tracked_files": 1107
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
