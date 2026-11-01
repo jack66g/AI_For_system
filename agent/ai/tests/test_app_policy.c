@@ -20,6 +20,10 @@
  *   - 注入面探测：空 root 找不到、造一个可写节点能找到；
  *   - 下发状态机（临时文件 sink）：成功、中途写失败回滚、读回不一致
  *     回滚、快照失败零改动；
+ *   - B-117 整批写入（临时文件当节点）：clear+行+commit 恰好一整批、
+ *     单次 write/单次 open（inotify + 哨兵偏移双证）、空策略
+ *     clear+commit、第 65 条/超 16384 字节报错不截断、快照恢复整批、
+ *     errno → 人话（ENOENT/EISDIR/EPERM）；
  *   - 工具级：profile_dynamic=@文件 生成、缺参、apply 在本机 fail-closed
  *     （真机有 ai LSM 时自动跳过该断言）。
  *
@@ -34,6 +38,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/inotify.h>
 
 #include "ai_types.h"
 #include "ai_json_util.h"
@@ -965,6 +970,399 @@ static int tool_call(const char *name, const char *args, char **out, int *rc)
 	return *rc;
 }
 
+/* ------------------------------------------------------------------ */
+/* 6b) B-117：整批写入 + commit（临时文件当节点）                      */
+/* ------------------------------------------------------------------ */
+
+#define NB_SENTINEL_LEN 4000
+
+static void nb_sentinel_fill(const char *path)
+{
+	char *buf = malloc(NB_SENTINEL_LEN + 1);
+	int i;
+
+	if (!buf)
+		return;
+	for (i = 0; i < NB_SENTINEL_LEN; i++)
+		buf[i] = 'X';
+	buf[NB_SENTINEL_LEN] = '\0';
+	put_file(path, buf);
+	free(buf);
+}
+
+static int nb_inotify_start(const char *path)
+{
+	int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+
+	if (fd < 0)
+		return -1;
+	if (inotify_add_watch(fd, path, IN_OPEN | IN_MODIFY |
+			      IN_CLOSE_WRITE) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static void nb_inotify_drain(int fd, int *opens, int *mods, int *closes)
+{
+	char buf[8192] __attribute__((aligned(8)));
+	int round;
+
+	*opens = 0;
+	*mods = 0;
+	*closes = 0;
+	for (round = 0; round < 30; round++) {
+		ssize_t n;
+
+		while ((n = read(fd, buf, sizeof(buf))) > 0) {
+			ssize_t off = 0;
+
+			while (off + (ssize_t)sizeof(struct inotify_event) <=
+			       n) {
+				struct inotify_event *ev =
+					(struct inotify_event *)(buf + off);
+
+				if (ev->mask & IN_OPEN)
+					(*opens)++;
+				if (ev->mask & IN_MODIFY)
+					(*mods)++;
+				if (ev->mask & IN_CLOSE_WRITE)
+					(*closes)++;
+				off += (ssize_t)(sizeof(*ev) + ev->len);
+			}
+		}
+		if (*closes > 0 && *mods > 0)
+			break;
+		usleep(10000);
+	}
+}
+
+static void nb_render_expected(const struct apol_policy *p, char *out,
+			       size_t cap)
+{
+	size_t off = 0;
+	int i;
+
+	out[0] = '\0';
+	off += (size_t)snprintf(out + off, cap - off, "clear\n");
+	for (i = 0; i < p->rule_n && off < cap; i++) {
+		char line[200];
+		int l;
+
+		(void)apol_rule_line(&p->rules[i], line, sizeof(line));
+		l = snprintf(out + off, cap - off, "%s\n", line);
+		if (l < 0)
+			break;
+		off += (size_t)l;
+	}
+	snprintf(out + off, cap - off, "commit\n");
+}
+
+static void test_node_batch(void)
+{
+	struct apol_node_sink_ctx ctx;
+	struct apol_sink sink;
+	struct apol_policy p;
+	struct apol_apply_result res;
+	char err[512] = "";
+	char path[700], expected[2048];
+	char *got = NULL;
+	int i, opens, mods, closes;
+
+	/* 1) 一次 write 写出一整批：clear 开头、每规则一行、commit 结尾 */
+	snprintf(path, sizeof(path), "%s/node-batch.rules", g_tmp);
+	put_file(path, "");
+	apol_sink_node_init(&sink, &ctx, path);
+	CHECK(strcmp(sink.name, "procfs-batch-v2") == 0, "nb-sink-name");
+	CHECK(strcmp(ctx.node, path) == 0, "nb-sink-node");
+	CHECK(apol_policy_parse(k_policy2, &p, err, sizeof(err)) == 0,
+	      "nb-parse");
+	nb_render_expected(&p, expected, sizeof(expected));
+	{
+		int ifd = nb_inotify_start(path);
+
+		CHECK(apol_apply_run(&sink, &p, &res, err, sizeof(err)) == 0,
+		      "nb-apply-ok");
+		if (ifd >= 0) {
+			nb_inotify_drain(ifd, &opens, &mods, &closes);
+			close(ifd);
+			printf("nb-inotify: opens=%d writes=%d close_write=%d\n",
+			       opens, mods, closes);
+			/* 一次 write 的确定性证据：mods/closes 各 1。打开次数受
+			 * fsnotify 合并影响（相邻同 mask 的 IN_OPEN 会合并，实测
+			 * "快照读"与"整批写"两个 open 合成 1 个事件），故 opens
+			 * 只做区间断言；逐行下发会是 mods=N、opens=N+1。 */
+			CHECK(mods == 1, "nb-single-write");
+			CHECK(closes == 1, "nb-single-close-write");
+			CHECK(opens >= 2 && opens <= 3, "nb-no-per-line-open");
+		} else {
+			SKIP("nb-inotify", "inotify 不可用");
+		}
+	}
+	CHECK(res.rules_applied == 2, "nb-applied-2");
+	CHECK(res.readback_ok == 1 && res.readback_matched == 2,
+	      "nb-readback-2");
+	got = slurp(path);
+	CHECK(got && strcmp(got, expected) == 0, "nb-exact-batch");
+	CHECK(got && strncmp(got, "clear\n", 6) == 0, "nb-clear-first");
+	CHECK(got && strstr(got, "\ncommit\n") != NULL, "nb-commit-line");
+	CHECK(got && strcmp(got + strlen(got) - 7, "commit\n") == 0,
+	      "nb-commit-last");
+	CHECK(got && strstr(got, "state:") == NULL, "nb-no-kernel-header");
+	CHECK(got && strstr(got, "path:") == NULL, "nb-no-uri-format");
+	if (got) {
+		char *batch = malloc(strlen(expected) + 1);
+
+		if (batch) {
+			memcpy(batch, got, strlen(expected));
+			batch[strlen(expected)] = '\0';
+			emit("b117-batch-applied.txt", batch);
+			free(batch);
+		}
+	}
+	free(got);
+
+	/* 2) 证明不是「每行一次 open」：旧实现首尾都是 offset 0 覆盖（无
+	 * O_APPEND/O_TRUNC），4000 字节哨兵会被写成只剩最后一行 + 残留；
+	 * 整批写在 offset 0 连续覆盖整批、哨兵尾原样保留。 */
+	snprintf(path, sizeof(path), "%s/node-sentinel.rules", g_tmp);
+	nb_sentinel_fill(path);
+	apol_sink_node_init(&sink, &ctx, path);
+	CHECK(apol_apply_run(&sink, &p, &res, err, sizeof(err)) == 0,
+	      "nb-sentinel-apply");
+	got = slurp(path);
+	if (got) {
+		size_t blen = strlen(expected);
+
+		CHECK(strlen(got) == NB_SENTINEL_LEN, "nb-sentinel-length");
+		CHECK(strncmp(got, expected, blen) == 0,
+		      "nb-sentinel-batch-at-offset0");
+		CHECK(strspn(got + blen, "X") ==
+		      (size_t)(NB_SENTINEL_LEN - (int)blen),
+		      "nb-sentinel-tail-intact");
+		CHECK(strstr(got, "path /etc/ file_read allow\n") != NULL,
+		      "nb-sentinel-all-lines-present");
+	}
+	free(got);
+
+	/* 3) 空策略 → clear + commit（绝不空写） */
+	snprintf(path, sizeof(path), "%s/node-empty.rules", g_tmp);
+	put_file(path, "");
+	apol_sink_node_init(&sink, &ctx, path);
+	CHECK(apol_node_batch_begin(&ctx, err, sizeof(err)) == 0,
+	      "nb-empty-begin");
+	CHECK(ctx.batch_rules == 0 && ctx.batch_len == 0, "nb-empty-staged-0");
+	CHECK(apol_node_batch_commit(&ctx, err, sizeof(err)) == 0,
+	      "nb-empty-commit");
+	got = slurp(path);
+	CHECK(got && strcmp(got, "clear\ncommit\n") == 0, "nb-empty-batch");
+	emit("b117-batch-empty.txt", got);
+	free(got);
+
+	/* 4) 第 65 条规则：本地报错（人话），不写、不截断 */
+	snprintf(path, sizeof(path), "%s/node-65.rules", g_tmp);
+	put_file(path, "");
+	apol_sink_node_init(&sink, &ctx, path);
+	CHECK(apol_node_batch_begin(&ctx, err, sizeof(err)) == 0,
+	      "nb-65-begin");
+	for (i = 0; i < APOL_MAX_RULES; i++) {
+		struct apol_rule r;
+
+		memset(&r, 0, sizeof(r));
+		r.kind = APOL_KIND_PATH;
+		r.op = APOL_OP_FILE_READ;
+		snprintf(r.path_prefix, sizeof(r.path_prefix), "/d%d/", i);
+		if (apol_node_batch_push(&ctx, &r, err, sizeof(err)) != 0) {
+			CHECK(0, "nb-65-push-64");
+			break;
+		}
+	}
+	CHECK(ctx.batch_rules == 64, "nb-65-staged-64");
+	{
+		struct apol_rule r;
+
+		memset(&r, 0, sizeof(r));
+		r.kind = APOL_KIND_PATH;
+		r.op = APOL_OP_FILE_READ;
+		snprintf(r.path_prefix, sizeof(r.path_prefix), "/d64/");
+		err[0] = '\0';
+		CHECK(apol_node_batch_push(&ctx, &r, err, sizeof(err)) == -1,
+		      "nb-65-refused");
+		CHECK(strstr(err, "64") != NULL && strstr(err, "截断") != NULL,
+		      "nb-65-human");
+		CHECK(ctx.batch_rules == 64, "nb-65-not-truncated");
+	}
+	got = slurp(path);
+	CHECK(got && got[0] == '\0', "nb-65-no-write");
+	free(got);
+	{
+		struct apol_policy q;
+
+		memset(&q, 0, sizeof(q));
+		snprintf(q.schema, sizeof(q.schema), "%s", APOL_SCHEMA);
+		q.rule_n = APOL_MAX_RULES + 1;
+		err[0] = '\0';
+		CHECK(apol_apply_run(&sink, &q, &res, err, sizeof(err)) == -1,
+		      "nb-65-policy-refused");
+		CHECK(strstr(err, "rule_overflow") != NULL,
+		      "nb-65-policy-code");
+		CHECK(strstr(err, "64") != NULL, "nb-65-policy-human");
+		got = slurp(path);
+		CHECK(got && got[0] == '\0', "nb-65-policy-no-write");
+		free(got);
+	}
+
+	/* 5) 单批 > 16384 字节：本地报错（内核会 -E2BIG），不分片不截断 */
+	{
+		char aaa[281];
+		char *big = malloc(APOL_MAX_RULES * 320 + 16);
+
+		memset(aaa, 'a', sizeof(aaa) - 1);
+		aaa[sizeof(aaa) - 1] = '\0';
+		if (big) {
+			size_t off = 0;
+			int k;
+
+			for (k = 0; k < 60; k++)
+				off += (size_t)snprintf(big + off,
+					APOL_MAX_RULES * 320 + 16 - off,
+					"path /%s file_read allow\n", aaa);
+			snprintf(path, sizeof(path), "%s/node-big.rules",
+				 g_tmp);
+			put_file(path, "");
+			apol_sink_node_init(&sink, &ctx, path);
+			err[0] = '\0';
+			CHECK(apol_node_batch_begin(&ctx, err,
+						    sizeof(err)) == 0,
+			      "nb-big-begin");
+			CHECK(apol_node_batch_push_snapshot(&ctx, big, err,
+							   sizeof(err)) == -1,
+			      "nb-big-refused");
+			CHECK(strstr(err, "单批过大") != NULL &&
+			      strstr(err, "16384") != NULL, "nb-big-human");
+			err[0] = '\0';
+			CHECK(sink.restore(sink.ctx, big, err,
+					   sizeof(err)) == -1, "nb-big-restore");
+			got = slurp(path);
+			CHECK(got && got[0] == '\0', "nb-big-no-write");
+			free(got);
+			free(big);
+		}
+	}
+
+	/* 6) 回滚：真实内核读回格式的快照 → 模拟下发失败 → restore 必须
+	 * 只把 "# effective" 里的生效规则整批写回（一次 write） */
+	{
+		static const char *k_snap =
+			"# ai_lsm rules v1\n"
+			"state: enabled\n"
+			"lsm: active\n"
+			"version: 7\n"
+			"effective: 2/64 path=2 label=0 pid=0\n"
+			"staged: 0/64 task_labels=0 owner=no clear=no\n"
+			"rejected: 0\n"
+			"commits: 3\n"
+			"label_skipped: 0\n"
+			"last_commit_pid: 4242\n"
+			"# effective\n"
+			"path /old/a/ file_read allow\n"
+			"path /old/b/ file_exec deny\n"
+			"# staged\n"
+			"label 4242 9\n";
+		const char *want =
+			"clear\n"
+			"path /old/a/ file_read allow\n"
+			"path /old/b/ file_exec deny\n"
+			"commit\n";
+		struct apol_rule r;
+		char *snap = NULL;
+		int ifd;
+
+		snprintf(path, sizeof(path), "%s/node-rb.rules", g_tmp);
+		put_file(path, k_snap);
+		apol_sink_node_init(&sink, &ctx, path);
+		CHECK(sink.snapshot(sink.ctx, &snap, err, sizeof(err)) == 0,
+		      "nb-rb-snapshot");
+		memset(&r, 0, sizeof(r));
+		r.kind = APOL_KIND_PATH;
+		r.op = APOL_OP_FILE_READ;
+		snprintf(r.path_prefix, sizeof(r.path_prefix), "/new/");
+		CHECK(sink.add(sink.ctx, &r, err, sizeof(err)) == 0,
+		      "nb-rb-add-staged");
+		/* 模拟整批下发失败：暂存的行没 commit，直接恢复快照。
+		 * 先清空普通文件：procfs 节点没有"文件长度"概念，普通文件
+		 * 不截断会在整批后留下旧快照尾巴，影响逐字节断言。 */
+		put_file(path, "");
+		ifd = nb_inotify_start(path);
+		CHECK(sink.restore(sink.ctx, snap, err, sizeof(err)) == 0,
+		      "nb-rb-restore");
+		if (ifd >= 0) {
+			nb_inotify_drain(ifd, &opens, &mods, &closes);
+			close(ifd);
+			printf("nb-inotify-restore: opens=%d writes=%d "
+			       "close_write=%d\n", opens, mods, closes);
+			CHECK(mods == 1, "nb-rb-single-write");
+			CHECK(opens == 1, "nb-rb-single-open");
+		}
+		got = slurp(path);
+		CHECK(got && strcmp(got, want) == 0, "nb-rb-exact-batch");
+		CHECK(got && strstr(got, "state:") == NULL,
+		      "nb-rb-header-filtered");
+		CHECK(got && strstr(got, "/new/") == NULL, "nb-rb-staged-dropped");
+		emit("b117-batch-restore.txt", got);
+		free(got);
+		free(snap);
+	}
+
+	/* 7) errno → 人话 */
+	CHECK(strstr(apol_node_errno_text(EINVAL), "EINVAL") != NULL,
+	      "nb-err-einval");
+	CHECK(strstr(apol_node_errno_text(EINVAL), "标脏") != NULL,
+	      "nb-err-einval-dirty");
+	CHECK(strstr(apol_node_errno_text(ENOSPC), "64") != NULL,
+	      "nb-err-enospc");
+	CHECK(strstr(apol_node_errno_text(ENODEV), "总闸") != NULL,
+	      "nb-err-enodev");
+	CHECK(strstr(apol_node_errno_text(EPERM), "权限") != NULL,
+	      "nb-err-eperm");
+	CHECK(strstr(apol_node_errno_text(E2BIG), "16384") != NULL,
+	      "nb-err-e2big");
+	CHECK(apol_node_errno_text(12345) == NULL, "nb-err-unknown");
+
+	/* 8) 端到端错误面：节点不存在 / 节点是目录 / 只读节点 */
+	snprintf(path, sizeof(path), "%s/node-missing.rules", g_tmp);
+	unlink(path);
+	apol_sink_node_init(&sink, &ctx, path);
+	err[0] = '\0';
+	CHECK(apol_apply_run(&sink, &p, &res, err, sizeof(err)) == -1,
+	      "nb-noent-fail");
+	CHECK(strstr(err, "-ENOENT") != NULL, "nb-noent-human");
+
+	snprintf(path, sizeof(path), "%s/node-isdir", g_tmp);
+	mkdir(path, 0700);
+	apol_sink_node_init(&sink, &ctx, path);
+	err[0] = '\0';
+	CHECK(apol_apply_run(&sink, &p, &res, err, sizeof(err)) == -1,
+	      "nb-isdir-fail");
+	CHECK(strstr(err, "-EISDIR") != NULL, "nb-isdir-human");
+
+	if (geteuid() != 0) {
+		snprintf(path, sizeof(path), "%s/node-ro.rules", g_tmp);
+		put_file(path, "# ai_lsm rules v1\n# effective\n# staged\n");
+		chmod(path, 0444);
+		apol_sink_node_init(&sink, &ctx, path);
+		err[0] = '\0';
+		CHECK(apol_apply_run(&sink, &p, &res, err, sizeof(err)) == -1,
+		      "nb-ro-fail");
+		CHECK(strstr(err, "-EPERM/-EACCES") != NULL, "nb-ro-human");
+		CHECK(strstr(err, "rollback_failed") != NULL,
+		      "nb-ro-rollback-failed");
+	} else {
+		SKIP("nb-ro", "root 无视文件权限位");
+	}
+}
+
 static void test_tool_generate(void)
 {
 	char dynpath[700], statpath[700], argbuf[1200];
@@ -1165,6 +1563,7 @@ int main(int argc, char **argv)
 	test_render_roundtrip();
 	test_probes();
 	test_apply_machine();
+	test_node_batch();
 	test_tool_generate();
 	test_tool_apply();
 	{

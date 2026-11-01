@@ -20,13 +20,15 @@
  * B. 下发（状态机 + 注入后端抽象）
  *    闸门顺序：策略校验 → 敏感确认（纯策略侧）→ 内核 ai LSM（能力侧）
  *    → 规则注入面 → 下发。任何一道不过都 fail-closed 且不改任何状态。
- *    下发本身：快照 → 逐条 add → 读回校验；任一步失败 restore 快照。
+ *    下发本身：快照 → 逐条暂存 → 一次性整批 write（clear + 行… +
+ *    commit）→ 读回校验；任一步失败 restore 快照（同样整批）。
  *
  * C. 诚实边界（本机实测结论，写进策略 JSON 的 degraded/warnings）
  *    - 当前宿主 LSM 列表没有 ai → apply 必定 fail-closed；
- *    - 即使内核启用 ai，规则注入面当前只有内核内部函数
- *      （ai_lsm_rule_add_path/_label），没有 procfs/sysfs/netlink 写口
- *      → apply 在第三道闸拒绝，并列出探测过的候选；
+ *    - 内核 B-117 起提供 /proc/ai/lsm/rules（0600）批量写口：整批
+ *      "clear + 行… + commit" 必须在同一次 write 内完成（暂存区是
+ *      全局单写者、close 即丢弃），逐行 open→write→close 在新内核
+ *      上一条也提交不上；
  *    - socket_connect/socket_sendmsg 不按路径匹配 → 网络目标不可表达，
  *      只进 allowlist.net 并标 enforceable=false。
  */
@@ -1592,6 +1594,29 @@ int apol_rule_uri(const struct apol_rule *r, char *out, size_t cap)
 			apol_op_name(r->op), r->deny ? "deny" : "allow");
 }
 
+/* 读回文本里是否有与 line 完全相同的一行（容忍尾部 \r / 无结尾换行） */
+static int apol_text_has_line(const char *txt, const char *line)
+{
+	size_t want = strlen(line);
+	const char *p = txt;
+
+	if (!txt || !want)
+		return 0;
+	while (*p) {
+		const char *end = strchr(p, '\n');
+		size_t len = end ? (size_t)(end - p) : strlen(p);
+
+		if (len && p[len - 1] == '\r')
+			len--;
+		if (len == want && memcmp(p, line, len) == 0)
+			return 1;
+		if (!end)
+			break;
+		p = end + 1;
+	}
+	return 0;
+}
+
 int apol_apply_run(struct apol_sink *sink, const struct apol_policy *p,
 		   struct apol_apply_result *res, char *err, size_t errcap)
 {
@@ -1610,6 +1635,12 @@ int apol_apply_run(struct apol_sink *sink, const struct apol_policy *p,
 		 sink->name ? sink->name : "unknown");
 	if (!p || p->rule_n <= 0) {
 		snprintf(err, errcap, "empty_policy|没有可下发的规则");
+		return -1;
+	}
+	if (p->rule_n > APOL_MAX_RULES) {
+		snprintf(err, errcap, "rule_overflow|策略 %d 条规则超过内核 "
+			 "64 槽上限（-ENOSPC，不截断），请减少规则",
+			 p->rule_n);
 		return -1;
 	}
 	if (apol_has_allow_all(p)) {
@@ -1656,13 +1687,18 @@ int apol_apply_run(struct apol_sink *sink, const struct apol_policy *p,
 	}
 	for (i = 0; i < p->rule_n; i++) {
 		char uri[200] = "";
+		char line[APOL_PREFIX_MAX + 64];
 
 		(void)apol_rule_uri(&p->rules[i], uri, sizeof(uri));
-		if (!strstr(rb, uri)) {
+		(void)apol_rule_line(&p->rules[i], line, sizeof(line));
+		/* 读回两种形态都认：本工具的行 URI（单测后端）与内核
+		 * "rules v1" 原文（path <前缀> <op> <allow|deny>） */
+		if (!apol_text_has_line(rb, uri) &&
+		    !apol_text_has_line(rb, line)) {
 			snprintf(res->fail_rule, sizeof(res->fail_rule), "%s",
 				 uri);
 			snprintf(res->fail_why, sizeof(res->fail_why),
-				 "读回校验：未在注入面找到该规则");
+				 "读回校验：未在注入面找到该规则（%s）", line);
 			goto rollback;
 		}
 		res->readback_matched++;
@@ -1694,36 +1730,291 @@ rollback:
 	return -1;
 }
 
-/* ---- 生产注入后端：procfs-line 节点（当前内核未提供该节点） ----
+/* ---- 生产注入后端：procfs 批量节点（B-117：整批 + commit） ----
  *
- * 行协议（本工具定义；内核提供对应节点前不可用）：
- *   path <path_prefix> <op_name> <allow|deny>
- *   label <label_id> <op_name> <allow|deny>
- *   clear
- * 读该节点返回同样的行（读回校验用）。协议不承载 detail/because
- * （内核 detail 字段 64B；可解释性留在 app_policy_generate 的生成物里）。
+ * 内核语义（linux-6.18.39 + ai_lsm b117 补丁，已在 L1 上逐行核对）：
+ *   clear                          清空本批次暂存区（不动生效表）
+ *   path <prefix> <op> <allow|deny>
+ *   label <label_id> <op> <allow|deny>
+ *   pid <pid> <op> <allow|deny>
+ *   commit                         用暂存区整体替换生效表
+ *
+ *   - 暂存区是「全局单写者」：本批次第一条命令认领，close 即释放并清空
+ *     暂存 —— **没有 commit 就 close，整批丢弃**；所以整批必须落在同一
+ *     次 write 里，逐行 open→write→close 一条也提交不上；
+ *   - 任一行非法 → 整批 -EINVAL 并标 poisoned（须重新 clear 才能再下）；
+ *   - 超过 64 槽 → -ENOSPC（内核绝不截断）；
+ *   - 运行时总闸关闭 → -ENODEV；单次 write > 16384 字节 → -E2BIG。
+ *
+ * 因此本后端把 add 变成「追加到 ctx 的批次缓冲」，readback / restore 时
+ * 一次性写出 "clear\n + 全部行 + commit\n"。超限在本地就报错：既不分片
+ * （暂存区跨 open 会丢，分片必然丢前半批），也不静默截断。
+ * 行协议不承载 detail/because（内核 detail 字段 64B），可解释性留在
+ * app_policy_generate 的生成物里。
+ *
+ * 读回是内核的 "rules v1" 文本：头部若干 state:/effective:/commits: 行、
+ * "# effective" 分区（生效表规则行）、"# staged" 分区。快照恢复只回灌
+ * "# effective" 里的规则行，头部统计行回灌会被内核判成非法行。
  */
-static int apol_node_write(void *ctx, const char *line, char *err,
+#define APOL_BATCH_FIXED	(sizeof("clear\n") - 1 + sizeof("commit\n") - 1)
+
+int apol_rule_line(const struct apol_rule *r, char *out, size_t cap)
+{
+	if (!r || !out || cap == 0)
+		return -1;
+	if (r->kind == APOL_KIND_LABEL)
+		return snprintf(out, cap, "label %d %s %s", r->label_id,
+				apol_op_name(r->op),
+				r->deny ? "deny" : "allow");
+	return snprintf(out, cap, "path %s %s %s", r->path_prefix,
+			apol_op_name(r->op), r->deny ? "deny" : "allow");
+}
+
+const char *apol_node_errno_text(int err)
+{
+	switch (err) {
+	case EINVAL:
+		return "-EINVAL：内核拒绝了整批（某行非法），暂存区已标脏，"
+		       "须重新 clear 后整批重下";
+	case ENOSPC:
+		return "-ENOSPC：超过内核 64 槽上限，整批未生效（内核绝不截断）";
+	case ENODEV:
+		return "-ENODEV：AI 运行时总闸关闭（ai.enabled=0），规则注入未启用";
+	case E2BIG:
+		return "-E2BIG：单批超过内核 16384 字节上限，请减少规则";
+	case EPERM:
+	case EACCES:
+		return "-EPERM/-EACCES：权限不足（节点 0600，需 root/"
+		       "CAP_SYS_ADMIN）";
+	case EBUSY:
+		return "-EBUSY：暂存区被另一写者占用（另一进程持有本批次），"
+		       "稍后重试";
+	case ENOENT:
+		return "-ENOENT：注入节点不存在（内核未提供 "
+		       "/proc/ai/lsm/rules）";
+	case EISDIR:
+		return "-EISDIR：注入节点路径是目录，不是可写规则节点";
+	case ENOMEM:
+		return "-ENOMEM：内核内存不足，批次未生效";
+	case EFAULT:
+		return "-EFAULT：内核拷贝批次缓冲失败";
+	default:
+		return NULL;
+	}
+}
+
+static void apol_node_err_put(char *err, size_t errcap, const char *what,
+			      int e)
+{
+	const char *msg = apol_node_errno_text(e);
+
+	if (msg)
+		snprintf(err, errcap, "%s：%s", what, msg);
+	else
+		snprintf(err, errcap, "%s：%s（errno=%d）", what,
+			 strerror(e), e);
+}
+
+int apol_node_batch_begin(struct apol_node_sink_ctx *ctx, char *err,
+			  size_t errcap)
+{
+	if (!ctx) {
+		snprintf(err, errcap, "内部错误：批次上下文为空");
+		return -1;
+	}
+	ctx->batch_len = 0;
+	ctx->batch_rules = 0;
+	return 0;
+}
+
+/* 追加一行（已带结尾换行）。超 64 槽 / 超 16384 字节 → 本地报错，不截断 */
+static int apol_node_batch_append(struct apol_node_sink_ctx *ctx,
+				  const char *line, char *err, size_t errcap)
+{
+	size_t len = strlen(line);
+	size_t need;
+
+	if (ctx->batch_rules >= APOL_MAX_RULES) {
+		snprintf(err, errcap,
+			 "规则超过内核 64 槽上限（已有 %d 条，再加 1 条会整批 "
+			 "-ENOSPC）：本工具不静默截断，请减少规则",
+			 ctx->batch_rules);
+		return -1;
+	}
+	need = ctx->batch_len + len + APOL_BATCH_FIXED;
+	if (need > APOL_NODE_BATCH_MAX) {
+		snprintf(err, errcap,
+			 "单批过大（%zu 字节 > 内核 %d 字节上限）：规则过多，"
+			 "且暂存区跨 open 会丢、不能分片，请减少规则",
+			 need, APOL_NODE_BATCH_MAX);
+		return -1;
+	}
+	memcpy(ctx->batch + ctx->batch_len, line, len);
+	ctx->batch_len += len;
+	ctx->batch_rules++;
+	return 0;
+}
+
+int apol_node_batch_push(struct apol_node_sink_ctx *ctx,
+			 const struct apol_rule *r, char *err, size_t errcap)
+{
+	char line[APOL_PREFIX_MAX + 64];
+	int n;
+
+	if (!ctx || !r) {
+		snprintf(err, errcap, "内部错误：批次上下文或规则为空");
+		return -1;
+	}
+	n = apol_rule_line(r, line, sizeof(line));
+	if (n < 0 || (size_t)n >= sizeof(line) - 1) {
+		snprintf(err, errcap, "规则行过长（%d 字节），无法下发", n);
+		return -1;
+	}
+	line[n++] = '\n';
+	line[n] = '\0';
+	return apol_node_batch_append(ctx, line, err, errcap);
+}
+
+/*
+ * 快照回灌：真实内核读回带 "# effective" / "# staged" 分区，只取生效表
+ * 规则行；没有分区标记时（自产行协议/单测快照）整份非空、非 # 行原样
+ * 回灌。任何非规则行（state:/effective:/commits:）都不回灌 —— 内核会
+ * 把它判成非法行并标脏整批。
+ */
+int apol_node_batch_push_snapshot(struct apol_node_sink_ctx *ctx,
+				  const char *snap, char *err, size_t errcap)
+{
+	int sectioned = snap && strstr(snap, "# effective") != NULL;
+	int in_effective = !sectioned;
+	char *copy, *line, *save = NULL;
+	int rc = 0;
+
+	if (!ctx) {
+		snprintf(err, errcap, "内部错误：批次上下文为空");
+		return -1;
+	}
+	copy = strdup(snap ? snap : "");
+	if (!copy) {
+		snprintf(err, errcap, "内存不足（快照回灌）");
+		return -1;
+	}
+	for (line = strtok_r(copy, "\n", &save); line;
+	     line = strtok_r(NULL, "\n", &save)) {
+		char *s = line;
+		char buf[512];
+		size_t n, l;
+
+		while (*s == ' ' || *s == '\t')
+			s++;
+		n = strlen(s);
+		while (n && (s[n - 1] == '\r' || s[n - 1] == ' ' ||
+			     s[n - 1] == '\t'))
+			s[--n] = '\0';
+		if (s[0] == '#') {
+			if (sectioned) {
+				if (strstr(s, "# effective"))
+					in_effective = 1;
+				else if (strstr(s, "# staged"))
+					in_effective = 0;
+			}
+			continue;
+		}
+		if (!s[0] || (sectioned && !in_effective))
+			continue;
+		l = strlen(s);
+		if (l + 2 > sizeof(buf)) {
+			snprintf(err, errcap, "快照规则行过长（%zu 字节），"
+				 "无法回灌", l);
+			rc = -1;
+			break;
+		}
+		memcpy(buf, s, l);
+		buf[l] = '\n';
+		buf[l + 1] = '\0';
+		rc = apol_node_batch_append(ctx, buf, err, errcap);
+		if (rc != 0)
+			break;
+	}
+	free(copy);
+	return rc;
+}
+
+int apol_node_batch_render(const struct apol_node_sink_ctx *ctx, char *out,
+			   size_t cap)
+{
+	size_t pre = sizeof("clear\n") - 1;
+	size_t post = sizeof("commit\n") - 1;
+	size_t need;
+
+	if (!ctx || !out)
+		return -1;
+	need = pre + ctx->batch_len + post;
+	if (need + 1 > cap)
+		return -1;
+	memcpy(out, "clear\n", pre);
+	memcpy(out + pre, ctx->batch, ctx->batch_len);
+	memcpy(out + pre + ctx->batch_len, "commit\n", post);
+	out[need] = '\0';
+	return (int)need;
+}
+
+/*
+ * 整批下发：一次 open→write→close，写 "clear\n + 行… + commit\n"。
+ * 本地先做 16384 字节上限检查（内核会直接 -E2BIG）；失败不重试、不截断。
+ */
+int apol_node_batch_commit(struct apol_node_sink_ctx *ctx, char *err,
 			   size_t errcap)
 {
-	struct apol_node_sink_ctx *c = ctx;
-	int fd;
-	size_t len = strlen(line);
+	char buf[APOL_NODE_BATCH_MAX + 2];
+	int fd, saved;
 	ssize_t n;
+	int len;
 
-	fd = open(c->node, O_WRONLY | O_CLOEXEC);
+	if (!ctx || !ctx->node[0]) {
+		snprintf(err, errcap, "内部错误：注入节点路径为空");
+		return -1;
+	}
+	len = apol_node_batch_render(ctx, buf, sizeof(buf));
+	if (len < 0) {
+		snprintf(err, errcap, "批次渲染失败（%zu 字节行，超过单批上限）",
+			 ctx->batch_len);
+		return -1;
+	}
+	fd = open(ctx->node, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
-		snprintf(err, errcap, "打开 %s 失败：%s", c->node,
-			 strerror(errno));
+		apol_node_err_put(err, errcap, "打开注入节点失败", errno);
 		return -1;
 	}
-	n = write(fd, line, len);
+	n = write(fd, buf, (size_t)len);
+	saved = errno;
 	close(fd);
-	if (n < 0 || (size_t)n != len) {
-		snprintf(err, errcap, "写 %s 失败：%s", c->node,
-			 n < 0 ? strerror(errno) : "短写");
+	if (n < 0) {
+		apol_node_err_put(err, errcap, "整批下发失败（内核未接收）",
+				  saved);
 		return -1;
 	}
+	if ((size_t)n != (size_t)len) {
+		snprintf(err, errcap, "整批下发短写（%zd/%d 字节）：内核可能"
+			 "只收了前 %zd 字节，须重新 clear 后整批重下", n, len,
+			 n);
+		return -1;
+	}
+	ctx->batch_len = 0;
+	ctx->batch_rules = 0;
+	return 0;
+}
+
+static int apol_node_read_text(void *ctx, char **txt, const char *what,
+			       char *err, size_t errcap)
+{
+	struct apol_node_sink_ctx *c = ctx;
+	char *buf = apol_read_file(c->node, 65536, NULL);
+
+	if (!buf) {
+		apol_node_err_put(err, errcap, what, errno);
+		return -1;
+	}
+	*txt = buf;
 	return 0;
 }
 
@@ -1737,8 +2028,7 @@ static int apol_node_snapshot(void *ctx, char **snap, char *err, size_t errcap)
 			*snap = strdup("");
 			return *snap ? 0 : -1;
 		}
-		snprintf(err, errcap, "读 %s 失败：%s", c->node,
-			 strerror(errno));
+		apol_node_err_put(err, errcap, "快照读取注入节点失败", errno);
 		return -1;
 	}
 	*snap = buf;
@@ -1747,65 +2037,38 @@ static int apol_node_snapshot(void *ctx, char **snap, char *err, size_t errcap)
 
 static int apol_node_clear(void *ctx, char *err, size_t errcap)
 {
-	return apol_node_write(ctx, "clear\n", err, errcap);
+	/* 只清本工具的用户态批次缓冲：内核的 clear 在 commit 时一并写出 */
+	return apol_node_batch_begin(ctx, err, errcap);
 }
 
 static int apol_node_add(void *ctx, const struct apol_rule *r, char *err,
 			 size_t errcap)
 {
-	char line[320];
-
-	if (r->kind == APOL_KIND_LABEL)
-		snprintf(line, sizeof(line), "label %d %s %s\n", r->label_id,
-			 apol_op_name(r->op), r->deny ? "deny" : "allow");
-	else
-		snprintf(line, sizeof(line), "path %s %s %s\n",
-			 r->path_prefix, apol_op_name(r->op),
-			 r->deny ? "deny" : "allow");
-	return apol_node_write(ctx, line, err, errcap);
+	/* 只追加到批次缓冲；真正下发在 readback/restore 时一次 write 完成 */
+	return apol_node_batch_push(ctx, r, err, errcap);
 }
 
 static int apol_node_readback(void *ctx, char **txt, char *err, size_t errcap)
 {
 	struct apol_node_sink_ctx *c = ctx;
-	char *buf = apol_read_file(c->node, 65536, NULL);
 
-	if (!buf) {
-		snprintf(err, errcap, "读回 %s 失败：%s", c->node,
-			 strerror(errno));
+	/* 先把整批（clear + 行… + commit）一次写进节点，再读回生效表 */
+	if (apol_node_batch_commit(c, err, errcap) != 0)
 		return -1;
-	}
-	*txt = buf;
-	return 0;
+	return apol_node_read_text(ctx, txt, "读回注入节点失败", err, errcap);
 }
 
 static int apol_node_restore(void *ctx, const char *snap, char *err,
 			     size_t errcap)
 {
-	char *copy, *line, *save = NULL;
-	int rc = 0;
+	struct apol_node_sink_ctx *c = ctx;
 
-	if (apol_node_clear(ctx, err, errcap) != 0)
+	/* 快照恢复同样走「一次写整批」，绝不逐行 open */
+	if (apol_node_batch_begin(c, err, errcap) != 0)
 		return -1;
-	copy = strdup(snap ? snap : "");
-	if (!copy) {
-		snprintf(err, errcap, "内存不足（快照恢复）");
+	if (apol_node_batch_push_snapshot(c, snap, err, errcap) != 0)
 		return -1;
-	}
-	for (line = strtok_r(copy, "\n", &save); line;
-	     line = strtok_r(NULL, "\n", &save)) {
-		char buf[512];
-
-		if (!line[0])
-			continue;
-		snprintf(buf, sizeof(buf), "%s\n", line);
-		if (apol_node_write(ctx, buf, err, errcap) != 0) {
-			rc = -1;
-			break;
-		}
-	}
-	free(copy);
-	return rc;
+	return apol_node_batch_commit(c, err, errcap);
 }
 
 int apol_sink_node_init(struct apol_sink *sink, struct apol_node_sink_ctx *ctx,
@@ -1814,7 +2077,7 @@ int apol_sink_node_init(struct apol_sink *sink, struct apol_node_sink_ctx *ctx,
 	memset(ctx, 0, sizeof(*ctx));
 	snprintf(ctx->node, sizeof(ctx->node), "%s", node ? node : "");
 	memset(sink, 0, sizeof(*sink));
-	sink->name = "procfs-line-v1";
+	sink->name = "procfs-batch-v2";
 	sink->ctx = ctx;
 	sink->snapshot = apol_node_snapshot;
 	sink->clear = apol_node_clear;

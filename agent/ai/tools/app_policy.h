@@ -65,6 +65,7 @@
 #define APOL_MAX_LINES		10
 #define APOL_MAX_UNRESOLVED	16
 #define APOL_TEXT_MAX		(256 * 1024)
+#define APOL_NODE_BATCH_MAX	16384	/* == AI_LSM_RULES_WRITE_MAX（单次 write 上限） */
 
 /* 规则操作类型：编号必须与内核 enum ai_lsm_op_type 逐项一致 */
 enum apol_op {
@@ -191,7 +192,8 @@ struct apol_inject_info {
 
 /*
  * 注入后端抽象：apply 的状态机（快照→下发→读回→回滚）只依赖本结构，
- * 生产后端是 procfs-line 节点（apol_sink_node），单测后端是临时文件。
+ * 生产后端是 procfs 批量节点（apol_sink_node：整批 write + commit），
+ * 单测后端是临时文件。
  */
 struct apol_sink {
 	const char *name;
@@ -266,6 +268,10 @@ int apol_policy_render_json(const struct apol_policy *p, const char *tool,
  * 或 label:<id>:<op>:<allow|deny>。返回 snprintf 语义的长度。 */
 int apol_rule_uri(const struct apol_rule *r, char *out, size_t cap);
 
+/* 规则的内核行协议原文（不含换行）：path <前缀> <op> <allow|deny>
+ * 或 label <id> <op> <allow|deny>。返回 snprintf 语义的长度。 */
+int apol_rule_line(const struct apol_rule *r, char *out, size_t cap);
+
 /* 策略 JSON → struct（apply 入口的 schema 校验）；0 通过 */
 int apol_policy_parse(const char *json, struct apol_policy *p, char *err,
 		      size_t errcap);
@@ -286,14 +292,37 @@ int apol_inject_probe(const char *root, struct apol_inject_info *info);
 int apol_apply_run(struct apol_sink *sink, const struct apol_policy *p,
 		   struct apol_apply_result *res, char *err, size_t errcap);
 
-/* 生产注入后端（procfs-line 节点）的状态；node=<注入节点路径> */
+/* 生产注入后端（procfs 批量节点）的状态；node=<注入节点路径> */
 struct apol_node_sink_ctx {
 	char node[256];
 	char snapfile[256];
+	/* B-117 批次暂存：add 只追加到这里，readback/restore 时一次 write
+	 * 下发；batch_len 只算规则行（含换行），不含 clear/commit 固定头尾。 */
+	char batch[APOL_NODE_BATCH_MAX];
+	size_t batch_len;
+	int batch_rules;	/* 已暂存规则行数（≤ APOL_MAX_RULES） */
 };
 
 int apol_sink_node_init(struct apol_sink *sink, struct apol_node_sink_ctx *ctx,
 			const char *node);
+
+/* ---- B-117 批次构造（导出供单测逐字节断言） ----
+ * 整批文本恒为 "clear\n" + 规则行… + "commit\n"；空策略就是
+ * "clear\ncommit\n"（仍须 clear+commit 才能清空生效表，绝不空写）。
+ */
+int apol_node_batch_begin(struct apol_node_sink_ctx *ctx, char *err,
+			  size_t errcap);
+int apol_node_batch_push(struct apol_node_sink_ctx *ctx,
+			 const struct apol_rule *r, char *err, size_t errcap);
+int apol_node_batch_push_snapshot(struct apol_node_sink_ctx *ctx,
+				  const char *snap, char *err, size_t errcap);
+int apol_node_batch_commit(struct apol_node_sink_ctx *ctx, char *err,
+			   size_t errcap);
+/* 渲染整批文本（clear + 行… + commit，末尾有 NUL），返回字节数，<0 失败 */
+int apol_node_batch_render(const struct apol_node_sink_ctx *ctx, char *out,
+			   size_t cap);
+/* 内核 errno → 人话（EINVAL/ENOSPC/ENODEV/EPERM/E2BIG/EBUSY…；NULL=不认识） */
+const char *apol_node_errno_text(int err);
 
 /* 执行器入口：app_policy_generate / app_policy_apply（channel=appctl） */
 int exec_app_policy_tool(const char *name, const char *args_json, char **out);
