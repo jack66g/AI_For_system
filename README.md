@@ -8,7 +8,7 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
 "意图被篡改/注入/伪造"，不是给 AI 的能力设上限。**
 
 **先读这一份**：👉 [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md) —— 全系统总介绍
-（三层架构、218 工具面、一次 ask 的完整路径、当前边界）。
+（三层架构、220 工具面、一次 ask 的完整路径、当前边界）。
 
 ## 当前状态（alpha.14.0 基线 + W81 增补，未发版）
 
@@ -17,11 +17,13 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
 - **AI LSM 扩展**：任务级 workspace 标签（blob、fork 继承）+ 三维规则
   （pid > label > path_prefix）+ `socket_connect` / `socket_sendmsg` / `file_permission`
   三个新 hook。修掉多令牌 `lsm=` 只注册首个的根因（`MAX_LSM_COUNT` 未计入内建 `ai`）。
-- **能力面**：⭐ **218 工具 / 24 通道 / 9 能力域 / seed 235**，单一正典 `agent/ai/tools/tools.json`。
+- **能力面**：⭐ **220 工具 / 24 通道 / 9 能力域 / seed 237**，单一正典 `agent/ai/tools/tools.json`。
   （alpha.14.0 发版时为 197/19/214；W81 新增网络意图编译、命中闭环、应用画像、工作区网络、攻击链关联与靶场，共 +18 工具 / +4 通道）
   W79 加 `workspace`（loop+ext4 持久盘）与 `sched`（双调度台）；W80 加 `bpf`
-  （裸 `bpf()` 加载器 + nfqueue 判决）。
-- **回归**：`tests/run_all` **55/55**；能力审计 PASS（gaps P0=0）。
+  （裸 `bpf()` 加载器 + nfqueue 判决）；W82 加 `appctl` 控制面适配器与
+  画像→策略（`app_policy_generate` R/D1 只生成，`app_policy_apply` W2/D3
+  fail-closed：本机无 `ai` LSM 时明确拒绝并报实际 LSM 列表）。
+- **回归**：`tests/run_all` **56/56**；能力审计 PASS（gaps P0=0）。
 - **qemu**：install **6/6**、diskboot **7/7**、contentcheck **58/58**、deskcheck **15/15**。
   真内核实测 `lsm=selinux,ai,bpf` → `capability,selinux,ai,bpf`；overlay CoW 挂载成功。
 - **发布件**：ISO `2f2c6cde7fea1618d2af1f1d5205d9cc`（753,551,360 B）、

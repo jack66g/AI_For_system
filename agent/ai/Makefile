@@ -157,6 +157,7 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/net_range.c \
 	$(TOOLS_DIR)/app_profile.c \
 	$(TOOLS_DIR)/app_ctl.c \
+	$(TOOLS_DIR)/app_policy.c \
 	$(COMM_DIR)/communication.c \
 	$(BACKEND_DIR)/backend.c \
 	$(PROVIDER_DIR)/provider_core.c \

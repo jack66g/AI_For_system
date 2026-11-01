@@ -33,6 +33,7 @@ tests=(
     test_paste_merge test_ask_repair test_memory_degraded_all test_streams test_tls_srv test_macros test_net_admin
     test_sched test_bpf test_net_intent test_net_hit test_app_profile
     test_net_chain test_workspace_net test_range test_app_ctl
+    test_app_policy
 )
 
 pass=0

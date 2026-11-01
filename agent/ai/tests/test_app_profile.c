@@ -605,7 +605,7 @@ static void test_registry(void)
 		free(err);
 		return;
 	}
-	CHECK(reg.tool_count == 218, "registry-218");
+	CHECK(reg.tool_count == 220, "registry-220");
 	t = tool_registry_find(&reg, "app_profile_static");
 	CHECK(t && t->channel == TOOL_CH_APPPROFILE && t->risk &&
 	      strcmp(t->risk, TOOL_RISK_R) == 0, "registry-static-R");

@@ -40,6 +40,7 @@
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
 #include "app_ctl.h"
+#include "app_policy.h"
 
 /* ======================================================================
  * 1) 通用工具
@@ -3973,6 +3974,9 @@ int exec_app_ctl_channel(const void *tool_v, const char *args_json,
 		*out = strdup("ERROR: appctl 调用参数为空");
 		return AI_ERR_INVALID_ARG;
 	}
+	/* W82 V4.5：画像→策略两件走同一 appctl 通道（实现于 app_policy.c） */
+	if (strncmp(tool->name, "app_policy_", 11) == 0)
+		return exec_app_policy_tool(tool->name, args_json, out);
 	if (strcmp(tool->name, "app_ctl_probe") == 0)
 		return ac_tool_probe(args_json, strlen(args_json), out);
 	if (strcmp(tool->name, "app_ctl_call") == 0)

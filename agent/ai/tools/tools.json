@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-01T10:22:38",
+  "generated_at": "2026-11-01T10:57:43",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 218,
-  "tool_names_sha256": "5d20f80535dc05093e3ab64723657ef47d831f4bf4f21ade62a31d9e9805a3b5",
+  "tool_count": 220,
+  "tool_names_sha256": "5c21de40bfd264d7ca4a85f9cf08c4f4c8d1f72fd8fe3740085ea54b7c47fba3",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -29,12 +29,12 @@
     "appprofile": 3,
     "netchain": 2,
     "range": 5,
-    "appctl": 3
+    "appctl": 5
   },
   "risk_counts": {
-    "R": 94,
+    "R": 95,
     "W1": 52,
-    "W2": 71,
+    "W2": 72,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -7127,6 +7127,73 @@
         },
         "required": [
           "backend"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "app_policy_generate",
+      "channel": "appctl",
+      "risk": "R",
+      "description": "画像结论 → 自动策略（R/D1，只生成不落盘、不下发）：输入一个 APP 的静态+动态画像（JSON 或 @文件），或直接给可执行路径（内部依次跑 app_profile_static / app_profile_dynamic）。输出声明式策略 schema=aik-app-policy/1：LSM 规则（kind=path/label、label_id、op 与内核 enum ai_lsm_op_type 同号、deny、path_prefix≤63 字节）+ 按 op 分组的路径白名单 + 每条规则的 because 与 fact{seq,type,path}（哪条画像事实推导出来的，绝不凭空生成）。默认最小权限：只对动态画像实际出现过的路径写 allow，未出现的路径不写规则（由 LSM 默认策略决定），永不生成 allow-all。命中 /etc/shadow、/proc/<pid>/mem、~/.ssh 等危险路径时该规则 DENY + sensitive=true + requires_confirm=true，策略级 requires_confirm 置位。网络目标因内核 socket_connect 只按 pid/label 匹配而不可表达，只进 allowlist.net 并标 enforceable=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "可执行文件绝对路径（如 /usr/bin/curl）；内部依次跑静态/动态画像。与 profile_static/profile_dynamic 至少给一个"
+          },
+          "profile_static": {
+            "type": "string",
+            "description": "静态画像：app_profile_static 的 JSON，或 @绝对路径读文件"
+          },
+          "profile_dynamic": {
+            "type": "string",
+            "description": "动态画像：app_profile_dynamic 的 JSON（含 events 数组），或 @绝对路径读文件；给了就不再内部跑动态画像"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "内部跑动态画像时目标程序的参数（如 [\"--version\"]；仍受 app_profile_dynamic 的参数白名单约束）"
+          },
+          "run_dynamic": {
+            "type": "boolean",
+            "default": true,
+            "description": "没给 profile_dynamic 时是否内部跑动态画像（需要 root + aik-sandbox 工作区；失败则降级为仅静态事实）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "app_policy_apply",
+      "channel": "appctl",
+      "risk": "W2",
+      "description": "策略下发到 AI LSM（W2/D3，fail-closed）：先探测内核 LSM 列表里有没有 ai（/sys/kernel/security/lsm），没有就明确拒绝并原样报出实际 LSM 列表，不做任何改动；有 ai 再探测规则注入节点，没有同样拒绝（绝不伪造成功）。下发前存旧规则快照 → 逐条下发→ 读回校验 → 任一步失败恢复快照。策略含敏感路径命中时，除非 confirm_sensitive=true 否则先要求人工确认。拒绝时输出 refused/changed=false/error_code 与实际状态证据。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "type": "string",
+            "description": "策略 JSON（app_policy_generate 的整包或裸 policy 对象），或 @绝对路径读文件"
+          },
+          "confirm_sensitive": {
+            "type": "boolean",
+            "default": false,
+            "description": "策略含敏感路径命中（sensitive/requires_confirm）时的人工确认；不传则拒绝并要求先确认"
+          }
+        },
+        "required": [
+          "policy"
         ]
       },
       "sub": [

@@ -91,7 +91,7 @@ CH_NETINTENT = "netintent"  # W81 V3.1/V3.2：网络意图 ↔ nft 双向编译�
 CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
 CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
 CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
-CH_APPCTL = "appctl"        # W82 V4.4：控制面适配器（CLI/HTTP 探测·调用·任务，三件）
+CH_APPCTL = "appctl"        # W82 V4.4/V4.5：控制面适配器三件 + 画像→策略两件
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -279,6 +279,9 @@ SUB_MAP = {
     "app_ctl_probe": ["sysadmin"],
     "app_ctl_call": ["sysadmin", "netsec"],
     "app_ctl_task": ["sysadmin", "sandbox"],
+    # ---- W82 V4.5：画像结论 → 自动策略（两件）----
+    "app_policy_generate": ["sysadmin", "netsec"],
+    "app_policy_apply": ["sysadmin", "netsec"],
     # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
     "net_chain_watch": ["netsec"],
     "net_chain_rules": ["netsec"],
@@ -789,7 +792,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 218        # 主表 tools.json（W82 V4.4：215 + 3 控制面）
+EXPECTED_TOOL_COUNT = 220        # 主表 tools.json（W82 V4.5：218 + 2 策略）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -1013,9 +1016,11 @@ EXPECTED_TOOL_NAMES = [
     "range_inject",
     "app_ctl_probe",
     "app_ctl_call",
+    "app_policy_generate",
+    "app_policy_apply",
     "app_ctl_task",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "5d20f80535dc05093e3ab64723657ef47d831f4bf4f21ade62a31d9e9805a3b5"
+EXPECTED_TOOL_NAMES_SHA256 = "5c21de40bfd264d7ca4a85f9cf08c4f4c8d1f72fd8fe3740085ea54b7c47fba3"
 
 
 def manifest_sha256(names):
@@ -4408,6 +4413,39 @@ def appctl_tools():
             "default": 30,
             "description": "单次调用超时秒数（到点 SIGKILL 进程组）"},
     }
+    policy_gen_props = {
+        "app": {
+            "type": "string",
+            "description": "可执行文件绝对路径（如 /usr/bin/curl）；内部"
+            "依次跑静态/动态画像。与 profile_static/profile_dynamic 至少"
+            "给一个"},
+        "profile_static": {
+            "type": "string",
+            "description": "静态画像：app_profile_static 的 JSON，或 @绝对"
+            "路径读文件"},
+        "profile_dynamic": {
+            "type": "string",
+            "description": "动态画像：app_profile_dynamic 的 JSON（含 "
+            "events 数组），或 @绝对路径读文件；给了就不再内部跑动态画像"},
+        "argv": {
+            "type": "array", "items": {"type": "string"},
+            "description": "内部跑动态画像时目标程序的参数（如 "
+            "[\"--version\"]；仍受 app_profile_dynamic 的参数白名单约束）"},
+        "run_dynamic": {
+            "type": "boolean", "default": True,
+            "description": "没给 profile_dynamic 时是否内部跑动态画像"
+            "（需要 root + aik-sandbox 工作区；失败则降级为仅静态事实）"},
+    }
+    policy_apply_props = {
+        "policy": {
+            "type": "string",
+            "description": "策略 JSON（app_policy_generate 的整包或裸 "
+            "policy 对象），或 @绝对路径读文件"},
+        "confirm_sensitive": {
+            "type": "boolean", "default": False,
+            "description": "策略含敏感路径命中（sensitive/"
+            "requires_confirm）时的人工确认；不传则拒绝并要求先确认"},
+    }
     task_props = {
         "action": {
             "type": "string", "enum": ["run", "cancel", "status"],
@@ -4464,6 +4502,33 @@ def appctl_tools():
             "status_code/body），参数中 password/token/secret 等敏感值"
             "在审计里打码；每次调用写全量审计。",
             call_props, ["backend"]),
+        tool_appctl(
+            "app_policy_generate", RISK_R,
+            "画像结论 → 自动策略（R/D1，只生成不落盘、不下发）：输入一个 "
+            "APP 的静态+动态画像（JSON 或 @文件），或直接给可执行路径"
+            "（内部依次跑 app_profile_static / app_profile_dynamic）。输出"
+            "声明式策略 schema=aik-app-policy/1：LSM 规则（kind=path/"
+            "label、label_id、op 与内核 enum ai_lsm_op_type 同号、deny、"
+            "path_prefix≤63 字节）+ 按 op 分组的路径白名单 + 每条规则的 "
+            "because 与 fact{seq,type,path}（哪条画像事实推导出来的，绝不"
+            "凭空生成）。默认最小权限：只对动态画像实际出现过的路径写 "
+            "allow，未出现的路径不写规则（由 LSM 默认策略决定），永不生成 "
+            "allow-all。命中 /etc/shadow、/proc/<pid>/mem、~/.ssh 等危险"
+            "路径时该规则 DENY + sensitive=true + requires_confirm=true，"
+            "策略级 requires_confirm 置位。网络目标因内核 socket_connect "
+            "只按 pid/label 匹配而不可表达，只进 allowlist.net 并标 "
+            "enforceable=false。",
+            policy_gen_props, []),
+        tool_appctl(
+            "app_policy_apply", RISK_W2,
+            "策略下发到 AI LSM（W2/D3，fail-closed）：先探测内核 LSM 列表"
+            "里有没有 ai（/sys/kernel/security/lsm），没有就明确拒绝并原样"
+            "报出实际 LSM 列表，不做任何改动；有 ai 再探测规则注入节点，"
+            "没有同样拒绝（绝不伪造成功）。下发前存旧规则快照 → 逐条下发"
+            "→ 读回校验 → 任一步失败恢复快照。策略含敏感路径命中时，除非 "
+            "confirm_sensitive=true 否则先要求人工确认。拒绝时输出 "
+            "refused/changed=false/error_code 与实际状态证据。",
+            policy_apply_props, ["policy"]),
         tool_appctl(
             "app_ctl_task", RISK_W2,
             "应用控制面声明式任务（W2/D2）：按 steps 顺序执行一串 call "
