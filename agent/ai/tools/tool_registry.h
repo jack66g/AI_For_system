@@ -56,6 +56,7 @@ enum tool_channel {
 	TOOL_CH_RANGE,		/* W81 E2：靶场攻击面（5 件；默认关闭/D3/TTL） */
 	TOOL_CH_APPCTL,		/* W82：控制面适配器（CLI/HTTP 探测·调用·任务，3 件） */
 	TOOL_CH_DEVICE,		/* W82：USB 设备身份 + 绑定控制面（4 件） */
+	TOOL_CH_COMPAT,		/* W82B：V6 应用兼容（探测/适配器/落地/契约，4 件） */
 	TOOL_CH_UNKNOWN,
 };
 

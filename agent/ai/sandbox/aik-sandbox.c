@@ -214,6 +214,10 @@ struct sb_config {
 	int net_none;           /* 1 = CLONE_NEWNET */
 	int cgroup;             /* 1 = 尝试 cgroup */
 	int keep;               /* run --keep */
+	/* W82B（V6 L2）：--usr-overlay —— /usr 改为 overlay 挂载
+	 * （lower=宿主只读 /usr，upper/work 落在 workspace 镜像内）。
+	 * 默认 0：行为与 W79 完全一致（bind_ro）。 */
+	int usr_overlay;
 
 	/* W81d：--net=join:<ns> 加入已存在的具名 netns（工作区 veth 拓扑）。
 	 * 与 net_none 互斥：join 时不在 clone 里新建 NET ns，改为子进程
@@ -1933,6 +1937,7 @@ struct child_args {
 	/* W79：磁盘根 + 声明式 bind（源与目标同绝对路径） */
 	int backing_disk;
 	const char *loopdev;
+	int usr_overlay;                        /* W82B：/usr overlay 视图 */
 	const char *const *ro_paths;
 	int ro_n;
 	const char *const *rw_paths;
@@ -2041,7 +2046,33 @@ static int sandbox_child(void *argp)
 	 *    按沙盒 netns 视图呈现，/sys/kernel/ai 等全局节点照旧可见。
 	 *    无权限时回退宿主 ro bind（并告警）。 */
 	snprintf(path, sizeof(path), "%s/usr", mnt);
-	bind_ro("/usr", path, 0);
+	if (a->usr_overlay) {
+		/* W82B（V6 L2 挂载视图）：/usr 用 overlay 而非 ro bind。
+		 *   lower = 宿主只读 /usr（内容一个字节不改）
+		 *   upper/work = workspace 镜像内的 .aik-compat/
+		 * 适配器把 shim 写进 upper（如 /usr/bin/python4.9），
+		 * 沙盒内 /usr 就长出新文件；宿主 /usr 零写入，workspace
+		 * 销毁时 upper 随镜像一起消失。
+		 * opt-in：未加 --usr-overlay 时仍是原 bind_ro 语义。 */
+		char up[PATH_MAX], work[PATH_MAX];
+		char opt[PATH_MAX * 2 + 64];
+
+		snprintf(up, sizeof(up), "%s/.aik-compat/usr-upper", mnt);
+		snprintf(work, sizeof(work), "%s/.aik-compat/usr-work",
+			 mnt);
+		mkdir_p(up, 0755);
+		mkdir_p(work, 0755);
+		if (!is_dir(up) || !is_dir(work))
+			die(2, "创建 /usr overlay upper/work 失败: %s",
+			    strerror(errno));
+		snprintf(opt, sizeof(opt), "lowerdir=/usr,upperdir=%s,"
+			 "workdir=%s", up, work);
+		if (mount("overlay", path, "overlay",
+			  MS_NOSUID | MS_NODEV, opt))
+			die(2, "挂载 /usr overlay: %s", strerror(errno));
+	} else {
+		bind_ro("/usr", path, 0);
+	}
 	snprintf(path, sizeof(path), "%s/sys", mnt);
 	if (mount("sysfs", path, "sysfs",
 		  MS_RDONLY | MS_NOSUID | MS_NODEV, NULL)) {
@@ -2289,6 +2320,10 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 			return i;
 		if (strcmp(a, "--keep") == 0) {
 			c->keep = 1;
+			continue;
+		}
+		if (strcmp(a, "--usr-overlay") == 0) {
+			c->usr_overlay = 1;
 			continue;
 		}
 		if (strcmp(a, "--no-cgroup") == 0) {
@@ -2831,6 +2866,7 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	a.net_join = cfg.net_join[0] ? cfg.net_join : NULL;
 	a.backing_disk = disk;
 	a.loopdev = cfg.loopdev;
+	a.usr_overlay = cfg.usr_overlay;
 	a.ro_paths = (const char *const *)ro_ptrs;
 	a.ro_n = cfg.ro_n;
 	a.rw_paths = (const char *const *)rw_ptrs;
@@ -3184,6 +3220,8 @@ static void usage(FILE *fp)
 "  --disk-size-mb N 新建镜像容量（16-8192 MB）\n"
 "  --ro-path P      显式只读 bind 宿主路径 P（沙盒内同路径；可重复）\n"
 "  --rw-path P      显式读写 bind 宿主路径 P（可重复）\n"
+"  --usr-overlay    /usr 改为 overlay 视图（upper 在 workspace 内；\n"
+"                   W82B 应用兼容专用，默认关闭）\n"
 "\n"
 "环境变量：AIKERNEL_SANDBOX_CPUS/MEM_MB/PIDS/NET/NO_CGROUP，\n"
 "          AIKERNEL_SANDBOX_ARTIFACTS（宿主产物根，默认\n"

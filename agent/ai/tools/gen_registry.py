@@ -93,6 +93,7 @@ CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（�
 CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
 CH_APPCTL = "appctl"        # W82 V4.4/V4.5：控制面适配器三件 + 画像→策略两件
 CH_DEVICE = "device"        # W82 V5.1..V5.4：USB 设备身份 + 驱动绑定 + 四级适配（六件）
+CH_COMPAT = "compat"        # W82B V6：应用兼容（探测/适配器/落地/契约，四件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -434,6 +435,11 @@ SUB_MAP = {
     "bpf_prog_list": ["netsec"],
     "bpf_prog_unload": ["netsec"],
     "nfqueue_pump": ["netsec"],
+    # ---- W82B V6 应用兼容（四件；适配器是数据，不是代码）----
+    "compat_probe": ["sandbox", "fs"],
+    "compat_generate": ["sandbox", "fs"],
+    "compat_apply": ["sandbox"],
+    "compat_verify": ["sandbox", "sysadmin"],
 }
 
 # ---------------------------------------------------------------------------
@@ -801,7 +807,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 226        # 主表 tools.json（W82 V5.3/V5.4：224 + 2 适配）
+EXPECTED_TOOL_COUNT = 230        # 主表 tools.json（W82B V6：226 + 4 应用兼容）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -1034,8 +1040,12 @@ EXPECTED_TOOL_NAMES = [
     "dev_restore",
     "dev_adapt",
     "dev_task",
+    "compat_probe",
+    "compat_generate",
+    "compat_apply",
+    "compat_verify",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "7c24e0c7734a8409d730c9bc750705be6c25967b77ee60c9d8991af6f84a2afd"
+EXPECTED_TOOL_NAMES_SHA256 = "924313961e12c9aced2648163dcc55256b3a3554bc4d6d454a086ed55d80087d"
 
 
 def manifest_sha256(names):
@@ -4910,6 +4920,152 @@ def range_tools():
     ]
 
 
+
+# ---------------------------------------------------------------------------
+# W82B：V6 应用兼容（compat 通道，四件）
+#
+# 判据（ROADMAP §4.6 V6）：**适配器是数据，不是代码**——AI 产出的是规则
+# + 行为契约，应用本体一个字节都不改。第一版只做两层：
+#   L0 环境适配：路径重映射（shim）/ 环境变量 / 依赖库重定向
+#   L2 运行时隔离：workspace 自带 rootfs 与库 + /usr overlay 挂载视图
+# L1（ABI 翻译：binfmt_misc / seccomp 翻译）明确未实现：探测到架构不同
+# 或 32 位缺 loader 时标 layer=L1 / adaptable=false，绝不假装能修。
+#
+# 诚实边界：compat_probe 只做静态判定（不执行目标）；真实试跑只发生在
+# compat_apply 的 workspace 内；compat_verify 的契约必须含负向用例，
+# "返回 0 但输出为空"必须判不合格——防"把 ENOSYS 包装成成功"。
+# ---------------------------------------------------------------------------
+def tool_compat_probe():
+    return {
+        "name": "compat_probe",
+        "channel": CH_COMPAT,
+        "risk": RISK_R,
+        "description": "探测一个目标在本机为什么跑不起来（D0 只读，静态"
+                       "判定，不执行目标）：ELF 头（e_machine/位宽/OSABI/"
+                       "PT_INTERP）、DT_NEEDED 逐个在 LD_LIBRARY_PATH/"
+                       "RUNPATH/多架构目录里解析、脚本 shebang 链（含 "
+                       "#!/usr/bin/env 风格与解释器本身是脚本的下钻）、"
+                       "同族解释器候选（/usr/bin 等按前缀扫描）、执行位/"
+                       "可读性。每条 fatal 原因给 code/layer/fatal/"
+                       "adaptable/detail/evidence[]；缺解释器/缺库 → "
+                       "layer=L0 可适配；架构不同/32 位缺 loader → "
+                       "layer=L1 明确标注不可适配（v0 不做 ABI 翻译）。",
+        "parameters": obj_schema(
+            {"target": {"type": "string",
+                        "description": "宿主绝对路径（可执行/脚本；目录只"
+                                       "诊断不自动挑入口）"}},
+            ["target"]),
+    }
+
+
+def tool_compat_generate():
+    return {
+        "name": "compat_generate",
+        "channel": CH_COMPAT,
+        "risk": RISK_W1,
+        "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑"
+                       "同一套 probe，再把结论编译成声明式规则——L0 "
+                       "path_map（路径重映射 shim）/ env（环境变量）/ "
+                       "lib_redirect（库重定向）/ chmod（workspace 副本"
+                       "补位，宿主原件权限不动）；L2（workspace + stage + "
+                       "install + /usr overlay 挂载视图）；contract（退出"
+                       "码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹"
+                       "关键项 + 三类负向用例）；rollback（stage 与 upper "
+                       "shim 路径）。每条规则强制带 because，缺 because 拒绝"
+                       "应用。interpreter_map/lib_sources 可显式指定来源；"
+                       "探测到缺解释器/缺库但给不出来源时诚实失败，不猜。",
+        "parameters": obj_schema(
+            {"name": {"type": "string",
+                      "description": "适配器名（[A-Za-z0-9_.-]{1,32}，首字符"
+                                     "非 . / -）"},
+             "target": {"type": "string",
+                        "description": "宿主绝对路径（可执行/脚本文件）"},
+             "workspace": {"type": "string",
+                           "description": "可选：L2 workspace 名（默认 "
+                                          "cmp-<name>）"},
+             "interpreter_map": {"type": "object",
+                                 "description": "可选：{解释器路径或名字: "
+                                                "替代解释器绝对路径}"},
+             "lib_sources": {"type": "object",
+                             "description": "可选：{soname: 宿主库文件绝对"
+                                            "路径}"},
+             "env": {"type": "object",
+                     "description": "可选：{KEY: VALUE} 注入变量"},
+             "expect": {"type": "object",
+                        "description": "可选：{exit_code, stdout_contains"
+                                       ":[...], stderr_not_contains:[...],"
+                                       " max_ms}"},
+             "argv": {"type": "array", "items": {"type": "string"},
+                      "description": "可选：传给目标的参数（不含 argv[0]）"},
+             "timeout_s": {"type": "integer",
+                           "description": "试跑超时秒（1-600，默认 10）",
+                           "minimum": 1, "maximum": 600, "default": 10},
+             "write": {"type": "boolean",
+                       "description": "是否落盘（默认 true；false=只回显）",
+                       "default": True}},
+            ["name", "target"]),
+    }
+
+
+def tool_compat_apply():
+    return {
+        "name": "compat_apply",
+        "channel": CH_COMPAT,
+        "risk": RISK_W2,
+        "description": "在 workspace 内落地适配器并试跑一次（D2 高危写）："
+                       "workspace 不存在则按 disk backend 新建（记 created "
+                       "以便回滚）；目标复制进 stage、库复制进 stage/lib、"
+                       "shim 写进 /.aik-compat/usr-upper（overlay upper，"
+                       "落在 workspace 镜像内）；随后带 L0 env + L2 /usr "
+                       "overlay 试跑 contract.argv。试跑未过非轨迹断言 → "
+                       "立即回滚（删 stage/shim，本次新建的 workspace 一并"
+                       "销毁）并报失败，绝不留半成品。目标原件、宿主 "
+                       "/usr、/etc 零写入。rollback=true 时执行回滚（幂等）。",
+        "parameters": obj_schema(
+            {"name": {"type": "string", "description": "适配器名"},
+             "workspace": {"type": "string",
+                           "description": "可选：覆盖适配器声明的 workspace"},
+             "rollback": {"type": "boolean",
+                          "description": "true=只做回滚（删 stage/shim，"
+                                         "本次 apply 新建的 workspace 销毁）",
+                          "default": False}},
+            ["name"]),
+    }
+
+
+def tool_compat_verify():
+    return {
+        "name": "compat_verify",
+        "channel": CH_COMPAT,
+        "risk": RISK_W1,
+        "description": "跑行为契约（D1，必须已 apply）：正例跑一次并逐条"
+                       "判定退出码/stdout 非空/stdout 含/stderr 不含/耗时"
+                       "上限/syscall 轨迹（strace 在宿主侧包 aik-sandbox，"
+                       "轨迹在 workspace 内产生）；再跑三类负向自检——"
+                       "stdout 丢空（stdout 断言必须判负）、强制 exit 97"
+                       "（退出码断言必须判负）、不带任何适配跑同一目标"
+                       "（契约必须判负）。任一不过、或负向自检被放过 → "
+                       "ok=false 并给逐条 diff。strace 不可用时判『不可"
+                       "验证』而不是靜默放过。",
+        "parameters": obj_schema(
+            {"name": {"type": "string", "description": "适配器名"},
+             "trace": {"type": "boolean",
+                       "description": "是否采集 syscall 轨迹（默认 true；"
+                                      "false 时含轨迹断言的契约判不可验证）",
+                       "default": True}},
+            ["name"]),
+    }
+
+
+def compat_tools():
+    return [
+        tool_compat_probe(),
+        tool_compat_generate(),
+        tool_compat_apply(),
+        tool_compat_verify(),
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -4982,6 +5138,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(appctl_tools())
     # W82 V5.1/V5.2：USB 设备身份 + 驱动绑定四件（追加在清单末尾）
     tools.extend(device_tools())
+    # W82B V6：应用兼容四件（追加在清单末尾；锚点同步）
+    tools.extend(compat_tools())
     return tools
 
 

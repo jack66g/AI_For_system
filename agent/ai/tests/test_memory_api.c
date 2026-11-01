@@ -281,7 +281,7 @@ int main(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 226, "注册表总数 226");
+	CHECK(reg.tool_count == 230, "注册表总数 230");
 	{
 		int mem = 0;
 		const struct ai_tool *t;

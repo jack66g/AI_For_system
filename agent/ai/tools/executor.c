@@ -71,6 +71,7 @@
 #include "app_profile.h"
 #include "app_ctl.h"
 #include "device_tools.h"
+#include "compat_tools.h"
 #include "net_chain.h"
 #include "net_range.h"
 #include "workspace_tools.h"
@@ -5904,6 +5905,9 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 	case TOOL_CH_DEVICE:
 		rc = exec_device_channel(tool, args_json, out);
 		break;
+	case TOOL_CH_COMPAT:
+		rc = exec_compat_channel(tool, args_json, out);
+		break;
 	case TOOL_CH_CLARIFY:
 		/* W77c：澄清只能由 ask 交互层处理；通用执行器即使被误调
 		 * 也绝不提问/建租约/执行动作。 */
@@ -5950,6 +5954,8 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		   "appctl（控制面：probe/call/task，CLI execv+回环 HTTP）" :
 		   tool->channel == TOOL_CH_DEVICE ?
 		   "device（USB 身份 + 驱动绑定，快照/读回/自动回滚）" :
+		   tool->channel == TOOL_CH_COMPAT ?
+		   "compat（V6 应用兼容：probe/适配器数据/workspace 落地/行为契约）" :
 		   tool->channel == TOOL_CH_MODEL ? "model" : "memory",
 		   args_json,
 		   g_mem_degraded ? "degraded" :

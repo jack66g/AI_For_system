@@ -224,3 +224,7 @@ dev_bind 先校验目标是非 hu
 dev_restore 读取 dev_bind 落盘
 dev_adapt L1 已在树驱动 new_i
 dev_task action=status 返回任
+compat_probe ELF 头（e_machine/位
+compat_generate 先跑同一套 probe，
+compat_apply workspace 不存在则
+compat_verify 正例跑一次并逐条

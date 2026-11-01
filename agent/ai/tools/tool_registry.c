@@ -85,6 +85,8 @@ enum tool_channel tool_channel_from_str(const char *s)
 		return TOOL_CH_APPCTL;
 	if (strcmp(s, "device") == 0)
 		return TOOL_CH_DEVICE;
+	if (strcmp(s, "compat") == 0)
+		return TOOL_CH_COMPAT;
 	return TOOL_CH_UNKNOWN;
 }
 
@@ -95,7 +97,7 @@ static const char *channel_str(enum tool_channel ch)
 		"exec", "memory", "shell", "sandbox", "sysctl", "sysfs",
 		"desktop", "interaction", "model", "stream", "macro",
 		"netadmin", "workspace", "sched", "bpf", "netintent",
-		"appprofile", "netchain", "range", "appctl", "device",
+		"appprofile", "netchain", "range", "appctl", "device", "compat",
 		"unknown",
 	};
 

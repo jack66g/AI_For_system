@@ -8,7 +8,7 @@
  *     （192.168.245.1 / 8.8.8.8 / 清单外 / 声明外）全部拒绝并留审计。
  *   - 纯函数：CIDR/端口/payload hex/状态往返/惰性过期。
  *   - watchdog：合成 2 秒到期状态 → 自动关闭（不等待 1 分钟）。
- *   - 注册表：5 件工具、channel=range、总数 226。
+ *   - 注册表：5 件工具、channel=range、总数 230。
  *   - 策略：range_status=D0 / disable=D1 / enable+scan+inject=D3。
  *
  * --boundary：打印第一步边界场景的完整命令/输出/审计（证据用）。
@@ -498,8 +498,8 @@ static void test_registry(void)
 		p++;
 	}
 	CHECK(n == 5, "registry-rate-5-range-tools");
-	CHECK(strstr(buf, "\"tool_count\": 226") != NULL,
-	      "registry-tool-count-226");
+	CHECK(strstr(buf, "\"tool_count\": 230") != NULL,
+	      "registry-tool-count-230");
 	CHECK(strstr(buf, "\"range\": 5") != NULL,
 	      "registry-channel-count-range-5");
 	CHECK(strstr(buf, "\"name\": \"range_status\"") != NULL,

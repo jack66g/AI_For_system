@@ -25,6 +25,7 @@
 
 #include <stddef.h>
 #include <signal.h>
+#include <limits.h>
 
 /* 纯函数（导出供单测；不触碰文件系统） */
 int ai_ws_valid_name(const char *s);
@@ -63,6 +64,35 @@ int exec_workspace_channel(const void *tool, const char *args_json,
  */
 int ai_ws_ensure(const char *name, int net_none, long long size_mb,
 		 char **out, int *created);
+
+/*
+ * W82B（V6）：compat 通道需要「按指定 backend 建工作区」+「只读元数据
+ * 视图」。不复制生命周期逻辑：两条入口都直接复用 ws_cmd_create /
+ * ws_meta_read，保证与 workspace_create 单一实现。
+ *
+ *   ai_ws_ensure_backing  同 ai_ws_ensure，但 backing 可指定 disk/tmpfs
+ *                         （compat 的适配器 workspace 必须是 disk：要跨
+ *                         apply/verify 两次调用持久）。
+ *   ai_ws_info_get        读元数据：backing/image/限额/net/net_ns；不存在
+ *                         返回 -1。调用方据此组装 aik-sandbox argv
+ *                         （compat 要额外加 --usr-overlay，不能走
+ *                         ws_build_run_argv 的固定参数面）。
+ */
+int ai_ws_ensure_backing(const char *name, const char *backing,
+			 long long size_mb, int net_none, char **out,
+			 int *created);
+
+struct ai_ws_info {
+	char backing[16];       /* "disk" | "tmpfs" */
+	char image[PATH_MAX];   /* backing=disk 时的镜像绝对路径 */
+	int  cpus_x100;
+	long mem_mb;
+	long pids_max;
+	char net[16];           /* "none" | "host" | "veth" */
+	char net_ns[64];        /* net=veth 时的 netns 名 */
+};
+
+int ai_ws_info_get(const char *name, struct ai_ws_info *out);
 int ai_ws_meta_net(const char *name, int *net_none, char *backing,
 		   size_t cap);
 int ai_ws_destroy(const char *name, char **out);

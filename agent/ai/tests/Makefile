@@ -28,11 +28,10 @@ TESTS   := test_workspace test_utf8_body test_http_retry test_cloud_stream test_
 	   test_onboarding_cloud test_clarify test_streams test_macros test_net_admin test_tls_srv \
 	   test_sched test_bpf test_net_intent test_net_hit test_app_profile \
 	   test_net_chain test_workspace_net test_range test_app_ctl \
-	   test_app_policy test_device_tools test_workspace_backend
+	   test_app_policy test_device_tools test_workspace_backend test_compat
 
 # W65：Makefile 头依赖回归（shell 脚本，clean 不得删除）
 DEPS_TEST := test_make_deps.sh
-
 all: $(TESTS)
 
 test_utf8_body: test_utf8_body.c $(RUNTIME)
@@ -104,7 +103,7 @@ test_toolname_map: test_toolname_map.c $(RUNTIME)
 
 # W42: sandbox 通道（隔离区+子智能体）——executor/tool_registry 真实现
 # + netlink/SME/策略闸门桩（mock 进程级：mock aik-sandbox + mock ai）
-SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/net_range.c ../tools/app_profile.c ../tools/app_ctl.c ../tools/app_policy.c ../tools/device_tools.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+SB_EXEC_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/net_range.c ../tools/app_profile.c ../tools/app_ctl.c ../tools/app_policy.c ../tools/device_tools.c ../tools/compat_tools.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		 ../policy/ai_lease.c \
@@ -118,6 +117,13 @@ test_sandbox_tools: test_sandbox_tools.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 # 真机持久性由 sudo ./test_workspace --live 走真 aik-sandbox 验证）
 test_workspace: test_workspace.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_workspace.c \
+		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# W82B：V6 应用兼容（probe/generate/apply/verify）。默认非 root 只测纯函数/
+# 静态探测/注册表接线/诚实错误；真 workspace + /usr overlay + 行为契约由
+# sudo ./test_compat --live 验证（构造样本 A/B，含负向契约自检）。
+test_compat: test_compat.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_compat.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
 
 # W81d：工作区网络（net=veth）。默认非 root 只测纯函数/注册表/元数据往返/
@@ -275,7 +281,7 @@ test_memory_api: test_memory_api.c $(SME_SRCS) ../tools/tool_registry.c \
 
 # W66：30 件 memory_* 全量降级 + 超时/HTTP500/路径白名单/Unicode/长文本
 # （executor/tool_registry/sme_client/local_http 全真；netlink/policy 桩）
-MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/net_range.c ../tools/app_profile.c ../tools/app_ctl.c ../tools/app_policy.c ../tools/device_tools.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
+MEM_ALL_SRCS := ../tools/executor.c ../tools/macro_tools.c ../tools/net_admin.c ../tools/net_intent.c ../tools/net_hit.c ../tools/net_chain.c ../tools/net_range.c ../tools/app_profile.c ../tools/app_ctl.c ../tools/app_policy.c ../tools/device_tools.c ../tools/compat_tools.c ../tools/workspace_tools.c ../tools/sched_tools.c ../tools/bpf_tools.c ../runtime/netlink/ai_streams.c ../tools/tool_registry.c \
 	 ../config/config_manager.c \
 	 ../shell/commands/model_lifecycle.c \
 		../policy/ai_lease.c \

@@ -8,7 +8,7 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
 "意图被篡改/注入/伪造"，不是给 AI 的能力设上限。**
 
 **先读这一份**：👉 [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md) —— 全系统总介绍
-（三层架构、226 工具面、一次 ask 的完整路径、当前边界）。
+（三层架构、230 工具面、一次 ask 的完整路径、当前边界）。
 
 ## 当前状态（alpha.14.0 基线 + W81/W82 增补，未发版）
 
@@ -17,7 +17,7 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
 - **AI LSM 扩展**：任务级 workspace 标签（blob、fork 继承）+ 三维规则
   （pid > label > path_prefix）+ `socket_connect` / `socket_sendmsg` / `file_permission`
   三个新 hook。修掉多令牌 `lsm=` 只注册首个的根因（`MAX_LSM_COUNT` 未计入内建 `ai`）。
-- **能力面**：⭐ **226 工具 / 25 通道 / 9 能力域 / seed 243**，单一正典 `agent/ai/tools/tools.json`。
+- **能力面**：⭐ **230 工具 / 26 通道 / 9 能力域 / seed 247**，单一正典 `agent/ai/tools/tools.json`。
   （alpha.14.0 发版时为 197/19/214；W81 新增网络意图编译、命中闭环、应用画像、工作区网络、攻击链关联与靶场，共 +18 工具 / +4 通道）
   W79 加 `workspace`（loop+ext4 持久盘）与 `sched`（双调度台）；W80 加 `bpf`
   （裸 `bpf()` 加载器 + nfqueue 判决）；W82 加 `appctl` 控制面适配器与

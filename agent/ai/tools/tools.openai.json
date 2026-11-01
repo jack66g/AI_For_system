@@ -6366,5 +6366,154 @@
         "sysadmin"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_probe",
+      "description": "探测一个目标在本机为什么跑不起来（D0 只读，静态判定，不执行目标）：ELF 头（e_machine/位宽/OSABI/PT_INTERP）、DT_NEEDED 逐个在 LD_LIBRARY_PATH/RUNPATH/多架构目录里解析、脚本 shebang 链（含 #!/usr/bin/env 风格与解释器本身是脚本的下钻）、同族解释器候选（/usr/bin 等按前缀扫描）、执行位/可读性。每条 fatal 原因给 code/layer/fatal/adaptable/detail/evidence[]；缺解释器/缺库 → layer=L0 可适配；架构不同/32 位缺 loader → layer=L1 明确标注不可适配（v0 不做 ABI 翻译）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "宿主绝对路径（可执行/脚本；目录只诊断不自动挑入口）"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_generate",
+      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。interpreter_map/lib_sources 可显式指定来源；探测到缺解释器/缺库但给不出来源时诚实失败，不猜。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名（[A-Za-z0-9_.-]{1,32}，首字符非 . / -）"
+          },
+          "target": {
+            "type": "string",
+            "description": "宿主绝对路径（可执行/脚本文件）"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "可选：L2 workspace 名（默认 cmp-<name>）"
+          },
+          "interpreter_map": {
+            "type": "object",
+            "description": "可选：{解释器路径或名字: 替代解释器绝对路径}"
+          },
+          "lib_sources": {
+            "type": "object",
+            "description": "可选：{soname: 宿主库文件绝对路径}"
+          },
+          "env": {
+            "type": "object",
+            "description": "可选：{KEY: VALUE} 注入变量"
+          },
+          "expect": {
+            "type": "object",
+            "description": "可选：{exit_code, stdout_contains:[...], stderr_not_contains:[...], max_ms}"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选：传给目标的参数（不含 argv[0]）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "description": "试跑超时秒（1-600，默认 10）",
+            "minimum": 1,
+            "maximum": 600,
+            "default": 10
+          },
+          "write": {
+            "type": "boolean",
+            "description": "是否落盘（默认 true；false=只回显）",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "target"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_apply",
+      "description": "在 workspace 内落地适配器并试跑一次（D2 高危写）：workspace 不存在则按 disk backend 新建（记 created 以便回滚）；目标复制进 stage、库复制进 stage/lib、shim 写进 /.aik-compat/usr-upper（overlay upper，落在 workspace 镜像内）；随后带 L0 env + L2 /usr overlay 试跑 contract.argv。试跑未过非轨迹断言 → 立即回滚（删 stage/shim，本次新建的 workspace 一并销毁）并报失败，绝不留半成品。目标原件、宿主 /usr、/etc 零写入。rollback=true 时执行回滚（幂等）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "可选：覆盖适配器声明的 workspace"
+          },
+          "rollback": {
+            "type": "boolean",
+            "description": "true=只做回滚（删 stage/shim，本次 apply 新建的 workspace 销毁）",
+            "default": false
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_verify",
+      "description": "跑行为契约（D1，必须已 apply）：正例跑一次并逐条判定退出码/stdout 非空/stdout 含/stderr 不含/耗时上限/syscall 轨迹（strace 在宿主侧包 aik-sandbox，轨迹在 workspace 内产生）；再跑三类负向自检——stdout 丢空（stdout 断言必须判负）、强制 exit 97（退出码断言必须判负）、不带任何适配跑同一目标（契约必须判负）。任一不过、或负向自检被放过 → ok=false 并给逐条 diff。strace 不可用时判『不可验证』而不是靜默放过。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名"
+          },
+          "trace": {
+            "type": "boolean",
+            "description": "是否采集 syscall 轨迹（默认 true；false 时含轨迹断言的契约判不可验证）",
+            "default": true
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "sysadmin"
+      ]
+    }
   }
 ]

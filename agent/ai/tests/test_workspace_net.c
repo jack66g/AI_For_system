@@ -7,7 +7,7 @@
  *     port、注入字符一律拒绝；
  *   - 命名派生：netns=aikws-<name>、表=aik_ws_<name>、veth=aikv/aikc<hash>
  *     （IFNAMSIZ<=15，确定性）；
- *   - 注册表接线：226 件、workspace 通道 8 件、新增两件的 risk/sub；
+ *   - 注册表接线：230 件、workspace 通道 8 件、新增两件的 risk/sub；
  *   - 危险分级：workspace_net_allow=D2、workspace_net_status=D0；
  *   - 元数据往返：net=veth + net_ns/net_ip/allow 行解析；
  *   - 诚实错误：不存在的工作区 → NOT_FOUND；net 非法 → INVALID_ARG；
@@ -162,7 +162,7 @@ static void test_registry(struct tool_registry *reg)
 		"W1", "R", "R", "W2", "W1", "W1", "W2", "R",
 	};
 
-	CHECK(reg->tool_count == 226, "注册表总数 226（W82：215 + 3 控制面 + 2 策略 + 2 适配）");
+	CHECK(reg->tool_count == 230, "注册表总数 230（W82B：226 + 4 应用兼容）");
 	for (i = 0; i < reg->tool_count; i++)
 		if (reg->tools[i].channel == TOOL_CH_WORKSPACE)
 			ws++;

@@ -3686,8 +3686,14 @@ static int ws_cmd_quota(const char *args_json, char **out)
  * W81c：应用画像复用入口（见 workspace_tools.h）。
  * ai_ws_ensure 只在工作区不存在时建 tmpfs 工作区（不覆盖既有状态）。
  */
-int ai_ws_ensure(const char *name, int net_none, long long size_mb,
-		 char **out, int *created)
+/*
+ * W82B（V6）：backing 可指定版本。compat 的适配器 workspace 必须是
+ * disk（apply 落地的东西要跨 verify 那次调用持久），但生命周期与
+ * workspace_create 完全同一条实现——这里只多传一个 backing 字段。
+ */
+int ai_ws_ensure_backing(const char *name, const char *backing,
+			 long long size_mb, int net_none, char **out,
+			 int *created)
 {
 	struct ws_meta m;
 	char args[512];
@@ -3704,6 +3710,14 @@ int ai_ws_ensure(const char *name, int net_none, long long size_mb,
 			*o = NULL;
 		return AI_ERR_INVALID_ARG;
 	}
+	if (!backing || !backing[0])
+		backing = "tmpfs";
+	if (strcmp(backing, "disk") != 0 && strcmp(backing, "tmpfs") != 0) {
+		if (asprintf(o, "ERROR: 非法 backing='%s'（disk|tmpfs）",
+			     backing) < 0)
+			*o = NULL;
+		return AI_ERR_INVALID_ARG;
+	}
 	if (ws_meta_read(name, &m) == 0)
 		return AI_OK;
 	if (size_mb <= 0)
@@ -3711,14 +3725,42 @@ int ai_ws_ensure(const char *name, int net_none, long long size_mb,
 	if (size_mb < WS_MIN_MB)
 		size_mb = WS_MIN_MB;
 	snprintf(args, sizeof(args),
-		 "{\"name\":\"%s\",\"backing\":\"tmpfs\",\"size_mb\":%lld,"
-		 "\"net\":\"%s\"}", name, size_mb,
+		 "{\"name\":\"%s\",\"backing\":\"%s\",\"size_mb\":%lld,"
+		 "\"net\":\"%s\"}", name, backing, size_mb,
 		 net_none ? "none" : "host");
 	rc = ws_cmd_create(args, o);
 	if (rc == AI_OK && created)
 		*created = 1;
 	free(discard);
 	return rc;
+}
+
+int ai_ws_ensure(const char *name, int net_none, long long size_mb,
+		 char **out, int *created)
+{
+	return ai_ws_ensure_backing(name, "tmpfs", size_mb, net_none, out,
+				    created);
+}
+
+/* W82B：compat 组装 aik-sandbox argv 时需要的只读元数据视图 */
+int ai_ws_info_get(const char *name, struct ai_ws_info *out)
+{
+	struct ws_meta m;
+
+	if (!out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	if (!ai_ws_valid_name(name) || ws_meta_read(name, &m))
+		return -1;
+	snprintf(out->backing, sizeof(out->backing), "%s", m.backing);
+	snprintf(out->image, sizeof(out->image), "%s", m.image);
+	out->cpus_x100 = m.cpus_x100;
+	out->mem_mb = m.mem_mb;
+	out->pids_max = m.pids_max;
+	snprintf(out->net, sizeof(out->net), "%s",
+		 ws_net_mode_str(m.net_mode));
+	snprintf(out->net_ns, sizeof(out->net_ns), "%s", m.net_ns);
+	return 0;
 }
 
 int ai_ws_meta_net(const char *name, int *net_none, char *backing,
