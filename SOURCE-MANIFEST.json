@@ -1,6 +1,6 @@
 {
-  "created": "2026-11-01T16:30:37+08:00",
-  "kernel": "6.18.39 #61",
+  "created": "2026-11-01T19:48:27+08:00",
+  "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
     "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",

@@ -1,6 +1,6 @@
 # AIKernel — AI 主体接管 Linux 的控制系统
 
-> 版本：**0.1.0-alpha.14.0** · 内核 **Linux 6.18.39 #61**（GPL-2.0）
+> 版本：**0.1.0-alpha.14.0**（发布 ISO 仍为内核 **#61**）· 内核源码 **Linux 6.18.39 #62**（B-117 注入面，未发版）（GPL-2.0）
 > 仓库定位：可审计的**纯源码基线**——不包含 ISO、rootfs 镜像、构建产物、证据日志或任何密钥。
 
 AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、租约/确认/审计，
@@ -10,7 +10,7 @@ AIKernel 把 Linux 内核当作被管理对象：AI 通过统一能力总线、�
 **先读这一份**：👉 [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md) —— 全系统总介绍
 （三层架构、230 工具面、一次 ask 的完整路径、当前边界）。
 
-## 当前状态（alpha.14.0 基线 + W81/W82 增补，未发版）
+## 当前状态（alpha.14.0 基线 + W81/W82/W82B 增补，内核源码 #62，未发版）
 
 - **内核 #61**：`bzImage` 19,489,792 B，md5 `e4f6dbeac8eeb006abcb17c0871cf9e8`，0 error。
   新增 `OVERLAY_FS` / `NETFILTER_ADVANCED`+`NFQUEUE` / `BPF_LSM` / `CGROUP_BPF` 共 8 个 `=y`。
