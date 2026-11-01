@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-01T06:00:28",
+  "generated_at": "2026-11-01T10:22:38",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 215,
-  "tool_names_sha256": "f157db1afd5f9058c001b02973535469040c473196402f02002392e5235b67da",
+  "tool_count": 218,
+  "tool_names_sha256": "5d20f80535dc05093e3ab64723657ef47d831f4bf4f21ade62a31d9e9805a3b5",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -28,12 +28,13 @@
     "netintent": 6,
     "appprofile": 3,
     "netchain": 2,
-    "range": 5
+    "range": 5,
+    "appctl": 3
   },
   "risk_counts": {
-    "R": 93,
+    "R": 94,
     "W1": 52,
-    "W2": 69,
+    "W2": 71,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -6993,6 +6994,201 @@
       },
       "sub": [
         "netsec"
+      ]
+    },
+    {
+      "name": "app_ctl_probe",
+      "channel": "appctl",
+      "risk": "R",
+      "description": "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 --help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面（显式 http_ports/http_urls，或从 python3 -m http.server 参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境是否存在（只探测，implemented=false，不实现可访问性树操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级原因 + warnings。不做端口扫描、不碰外网。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "可执行文件名（PATH 查找）或绝对路径"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "仅用于推断 HTTP 服务端口（如 [\"-m\",\"http.server\",\"8000\"]）；CLI 探测只跑 --help/-h，绝不执行这些业务参数"
+          },
+          "http_ports": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "要探测的本地回环端口（最多 8 个，1..65535）"
+          },
+          "http_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "HTTP 探测路径（默认 /，最多 8 个）"
+          },
+          "http_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "完整回环 URL（最多 8 个，仅 http://127.0.0.1|localhost|::1）"
+          },
+          "dbus_name": {
+            "type": "string",
+            "description": "要查询归属的 D-Bus 名字（如 org.example.App；不填只报告 session bus 是否存在）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30,
+            "default": 5,
+            "description": "单项探测超时秒数"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式"
+          }
+        },
+        "required": [
+          "app"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    },
+    {
+      "name": "app_ctl_call",
+      "channel": "appctl",
+      "risk": "W2",
+      "description": "应用控制面单动作调用（W2/D2）：backend=cli 时 fork+execv(argv) 逐项传参（无 shell 字符串，超时/取消 SIGKILL 进程组）；backend=http 时只允许 http://127.0.0.1|localhost|::1 的 method/url/body。返回 stdout/stderr/rc/耗时（HTTP 返回 status_code/body），参数中 password/token/secret 等敏感值在审计里打码；每次调用写全量审计。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "backend": {
+            "type": "string",
+            "enum": [
+              "cli",
+              "http"
+            ],
+            "description": "控制面类型"
+          },
+          "program": {
+            "type": "string",
+            "description": "backend=cli 必填：可执行文件名或绝对路径"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "backend=cli：参数数组（最多 64 项，逐项 execv，不经 shell）"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "工作目录（绝对路径；默认 appctl work 目录）"
+          },
+          "stdin": {
+            "type": "string",
+            "description": "可选 stdin 内容（≤60000 字节）"
+          },
+          "method": {
+            "type": "string",
+            "default": "GET",
+            "description": "backend=http：HTTP 方法（大写字母）"
+          },
+          "url": {
+            "type": "string",
+            "description": "backend=http：仅 http://127.0.0.1|localhost|::1"
+          },
+          "body": {
+            "type": "string",
+            "description": "backend=http：请求体"
+          },
+          "content_type": {
+            "type": "string",
+            "description": "backend=http：Content-Type（有 body 时默认 application/json）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "default": 30,
+            "description": "单次调用超时秒数（到点 SIGKILL 进程组）"
+          }
+        },
+        "required": [
+          "backend"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    },
+    {
+      "name": "app_ctl_task",
+      "channel": "appctl",
+      "risk": "W2",
+      "description": "应用控制面声明式任务（W2/D2）：按 steps 顺序执行一串 call + 断言（rc/stdout/stderr/正则/文件存在与内容/HTTP 状态码），默认失败即停并回报哪一步失败与原始 stderr；进度写 <task_id>.progress.jsonl；支持 action=cancel 从另一进程取消（SIGKILL 进程组 + 取消标记，清理 pid/cancel 标记）、action=status 查看进度。任务定义用 JSON（YAML 未实现）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "run",
+              "cancel",
+              "status"
+            ],
+            "default": "run",
+            "description": "run=执行；cancel=取消运行中的任务（写取消标记+SIGKILL 进程组）；status=查看进度"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "任务 ID（[A-Za-z0-9._-]，≤64；run 缺省自动生成；cancel/status 必填）"
+          },
+          "workdir": {
+            "type": "string",
+            "description": "任务工作目录（绝对路径且已存在；缺省 <state>/tasks/<task_id>"
+          },
+          "fail_fast": {
+            "type": "boolean",
+            "default": true,
+            "description": "失败即停（默认 true）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 300,
+            "description": "整个任务超时秒数"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "步骤数组（最多 32）：每步 {name, call:{backend,program,argv,cwd,method,url,body,timeout_s}, assert:{rc,status_code,stdout_contains,stdout_not_contains,stderr_contains,stderr_not_contains,stdout_matches,stderr_matches,body_contains,file_exists,file_absent,file_min_size,file_contains}, continue_on_fail}"
+          },
+          "task": {
+            "type": "object",
+            "description": "可选：把 {steps:[...]} 作为对象传入；本版只接受 JSON（YAML 未实现）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "sandbox"
       ]
     }
   ]

@@ -53,6 +53,7 @@ enum tool_channel {
 	TOOL_CH_APPPROFILE,	/* W81c：应用静态/动态画像 + 差集报告（3 件） */
 	TOOL_CH_NETCHAIN,	/* W81e：conntrack 事件流 + 攻击链关联（2 件） */
 	TOOL_CH_RANGE,		/* W81 E2：靶场攻击面（5 件；默认关闭/D3/TTL） */
+	TOOL_CH_APPCTL,		/* W82：控制面适配器（CLI/HTTP 探测·调用·任务，3 件） */
 	TOOL_CH_UNKNOWN,
 };
 

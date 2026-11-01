@@ -213,3 +213,6 @@ range_enable cidr 必须在硬编码
 range_disable 停 watchdog、删 state
 range_scan 目标必须在启用时
 range_inject UDP / TCP SYN / ICMP，p
+app_ctl_probe 对一个 APP 回答「
+app_ctl_call backend=cli 时 fork+exe
+app_ctl_task 按 steps 顺序执行

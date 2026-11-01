@@ -103,7 +103,7 @@ static void test_registry(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 215, "注册表总数 215");
+	CHECK(reg.tool_count == 218, "注册表总数 218");
 	CHECK(tool_channel_from_str("workspace") == TOOL_CH_WORKSPACE,
 	      "channel 字符串 workspace 映射");
 	for (i = 0; i < reg.tool_count; i++)

@@ -91,6 +91,7 @@ CH_NETINTENT = "netintent"  # W81 V3.1/V3.2：网络意图 ↔ nft 双向编译�
 CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风险报告（三件）
 CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
 CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
+CH_APPCTL = "appctl"        # W82 V4.4：控制面适配器（CLI/HTTP 探测·调用·任务，三件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -274,6 +275,10 @@ SUB_MAP = {
     "app_profile_static": ["sysadmin"],
     "app_profile_dynamic": ["sysadmin", "sandbox"],
     "app_profile_diff": ["sysadmin", "netsec"],
+    # ---- W82 V4.4：控制面适配器（三件）----
+    "app_ctl_probe": ["sysadmin"],
+    "app_ctl_call": ["sysadmin", "netsec"],
+    "app_ctl_task": ["sysadmin", "sandbox"],
     # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
     "net_chain_watch": ["netsec"],
     "net_chain_rules": ["netsec"],
@@ -784,7 +789,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 215        # 主表 tools.json（W81 E2：210 + 5 靶场）
+EXPECTED_TOOL_COUNT = 218        # 主表 tools.json（W82 V4.4：215 + 3 控制面）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -1006,8 +1011,11 @@ EXPECTED_TOOL_NAMES = [
     "range_disable",
     "range_scan",
     "range_inject",
+    "app_ctl_probe",
+    "app_ctl_call",
+    "app_ctl_task",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "f157db1afd5f9058c001b02973535469040c473196402f02002392e5235b67da"
+EXPECTED_TOOL_NAMES_SHA256 = "5d20f80535dc05093e3ab64723657ef47d831f4bf4f21ade62a31d9e9805a3b5"
 
 
 def manifest_sha256(names):
@@ -3253,6 +3261,7 @@ CHANNEL_RETURN = {
     CH_BPF: "返回 prog_id/fd/type/name/tag 与真实能力探测；加载/附着失败带 errno 与内核能力说明。list 返回内核程序清单（mine 标记）；unload 返回复验结果；nfqueue_pump 返回绑定结果、五元组与 verdict 统计或明确不支持原因。",
     CH_NETINTENT: "返回意图解析结果 + 规则集文本 + 行级 diff + 语法预检结论（compile，只读）；apply 返回预检/应用/抽查/快照/回滚死线与看门狗 PID；confirm 返回 decided 方式与日志尾；summarize 返回「默认策略/允许/拒绝/其他」分段人话摘要；net_hit_watch 返回采样器 pid/运行态/触发与清理计数，status 返回运行态+剩余 TTL+降级清单+审计尾，net_hit_policy 返回阈值配置与生效说明。",
     CH_APPPROFILE: "static 返回 ELF/依赖/符号/能力/桌面/包来源与 declared 声明清单；dynamic 返回 JSON 事件流（文件读/写/映射、子进程、网络）+ 统计 + degraded 局限说明；diff 返回「要的/用的/偷偷碰的」三栏 + 0-100 风险分 + 放行条件建议（只读，不自动落策略）。",
+    CH_APPCTL: "probe 返回 backends 列表 + CLI/HTTP/dbus/AT-SPI 逐档证据与 warnings；call 返回 backend/target/rc/stdout/stderr/耗时（HTTP 含 status_code/body）；task 返回 status/steps/失败步骤/断言结果/进度与审计路径（cancel/status 返回取消或进度快照）。",
     CH_NETCHAIN: "start 返回采样器 pid/事件源逐档可用性与规则；status 返回运行态、事件源探测（procfs/命令/ctnetlink，不可用/空表如实标注）、最近采样计数与审计尾；stop 返回停止结果。命中事件含 type/src/dsts/ports/window/evidence_count，写 events.jsonl + audit.log；只观测不封禁。",
 }
 
@@ -4323,6 +4332,150 @@ def tool_netchain(name, risk, desc, props, required=None):
             "parameters": obj_schema(props or {}, required)}
 
 
+def tool_appctl(name, risk, desc, props, required=None):
+    """W82 V4.4：控制面适配器（channel=appctl，三件）"""
+    return {"name": name, "channel": CH_APPCTL, "risk": risk,
+            "description": desc,
+            "parameters": obj_schema(props or {}, required)}
+
+
+def appctl_tools():
+    """W82 V4.4：把「能画像」升级成「能驱动」——probe 探测控制面、
+    call 调单个动作、task 跑声明式多步任务。CLI 一律 argv 逐项 execv，
+    HTTP 只走回环；每次 call 全量审计（敏感值打码）。"""
+    probe_props = {
+        "app": {
+            "type": "string",
+            "description": "可执行文件名（PATH 查找）或绝对路径"},
+        "argv": {
+            "type": "array", "items": {"type": "string"},
+            "description": "仅用于推断 HTTP 服务端口（如 "
+            "[\"-m\",\"http.server\",\"8000\"]）；CLI 探测只跑 "
+            "--help/-h，绝不执行这些业务参数"},
+        "http_ports": {
+            "type": "array", "items": {"type": "integer"},
+            "description": "要探测的本地回环端口（最多 8 个，1..65535）"},
+        "http_paths": {
+            "type": "array", "items": {"type": "string"},
+            "description": "HTTP 探测路径（默认 /，最多 8 个）"},
+        "http_urls": {
+            "type": "array", "items": {"type": "string"},
+            "description": "完整回环 URL（最多 8 个，仅 "
+            "http://127.0.0.1|localhost|::1）"},
+        "dbus_name": {
+            "type": "string",
+            "description": "要查询归属的 D-Bus 名字（如 "
+            "org.example.App；不填只报告 session bus 是否存在）"},
+        "timeout_s": {
+            "type": "integer", "minimum": 1, "maximum": 30, "default": 5,
+            "description": "单项探测超时秒数"},
+        "format": {
+            "type": "string", "enum": ["json", "text"], "default": "json",
+            "description": "输出格式"},
+    }
+    call_props = {
+        "backend": {
+            "type": "string", "enum": ["cli", "http"],
+            "description": "控制面类型"},
+        "program": {
+            "type": "string",
+            "description": "backend=cli 必填：可执行文件名或绝对路径"},
+        "argv": {
+            "type": "array", "items": {"type": "string"},
+            "description": "backend=cli：参数数组（最多 64 项，逐项 "
+            "execv，不经 shell）"},
+        "cwd": {
+            "type": "string",
+            "description": "工作目录（绝对路径；默认 appctl work 目录）"},
+        "stdin": {
+            "type": "string",
+            "description": "可选 stdin 内容（≤60000 字节）"},
+        "method": {
+            "type": "string", "default": "GET",
+            "description": "backend=http：HTTP 方法（大写字母）"},
+        "url": {
+            "type": "string",
+            "description": "backend=http：仅 "
+            "http://127.0.0.1|localhost|::1"},
+        "body": {
+            "type": "string", "description": "backend=http：请求体"},
+        "content_type": {
+            "type": "string",
+            "description": "backend=http：Content-Type（有 body 时默认 "
+            "application/json）"},
+        "timeout_s": {
+            "type": "integer", "minimum": 1, "maximum": 600,
+            "default": 30,
+            "description": "单次调用超时秒数（到点 SIGKILL 进程组）"},
+    }
+    task_props = {
+        "action": {
+            "type": "string", "enum": ["run", "cancel", "status"],
+            "default": "run",
+            "description": "run=执行；cancel=取消运行中的任务（写取消"
+            "标记+SIGKILL 进程组）；status=查看进度"},
+        "task_id": {
+            "type": "string",
+            "description": "任务 ID（[A-Za-z0-9._-]，≤64；run 缺省自动"
+            "生成；cancel/status 必填）"},
+        "workdir": {
+            "type": "string",
+            "description": "任务工作目录（绝对路径且已存在；缺省 "
+            "<state>/tasks/<task_id>"},
+        "fail_fast": {
+            "type": "boolean", "default": True,
+            "description": "失败即停（默认 true）"},
+        "timeout_s": {
+            "type": "integer", "minimum": 1, "maximum": 3600,
+            "default": 300,
+            "description": "整个任务超时秒数"},
+        "steps": {
+            "type": "array", "items": {"type": "object"},
+            "description": "步骤数组（最多 32）：每步 {name, call:{"
+            "backend,program,argv,cwd,method,url,body,timeout_s}, assert:{"
+            "rc,status_code,stdout_contains,stdout_not_contains,"
+            "stderr_contains,stderr_not_contains,stdout_matches,"
+            "stderr_matches,body_contains,file_exists,file_absent,"
+            "file_min_size,file_contains}, continue_on_fail}"},
+        "task": {
+            "type": "object",
+            "description": "可选：把 {steps:[...]} 作为对象传入；"
+            "本版只接受 JSON（YAML 未实现）"},
+    }
+    return [
+        tool_appctl(
+            "app_ctl_probe", RISK_R,
+            "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答"
+            "「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 "
+            "--help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面"
+            "（显式 http_ports/http_urls，或从 python3 -m http.server "
+            "参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否"
+            "可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境"
+            "是否存在（只探测，implemented=false，不实现可访问性树"
+            "操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级"
+            "原因 + warnings。不做端口扫描、不碰外网。",
+            probe_props, ["app"]),
+        tool_appctl(
+            "app_ctl_call", RISK_W2,
+            "应用控制面单动作调用（W2/D2）：backend=cli 时 fork+execv"
+            "(argv) 逐项传参（无 shell 字符串，超时/取消 SIGKILL 进程"
+            "组）；backend=http 时只允许 http://127.0.0.1|localhost|::1 "
+            "的 method/url/body。返回 stdout/stderr/rc/耗时（HTTP 返回 "
+            "status_code/body），参数中 password/token/secret 等敏感值"
+            "在审计里打码；每次调用写全量审计。",
+            call_props, ["backend"]),
+        tool_appctl(
+            "app_ctl_task", RISK_W2,
+            "应用控制面声明式任务（W2/D2）：按 steps 顺序执行一串 call "
+            "+ 断言（rc/stdout/stderr/正则/文件存在与内容/HTTP 状态码），"
+            "默认失败即停并回报哪一步失败与原始 stderr；进度写 "
+            "<task_id>.progress.jsonl；支持 action=cancel 从另一进程取消"
+            "（SIGKILL 进程组 + 取消标记，清理 pid/cancel 标记）、"
+            "action=status 查看进度。任务定义用 JSON（YAML 未实现）。",
+            task_props, []),
+    ]
+
+
 def netchain_tools():
     """W81 E1：两件——观测采样器（start/stop/status，W1/D1，只观测）
     + 阈值配置（get/set，W1/D1）。事件源 procfs 优先、conntrack 命令可选、
@@ -4589,6 +4742,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(netchain_tools())
     # W81 E2：V3.6 靶场攻击面五件（追加在清单末尾）
     tools.extend(range_tools())
+    # W82 V4.4：控制面适配器三件（追加在清单末尾；锚点同步）
+    tools.extend(appctl_tools())
     return tools
 
 
@@ -4909,9 +5064,9 @@ def main():
     ]
     for ch in (CH_PROC, CH_SYSFS, CH_NETLINK, CH_NLSENSE, CH_EXEC,
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
-               CH_DESKTOP, CH_MODEL, CH_CLARIFY, CH_WORKSPACE,
-               CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT,
-               CH_APPPROFILE, CH_NETCHAIN):
+               CH_DESKTOP, CH_MODEL, CH_STREAM, CH_MACRO, CH_CLARIFY,
+               CH_WORKSPACE, CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT,
+               CH_APPPROFILE, CH_NETCHAIN, CH_RANGE, CH_APPCTL):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):
