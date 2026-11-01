@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-01T13:42:14",
+  "generated_at": "2026-11-01T14:24:25",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 224,
-  "tool_names_sha256": "f2b0b78cc1020730530979430d47e1a7f76720de08cfcc4ce0bacf17faed743a",
+  "tool_count": 226,
+  "tool_names_sha256": "7c24e0c7734a8409d730c9bc750705be6c25967b77ee60c9d8991af6f84a2afd",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -30,12 +30,12 @@
     "netchain": 2,
     "range": 5,
     "appctl": 5,
-    "device": 4
+    "device": 6
   },
   "risk_counts": {
     "R": 97,
-    "W1": 52,
-    "W2": 74,
+    "W1": 53,
+    "W2": 75,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -7397,6 +7397,66 @@
       "sub": [
         "sysadmin",
         "res"
+      ]
+    },
+    {
+      "name": "dev_adapt",
+      "channel": "device",
+      "risk": "W2",
+      "description": "对 USB 设备启动四级递进适配任务（W2/D3，异步）：L1 已在树驱动 new_id → L2 driver_override 强绑 → L3 通用类驱动（uinput/usb-storage/vfio）→ L4 目标驱动模块参数 quirk。每级都「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」；只有读回 driver == 目标（HID 目标还要求 /proc/bus/input/devices 里有输入设备）才算该级成功。立刻返回 task_id（后台 daemon 执行，状态落 status.json / progress.jsonl / daemon.log）。四级全失败时任务 ok=false 并逐级给出 rc/errno/原因，设备回到任务开始前的驱动；任何单级回滚失败都会中止后续级别（不在未知状态上继续）。只允许非 hub 单接口叶子设备，真实 /sys 写要求 root。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）；设备名自动解析到唯一接口（绑定发生在接口上）"
+          },
+          "driver": {
+            "type": "string",
+            "description": "四级递进的目标驱动（如 usbhid / usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"
+          }
+        },
+        "required": [
+          "device",
+          "driver"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    },
+    {
+      "name": "dev_task",
+      "channel": "device",
+      "risk": "W1",
+      "description": "查询/控制 USB 适配任务（W1/D1）：action=status 返回任务状态、当前级别、进程是否存活、progress.jsonl 与 daemon.log 的尾部；action=cancel 先 SIGTERM（5s 不退再 SIGKILL 兜底），然后按任务快照把设备回滚到任务开始前的驱动并读回校验，最后把任务标成 canceled；action=log 返回全量进度事件与后台日志。不传 task_id时取状态目录里最近的一个任务。已完成且成功的任务不会被 cancel回滚（避免毁掉成功结果）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "cancel",
+              "log"
+            ],
+            "default": "status",
+            "description": "status=任务状态/当前级别/进度与日志尾；cancel=SIGTERM（5s 不退再 SIGKILL）停止后台任务并把设备回滚到任务开始前的驱动；log=全量 progress.jsonl + daemon.log"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "可选：dev_adapt 返回的 task_id；不填则取状态目录里最近的一个适配任务"
+          },
+          "reason": {
+            "type": "string",
+            "description": "可选：取消原因，原样写进任务状态与审计"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
       ]
     }
   ]

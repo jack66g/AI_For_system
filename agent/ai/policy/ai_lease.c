@@ -1501,6 +1501,20 @@ enum ai_danger ai_danger_classify(const char *tool_name, const char *domain,
 			why = "usb_driver_actuation";
 			goto out;
 		}
+		/* W82 V5.3/V5.4：dev_adapt 是同一类设备级写（四级递进里包含
+		 * new_id/override/bind 与模块参数 quirk），一律 D3；dev_task
+		 * 只是任务控制面（status/cancel/log，cancel 会按快照回滚），
+		 * 风险收敛为 D1。 */
+		if (strcmp(tool_name, "dev_adapt") == 0) {
+			d = AI_D3;
+			why = "usb_adaptation";
+			goto out;
+		}
+		if (strcmp(tool_name, "dev_task") == 0) {
+			d = AI_D1;
+			why = "usb_adapt_task_control";
+			goto out;
+		}
 		if (strcmp(tool_name, "procfs_write_telemetry_reset") == 0) {
 			d = AI_D2;
 			why = "telemetry_reset";

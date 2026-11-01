@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * device_tools.h - W82 V5.1/V5.2 设备身份 + 绑定控制面（USB 先行，TOOL_CH_DEVICE）
+ * device_tools.h - W82 V5.1/V5.2/V5.3/V5.4 设备身份 + 绑定 + 四级适配
+ *                  （USB 先行，TOOL_CH_DEVICE）
  *
- * 本通道只做 USB，回答两件事：
+ * 本通道只做 USB，回答三件事：
  *   1. 「这台机器上有什么 USB 设备、它是什么」——dev_list / dev_identify；
- *   2. 「怎么把某个接口绑到指定驱动、失败怎么恢复」——dev_bind / dev_restore。
+ *   2. 「怎么把某个接口绑到指定驱动、失败怎么恢复」——dev_bind / dev_restore；
+ *   3. 「这个设备到底能用哪种方式适配」——dev_adapt / dev_task。
  *
- * 四件工具：
+ * 六件工具：
  *   dev_list     （R/D0）枚举 /sys/bus/usb/devices 全部节点（设备 + 接口），
  *                给出 idVendor:idProduct、modalias、class、driver、
  *                driver_override、is_hub 与接口清单。
@@ -20,6 +22,15 @@
  *                失败自动回滚到原驱动/原 driver_override 并逐项校验。
  *   dev_restore  （W2/D2）按快照恢复原驱动与 driver_override（可显式传
  *                snapshot，或读状态目录里最近一次快照）。
+ *   dev_adapt    （W2/D3）对设备启动**四级递进**适配任务，异步执行并立刻
+ *                返回 task_id：L1 已在树驱动 new_id → L2 driver_override
+ *                强绑 → L3 通用类驱动（uinput/usb-storage/vfio）→ L4 参数
+ *                quirk。每级「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」；
+ *                四级全失败时 ok=false 并给出每级 rc/errno/原因，设备回到
+ *                任务开始前的驱动。
+ *   dev_task     （R/D1）适配任务控制：status（状态/当前级别/进度与日志尾）、
+ *                cancel（SIGTERM→SIGKILL 兜底 + 回滚到任务开始前的驱动）、
+ *                log（全量 progress.jsonl + daemon.log）。
  *
  * 安全边界（硬约束，代码里逐条拒绝）：
  *   - 只允许操作「非 hub 且只有单接口」的设备；根 hub（usbN）、bDeviceClass=9
@@ -34,6 +45,9 @@
  * 测试缝：AIKERNEL_USB_SYSFS_ROOT 可把 sysfs 根指到临时假树（默认
  * /sys/bus/usb）。只有该根不在 /sys 下时非 root 才允许写——真实 /sys 仍
  * 需要 root；这个开关只用于单测，不改变生产路径。
+ * AIKERNEL_ADAPT_FOREGROUND=1 让 dev_adapt 在本进程同步跑完（单测用）；
+ * AIKERNEL_ADAPT_LEVEL_DELAY_MS=N 在「每级动作完成、尚未验证」的窗口里
+ * 停顿 N 毫秒，只用于让取消测试有确定的取消窗口（默认 0，不改变语义）。
  */
 #ifndef _AI_DEVICE_TOOLS_H
 #define _AI_DEVICE_TOOLS_H
@@ -87,5 +101,19 @@ int dv_mode_valid(const char *mode);
 
 /* 类别中文名（静态字符串，未知返回 "其他/未分类"）。 */
 const char *dv_class_cn(const char *cls);
+
+/* ------------------------------------------------------------------ */
+/* W82 V5.3/V5.4：四级递进适配（dev_adapt）+ 异步任务（dev_task）      */
+/* ------------------------------------------------------------------ */
+
+/* 适配级别名：1=in_tree_new_id 2=driver_override 3=generic_driver
+ * 4=param_quirk；越界返回 "unknown"。 */
+const char *dv_adapt_level_name(int level);
+
+/* 任务 id 合法性：非空、<=63 字节、仅 [A-Za-z0-9._-]、不以 '.' 开头。 */
+int dv_task_id_valid(const char *id);
+
+/* 任务状态是否终态（done / failed / canceled）。 */
+int dv_task_state_terminal(const char *state);
 
 #endif /* _AI_DEVICE_TOOLS_H */

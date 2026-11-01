@@ -3,7 +3,7 @@
  * test_desktop_tools.c - W76 桌面能力面工具层回归
  *
  * 覆盖：
- *   - 注册表 224 件 / desktop 通道 20 件 / 每件 risk 与 D 级；
+ *   - 注册表 226 件 / desktop 通道 20 件 / 每件 risk 与 D 级；
  *   - tool_channel_from_str("desktop")；
  *   - D0/D1 无租约自动放行，真实走本机 mock HTTP；
  *   - D2 在 NONE 下 CONFIRM_REQUIRED（非 TTY，且不发起 HTTP）；
@@ -409,7 +409,7 @@ int main(void)
 	       (unsigned)getuid(), url);
 
 	/* ---- 1. 注册表 ---- */
-	expect(g_reg.tool_count == 224, "注册表总数 224（实际 %d）",
+	expect(g_reg.tool_count == 226, "注册表总数 226（实际 %d）",
 	       g_reg.tool_count);
 	expect(tool_channel_from_str("desktop") == TOOL_CH_DESKTOP,
 	       "tool_channel_from_str(\"desktop\") 映射");

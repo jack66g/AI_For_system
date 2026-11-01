@@ -222,3 +222,5 @@ dev_list 按 /sys/bus/usb/devices
 dev_identify 类别推断 hub/hid/sto
 dev_bind 先校验目标是非 hu
 dev_restore 读取 dev_bind 落盘
+dev_adapt L1 已在树驱动 new_i
+dev_task action=status 返回任

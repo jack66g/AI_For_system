@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * device_tools.c - W82 V5.1/V5.2 设备身份 + 绑定控制面（USB 先行）
+ * device_tools.c - W82 V5.1..V5.4 设备身份 + 绑定 + 四级适配（USB 先行）
  *
- * 设计说明见 device_tools.h。本文件分六段：
+ * 设计说明见 device_tools.h。本文件分七段：
  *   1) 有界输出缓冲 / JSON 转义 / 内置最小 ids 表 / 纯判定函数
  *   2) sysfs 只读原语（读属性、读 driver 软链、列目录、状态目录、审计）
  *   3) 设备事实收集（设备 + 接口 + hub 判定 + 绑定安全规则）
  *   4) dev_list / dev_identify（只读）
  *   5) 快照（落盘 + 读回）与 dev_bind / dev_restore（写 /sys + 回滚）
- *   6) 通道入口
+ *   6) dev_adapt（四级递进 + 后台 daemon）与 dev_task（status/cancel/log）
+ *   7) 通道入口
  *
  * 关键不变量：
  *   - 任何 /sys 写之前 dv_snap_save() 必须已成功（ctx->snapshot_ready）；
@@ -16,6 +17,8 @@
  *   - 每次写都进 writes[] 与 audit.log（路径、值、rc、errno）。
  *   - 失败回滚后必须读回校验；校验不通过时结果里 rollback.ok=false 且
  *     error_code 保持失败原因，绝不把回滚失败粉饰成成功。
+ *   - 适配任务只有「读回 driver == 目标」且（HID 目标）有输入设备才算该级
+ *     成功；四级全失败必须 ok=false 并保证设备回到任务开始前的驱动。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -31,8 +34,10 @@
 #include <time.h>
 #include <ctype.h>
 #include <limits.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "ai_types.h"
 #include "ai_json_util.h"
@@ -1496,11 +1501,36 @@ static int dv_snap_path(const char *state, const char *device, char *out,
 	return 0;
 }
 
+/* 快照序列化（单源：标准快照与任务快照共用同一份文本） */
+static int dv_snap_render(const struct dv_snap *s, char *buf, size_t cap)
+{
+	struct dvb b;
+
+	if (!s || !buf || cap == 0)
+		return -1;
+	dvb_init(&b, buf, cap);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", "aik-usb-snapshot/1");
+	dvb_kv_str(&b, "device", s->device);
+	dvb_kv_str(&b, "iface", s->iface);
+	dvb_kv_str(&b, "sysfs", s->sysfs);
+	dvb_kv_str(&b, "driver", s->driver);
+	dvb_kv_bool(&b, "bound", s->bound);
+	dvb_kv_str(&b, "driver_override", s->override);
+	dvb_kv_bool(&b, "driver_override_present", s->override_present);
+	dvb_kv_str(&b, "new_id", s->new_id);
+	dvb_kv_str(&b, "new_id_driver", s->new_id_driver);
+	dvb_kv_str(&b, "taken_at", s->taken_at);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	if (b.trunc)
+		return -1;
+	return 0;
+}
+
 static int dv_snap_save(const char *state, struct dv_snap *s, char *err,
 			size_t errcap)
 {
 	char buf[4096];
-	struct dvb b;
 
 	if (!s || !s->device[0]) {
 		if (err)
@@ -1515,21 +1545,7 @@ static int dv_snap_save(const char *state, struct dv_snap *s, char *err,
 	snprintf(s->schema, sizeof(s->schema), "aik-usb-snapshot/1");
 	if (!s->taken_at[0])
 		dv_now(s->taken_at, sizeof(s->taken_at));
-	dvb_init(&b, buf, sizeof(buf));
-	dvb_puts(&b, "{");
-	dvb_kv_str(&b, "schema", s->schema);
-	dvb_kv_str(&b, "device", s->device);
-	dvb_kv_str(&b, "iface", s->iface);
-	dvb_kv_str(&b, "sysfs", s->sysfs);
-	dvb_kv_str(&b, "driver", s->driver);
-	dvb_kv_bool(&b, "bound", s->bound);
-	dvb_kv_str(&b, "driver_override", s->override);
-	dvb_kv_bool(&b, "driver_override_present", s->override_present);
-	dvb_kv_str(&b, "new_id", s->new_id);
-	dvb_kv_str(&b, "new_id_driver", s->new_id_driver);
-	dvb_kv_str(&b, "taken_at", s->taken_at);
-	dvb_puts(&b, "\"schema_ok\":true}");
-	if (b.trunc) {
+	if (dv_snap_render(s, buf, sizeof(buf)) != 0) {
 		if (err)
 			snprintf(err, errcap, "快照序列化超长");
 		return -1;
@@ -1615,23 +1631,22 @@ static int dv_snap_parse(const char *content, size_t n, struct dv_snap *s,
 	return 0;
 }
 
-static int dv_snap_load(const char *state, const char *device,
-			struct dv_snap *s, char *err, size_t errcap)
+static int dv_snap_load_path(const char *path, struct dv_snap *s, char *err,
+			     size_t errcap)
 {
-	char path[DV_PATH_MAX], content[DV_SNAP_FILE_MAX];
+	char content[DV_SNAP_FILE_MAX];
 	ssize_t n;
 	int fd;
 
-	if (dv_snap_path(state, device, path, sizeof(path)) != 0) {
+	if (!path || !path[0] || !s) {
 		if (err)
-			snprintf(err, errcap, "快照路径非法");
+			snprintf(err, errcap, "快照路径为空");
 		return -1;
 	}
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0) {
 		if (err)
-			snprintf(err, errcap, "没有 %s 的快照（%s）", device,
-				 path);
+			snprintf(err, errcap, "快照不可读（%s）", path);
 		return -1;
 	}
 	n = read(fd, content, sizeof(content) - 1);
@@ -1643,6 +1658,19 @@ static int dv_snap_load(const char *state, const char *device,
 	}
 	content[n] = '\0';
 	return dv_snap_parse(content, (size_t)n, s, path, err, errcap);
+}
+
+static int dv_snap_load(const char *state, const char *device,
+			struct dv_snap *s, char *err, size_t errcap)
+{
+	char path[DV_PATH_MAX];
+
+	if (dv_snap_path(state, device, path, sizeof(path)) != 0) {
+		if (err)
+			snprintf(err, errcap, "快照路径非法");
+		return -1;
+	}
+	return dv_snap_load_path(path, s, err, errcap);
 }
 
 static void dv_ctx_record(struct dv_ctx *ctx, const char *path,
@@ -2725,6 +2753,2105 @@ out:
 }
 
 /* ======================================================================
+ * 7) W82 V5.3/V5.4：四级递进适配（dev_adapt）+ 异步任务（dev_task）
+ *
+ * 四级递进（每级都是「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」）：
+ *   L1 in_tree_new_id  向「已在树」的目标驱动写 new_id 强制匹配后 bind
+ *   L2 driver_override 写 driver_override 后 bind（本内核无该属性 → fail-closed）
+ *   L3 generic_driver  通用类驱动兜底（uinput / usb-storage / vfio）
+ *   L4 param_quirk     目标驱动模块参数 quirk（参数缺失/只读 → 如实失败）
+ *
+ * 异步模型：dev_adapt 先做完整安全校验 + 落快照 + 建任务目录，再 fork 出
+ * daemon（setsid，stdout/stderr 接 daemon.log），父进程立刻返回 task_id。
+ * daemon 把进度写 status.json（原子重写）+ progress.jsonl（追加）+ daemon.log。
+ * dev_task action=cancel 发 SIGTERM，daemon 在下一个检查点中止；取消路径
+ * 与任务收尾都调用 dv_ensure_original()，确保设备回到任务开始前的驱动。
+ *
+ * 不假成功：只有「读回 driver == 目标」且（HID 目标时）/proc/bus/input/devices
+ * 里确有该接口的输入设备，才算该级成功；四级全失败时 ok=false，levels[]
+ * 保留每级 rc/errno/verify/rollback 与失败写路径。回滚失败会显式标
+ * rollback_ok=false 并停止后续级别（不在未知状态上继续动设备）。
+ * ====================================================================== */
+
+#define DV_ADAPT_LEVELS		4
+#define DV_ADAPT_SCHEMA		"aik-usb-adapt/1"
+#define DV_TASK_SCHEMA		"aik-usb-adapt-task/1"
+#define DV_TASK_STATUS_SCHEMA	"aik-usb-task/1"
+#define DV_TASK_LOG_SCHEMA	"aik-usb-task-log/1"
+#define DV_TASK_ID_MAX		64
+#define DV_TASK_STATUS_BUF	(64 * 1024)
+#define DV_TASK_LOG_MAX		(256 * 1024)
+#define DV_TASK_TAIL_LINES	8
+#define DV_REAP_MAX		8
+
+enum {
+	DV_TASK_QUEUED = 0,
+	DV_TASK_RUNNING,
+	DV_TASK_DONE,
+	DV_TASK_FAILED,
+	DV_TASK_CANCELED,
+};
+
+/* 只有 dev_adapt 的 daemon / 前台执行会置位；其它工具路径恒为 0。 */
+static volatile sig_atomic_t dv_g_cancel;
+static pid_t dv_g_children[DV_REAP_MAX];
+static int dv_g_nchildren;
+
+static void dv_cancel_handler(int sig)
+{
+	(void)sig;
+	dv_g_cancel = 1;
+}
+
+static const char *dv_state_name(int s)
+{
+	switch (s) {
+	case DV_TASK_QUEUED:
+		return "queued";
+	case DV_TASK_RUNNING:
+		return "running";
+	case DV_TASK_DONE:
+		return "done";
+	case DV_TASK_FAILED:
+		return "failed";
+	case DV_TASK_CANCELED:
+		return "canceled";
+	default:
+		return "unknown";
+	}
+}
+
+int dv_task_state_terminal(const char *state)
+{
+	if (!state)
+		return 0;
+	return strcmp(state, "done") == 0 || strcmp(state, "failed") == 0 ||
+	       strcmp(state, "canceled") == 0;
+}
+
+const char *dv_adapt_level_name(int level)
+{
+	switch (level) {
+	case 1:
+		return "in_tree_new_id";
+	case 2:
+		return "driver_override";
+	case 3:
+		return "generic_driver";
+	case 4:
+		return "param_quirk";
+	default:
+		return "unknown";
+	}
+}
+
+int dv_task_id_valid(const char *id)
+{
+	size_t i, n;
+
+	if (!id || !id[0])
+		return 0;
+	n = strlen(id);
+	if (n >= DV_TASK_ID_MAX || id[0] == '.')
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)id[i];
+
+		if (isalnum(c) || c == '.' || c == '_' || c == '-')
+			continue;
+		return 0;
+	}
+	return 1;
+}
+
+struct dv_task_paths {
+	char dir[DV_PATH_MAX];
+	char status[DV_PATH_MAX];
+	char progress[DV_PATH_MAX];
+	char log[DV_PATH_MAX];
+	char pid[DV_PATH_MAX];
+	char snap[DV_PATH_MAX];
+};
+
+struct dv_level_rec {
+	int level;
+	char name[40];
+	char driver[DV_MAX_DRIVER];
+	char action[40];
+	int rc;			/* 0 成功 / -1 失败 / -2 取消 */
+	int err;		/* 决定性失败写的 errno（无失败写为 0） */
+	int verify;		/* 读回验证是否通过 */
+	int rollback_attempted;
+	int rollback_ok;
+	char code[48];
+	char detail[600];
+};
+
+struct dv_task {
+	struct dv_task_paths paths;
+	char id[DV_TASK_ID_MAX];
+	char device[DV_NAME_MAX];
+	char iface[DV_NAME_MAX];
+	char sysfs[DV_PATH_MAX];
+	char target[DV_MAX_DRIVER];
+	char orig_driver[DV_MAX_DRIVER];
+	int orig_override_present;
+	char orig_override[DV_MAX_OVERRIDE];
+	int state;
+	int ok;			/* -1 未知 / 0 失败 / 1 成功 */
+	int level;		/* 当前级别 1..4；0 = 尚未开始 */
+	int pid;
+	int foreground;
+	int changed;
+	int seq;
+	char started_at[32];
+	char updated_at[32];
+	char finished_at[32];
+	char error_code[64];
+	char error[600];
+	char snapshot[DV_PATH_MAX];
+	char cancel_source[32];
+	struct dv_level_rec lv[DV_ADAPT_LEVELS];
+	int n_lv;
+};
+
+static int dv_read_file_bounded(const char *path, char *buf, size_t cap,
+				size_t *out_n);
+
+/* ------------------------------------------------------------------ */
+/* 任务目录 / 状态文件                                                 */
+/* ------------------------------------------------------------------ */
+
+static int dv_tasks_root(char *out, size_t cap)
+{
+	char state[DV_PATH_MAX], tasks[DV_PATH_MAX];
+
+	if (dv_state_dir(state, sizeof(state)) != 0)
+		return -1;
+	if (dv_join(tasks, sizeof(tasks), state, "tasks") != 0)
+		return -1;
+	if (dv_mkdir_one(tasks) != 0)
+		return -1;
+	snprintf(out, cap, "%s", tasks);
+	return 0;
+}
+
+static int dv_task_paths_open(const char *id, struct dv_task_paths *p)
+{
+	char root[DV_PATH_MAX];
+	char name[DV_NAME_MAX];
+
+	if (!p || !dv_task_id_valid(id))
+		return -1;
+	snprintf(name, sizeof(name), "%s", id);
+	memset(p, 0, sizeof(*p));
+	if (dv_tasks_root(root, sizeof(root)) != 0)
+		return -1;
+	if (dv_join(p->dir, sizeof(p->dir), root, name) != 0)
+		return -1;
+	if (dv_mkdir_one(p->dir) != 0)
+		return -1;
+	if (dv_join(p->status, sizeof(p->status), p->dir, "status.json") != 0 ||
+	    dv_join(p->progress, sizeof(p->progress), p->dir,
+		    "progress.jsonl") != 0 ||
+	    dv_join(p->log, sizeof(p->log), p->dir, "daemon.log") != 0 ||
+	    dv_join(p->pid, sizeof(p->pid), p->dir, "pid") != 0 ||
+	    dv_join(p->snap, sizeof(p->snap), p->dir, "snapshot.json") != 0)
+		return -1;
+	return 0;
+}
+
+static void dv_task_gen_id(char *out, size_t cap)
+{
+	struct tm tm;
+	time_t now = time(NULL);
+	char stamp[32];
+	static int counter;
+
+	gmtime_r(&now, &tm);
+	strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &tm);
+	counter++;
+	snprintf(out, cap, "t-%s-%ld-%d", stamp, (long)(getpid() % 100000),
+		 counter);
+}
+
+/* 任务目录里 mtime 最新的那个（dev_task 不传 task_id 时的默认目标） */
+static int dv_task_latest(char *out, size_t cap)
+{
+	char root[DV_PATH_MAX];
+	char **kids = NULL;
+	int n = 0, i, found = 0;
+	time_t best_sec = 0;
+	long best_nsec = 0;
+
+	out[0] = '\0';
+	if (dv_tasks_root(root, sizeof(root)) != 0)
+		return -1;
+	if (dv_list_children(root, NULL, &kids, &n) != 0)
+		return -1;
+	for (i = 0; i < n; i++) {
+		char path[DV_PATH_MAX];
+		struct stat st;
+
+		if (!dv_task_id_valid(kids[i]))
+			continue;
+		if (dv_join(path, sizeof(path), root, kids[i]) != 0)
+			continue;
+		if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+			continue;
+		/* 秒级 mtime 在同一秒内会打平（实测踩过），用纳秒比较 */
+		if (!found || st.st_mtim.tv_sec > best_sec ||
+		    (st.st_mtim.tv_sec == best_sec &&
+		     st.st_mtim.tv_nsec > best_nsec)) {
+			best_sec = st.st_mtim.tv_sec;
+			best_nsec = st.st_mtim.tv_nsec;
+			found = 1;
+			snprintf(out, cap, "%s", kids[i]);
+		}
+	}
+	dv_free_children(kids, n);
+	return found ? 0 : -1;
+}
+
+static int dv_read_file_bounded(const char *path, char *buf, size_t cap,
+				size_t *out_n)
+{
+	int fd;
+	ssize_t n;
+
+	if (out_n)
+		*out_n = 0;
+	if (!path || !buf || cap == 0)
+		return -1;
+	buf[0] = '\0';
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	n = read(fd, buf, cap - 1);
+	close(fd);
+	if (n < 0)
+		return -1;
+	buf[n] = '\0';
+	if (out_n)
+		*out_n = (size_t)n;
+	return 0;
+}
+
+static long long dv_json_get_int(const char *json, size_t len, const char *key,
+				 long long def)
+{
+	const char *val;
+	size_t vlen;
+	int type;
+	char buf[32], *end;
+	long long v;
+
+	if (!json || ai_json_obj_get(json, len, key, &val, &vlen, &type) != 1 ||
+	    type != AI_JSON_NUM)
+		return def;
+	if (vlen >= sizeof(buf))
+		return def;
+	memcpy(buf, val, vlen);
+	buf[vlen] = '\0';
+	errno = 0;
+	v = strtoll(buf, &end, 10);
+	if (errno != 0 || end == buf)
+		return def;
+	return v;
+}
+
+/* 进度事件：progress.jsonl（结构化）+ daemon.log（人读）双写 */
+static void dv_task_emit(struct dv_task *t, int level, const char *event,
+			 const char *fmt, ...)
+{
+	char line[2048], human[1024], stamp[32];
+	struct dvb b;
+	va_list ap;
+	int fd, n;
+	size_t len;
+
+	if (!t || !t->paths.progress[0])
+		return;
+	dv_now(stamp, sizeof(stamp));
+	t->seq++;
+	va_start(ap, fmt);
+	vsnprintf(human, sizeof(human), fmt, ap);
+	va_end(ap);
+	dvb_init(&b, line, sizeof(line));
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "ts", stamp);
+	dvb_kv_int(&b, "seq", t->seq);
+	dvb_kv_str(&b, "task_id", t->id);
+	dvb_kv_int(&b, "level", level);
+	dvb_kv_str(&b, "event", event);
+	dvb_kv_str(&b, "msg", human);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	len = strlen(line);
+	if (len + 2 >= sizeof(line))
+		return;
+	line[len++] = '\n';
+	line[len] = '\0';
+	fd = open(t->paths.progress,
+		  O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+	if (fd >= 0) {
+		if (write(fd, line, len) != (ssize_t)len) {
+			/* 进度写失败不能改变判定，但要留痕 */
+			dv_audit("op=adapt_progress_write_failed task=%s",
+				 t->id);
+		}
+		close(fd);
+	}
+	fd = open(t->paths.log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+		  0600);
+	if (fd >= 0) {
+		n = dprintf(fd, "%s level=%d event=%s %s\n", stamp, level,
+			    event, human);
+		(void)n;
+		close(fd);
+	}
+}
+
+static void dv_read_driver_node(const char *root, const char *node, char *out,
+				size_t cap)
+{
+	char devices[DV_PATH_MAX], node_dir[DV_PATH_MAX];
+
+	out[0] = '\0';
+	if (dv_join(devices, sizeof(devices), root, "devices") != 0 ||
+	    dv_join(node_dir, sizeof(node_dir), devices, node) != 0)
+		return;
+	dv_read_driver(node_dir, out, cap);
+}
+
+static int dv_task_status_write(struct dv_task *t)
+{
+	char *buf;
+	struct dvb b;
+	char err[256], drv[DV_MAX_DRIVER];
+	int i;
+
+	if (!t || !t->paths.status[0])
+		return -1;
+	buf = malloc(DV_TASK_STATUS_BUF);
+	if (!buf)
+		return -1;
+	dv_read_driver_node(t->sysfs[0] ? t->sysfs : "/sys/bus/usb",
+			    t->iface[0] ? t->iface : t->device, drv,
+			    sizeof(drv));
+	dv_now(t->updated_at, sizeof(t->updated_at));
+	dvb_init(&b, buf, DV_TASK_STATUS_BUF);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", DV_TASK_SCHEMA);
+	dvb_kv_str(&b, "task_id", t->id);
+	dvb_kv_str(&b, "device", t->device);
+	dvb_kv_str(&b, "iface", t->iface[0] ? t->iface : NULL);
+	dvb_kv_str(&b, "sysfs", t->sysfs[0] ? t->sysfs : NULL);
+	dvb_kv_str(&b, "target_driver", t->target);
+	dvb_kv_str(&b, "status", dv_state_name(t->state));
+	dvb_json_str(&b, "ok");
+	dvb_putc(&b, ':');
+	dvb_puts(&b, t->ok < 0 ? "null" : (t->ok ? "true" : "false"));
+	dvb_putc(&b, ',');
+	dvb_kv_int(&b, "level", t->level);
+	dvb_kv_int(&b, "levels_total", DV_ADAPT_LEVELS);
+	dvb_kv_int(&b, "pid", t->pid);
+	dvb_kv_bool(&b, "foreground", t->foreground);
+	dvb_kv_bool(&b, "changed", t->changed);
+	dvb_kv_str(&b, "orig_driver",
+		   t->orig_driver[0] ? t->orig_driver : NULL);
+	dvb_kv_str(&b, "current_driver", drv[0] ? drv : NULL);
+	dvb_kv_str(&b, "started_at", t->started_at);
+	dvb_kv_str(&b, "updated_at", t->updated_at);
+	dvb_kv_str(&b, "finished_at",
+		   t->finished_at[0] ? t->finished_at : NULL);
+	dvb_kv_str(&b, "snapshot", t->snapshot[0] ? t->snapshot : NULL);
+	dvb_kv_str(&b, "error_code",
+		   t->error_code[0] ? t->error_code : NULL);
+	dvb_kv_str(&b, "error", t->error[0] ? t->error : NULL);
+	dvb_kv_str(&b, "cancel_source",
+		   t->cancel_source[0] ? t->cancel_source : NULL);
+	dvb_puts(&b, "\"levels\":[");
+	for (i = 0; i < t->n_lv; i++) {
+		struct dv_level_rec *r = &t->lv[i];
+
+		if (i)
+			dvb_putc(&b, ',');
+		dvb_puts(&b, "{");
+		dvb_kv_int(&b, "level", r->level);
+		dvb_kv_str(&b, "name", r->name);
+		dvb_kv_str(&b, "driver", r->driver[0] ? r->driver : NULL);
+		dvb_kv_str(&b, "action", r->action[0] ? r->action : NULL);
+		dvb_kv_int(&b, "rc", r->rc);
+		dvb_kv_int(&b, "errno", r->err);
+		dvb_kv_bool(&b, "verify", r->verify);
+		dvb_kv_bool(&b, "rollback_attempted", r->rollback_attempted);
+		dvb_kv_bool(&b, "rollback_ok", r->rollback_ok);
+		dvb_kv_str(&b, "code", r->code[0] ? r->code : NULL);
+		dvb_kv_str(&b, "detail", r->detail[0] ? r->detail : NULL);
+		dvb_obj_close(&b);
+	}
+	dvb_arr_close(&b);
+	dvb_putc(&b, ',');
+	dvb_kv_bool(&b, "truncated", b.trunc);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	if (b.trunc) {
+		free(buf);
+		return -1;
+	}
+	i = dv_write_file_atomic(t->paths.status, buf, err, sizeof(err));
+	free(buf);
+	if (i != 0)
+		dv_audit("op=adapt_status_write_failed task=%s err=%s", t->id,
+			 err);
+	return i;
+}
+
+/* 收尾失败：写失败态并返回 -1（供 pipeline 直接 return） */
+static int dv_task_fail(struct dv_task *t, const char *code,
+			const char *fmt, ...)
+{
+	va_list ap;
+
+	t->state = DV_TASK_FAILED;
+	t->ok = 0;
+	snprintf(t->error_code, sizeof(t->error_code), "%s",
+		 code && code[0] ? code : "failed");
+	va_start(ap, fmt);
+	vsnprintf(t->error, sizeof(t->error), fmt, ap);
+	va_end(ap);
+	if (!t->finished_at[0])
+		dv_now(t->finished_at, sizeof(t->finished_at));
+	dv_task_status_write(t);
+	dv_task_emit(t, t->level, "task_end", "status=failed error_code=%s",
+		     t->error_code);
+	return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 四级递进的判定原语                                                 */
+/* ------------------------------------------------------------------ */
+
+static int dv_driver_exists(const char *root, const char *drv)
+{
+	char dir[DV_PATH_MAX], sub[DV_PATH_MAX];
+
+	if (!dv_driver_name_valid(drv))
+		return 0;
+	if (dv_join(sub, sizeof(sub), root, "drivers") != 0 ||
+	    dv_join(dir, sizeof(dir), sub, drv) != 0)
+		return 0;
+	return dv_dir_exists(dir);
+}
+
+static int dv_driver_has_attr(const char *root, const char *drv,
+			      const char *attr)
+{
+	char path[DV_PATH_MAX];
+
+	if (dv_driver_path(path, sizeof(path), root, drv, attr) != 0)
+		return 0;
+	return dv_file_exists(path);
+}
+
+static int dv_iface_is_hid(const struct dv_facts *f)
+{
+	return f->iface_class_ok && f->n_iface_classes == 1 &&
+	       f->iface_class[0] == 3;
+}
+
+static const char *dv_ctx_fail_path(const struct dv_ctx *ctx)
+{
+	int i;
+
+	for (i = ctx->nwrites - 1; i >= 0; i--)
+		if (ctx->writes[i].rc != 0)
+			return ctx->writes[i].path;
+	return "";
+}
+
+static int dv_ctx_fail_errno(const struct dv_ctx *ctx)
+{
+	int i;
+
+	for (i = ctx->nwrites - 1; i >= 0; i--)
+		if (ctx->writes[i].rc != 0)
+			return ctx->writes[i].err;
+	return 0;
+}
+
+/* 读回验证：driver 必须是目标；HID 目标还要有输入设备（真 sysfs 才查） */
+static int dv_adapt_verify(const char *root, const char *node, const char *drv,
+			   int want_input, int wait_ms, int *input_count,
+			   char *why, size_t whycap)
+{
+	char devices[DV_PATH_MAX], node_dir[DV_PATH_MAX], now[DV_MAX_DRIVER];
+	int cnt = 0;
+
+	now[0] = '\0';
+	if (input_count)
+		*input_count = 0;
+	if (why && whycap)
+		why[0] = '\0';
+	if (dv_join(devices, sizeof(devices), root, "devices") != 0 ||
+	    dv_join(node_dir, sizeof(node_dir), devices, node) != 0) {
+		if (why)
+			snprintf(why, whycap, "sysfs 路径过长");
+		return 0;
+	}
+	dv_read_driver(node_dir, now, sizeof(now));
+	if (strcmp(now, drv) != 0) {
+		if (why)
+			snprintf(why, whycap, "读回 driver=%s，不是目标 %s",
+				 now[0] ? now : "(空)", drv);
+		return 0;
+	}
+	if (want_input) {
+		if (dv_input_probe(root, node_dir, wait_ms, NULL, 0, &cnt) <= 0) {
+			if (why)
+				snprintf(why, whycap,
+					 "driver 已是 %s 但 /proc/bus/input/devices 里没有该接口的输入设备",
+					 drv);
+			return 0;
+		}
+	}
+	if (input_count)
+		*input_count = cnt;
+	return 1;
+}
+
+static int dv_ensure_original(const char *root, struct dv_facts *f,
+			      const struct dv_snap *snap, char *msg,
+			      size_t msgcap);
+
+/* 统一收尾：验证 → 失败回滚 → 填 level 记录。
+ * 返回 1 成功 / 0 失败（已回滚）/ -1 回滚失败（调用方必须停）。 */
+static int dv_level_finish(struct dv_ctx *ctx, struct dv_facts *f,
+			   struct dv_level_rec *r, const char *drv,
+			   int action_ok, const char *code, const char *msg,
+			   int wait_ms)
+{
+	char why[256] = "", rbuf[512] = "";
+	int in_count = 0, verify = 0;
+
+	r->verify = 0;
+	r->rc = action_ok ? 0 : -1;
+	r->err = action_ok ? 0 : dv_ctx_fail_errno(ctx);
+	snprintf(r->driver, sizeof(r->driver), "%s", drv);
+	if (!action_ok) {
+		snprintf(r->code, sizeof(r->code), "%s",
+			 code && code[0] ? code : "action_failed");
+		snprintf(r->detail, sizeof(r->detail), "%s%s%s",
+			 msg ? msg : "",
+			 dv_ctx_fail_path(ctx)[0] ? "；失败写 " : "",
+			 dv_ctx_fail_path(ctx));
+	} else {
+		verify = dv_adapt_verify(ctx->root, f->node, drv,
+					 dv_iface_is_hid(f) &&
+					 strcmp(drv, "usbhid") == 0 &&
+					 dv_root_is_real_sysfs(ctx->root),
+					 wait_ms, &in_count, why, sizeof(why));
+		r->verify = verify;
+		if (verify) {
+			r->rc = 0;
+			r->err = 0;
+			r->code[0] = '\0';
+			snprintf(r->detail, sizeof(r->detail),
+				 "读回 driver=%s%s%s", drv,
+				 in_count > 0 ? "，输入设备 " : "",
+				 in_count > 0 ? "已出现" : "");
+			return 1;
+		}
+		r->rc = -1;
+		r->err = 0;
+		snprintf(r->code, sizeof(r->code), "verify_failed");
+		snprintf(r->detail, sizeof(r->detail), "写入未报错但验证失败：%s",
+			 why);
+	}
+	/* 失败 → 回滚到任务开始前的状态 */
+	r->rollback_attempted = 1;
+	r->rollback_ok = (dv_rollback(ctx, rbuf, sizeof(rbuf)) == 0);
+	{
+		size_t used = strlen(r->detail);
+
+		snprintf(r->detail + used, sizeof(r->detail) - used,
+			 "；回滚%s：%s", r->rollback_ok ? "成功" : "失败", rbuf);
+	}
+	dv_audit("op=adapt_level_failed level=%d driver=%s code=%s rc=%d errno=%d rollback_ok=%d",
+		 r->level, drv, r->code, r->rc, r->err, r->rollback_ok);
+	return r->rollback_ok ? 0 : -1;
+}
+
+/* L1：向「已在树」的目标驱动写 new_id，再 bind */
+static int dv_lvl_new_id(struct dv_ctx *ctx, const char *drv, char *code,
+			 size_t codecap, char *msg, size_t msgcap)
+{
+	if (!dv_driver_exists(ctx->root, drv)) {
+		snprintf(code, codecap, "driver_not_registered");
+		snprintf(msg, msgcap, "目标驱动 %s 未注册（模块未加载？本工具不自动 modprobe）",
+			 drv);
+		return -1;
+	}
+	if (!dv_driver_has_attr(ctx->root, drv, "new_id")) {
+		snprintf(code, codecap, "new_id_unsupported");
+		snprintf(msg, msgcap, "驱动 %s 没有 new_id 属性（不支持动态 id）",
+			 drv);
+		return -1;
+	}
+	if (!ctx->f->id_vendor[0] || !ctx->f->id_product[0]) {
+		snprintf(code, codecap, "new_id_unknown_ids");
+		snprintf(msg, msgcap, "拿不到 idVendor/idProduct，无法写 new_id");
+		return -1;
+	}
+	snprintf(ctx->snap.new_id, sizeof(ctx->snap.new_id), "%s %s",
+		 ctx->f->id_vendor, ctx->f->id_product);
+	snprintf(ctx->snap.new_id_driver, sizeof(ctx->snap.new_id_driver), "%s",
+		 drv);
+	if (dv_apply_bind(ctx, "new_id", drv, 1, code, codecap, msg, msgcap) != 0)
+		return -1;
+	/* 动态 id 用完就撤：绑定保持，避免污染驱动 id 表 */
+	if (dv_ctx_remove_newid(ctx) != 0)
+		dv_audit("op=adapt_remove_new_id_skipped driver=%s id=%s", drv,
+			 ctx->snap.new_id);
+	return 0;
+}
+
+/* L2：driver_override 强绑（本内核 USB 节点没有该属性 → 零写失败） */
+static int dv_lvl_override(struct dv_ctx *ctx, const struct dv_facts *f,
+			   const char *drv, char *code, size_t codecap,
+			   char *msg, size_t msgcap)
+{
+	if (!f->override_present) {
+		snprintf(code, codecap, "override_unsupported");
+		snprintf(msg, msgcap,
+			 "目标接口 %s 没有 driver_override 属性（本内核不支持），override 模式不可用，零写",
+			 f->node);
+		return -1;
+	}
+	if (!dv_driver_exists(ctx->root, drv)) {
+		snprintf(code, codecap, "driver_not_registered");
+		snprintf(msg, msgcap, "目标驱动 %s 未注册", drv);
+		return -1;
+	}
+	if (dv_apply_bind(ctx, "override", drv, 1, code, codecap, msg,
+			  msgcap) != 0)
+		return -1;
+	return 0;
+}
+
+/* L4：目标驱动模块参数 quirk（只写零掩码，行为不变；写完必恢复旧值） */
+static int dv_quirk_param(const char *drv, char *path, size_t pathcap,
+			  char *old, size_t oldcap, int *writable)
+{
+	char mod[2][DV_MAX_DRIVER];
+	const char *cands[2];
+	int i;
+
+	snprintf(mod[0], sizeof(mod[0]), "%s", drv);
+	for (i = 0; mod[0][i]; i++)
+		if (mod[0][i] == '-')
+			mod[0][i] = '_';
+	snprintf(mod[1], sizeof(mod[1]), "%s", drv);
+	cands[0] = mod[0];
+	cands[1] = mod[1];
+	for (i = 0; i < 2; i++) {
+		char p[DV_PATH_MAX];
+
+		snprintf(p, sizeof(p), "/sys/module/%s/parameters/quirks",
+			 cands[i]);
+		if (!dv_file_exists(p))
+			continue;
+		snprintf(path, pathcap, "%s", p);
+		if (old && oldcap) {
+			if (dv_read_text_path(p, old, oldcap) != 0)
+				old[0] = '\0';
+		}
+		if (writable)
+			*writable = (access(p, W_OK) == 0);
+		return 0;
+	}
+	return -1;
+}
+
+static int dv_lvl_quirk(struct dv_ctx *ctx, const char *drv, char *code,
+			size_t codecap, char *msg, size_t msgcap)
+{
+	char path[DV_PATH_MAX], old[256] = "", val[96], code2[48] = "";
+	char msg2[300] = "";
+	int writable = 0, rc;
+
+	if (!dv_root_is_real_sysfs(ctx->root)) {
+		snprintf(code, codecap, "quirk_unsupported");
+		snprintf(msg, msgcap, "假 sysfs 测试树不探测模块参数");
+		return -1;
+	}
+	if (dv_quirk_param(drv, path, sizeof(path), old, sizeof(old),
+			   &writable) != 0) {
+		snprintf(code, codecap, "quirk_param_unavailable");
+		snprintf(msg, msgcap,
+			 "驱动 %s 没有 quirks 模块参数（查过 /sys/module/%s 与 %s 两种命名）",
+			 drv, drv, drv);
+		return -1;
+	}
+	if (!writable) {
+		snprintf(code, codecap, "quirk_param_readonly");
+		snprintf(msg, msgcap,
+			 "%s 只读（当前值 \"%s\"）：参数 quirk 只能在模块加载时生效，重载模块会重启设备，本工具不做",
+			 path, old);
+		return -1;
+	}
+	if (!ctx->f->id_vendor[0] || !ctx->f->id_product[0]) {
+		snprintf(code, codecap, "quirk_unknown_ids");
+		snprintf(msg, msgcap, "拿不到 idVendor/idProduct，无法拼 quirk");
+		return -1;
+	}
+	snprintf(val, sizeof(val), "0x%s:0x%s:0x0", ctx->f->id_vendor,
+		 ctx->f->id_product);
+	if (dv_ctx_write(ctx, path, val) != 0) {
+		snprintf(code, codecap, "quirk_write_failed");
+		snprintf(msg, msgcap, "写 %s 失败", path);
+		return -1;
+	}
+	if (dv_driver_has_attr(ctx->root, drv, "new_id")) {
+		snprintf(ctx->snap.new_id, sizeof(ctx->snap.new_id), "%s %s",
+			 ctx->f->id_vendor, ctx->f->id_product);
+		snprintf(ctx->snap.new_id_driver,
+			 sizeof(ctx->snap.new_id_driver), "%s", drv);
+		rc = dv_apply_bind(ctx, "new_id", drv, 1, code2, sizeof(code2),
+				   msg2, sizeof(msg2));
+	} else {
+		rc = dv_apply_bind(ctx, "bind", drv, 1, code2, sizeof(code2),
+				   msg2, sizeof(msg2));
+	}
+	/* 参数无条件恢复旧值（quirk 只是尝试，不留在系统里） */
+	if (dv_ctx_write(ctx, path, old) != 0)
+		dv_audit("op=adapt_quirk_restore_failed path=%s old=%s", path,
+			 old);
+	if (rc != 0) {
+		snprintf(code, codecap, "%s", code2[0] ? code2 : "bind_failed");
+		snprintf(msg, msgcap, "%s（quirk 已恢复为 \"%s\"）", msg2, old);
+		return -1;
+	}
+	return 0;
+}
+
+/* L3：通用类驱动兜底（uinput / usb-storage / vfio），逐个试、逐个回滚 */
+static int dv_lvl_generic(const char *root, struct dv_facts *f,
+			  const struct dv_snap *snap0, struct dv_task *t,
+			  struct dv_level_rec *r)
+{
+	static const char *cands[] = { "uinput", "usb-storage", "vfio" };
+	int i, any = 0, all_rb = 1, last_err = 0;
+	char last_code[48] = "", last_msg[400] = "";
+
+	snprintf(r->action, sizeof(r->action), "%s", "generic_driver");
+	for (i = 0; i < (int)(sizeof(cands) / sizeof(cands[0])); i++) {
+		const char *cand = cands[i];
+		struct dv_ctx cc;
+		char ccode[48] = "", cmsg[400] = "", rbuf[512] = "", why[256];
+		char mode[16];
+		int ok, verify, in_count = 0;
+
+		if (dv_g_cancel)
+			return -1;
+		if (!dv_driver_exists(root, cand)) {
+			/* 未注册只是"没试过"，不能覆盖真实尝试过的候选的失败原因 */
+			dv_task_emit(t, 3, "candidate_skip",
+				     "driver=%s reason=not_registered", cand);
+			continue;
+		}
+		any = 1;
+		memset(&cc, 0, sizeof(cc));
+		cc.root = root;
+		cc.f = f;
+		cc.snap = *snap0;
+		cc.snapshot_ready = 1;
+		snprintf(mode, sizeof(mode), "%s", "bind");
+		if (dv_driver_has_attr(root, cand, "new_id") &&
+		    f->id_vendor[0] && f->id_product[0]) {
+			snprintf(cc.snap.new_id, sizeof(cc.snap.new_id),
+				 "%s %s", f->id_vendor, f->id_product);
+			snprintf(cc.snap.new_id_driver,
+				 sizeof(cc.snap.new_id_driver), "%s", cand);
+			snprintf(mode, sizeof(mode), "%s", "new_id");
+		}
+		ok = (dv_apply_bind(&cc, mode, cand, 1, ccode, sizeof(ccode),
+				    cmsg, sizeof(cmsg)) == 0);
+		if (ok) {
+			verify = dv_adapt_verify(root, f->node, cand, 0, 0,
+						 &in_count, why, sizeof(why));
+			if (verify) {
+				snprintf(r->driver, sizeof(r->driver), "%s",
+					 cand);
+				snprintf(r->action, sizeof(r->action), "%s",
+					 mode);
+				r->rc = 0;
+				r->err = 0;
+				r->verify = 1;
+				r->rollback_attempted = 0;
+				r->code[0] = '\0';
+				snprintf(r->detail, sizeof(r->detail),
+					 "通用驱动 %s（mode=%s）绑定并读回成功",
+					 cand, mode);
+				if (strcmp(mode, "new_id") == 0)
+					(void)dv_ctx_remove_newid(&cc);
+				return 1;
+			}
+			snprintf(ccode, sizeof(ccode), "%s", "verify_failed");
+			snprintf(cmsg, sizeof(cmsg), "%s", why);
+		}
+		r->rollback_attempted = 1;
+		if (dv_rollback(&cc, rbuf, sizeof(rbuf)) != 0)
+			all_rb = 0;
+		last_err = dv_ctx_fail_errno(&cc);
+		snprintf(last_code, sizeof(last_code), "%s",
+			 ccode[0] ? ccode : "bind_failed");
+		snprintf(last_msg, sizeof(last_msg), "%s",
+			 cmsg[0] ? cmsg : "绑定失败");
+		dv_task_emit(t, 3, "candidate_failed",
+			     "driver=%s mode=%s rc=-1 errno=%d code=%s rollback=%d",
+			     cand, mode, last_err, last_code, all_rb);
+		if (!all_rb) {
+			snprintf(r->code, sizeof(r->code),
+				 "rollback_failed");
+			snprintf(r->detail, sizeof(r->detail),
+				 "候选 %s 回滚失败（%s），停止后续候选", cand,
+				 rbuf);
+			r->rollback_attempted = 1;
+			r->rollback_ok = 0;
+			r->rc = -1;
+			r->err = last_err;
+			return -1;
+		}
+	}
+	r->rollback_attempted = any ? 1 : 0;
+	r->rollback_ok = all_rb;
+	r->rc = -1;
+	r->err = last_err;
+	snprintf(r->code, sizeof(r->code), "%s",
+		 any ? (last_code[0] ? last_code : "generic_bind_failed")
+		     : "generic_driver_unavailable");
+	snprintf(r->detail, sizeof(r->detail), "%s",
+		 any ? last_msg
+		     : "候选通用驱动 uinput/usb-storage/vfio 都未注册（本工具不自动 modprobe）");
+	return 0;
+}
+
+/* 测试缝：让「动作已完成、尚未验证/回滚」的窗口可被取消；
+ * 默认 0（不延时）。返回 1 表示延时期间收到取消。 */
+static int dv_adapt_delay(void)
+{
+	const char *env = getenv("AIKERNEL_ADAPT_LEVEL_DELAY_MS");
+	long ms;
+
+	if (!env || !env[0])
+		return 0;
+	ms = strtol(env, NULL, 10);
+	if (ms <= 0)
+		return 0;
+	if (ms > 60000)
+		ms = 60000;
+	while (ms > 0) {
+		struct timespec ts;
+
+		if (dv_g_cancel)
+			return 1;
+		ts.tv_sec = 0;
+		ts.tv_nsec = 100 * 1000 * 1000;
+		nanosleep(&ts, NULL);
+		ms -= 100;
+	}
+	return dv_g_cancel ? 1 : 0;
+}
+
+/* 单级执行：动作 → （测试缝窗口）→ 验证/回滚。返回 1 成功 / 0 失败 / -1 取消 */
+static int dv_adapt_level(int level, const char *root, struct dv_facts *f,
+			  const struct dv_snap *snap0, struct dv_task *t,
+			  struct dv_level_rec *r)
+{
+	struct dv_ctx ctx;
+	char code[48] = "", msg[400] = "";
+	const char *drv = t->target;
+	int rc = -1, wait_ms = 0;
+
+	/* HID 目标：绑回 usbhid 后输入设备要过一会儿才出现，给它 2.5s 读回窗口 */
+	if (dv_iface_is_hid(f) && dv_root_is_real_sysfs(root))
+		wait_ms = 2500;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.root = root;
+	ctx.f = f;
+	ctx.snap = *snap0;
+	ctx.snapshot_ready = 1;
+	memset(r, 0, sizeof(*r));
+	r->level = level;
+	snprintf(r->name, sizeof(r->name), "%s", dv_adapt_level_name(level));
+	snprintf(r->driver, sizeof(r->driver), "%s", drv);
+
+	switch (level) {
+	case 1:
+		snprintf(r->action, sizeof(r->action), "%s", "new_id");
+		rc = dv_lvl_new_id(&ctx, drv, code, sizeof(code), msg,
+				   sizeof(msg));
+		break;
+	case 2:
+		snprintf(r->action, sizeof(r->action), "%s",
+			 "driver_override+bind");
+		rc = dv_lvl_override(&ctx, f, drv, code, sizeof(code), msg,
+				     sizeof(msg));
+		break;
+	case 3:
+		return dv_lvl_generic(root, f, snap0, t, r);
+	default:
+		snprintf(r->action, sizeof(r->action), "%s", "param_quirk+bind");
+		rc = dv_lvl_quirk(&ctx, drv, code, sizeof(code), msg,
+				  sizeof(msg));
+		break;
+	}
+
+	if (dv_adapt_delay()) {
+		snprintf(r->code, sizeof(r->code), "%s", "canceled");
+		snprintf(r->detail, sizeof(r->detail),
+			 "取消发生在 %s 级动作之后、验证之前",
+			 dv_adapt_level_name(level));
+		r->rc = -2;
+		r->err = ECANCELED;
+		return -1;
+	}
+	return dv_level_finish(&ctx, f, r, drv, rc == 0, code, msg, wait_ms);
+}
+
+static int dv_ensure_original(const char *root, struct dv_facts *f,
+			      const struct dv_snap *snap, char *msg,
+			      size_t msgcap)
+{
+	struct dv_ctx ctx;
+	char drv[DV_MAX_DRIVER] = "";
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.root = root;
+	ctx.f = f;
+	ctx.snap = *snap;
+	ctx.snapshot_ready = 1;
+	dv_read_driver_node(root, f->node, drv, sizeof(drv));
+	if (strcmp(drv, snap->driver) == 0) {
+		snprintf(msg, msgcap, "driver=%s 已是任务开始前的值",
+			 drv[0] ? drv : "(未绑定)");
+		return 0;
+	}
+	if (dv_rollback(&ctx, msg, msgcap) == 0)
+		return 0;
+	return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 流水线                                                             */
+/* ------------------------------------------------------------------ */
+
+static int dv_adapt_pipeline(struct dv_task *t)
+{
+	char root[DV_PATH_MAX], err[512], state[DV_PATH_MAX], rmsg[512] = "";
+	struct dv_facts f;
+	struct dv_snap snap;
+	int level, have_snap = 0;
+
+	memset(&f, 0, sizeof(f));
+	memset(&snap, 0, sizeof(snap));
+	t->pid = t->foreground ? 0 : (int)getpid();
+	t->state = DV_TASK_RUNNING;
+	t->ok = -1;
+	dv_now(t->started_at, sizeof(t->started_at));
+	dv_task_status_write(t);
+	dv_task_emit(t, 0, "task_start", "device=%s target=%s levels=%d",
+		     t->device, t->target, DV_ADAPT_LEVELS);
+
+	if (dv_sysfs_root(root, sizeof(root), err, sizeof(err)) != 0)
+		return dv_task_fail(t, "sysfs_unavailable", "%s", err);
+	if (dv_root_is_real_sysfs(root) && geteuid() != 0)
+		return dv_task_fail(t, "permission_denied",
+				    "写 %s 需要 root，未做任何修改", root);
+	if (dv_collect(root, t->device, &f, err, sizeof(err)) != 0)
+		return dv_task_fail(t, "device_not_found", "%s", err);
+	if (dv_op_node(root, &f) != 0)
+		return dv_task_fail(t, "path_error", "解析接口操作节点失败");
+	{
+		char gcode[48] = "", gmsg[400] = "";
+
+		if (dv_safety_gate(&f, gcode, sizeof(gcode), gmsg,
+				   sizeof(gmsg)) != 0)
+			return dv_task_fail(t, gcode, "%s", gmsg);
+	}
+	if (!dv_driver_name_valid(t->target) ||
+	    dv_driver_forbidden(t->target))
+		return dv_task_fail(t, "driver_forbidden",
+				    "目标驱动名非法或层级不对（hub/usb/usbfs 一律禁止）");
+
+	snprintf(t->iface, sizeof(t->iface), "%s", f.iface);
+	snprintf(t->sysfs, sizeof(t->sysfs), "%s", root);
+	snprintf(t->orig_driver, sizeof(t->orig_driver), "%s", f.driver);
+	t->orig_override_present = f.override_present;
+	snprintf(t->orig_override, sizeof(t->orig_override), "%s", f.override);
+
+	if (dv_state_dir(state, sizeof(state)) != 0)
+		return dv_task_fail(t, "snapshot_failed", "状态目录不可用");
+	snprintf(snap.device, sizeof(snap.device), "%s", f.dev);
+	snprintf(snap.iface, sizeof(snap.iface), "%s", f.iface);
+	snprintf(snap.sysfs, sizeof(snap.sysfs), "%s", root);
+	snprintf(snap.driver, sizeof(snap.driver), "%s", f.driver);
+	snap.bound = f.driver[0] != '\0';
+	snprintf(snap.override, sizeof(snap.override), "%s", f.override);
+	snap.override_present = f.override_present;
+	if (dv_snap_save(state, &snap, err, sizeof(err)) != 0)
+		return dv_task_fail(t, "snapshot_failed",
+				    "%s，未做任何修改", err);
+	have_snap = 1;
+	{
+		char text[4096];
+
+		if (dv_snap_render(&snap, text, sizeof(text)) == 0 &&
+		    dv_write_file_atomic(t->paths.snap, text, err,
+					 sizeof(err)) == 0) {
+			snprintf(t->snapshot, sizeof(t->snapshot), "%s",
+				 t->paths.snap);
+		} else {
+			dv_audit("op=adapt_task_snapshot_failed task=%s err=%s",
+				 t->id, err);
+		}
+	}
+	dv_task_status_write(t);
+	dv_task_emit(t, 0, "snapshot",
+		     "path=%s driver=%s override_present=%d",
+		     snap.path, snap.driver[0] ? snap.driver : "(未绑定)",
+		     snap.override_present);
+
+	for (level = 1; level <= DV_ADAPT_LEVELS; level++) {
+		struct dv_level_rec *r;
+		int rc;
+
+		if (dv_g_cancel)
+			goto canceled;
+		t->level = level;
+		t->n_lv = level;
+		r = &t->lv[level - 1];
+		dv_task_emit(t, level, "level_start",
+			     "name=%s target=%s orig=%s",
+			     dv_adapt_level_name(level), t->target,
+			     t->orig_driver[0] ? t->orig_driver : "(未绑定)");
+		dv_task_status_write(t);
+		rc = dv_adapt_level(level, root, &f, &snap, t, r);
+		if (rc < 0)
+			goto canceled;
+		t->n_lv = level;
+		dv_task_emit(t, level, "level_end",
+			     "rc=%d errno=%d verify=%d rollback=%d code=%s detail=%s",
+			     r->rc, r->err, r->verify,
+			     r->rollback_ok ? 1 : 0,
+			     r->code[0] ? r->code : "-", r->detail);
+		dv_task_status_write(t);
+		if (rc > 0) {
+			t->state = DV_TASK_DONE;
+			t->ok = 1;
+			t->changed = 1;
+			t->error_code[0] = '\0';
+			t->error[0] = '\0';
+			dv_now(t->finished_at, sizeof(t->finished_at));
+			dv_task_status_write(t);
+			dv_task_emit(t, level, "task_end",
+				     "status=done level=%d driver=%s", level,
+				     r->driver);
+			return 0;
+		}
+	}
+
+	/* 四级全失败：确保回到原驱动，再如实报 failed */
+	dv_g_cancel = 0;
+	if (have_snap) {
+		char drv[DV_MAX_DRIVER] = "";
+
+		dv_read_driver_node(root, f.node, drv, sizeof(drv));
+		if (strcmp(drv, snap.driver) != 0) {
+			if (dv_ensure_original(root, &f, &snap, rmsg,
+					       sizeof(rmsg)) != 0)
+				dv_audit("op=adapt_final_restore_failed device=%s msg=%s",
+					 t->device, rmsg);
+			else
+				dv_task_emit(t, DV_ADAPT_LEVELS,
+					     "final_restore", "%s", rmsg);
+		}
+	}
+	{
+		char detail[600];
+		int i;
+
+		detail[0] = '\0';
+		for (i = 0; i < t->n_lv; i++) {
+			char one[160];
+
+			snprintf(one, sizeof(one),
+				 "%sL%d(%s) rc=%d errno=%d %s%s",
+				 i ? " / " : "", t->lv[i].level,
+				 t->lv[i].name, t->lv[i].rc, t->lv[i].err,
+				 t->lv[i].code[0] ? t->lv[i].code : "-",
+				 t->lv[i].rollback_ok ? " 已回滚" : "");
+			if (strlen(detail) + strlen(one) + 1 >= sizeof(detail))
+				break;
+			memcpy(detail + strlen(detail), one, strlen(one) + 1);
+		}
+		return dv_task_fail(t, "all_levels_failed",
+				    "四级递进全部失败：%s", detail);
+	}
+
+canceled:
+	dv_g_cancel = 0;	/* 取消后的收尾必须允许写 */
+	t->state = DV_TASK_CANCELED;
+	t->ok = 0;
+	if (!t->cancel_source[0])
+		snprintf(t->cancel_source, sizeof(t->cancel_source), "%s",
+			 "signal(SIGTERM/SIGINT)");
+	dv_task_emit(t, t->level, "cancel", "收到取消请求：中止当前级别并确保设备回到原驱动");
+	if (have_snap) {
+		char drv[DV_MAX_DRIVER] = "";
+
+		dv_read_driver_node(root, f.node, drv, sizeof(drv));
+		if (strcmp(drv, snap.driver) != 0) {
+			if (dv_ensure_original(root, &f, &snap, rmsg,
+					       sizeof(rmsg)) == 0)
+				dv_task_emit(t, t->level, "cancel_restore",
+					     "%s", rmsg);
+			else
+				dv_task_emit(t, t->level,
+					     "cancel_restore_failed", "%s",
+					     rmsg);
+		} else {
+			snprintf(rmsg, sizeof(rmsg),
+				 "driver=%s 已是任务开始前的值",
+				 drv[0] ? drv : "(未绑定)");
+		}
+	} else {
+		snprintf(rmsg, sizeof(rmsg), "尚未落快照，未做过任何写");
+	}
+	snprintf(t->error_code, sizeof(t->error_code), "%s", "canceled");
+	snprintf(t->error, sizeof(t->error),
+		 "任务被取消；%s（恢复说明：%s）",
+		 t->cancel_source[0] ? t->cancel_source : "cancel 请求",
+		 rmsg);
+	dv_now(t->finished_at, sizeof(t->finished_at));
+	dv_task_status_write(t);
+	dv_task_emit(t, t->level, "task_end", "status=canceled restore=%s",
+		     rmsg);
+	return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 进程辅助                                                           */
+/* ------------------------------------------------------------------ */
+
+static void dv_close_fds_from(int low)
+{
+	long max = sysconf(_SC_OPEN_MAX);
+	int fd;
+
+	if (max < 0 || max > 4096)
+		max = 4096;
+	for (fd = low; fd < (int)max; fd++)
+		close(fd);
+}
+
+static pid_t dv_reap_children(void)
+{
+	int i, j = 0;
+	pid_t last = 0;
+
+	for (i = 0; i < dv_g_nchildren; i++) {
+		pid_t r = waitpid(dv_g_children[i], NULL, WNOHANG);
+
+		if (r == dv_g_children[i]) {
+			last = r;
+			continue;
+		}
+		if (r == 0)
+			dv_g_children[j++] = dv_g_children[i];
+	}
+	dv_g_nchildren = j;
+	return last;
+}
+
+static void dv_remember_child(pid_t pid)
+{
+	if (dv_g_nchildren >= DV_REAP_MAX)
+		return;
+	dv_g_children[dv_g_nchildren++] = pid;
+}
+
+static int dv_pid_alive(int pid)
+{
+	char path[64], buf[512], *rp;
+	int fd;
+	ssize_t n;
+
+	if (pid <= 0)
+		return 0;
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+	rp = strrchr(buf, ')');
+	if (!rp || rp[1] != ' ')
+		return 1;
+	return rp[2] != 'Z';
+}
+
+/* pid 复用防护：/proc/<pid>/cmdline 必须与本进程一致（同一个 agent 可执行体） */
+static int dv_pid_cmdline_match(int pid)
+{
+	char a[512], b[512], path[64];
+	int fd;
+	ssize_t na, nb;
+
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	na = read(fd, a, sizeof(a) - 1);
+	close(fd);
+	if (na <= 0)
+		return 0;
+	a[na] = '\0';
+	fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	nb = read(fd, b, sizeof(b) - 1);
+	close(fd);
+	if (nb <= 0)
+		return 0;
+	b[nb] = '\0';
+	return memcmp(a, b, (size_t)(na < nb ? na : nb)) == 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* JSON 小工具                                                        */
+/* ------------------------------------------------------------------ */
+
+static void dv_emit_tail_lines(struct dvb *b, const char *key, const char *text,
+			       int max_lines)
+{
+	int cap = max_lines > 0 ? max_lines : 1;
+	char **ring;
+	char *buf;
+	char *p;
+	int n = 0, i, start;
+
+	ring = calloc((size_t)cap, sizeof(*ring));
+	buf = strdup(text ? text : "");
+	if (!ring || !buf) {
+		free(ring);
+		free(buf);
+		dvb_json_str(b, key);
+		dvb_putc(b, ':');
+		dvb_puts(b, "[]");
+		dvb_putc(b, ',');
+		return;
+	}
+	for (p = buf; p && *p;) {
+		char *eol = strchr(p, '\n');
+		size_t l;
+
+		if (eol)
+			*eol = '\0';
+		l = strlen(p);
+		while (l > 0 && p[l - 1] == '\r')
+			p[--l] = '\0';
+		if (l > 0) {
+			free(ring[n % cap]);
+			ring[n % cap] = strdup(p);
+			n++;
+		}
+		if (!eol)
+			break;
+		p = eol + 1;
+	}
+	dvb_json_str(b, key);
+	dvb_putc(b, ':');
+	dvb_puts(b, "[");
+	start = n > cap ? n - cap : 0;
+	for (i = start; i < n; i++) {
+		if (i > start)
+			dvb_putc(b, ',');
+		dvb_json_str(b, ring[i % cap] ? ring[i % cap] : "");
+	}
+	dvb_puts(b, "]");
+	dvb_putc(b, ',');
+	for (i = 0; i < cap; i++)
+		free(ring[i]);
+	free(ring);
+	free(buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* dev_adapt：入口                                                    */
+/* ------------------------------------------------------------------ */
+
+static int dv_emit_adapt_accept(char **out, struct dv_task *t, int async,
+				int pid)
+{
+	char *buf = malloc(DV_OUT_LIMIT);
+	struct dvb b;
+	char *status_text = NULL;
+	size_t n = 0;
+
+	if (!buf) {
+		*out = strdup("ERROR: 内存不足");
+		return AI_ERR_MEMORY;
+	}
+	dvb_init(&b, buf, DV_OUT_LIMIT);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", DV_ADAPT_SCHEMA);
+	dvb_kv_bool(&b, "ok", 1);
+	dvb_kv_bool(&b, "accepted", 1);
+	dvb_kv_str(&b, "task_id", t->id);
+	dvb_kv_str(&b, "device", t->device);
+	dvb_kv_str(&b, "iface", t->iface[0] ? t->iface : NULL);
+	dvb_kv_str(&b, "target_driver", t->target);
+	dvb_kv_int(&b, "levels_total", DV_ADAPT_LEVELS);
+	dvb_kv_bool(&b, "async", async);
+	dvb_kv_int(&b, "pid", pid);
+	dvb_kv_str(&b, "status", dv_state_name(t->state));
+	dvb_kv_str(&b, "state_dir", t->paths.dir);
+	dvb_kv_str(&b, "status_file", t->paths.status);
+	dvb_kv_str(&b, "progress_file", t->paths.progress);
+	dvb_kv_str(&b, "daemon_log", t->paths.log);
+	dvb_kv_str(&b, "hint",
+		   async ? "dev_task action=status 看进度 / action=log 看全量日志 / action=cancel 取消并回滚"
+			 : "前台执行完成；task 字段即最终 status.json");
+	if (!async) {
+		status_text = malloc(DV_TASK_STATUS_BUF);
+		if (status_text &&
+		    dv_read_file_bounded(t->paths.status, status_text,
+					 DV_TASK_STATUS_BUF, &n) == 0 &&
+		    n > 2 && status_text[0] == '{') {
+			dvb_puts(&b, "\"task\":");
+			dvb_puts(&b, status_text);
+			dvb_putc(&b, ',');
+		}
+		free(status_text);
+	}
+	dvb_kv_str(&b, "levels_planned",
+		   "in_tree_new_id,driver_override,generic_driver,param_quirk");
+	dvb_kv_bool(&b, "truncated", b.trunc);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	*out = buf;
+	return AI_OK;
+}
+
+static int dv_tool_adapt(const char *args, char **out)
+{
+	char root[DV_PATH_MAX], err[512];
+	char gcode[48] = "", gmsg[400] = "";
+	char *dev = NULL, *drv = NULL;
+	struct dv_facts f;
+	struct dv_task t;
+	struct dv_task_paths p;
+	int rc, foreground = 0, pid = 0;
+	const char *val;
+	size_t vlen;
+	int type;
+
+	*out = NULL;
+	memset(&t, 0, sizeof(t));
+	memset(&f, 0, sizeof(f));
+	memset(&p, 0, sizeof(p));
+	dv_reap_children();
+	if (ai_json_obj_get(args, strlen(args), "device", &val, &vlen, &type) == 1
+	    && type == AI_JSON_STR)
+		dev = ai_json_strdup_str(val, vlen);
+	if (ai_json_obj_get(args, strlen(args), "driver", &val, &vlen, &type) == 1
+	    && type == AI_JSON_STR)
+		drv = ai_json_strdup_str(val, vlen);
+
+	if (!dev || !dev[0]) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "invalid_arg",
+				     "缺少 device（如 1-1 或 1-1:1.0）");
+	}
+	if (!drv || !drv[0]) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "invalid_arg",
+				     "缺少 driver（四级递进的目标驱动，如 usbhid）");
+	}
+	if (!dv_node_name_valid(dev)) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "invalid_arg",
+				     "device 不是合法 sysfs 节点名");
+	}
+	if (!dv_driver_name_valid(drv) || dv_driver_forbidden(drv)) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "driver_forbidden",
+				     "driver 名非法或层级不对（hub/usb/usbfs 一律禁止）");
+	}
+	if (dv_sysfs_root(root, sizeof(root), err, sizeof(err)) != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "sysfs_unavailable",
+				     "%s", err);
+	}
+	if (dv_root_is_real_sysfs(root) && geteuid() != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "permission_denied",
+				     "写 %s 需要 root（当前 uid=%lu），未做任何修改",
+				     root, (unsigned long)geteuid());
+	}
+	if (dv_collect(root, dev, &f, err, sizeof(err)) != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "device_not_found",
+				     "%s", err);
+	}
+	if (dv_op_node(root, &f) != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "path_error",
+				     "解析接口操作节点失败（路径过长）");
+	}
+	if (dv_safety_gate(&f, gcode, sizeof(gcode), gmsg, sizeof(gmsg)) != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, gcode, "%s", gmsg);
+	}
+	/* 安全目标已在上面全部通过，建任务目录 */
+	dv_task_gen_id(t.id, sizeof(t.id));
+	if (dv_task_paths_open(t.id, &p) != 0) {
+		free(dev);
+		free(drv);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "task_dir_failed",
+				     "任务状态目录不可用（%s）", t.id);
+	}
+	t.paths = p;
+	snprintf(t.device, sizeof(t.device), "%s", f.dev);
+	snprintf(t.iface, sizeof(t.iface), "%s", f.iface);
+	snprintf(t.sysfs, sizeof(t.sysfs), "%s", root);
+	snprintf(t.target, sizeof(t.target), "%s", drv);
+	snprintf(t.orig_driver, sizeof(t.orig_driver), "%s", f.driver);
+	t.orig_override_present = f.override_present;
+	snprintf(t.orig_override, sizeof(t.orig_override), "%s", f.override);
+	t.state = DV_TASK_QUEUED;
+	t.ok = -1;
+	dv_now(t.started_at, sizeof(t.started_at));
+	dv_task_status_write(&t);
+	dv_task_emit(&t, 0, "task_created", "device=%s target=%s pid=%d",
+		     t.device, t.target, (int)getpid());
+
+	foreground = (getenv("AIKERNEL_ADAPT_FOREGROUND") &&
+		      getenv("AIKERNEL_ADAPT_FOREGROUND")[0] == '1');
+	free(dev);
+	free(drv);
+
+	if (foreground) {
+		t.foreground = 1;
+		t.pid = 0;
+		dv_audit("op=dev_adapt mode=foreground task=%s device=%s target=%s",
+			 t.id, t.device, t.target);
+		(void)dv_adapt_pipeline(&t);
+		rc = dv_emit_adapt_accept(out, &t, 0, 0);
+		return rc;
+	}
+
+	fflush(NULL);
+	pid = fork();
+	if (pid < 0) {
+		snprintf(t.error_code, sizeof(t.error_code), "%s", "fork_failed");
+		t.state = DV_TASK_FAILED;
+		t.ok = 0;
+		dv_task_status_write(&t);
+		return dv_error_json(out, DV_ADAPT_SCHEMA, "fork_failed",
+				     "fork 后台进程失败: %s", strerror(errno));
+	}
+	if (pid == 0) {
+		int fd, nul;
+
+		/* --- 后台 daemon --- */
+		setsid();
+		dv_close_fds_from(3);
+		nul = open("/dev/null", O_RDONLY | O_CLOEXEC);
+		fd = open(t.paths.log, O_WRONLY | O_CREAT | O_APPEND |
+			  O_CLOEXEC, 0600);
+		if (nul >= 0) {
+			dup2(nul, 0);
+			close(nul);
+		}
+		if (fd >= 0) {
+			dup2(fd, 1);
+			dup2(fd, 2);
+			close(fd);
+		}
+		signal(SIGHUP, SIG_IGN);
+		signal(SIGTERM, dv_cancel_handler);
+		signal(SIGINT, dv_cancel_handler);
+		signal(SIGPIPE, SIG_IGN);
+		t.pid = (int)getpid();
+		t.foreground = 0;
+		(void)dv_adapt_pipeline(&t);
+		_exit(0);
+	}
+	/* --- 父进程：立刻返回 task_id --- */
+	{
+		char pidbuf[32];
+
+		snprintf(pidbuf, sizeof(pidbuf), "%d\n", pid);
+		if (dv_write_file_atomic(t.paths.pid, pidbuf, err,
+					 sizeof(err)) != 0)
+			dv_audit("op=adapt_pid_write_failed task=%s err=%s",
+				 t.id, err);
+	}
+	dv_remember_child((pid_t)pid);
+	dv_audit("op=dev_adapt mode=async task=%s device=%s target=%s pid=%d",
+		 t.id, t.device, t.target, pid);
+	return dv_emit_adapt_accept(out, &t, 1, pid);
+}
+
+/* ------------------------------------------------------------------ */
+/* dev_task：status / cancel / log                                    */
+/* ------------------------------------------------------------------ */
+
+static int dv_task_resolve(const char *id_arg, char *out, size_t cap)
+{
+	char id[DV_TASK_ID_MAX];
+
+	out[0] = '\0';
+	if (id_arg && id_arg[0]) {
+		if (!dv_task_id_valid(id_arg))
+			return -1;
+		snprintf(out, cap, "%s", id_arg);
+		return 0;
+	}
+	if (dv_task_latest(id, sizeof(id)) != 0)
+		return -1;
+	snprintf(out, cap, "%s", id);
+	return 0;
+}
+
+static int dv_task_dir_exists(const char *id)
+{
+	char root[DV_PATH_MAX], dir[DV_PATH_MAX];
+
+	if (!dv_task_id_valid(id))
+		return 0;
+	if (dv_tasks_root(root, sizeof(root)) != 0)
+		return 0;
+	if (dv_join(dir, sizeof(dir), root, id) != 0)
+		return 0;
+	return dv_dir_exists(dir);
+}
+
+static int dv_task_read_status(const char *id, char *buf, size_t cap,
+			       size_t *n)
+{
+	struct dv_task_paths p;
+
+	buf[0] = '\0';
+	if (dv_task_paths_open(id, &p) != 0)
+		return -1;
+	return dv_read_file_bounded(p.status, buf, cap, n);
+}
+
+static int dv_task_status_cmd(const char *id_arg, char **out)
+{
+	char id[DV_TASK_ID_MAX], txt[DV_TASK_STATUS_BUF];
+	char pidtxt[64] = "";
+	char *plog = NULL;
+	struct dv_task_paths p;
+	size_t n = 0, pn = 0;
+	int pid, alive;
+	const char *state = NULL;
+	char *buf;
+	struct dvb b;
+
+	if (dv_task_resolve(id_arg, id, sizeof(id)) != 0) {
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "task_not_found",
+				     "没有可用的适配任务（先 dev_adapt）");
+	}
+	if (!dv_task_dir_exists(id)) {
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "task_not_found",
+				     "任务 %s 不存在（先 dev_adapt）", id);
+	}
+	if (dv_task_read_status(id, txt, sizeof(txt), &n) != 0 ||
+	    n < 3 || txt[0] != '{') {
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "status_unreadable",
+				     "任务 %s 的 status.json 不存在或损坏", id);
+	}
+	if (dv_task_paths_open(id, &p) != 0) {
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "task_not_found",
+				     "任务 %s 目录不可用", id);
+	}
+	pid = (int)dv_json_get_int(txt, n, "pid", 0);
+	if (pid <= 0 && dv_read_file_bounded(p.pid, pidtxt,
+					     sizeof(pidtxt), NULL) == 0)
+		pid = atoi(pidtxt);
+	alive = dv_pid_alive(pid) && dv_pid_cmdline_match(pid);
+	{
+		static char st[32];
+
+		if (dv_json_get_str(txt, n, "status", st, sizeof(st)) == 0)
+			state = st;
+	}
+	plog = calloc(1, DV_TASK_LOG_MAX);
+	if (plog)
+		dv_read_file_bounded(p.progress, plog, DV_TASK_LOG_MAX, &pn);
+	buf = malloc(DV_OUT_LIMIT);
+	if (!buf) {
+		free(plog);
+		*out = strdup("ERROR: 内存不足");
+		return AI_ERR_MEMORY;
+	}
+	dvb_init(&b, buf, DV_OUT_LIMIT);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", DV_TASK_STATUS_SCHEMA);
+	dvb_kv_bool(&b, "ok", 1);
+	dvb_kv_str(&b, "action", "status");
+	dvb_kv_str(&b, "task_id", id);
+	dvb_kv_str(&b, "state_dir", p.dir);
+	dvb_kv_str(&b, "status", state ? state : "unknown");
+	dvb_kv_int(&b, "pid", pid);
+	dvb_kv_bool(&b, "process_alive", alive);
+	dvb_kv_bool(&b, "stale",
+		    (state && strcmp(state, "running") == 0 && !alive) ||
+		    (state && strcmp(state, "queued") == 0 && !alive));
+	dvb_kv_int(&b, "level", (long long)dv_json_get_int(txt, n, "level", 0));
+	dvb_kv_int(&b, "levels_total",
+		   (long long)dv_json_get_int(txt, n, "levels_total",
+					      DV_ADAPT_LEVELS));
+	dvb_puts(&b, "\"task\":");
+	dvb_puts(&b, txt);
+	dvb_putc(&b, ',');
+	dv_emit_tail_lines(&b, "progress_tail", plog ? plog : "",
+			   DV_TASK_TAIL_LINES);
+	free(plog);
+	{
+		char *logbuf = malloc(DV_TASK_LOG_MAX);
+
+		if (logbuf) {
+			dv_read_file_bounded(p.log, logbuf, DV_TASK_LOG_MAX,
+					     NULL);
+			dv_emit_tail_lines(&b, "daemon_tail", logbuf,
+					   DV_TASK_TAIL_LINES);
+			free(logbuf);
+		} else {
+			dvb_puts(&b, "\"daemon_tail\":[],");
+		}
+	}
+	dvb_kv_str(&b, "hint",
+		   "action=cancel 取消并回滚；action=log 取全量日志");
+	dvb_kv_bool(&b, "truncated", b.trunc);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	*out = buf;
+	return AI_OK;
+}
+
+static int dv_task_log_cmd(const char *id_arg, char **out)
+{
+	char id[DV_TASK_ID_MAX], *prog = NULL, *log = NULL;
+	struct dv_task_paths p;
+	size_t pn = 0, ln = 0;
+	char *buf;
+	struct dvb b;
+	int fd;
+	ssize_t r;
+	size_t off;
+
+	if (dv_task_resolve(id_arg, id, sizeof(id)) != 0)
+		return dv_error_json(out, DV_TASK_LOG_SCHEMA, "task_not_found",
+				     "没有可用的适配任务（先 dev_adapt）");
+	if (!dv_task_dir_exists(id) || dv_task_paths_open(id, &p) != 0)
+		return dv_error_json(out, DV_TASK_LOG_SCHEMA, "task_not_found",
+				     "任务 %s 不存在（先 dev_adapt）", id);
+	prog = calloc(1, DV_TASK_LOG_MAX + 1);
+	log = calloc(1, DV_TASK_LOG_MAX + 1);
+	if (!prog || !log) {
+		free(prog);
+		free(log);
+		*out = strdup("ERROR: 内存不足");
+		return AI_ERR_MEMORY;
+	}
+	/* 全量（有界）读：超限时保留尾部 */
+	fd = open(p.progress, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		off = 0;
+		while (off < DV_TASK_LOG_MAX &&
+		       (r = read(fd, prog + off, DV_TASK_LOG_MAX - off)) > 0)
+			off += (size_t)r;
+		prog[off] = '\0';
+		pn = off;
+		close(fd);
+	}
+	fd = open(p.log, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		off = 0;
+		while (off < DV_TASK_LOG_MAX &&
+		       (r = read(fd, log + off, DV_TASK_LOG_MAX - off)) > 0)
+			off += (size_t)r;
+		log[off] = '\0';
+		ln = off;
+		close(fd);
+	}
+	buf = malloc(DV_OUT_LIMIT);
+	if (!buf) {
+		free(prog);
+		free(log);
+		*out = strdup("ERROR: 内存不足");
+		return AI_ERR_MEMORY;
+	}
+	dvb_init(&b, buf, DV_OUT_LIMIT);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", DV_TASK_LOG_SCHEMA);
+	dvb_kv_bool(&b, "ok", 1);
+	dvb_kv_str(&b, "action", "log");
+	dvb_kv_str(&b, "task_id", id);
+	dvb_kv_str(&b, "state_dir", p.dir);
+	dvb_kv_int(&b, "progress_bytes", (long long)pn);
+	dvb_kv_int(&b, "daemon_log_bytes", (long long)ln);
+	dvb_puts(&b, "\"progress\":[");
+	{
+		char *nl = prog;
+		int first = 1;
+
+		while (nl && *nl) {
+			char *eol = strchr(nl, '\n');
+			size_t l = eol ? (size_t)(eol - nl) : strlen(nl);
+
+			if (l > 0) {
+				char one[2048];
+
+				snprintf(one, sizeof(one), "%.*s", (int)l, nl);
+				if (!first)
+					dvb_putc(&b, ',');
+				dvb_json_str(&b, one);
+				first = 0;
+			}
+			if (!eol)
+				break;
+			nl = eol + 1;
+		}
+	}
+	dvb_puts(&b, "],");
+	dvb_kv_str(&b, "daemon_log", log);
+	dvb_kv_bool(&b, "truncated",
+		    b.trunc || pn >= DV_TASK_LOG_MAX || ln >= DV_TASK_LOG_MAX);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	*out = buf;
+	free(prog);
+	free(log);
+	return AI_OK;
+}
+
+static int dv_task_cancel_cmd(const char *id_arg, const char *why, char **out)
+{
+	char id[DV_TASK_ID_MAX], txt[DV_TASK_STATUS_BUF];
+	char pidtxt[64] = "";
+	struct dv_task_paths p;
+	struct dv_snap snap;
+	char snap_err[256] = "";
+	size_t n = 0;
+	int pid = 0, alive = 0, ours = 0, sig = 0, killed = 0;
+	int have_snap = 0, restored = -1, i, terminal_before = 0;
+	char restore_msg[512] = "";
+	char state_buf[32] = "";
+	const char *state = state_buf;
+	char *buf;
+	struct dvb b;
+
+	if (dv_task_resolve(id_arg, id, sizeof(id)) != 0)
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA, "task_not_found",
+				     "没有可用的适配任务（先 dev_adapt）");
+	if (!dv_task_dir_exists(id))
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA, "task_not_found",
+				     "任务 %s 不存在（先 dev_adapt）", id);
+	if (dv_task_read_status(id, txt, sizeof(txt), &n) != 0 ||
+	    n < 3 || txt[0] != '{')
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "status_unreadable",
+				     "任务 %s 的 status.json 不存在或损坏", id);
+	if (!dv_task_dir_exists(id) || dv_task_paths_open(id, &p) != 0)
+		return dv_error_json(out, DV_TASK_STATUS_SCHEMA,
+				     "task_not_found",
+				     "任务 %s 不存在（先 dev_adapt）", id);
+	(void)dv_json_get_str(txt, n, "status", state_buf,
+			      sizeof(state_buf));
+	pid = (int)dv_json_get_int(txt, n, "pid", 0);
+	if (pid <= 0 && dv_read_file_bounded(p.pid, pidtxt,
+					     sizeof(pidtxt), NULL) == 0)
+		pid = atoi(pidtxt);
+	alive = dv_pid_alive(pid);
+	ours = alive && dv_pid_cmdline_match(pid);
+	terminal_before = state && dv_task_state_terminal(state);
+	memset(&snap, 0, sizeof(snap));
+	if (dv_snap_load_path(p.snap, &snap, snap_err, sizeof(snap_err)) == 0)
+		have_snap = 1;
+
+	/* 已完成且成功：不杀、不回滚（成功结果要保留） */
+	if (state && strcmp(state, "done") == 0 &&
+	    dv_json_get_int(txt, n, "ok", 0) == 1) {
+		buf = malloc(8192);
+		if (!buf) {
+			*out = strdup("ERROR: 内存不足");
+			return AI_ERR_MEMORY;
+		}
+		dvb_init(&b, buf, 8192);
+		dvb_puts(&b, "{");
+		dvb_kv_str(&b, "schema", DV_TASK_STATUS_SCHEMA);
+		dvb_kv_bool(&b, "ok", 1);
+		dvb_kv_str(&b, "action", "cancel");
+		dvb_kv_str(&b, "task_id", id);
+		dvb_kv_str(&b, "status", "done");
+		dvb_kv_bool(&b, "canceled", 0);
+		dvb_kv_str(&b, "note",
+			   "任务已成功完成，cancel 不回滚成功结果（如需还原请用 dev_restore）");
+		dvb_kv_bool(&b, "truncated", b.trunc);
+		dvb_puts(&b, "\"schema_ok\":true}");
+		*out = buf;
+		return AI_OK;
+	}
+
+	if (ours) {
+		kill(pid, SIGTERM);
+		sig = SIGTERM;
+		for (i = 0; i < 60; i++) {
+			if (!dv_pid_alive(pid))
+				break;
+			{
+				struct timespec ts;
+
+				ts.tv_sec = 0;
+				ts.tv_nsec = 100 * 1000 * 1000;
+				nanosleep(&ts, NULL);
+			}
+		}
+		if (dv_pid_alive(pid)) {
+			kill(pid, SIGKILL);
+			sig = SIGKILL;
+			killed = 1;
+			for (i = 0; i < 30; i++) {
+				if (!dv_pid_alive(pid))
+					break;
+				{
+					struct timespec ts;
+
+					ts.tv_sec = 0;
+					ts.tv_nsec = 100 * 1000 * 1000;
+					nanosleep(&ts, NULL);
+				}
+			}
+		}
+		(void)waitpid(pid, NULL, WNOHANG);
+	}
+
+	/* 读回：必须回到任务开始前的驱动 */
+	if (have_snap) {
+		char root[DV_PATH_MAX], err[256];
+		struct dv_facts f;
+
+		memset(&f, 0, sizeof(f));
+		if (dv_sysfs_root(root, sizeof(root), err, sizeof(err)) == 0 &&
+		    dv_collect(root, snap.device, &f, err, sizeof(err)) == 0 &&
+		    dv_op_node(root, &f) == 0) {
+			char now[DV_MAX_DRIVER] = "";
+
+			dv_read_driver_node(root, f.node, now, sizeof(now));
+			if (strcmp(now, snap.driver) == 0) {
+				restored = 1;
+				snprintf(restore_msg, sizeof(restore_msg),
+					 "driver=%s 已是任务开始前的值（无需回滚）",
+					 now[0] ? now : "(未绑定)");
+			} else {
+				dv_g_cancel = 0;
+				restored = (dv_ensure_original(root, &f, &snap,
+							       restore_msg,
+							       sizeof(restore_msg)) == 0);
+			}
+		} else {
+			snprintf(restore_msg, sizeof(restore_msg),
+				 "sysfs 不可用/设备已消失，无法校验");
+			restored = -1;
+		}
+	} else {
+		snprintf(restore_msg, sizeof(restore_msg),
+			 "没有任务快照（%s），无法回滚",
+			 snap_err[0] ? snap_err : "snapshot.json 缺失");
+	}
+
+	/* 若 daemon 自己没来得及写 canceled（SIGKILL 兜底），由 cancel 侧补写
+	 * 一份显式 canceled 状态；原 status.json 原文另存 status.before-cancel.json
+	 * （SIGKILL 路径拿不到完整 levels[]，不假装有）。 */
+	if (!terminal_before) {
+		struct dv_task t;
+		char st2[32] = "";
+		size_t n2 = 0;
+		int daemon_wrote = 0;
+
+		/* daemon 可能已自己写了 canceled（带完整 started_at/levels）：
+		 * 先重读，有就保留，不覆盖更完整的状态。 */
+		if (dv_task_read_status(id, txt, sizeof(txt), &n2) == 0 &&
+		    n2 > 3 &&
+		    dv_json_get_str(txt, n2, "status", st2, sizeof(st2)) == 0 &&
+		    strcmp(st2, "canceled") == 0)
+			daemon_wrote = 1;
+		if (daemon_wrote) {
+			n = n2;
+			goto cancel_status_done;
+		}
+		char target[64] = "";
+		char iface[DV_NAME_MAX] = "";
+		char device[DV_NAME_MAX] = "";
+
+		if (dv_task_read_status(id, txt, sizeof(txt), &n) != 0 ||
+		    n < 3 || txt[0] != '{')
+			txt[0] = '\0';
+		{
+			if (txt[0])
+				(void)dv_json_get_str(txt, n, "target_driver",
+						      target, sizeof(target));
+			if (have_snap) {
+				snprintf(iface, sizeof(iface), "%s", snap.iface);
+				snprintf(device, sizeof(device), "%s",
+					 snap.device);
+			}
+		}
+		memset(&t, 0, sizeof(t));
+		t.paths = p;
+		snprintf(t.id, sizeof(t.id), "%s", id);
+		snprintf(t.device, sizeof(t.device), "%s", device);
+		snprintf(t.iface, sizeof(t.iface), "%s", iface);
+		snprintf(t.sysfs, sizeof(t.sysfs), "%s",
+			 have_snap ? snap.sysfs : "");
+		snprintf(t.target, sizeof(t.target), "%s", target);
+		snprintf(t.orig_driver, sizeof(t.orig_driver), "%s",
+			 have_snap ? snap.driver : "");
+		t.state = DV_TASK_CANCELED;
+		t.ok = 0;
+		t.pid = pid;
+		t.level = (int)dv_json_get_int(txt[0] ? txt : "{}",
+					       txt[0] ? n : 2, "level", 0);
+		snprintf(t.cancel_source, sizeof(t.cancel_source), "%s",
+			 "dev_task/cancel");
+		snprintf(t.error_code, sizeof(t.error_code), "%s", "canceled");
+		snprintf(t.error, sizeof(t.error),
+			 "由 dev_task action=cancel 终止（signal=%s）；%s；"
+			 "原状态原文见 %s/status.before-cancel.json",
+			 killed ? "SIGKILL" : "SIGTERM", restore_msg, p.dir);
+		if (txt[0]) {
+			char bak[DV_PATH_MAX];
+			char werr[256];
+
+			if (dv_join(bak, sizeof(bak), p.dir,
+				    "status.before-cancel.json") == 0)
+				(void)dv_write_file_atomic(bak, txt, werr,
+							   sizeof(werr));
+		}
+		dv_now(t.finished_at, sizeof(t.finished_at));
+		dv_task_status_write(&t);
+		dv_task_emit(&t, t.level, "cancel_by_task",
+			     "signal=%s restored=%d msg=%s",
+			     killed ? "SIGKILL" : "SIGTERM", restored,
+			     restore_msg);
+	}
+cancel_status_done:
+
+	buf = malloc(DV_OUT_LIMIT);
+	if (!buf) {
+		*out = strdup("ERROR: 内存不足");
+		return AI_ERR_MEMORY;
+	}
+	dvb_init(&b, buf, DV_OUT_LIMIT);
+	dvb_puts(&b, "{");
+	dvb_kv_str(&b, "schema", DV_TASK_STATUS_SCHEMA);
+	dvb_kv_bool(&b, "ok", 1);
+	dvb_kv_str(&b, "action", "cancel");
+	dvb_kv_str(&b, "task_id", id);
+	dvb_kv_str(&b, "status",
+		   (terminal_before && state &&
+		    strcmp(state, "canceled") != 0) ? state : "canceled");
+	dvb_kv_bool(&b, "canceled",
+		    terminal_before && state && strcmp(state, "canceled") != 0
+			    ? 0 : 1);
+	dvb_kv_bool(&b, "already_terminal", terminal_before);
+	dvb_kv_int(&b, "pid", pid);
+	dvb_kv_bool(&b, "was_alive", alive);
+	dvb_kv_bool(&b, "pid_owned", ours);
+	dvb_kv_str(&b, "signal",
+		   sig == SIGKILL ? "SIGKILL" : (sig == SIGTERM ? "SIGTERM" : NULL));
+	dvb_kv_bool(&b, "process_gone", !dv_pid_alive(pid) || pid <= 0);
+	dvb_kv_bool(&b, "had_snapshot", have_snap);
+	dvb_kv_bool(&b, "restored_ok", restored == 1);
+	dvb_kv_str(&b, "restore_message", restore_msg);
+	if (have_snap) {
+		char now[DV_MAX_DRIVER] = "";
+
+		dv_read_driver_node(snap.sysfs, snap.iface, now, sizeof(now));
+		dvb_kv_str(&b, "orig_driver",
+			   snap.driver[0] ? snap.driver : NULL);
+		dvb_kv_str(&b, "current_driver", now[0] ? now : NULL);
+	}
+	dvb_kv_str(&b, "reason", why && why[0] ? why : "cancel");
+	dvb_kv_bool(&b, "truncated", b.trunc);
+	dvb_puts(&b, "\"schema_ok\":true}");
+	*out = buf;
+	return AI_OK;
+}
+
+static int dv_tool_task(const char *args, char **out)
+{
+	char *action = NULL, *id = NULL, *why = NULL;
+	const char *val;
+	size_t vlen;
+	int type, rc;
+
+	*out = NULL;
+	dv_reap_children();
+	if (ai_json_obj_get(args, strlen(args), "action", &val, &vlen, &type) == 1
+	    && type == AI_JSON_STR)
+		action = ai_json_strdup_str(val, vlen);
+	if (ai_json_obj_get(args, strlen(args), "task_id", &val, &vlen,
+			    &type) == 1 && type == AI_JSON_STR)
+		id = ai_json_strdup_str(val, vlen);
+	if (ai_json_obj_get(args, strlen(args), "reason", &val, &vlen, &type) == 1
+	    && type == AI_JSON_STR)
+		why = ai_json_strdup_str(val, vlen);
+	if (!action)
+		action = strdup("status");
+	if (!action || !action[0]) {
+		rc = dv_error_json(out, DV_TASK_STATUS_SCHEMA, "invalid_arg",
+				   "action 只允许 status / cancel / log");
+		goto out;
+	}
+	if (strcmp(action, "status") == 0)
+		rc = dv_task_status_cmd(id, out);
+	else if (strcmp(action, "cancel") == 0)
+		rc = dv_task_cancel_cmd(id, why, out);
+	else if (strcmp(action, "log") == 0)
+		rc = dv_task_log_cmd(id, out);
+	else
+		rc = dv_error_json(out, DV_TASK_STATUS_SCHEMA, "invalid_arg",
+				   "action 只允许 status / cancel / log（收到 %s）",
+				   action);
+out:
+	free(action);
+	free(id);
+	free(why);
+	return rc;
+}
+
+
+/* ======================================================================
  * 6) 通道入口
  * ====================================================================== */
 
@@ -2745,6 +4872,10 @@ int exec_device_channel(const void *tool_v, const char *args_json, char **out)
 		return dv_tool_bind(args_json, out);
 	if (strcmp(tool->name, "dev_restore") == 0)
 		return dv_tool_restore(args_json, out);
+	if (strcmp(tool->name, "dev_adapt") == 0)
+		return dv_tool_adapt(args_json, out);
+	if (strcmp(tool->name, "dev_task") == 0)
+		return dv_tool_task(args_json, out);
 	*out = strdup("ERROR: 未知 device 工具（注册表异常）");
 	return AI_ERR_INVALID_ARG;
 }

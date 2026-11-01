@@ -92,7 +92,7 @@ CH_APPPROFILE = "appprofile"  # W81 V4：应用静态/动态画像 + 差集风�
 CH_NETCHAIN = "netchain"    # W81 E1：conntrack 事件流 + 攻击链关联（两件）
 CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关闭）
 CH_APPCTL = "appctl"        # W82 V4.4/V4.5：控制面适配器三件 + 画像→策略两件
-CH_DEVICE = "device"        # W82 V5.1/V5.2：USB 设备身份 + 驱动绑定（四件）
+CH_DEVICE = "device"        # W82 V5.1..V5.4：USB 设备身份 + 驱动绑定 + 四级适配（六件）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -288,6 +288,9 @@ SUB_MAP = {
     "dev_identify": ["sysadmin"],
     "dev_bind": ["sysadmin", "res"],
     "dev_restore": ["sysadmin", "res"],
+    # ---- W82 V5.3/V5.4：四级递进适配 + 异步任务（两件）----
+    "dev_adapt": ["sysadmin", "res"],
+    "dev_task": ["sysadmin"],
     # ---- W81 E1：conntrack 事件流 + 攻击链关联（两件）----
     "net_chain_watch": ["netsec"],
     "net_chain_rules": ["netsec"],
@@ -798,7 +801,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 224        # 主表 tools.json（W82 V5.1/V5.2：220 + 4 设备）
+EXPECTED_TOOL_COUNT = 226        # 主表 tools.json（W82 V5.3/V5.4：224 + 2 适配）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
 #（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
@@ -1029,8 +1032,10 @@ EXPECTED_TOOL_NAMES = [
     "dev_identify",
     "dev_bind",
     "dev_restore",
+    "dev_adapt",
+    "dev_task",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "f2b0b78cc1020730530979430d47e1a7f76720de08cfcc4ce0bacf17faed743a"
+EXPECTED_TOOL_NAMES_SHA256 = "7c24e0c7734a8409d730c9bc750705be6c25967b77ee60c9d8991af6f84a2afd"
 
 
 def manifest_sha256(names):
@@ -3278,6 +3283,7 @@ CHANNEL_RETURN = {
     CH_APPPROFILE: "static 返回 ELF/依赖/符号/能力/桌面/包来源与 declared 声明清单；dynamic 返回 JSON 事件流（文件读/写/映射、子进程、网络）+ 统计 + degraded 局限说明；diff 返回「要的/用的/偷偷碰的」三栏 + 0-100 风险分 + 放行条件建议（只读，不自动落策略）。",
     CH_APPCTL: "probe 返回 backends 列表 + CLI/HTTP/dbus/AT-SPI 逐档证据与 warnings；call 返回 backend/target/rc/stdout/stderr/耗时（HTTP 含 status_code/body）；task 返回 status/steps/失败步骤/断言结果/进度与审计路径（cancel/status 返回取消或进度快照）。",
     CH_NETCHAIN: "start 返回采样器 pid/事件源逐档可用性与规则；status 返回运行态、事件源探测（procfs/命令/ctnetlink，不可用/空表如实标注）、最近采样计数与审计尾；stop 返回停止结果。命中事件含 type/src/dsts/ports/window/evidence_count，写 events.jsonl + audit.log；只观测不封禁。",
+    CH_DEVICE: "list 返回全部 USB 节点（设备+接口）与 bindable；identify 返回类别/人话名称/置信度；bind/restore 返回快照、逐笔写（path/value/rc/errno）、读回（driver/override/input）与回滚结论；adapt 立刻返回 task_id + 状态目录，后台 daemon 逐级写 status.json/progress.jsonl/daemon.log；task 返回任务状态/当前级别/进程存活/日志尾，cancel 返回信号、回滚读回与最终驱动。",
 }
 
 
@@ -4617,6 +4623,31 @@ def device_tools():
             "type": "boolean", "default": False,
             "description": "true=只校验快照与当前状态，不写 /sys"},
     }
+    adapt_props = {
+        "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）；"
+            "设备名自动解析到唯一接口（绑定发生在接口上）"},
+        "driver": {
+            "type": "string",
+            "description": "四级递进的目标驱动（如 usbhid / usb-storage）；"
+            "hub/usb/usbfs 层级不对，一律拒绝"},
+    }
+    task_props = {
+        "action": {
+            "type": "string", "enum": ["status", "cancel", "log"],
+            "default": "status",
+            "description": "status=任务状态/当前级别/进度与日志尾；"
+            "cancel=SIGTERM（5s 不退再 SIGKILL）停止后台任务并把设备回滚到"
+            "任务开始前的驱动；log=全量 progress.jsonl + daemon.log"},
+        "task_id": {
+            "type": "string",
+            "description": "可选：dev_adapt 返回的 task_id；不填则取状态"
+            "目录里最近的一个适配任务"},
+        "reason": {
+            "type": "string",
+            "description": "可选：取消原因，原样写进任务状态与审计"},
+    }
     return [
         tool_device(
             "dev_list", RISK_R,
@@ -4655,6 +4686,29 @@ def device_tools():
             "driver_override → 绑回原驱动，最后逐项读回校验；不一致时"
             "verified=false 并保留 error_code=restore_unverified，不假成功。",
             restore_props, ["device"]),
+        tool_device(
+            "dev_adapt", RISK_W2,
+            "对 USB 设备启动四级递进适配任务（W2/D3，异步）：L1 已在树驱动"
+            " new_id → L2 driver_override 强绑 → L3 通用类驱动"
+            "（uinput/usb-storage/vfio）→ L4 目标驱动模块参数 quirk。每级"
+            "都「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」；只有读回"
+            " driver == 目标（HID 目标还要求 /proc/bus/input/devices 里有"
+            "输入设备）才算该级成功。立刻返回 task_id（后台 daemon 执行，"
+            "状态落 status.json / progress.jsonl / daemon.log）。四级全失败"
+            "时任务 ok=false 并逐级给出 rc/errno/原因，设备回到任务开始前"
+            "的驱动；任何单级回滚失败都会中止后续级别（不在未知状态上"
+            "继续）。只允许非 hub 单接口叶子设备，真实 /sys 写要求 root。",
+            adapt_props, ["device", "driver"]),
+        tool_device(
+            "dev_task", RISK_W1,
+            "查询/控制 USB 适配任务（W1/D1）：action=status 返回任务状态、"
+            "当前级别、进程是否存活、progress.jsonl 与 daemon.log 的尾部；"
+            "action=cancel 先 SIGTERM（5s 不退再 SIGKILL 兜底），然后按任务"
+            "快照把设备回滚到任务开始前的驱动并读回校验，最后把任务标成"
+            " canceled；action=log 返回全量进度事件与后台日志。不传 task_id"
+            "时取状态目录里最近的一个任务。已完成且成功的任务不会被 cancel"
+            "回滚（避免毁掉成功结果）。",
+            task_props, []),
     ]
 
 

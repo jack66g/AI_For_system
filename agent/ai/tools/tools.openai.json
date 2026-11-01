@@ -6304,5 +6304,67 @@
         "res"
       ]
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_adapt",
+      "description": "对 USB 设备启动四级递进适配任务（W2/D3，异步）：L1 已在树驱动 new_id → L2 driver_override 强绑 → L3 通用类驱动（uinput/usb-storage/vfio）→ L4 目标驱动模块参数 quirk。每级都「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」；只有读回 driver == 目标（HID 目标还要求 /proc/bus/input/devices 里有输入设备）才算该级成功。立刻返回 task_id（后台 daemon 执行，状态落 status.json / progress.jsonl / daemon.log）。四级全失败时任务 ok=false 并逐级给出 rc/errno/原因，设备回到任务开始前的驱动；任何单级回滚失败都会中止后续级别（不在未知状态上继续）。只允许非 hub 单接口叶子设备，真实 /sys 写要求 root。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）；设备名自动解析到唯一接口（绑定发生在接口上）"
+          },
+          "driver": {
+            "type": "string",
+            "description": "四级递进的目标驱动（如 usbhid / usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"
+          }
+        },
+        "required": [
+          "device",
+          "driver"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_task",
+      "description": "查询/控制 USB 适配任务（W1/D1）：action=status 返回任务状态、当前级别、进程是否存活、progress.jsonl 与 daemon.log 的尾部；action=cancel 先 SIGTERM（5s 不退再 SIGKILL 兜底），然后按任务快照把设备回滚到任务开始前的驱动并读回校验，最后把任务标成 canceled；action=log 返回全量进度事件与后台日志。不传 task_id时取状态目录里最近的一个任务。已完成且成功的任务不会被 cancel回滚（避免毁掉成功结果）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "cancel",
+              "log"
+            ],
+            "default": "status",
+            "description": "status=任务状态/当前级别/进度与日志尾；cancel=SIGTERM（5s 不退再 SIGKILL）停止后台任务并把设备回滚到任务开始前的驱动；log=全量 progress.jsonl + daemon.log"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "可选：dev_adapt 返回的 task_id；不填则取状态目录里最近的一个适配任务"
+          },
+          "reason": {
+            "type": "string",
+            "description": "可选：取消原因，原样写进任务状态与审计"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
   }
 ]

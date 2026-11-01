@@ -303,6 +303,13 @@ static void test_danger_rules(void)
 	       "danger: dev_bind 驱动绑定 → D3");
 	expect(cls("dev_restore", "W2", "{\"device\":\"1-1\"}") == AI_D2,
 	       "danger: dev_restore 按快照恢复 → D2");
+	/* W82 V5.3/V5.4：四级递进适配同样会写驱动绑定表 → D3；
+	 * dev_task 只做任务控制（status/cancel/log），定为 D1。 */
+	expect(cls("dev_adapt", "W2", "{\"device\":\"1-1\",\"driver\":\"usbhid\"}")
+		       == AI_D3,
+	       "danger: dev_adapt 四级递进适配 → D3");
+	expect(cls("dev_task", "W1", "{\"action\":\"status\"}") == AI_D1,
+	       "danger: dev_task 任务控制 → D1");
 	expect(cls("net_hit_watch", "W1", "{\"action\":\"status\"}") == AI_D0,
 	       "danger: net_hit_watch status 只读 → D0");
 	expect(cls("net_hit_watch", "W1",

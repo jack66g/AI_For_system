@@ -14,6 +14,10 @@
  *   - 绑定闭环（假树 + 真实写文件）：override 快照 → 写 override →
  *     unbind → bind → 读回不是目标驱动 → 自动回滚 → 读回原驱动；
  *     写序列/快照路径/回滚结果逐项断言；dev_restore 按快照恢复。
+ *   - 四级递进适配（W82 V5.3/V5.4）：前台跑 dev_adapt 的成功路径（L1
+ *     new_id 成功）与失败路径（四级全失败、ok=false、逐级 rc/errno/原因、
+ *     设备回到 usbhid、快照落盘）；异步 fork + dev_task status/log/cancel
+ *     （取消后进程消失、状态 canceled、驱动恢复）；hub/危险驱动/缺参闸门。
  *
  * --live（必须 root，真写 /sys；只允许 VMware 虚拟鼠标 1-1）：
  *   预检 1-1 = 0e0f:0003、单接口、bInterfaceClass=03、当前 usbhid，
@@ -22,15 +26,24 @@
  *   制错绑，拿到真实 probe 失败与自动回滚），每步原始输出写 --emit
  *   目录，并对比受保护 hub 节点前后签名。
  *
+ * --live-adapt（必须 root）：跑 W82 V5.3/V5.4 三条真机实测——
+ *   A 成功路径（1-1 → usbhid，最终绑定 usbhid 且 /dev/input 有鼠标）、
+ *   B 失败路径（1-1 → usb-storage，四级逐级失败、最终 ok=false 且设备
+ *     回到 usbhid；usb-storage 未加载时如实 SKIP）、
+ *   C 取消（延迟窗口内 dev_task cancel：SIGTERM、进程消失、状态
+ *     canceled、驱动恢复）。证据逐步写 --emit 目录。
+ *
  * 用法：
  *   ./test_device_tools
  *   sudo ./test_device_tools --live --emit ~/aikernel-longterm/evidence/w82c
+ *   sudo ./test_device_tools --live-adapt --emit ~/aikernel-longterm/evidence/w82d
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <time.h>
@@ -584,6 +597,199 @@ static void test_fake_rollback(const char *root, const char *state)
 }
 
 /* ------------------------------------------------------------------ */
+/* 假 sysfs 树：四级递进适配（同步）+ 异步任务 + 取消                     */
+/* ------------------------------------------------------------------ */
+
+/* 从输出里抠出 "key":"value" 的字符串值（测试专用，够用即可） */
+static int grab_str(const char *s, const char *key, char *out, size_t cap)
+{
+	char pat[64];
+	const char *p, *e;
+
+	out[0] = '\0';
+	snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+	p = s ? strstr(s, pat) : NULL;
+	if (!p)
+		return -1;
+	p += strlen(pat);
+	e = strchr(p, '"');
+	if (!e)
+		return -1;
+	snprintf(out, cap, "%.*s", (int)(e - p), p);
+	return 0;
+}
+
+static void test_fake_adapt(const char *state)
+{
+	char *out = NULL;
+	char task_id[128], path[PATH_MAX], buf[16384];
+	int rc;
+
+	printf("== fake sysfs: dev_adapt 四级递进（同步）+ dev_task ==\n");
+	setenv("AIKERNEL_ADAPT_FOREGROUND", "1", 1);
+
+	/* A. 成功路径：目标 usbhid（已在树，new_id 后读回仍然是 usbhid） */
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\",\"driver\":\"usbhid\"}", &out);
+	CHECK(rc == AI_OK && out, "adapt 成功路径返回 OK");
+	CHECK(has(out, "\"accepted\":true"), "adapt 立刻接受任务");
+	CHECK(has(out, "\"async\":false"), "前台模式 async=false（单测）");
+	CHECK(has(out, "\"status\":\"done\""), "adapt 前台跑完 status=done");
+	CHECK(has(out, "\"ok\":true"), "adapt 成功路径 ok=true");
+	CHECK(has(out, "\"level\":1"), "成功发生在 L1（in_tree_new_id）");
+	CHECK(has(out, "\"name\":\"in_tree_new_id\""), "L1 名称正确");
+	CHECK(has(out, "\"current_driver\":\"usbhid\""), "读回 current_driver=usbhid");
+	CHECK(has(out, "\"driver\":\"usbhid\""), "L1 记录 driver=usbhid");
+	CHECK(has(out, "\"verify\":true"), "L1 读回验证通过");
+	CHECK(has(out, "\"rollback_attempted\":false"), "成功级别不回滚");
+	CHECK(has(out, "\"schema\":\"aik-usb-adapt/1\""), "adapt schema 正确");
+	CHECK(json_shape_ok(out), "adapt JSON 无尾逗号");
+	CHECK(grab_str(out, "task_id", task_id, sizeof(task_id)) == 0,
+	      "adapt 返回 task_id");
+	free_out(&out);
+	{
+		snprintf(path, sizeof(path), "%s/tasks/%s/status.json", state,
+			 task_id);
+		CHECK(access(path, F_OK) == 0, "状态目录含 status.json");
+		snprintf(path, sizeof(path), "%s/tasks/%s/progress.jsonl", state,
+			 task_id);
+		CHECK(access(path, F_OK) == 0, "状态目录含 progress.jsonl");
+		CHECK(read_text(path, buf, sizeof(buf)) == 0 &&
+		      has(buf, "task_start") && has(buf, "level_start") &&
+		      has(buf, "task_end"), "progress.jsonl 有起止事件");
+	}
+
+	rc = call_dev("dev_task", "{\"action\":\"status\"}", &out);
+	CHECK(rc == AI_OK && has(out, "\"action\":\"status\""), "dev_task status OK");
+	CHECK(has(out, "\"task_id\":\""), "status 报出 task_id");
+	CHECK(has(out, "\"process_alive\":false"), "前台任务没有后台进程");
+	CHECK(has(out, "\"progress_tail\":["), "status 含进度尾");
+	CHECK(json_shape_ok(out), "dev_task status JSON 无尾逗号");
+	free_out(&out);
+
+	rc = call_dev("dev_task", "{\"action\":\"log\"}", &out);
+	CHECK(rc == AI_OK && has(out, "\"progress\":["), "dev_task log 返回进度数组");
+	CHECK(has(out, "\"daemon_log\""), "log 含 daemon.log 原文");
+	CHECK(json_shape_ok(out), "dev_task log JSON 无尾逗号");
+	free_out(&out);
+
+	/* B. 失败路径：目标 usb-storage（假树里 bind 成功但读回不变） */
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\",\"driver\":\"usb-storage\"}", &out);
+	CHECK(rc == AI_OK && out, "adapt 失败路径也返回 OK（任务已接受）");
+	CHECK(has(out, "\"status\":\"failed\""), "四级全失败 status=failed");
+	CHECK(has(out, "\"ok\":false"), "四级全失败 ok=false");
+	CHECK(has(out, "\"error_code\":\"all_levels_failed\""),
+	      "失败原因 all_levels_failed");
+	CHECK(has(out, "\"levels_total\":4"), "levels_total=4");
+	CHECK(has(out, "\"name\":\"in_tree_new_id\"") &&
+	      has(out, "\"name\":\"driver_override\"") &&
+	      has(out, "\"name\":\"generic_driver\"") &&
+	      has(out, "\"name\":\"param_quirk\""),
+	      "四级都留下记录");
+	CHECK(has(out, "\"level\":4"), "记录到第 4 级");
+	CHECK(has(out, "\"current_driver\":\"usbhid\""),
+	      "四级全失败后设备仍在 usbhid（回滚到位）");
+	CHECK(has(out, "\"detail\":\""), "每级有 detail 说明");
+	CHECK(json_shape_ok(out), "adapt 失败 JSON 无尾逗号");
+	free_out(&out);
+
+	snprintf(path, sizeof(path), "%s/snapshots/1-1.json", state);
+	CHECK(access(path, F_OK) == 0, "适配前快照已落盘（dev_restore 可用）");
+	{
+		char sbuf[4096];
+
+		CHECK(read_text(path, sbuf, sizeof(sbuf)) == 0 &&
+		      has(sbuf, "\"driver\":\"usbhid\""), "快照记录原驱动 usbhid");
+	}
+
+	/* C. 安全闸门：hub 一律拒绝，且不建任务目录 */
+	rc = call_dev("dev_adapt", "{\"device\":\"usb1\",\"driver\":\"usbhid\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"hub_forbidden\""),
+	      "adapt 拒绝根 hub（hub_forbidden）");
+	free_out(&out);
+	rc = call_dev("dev_adapt", "{\"device\":\"1-2\",\"driver\":\"usbhid\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"hub_forbidden\""),
+	      "adapt 拒绝虚拟 hub 1-2");
+	free_out(&out);
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\",\"driver\":\"hub\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"driver_forbidden\""),
+	      "adapt 拒绝目标驱动 hub");
+	free_out(&out);
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"invalid_arg\""),
+	      "adapt 缺 driver 报 invalid_arg");
+	free_out(&out);
+
+	unsetenv("AIKERNEL_ADAPT_FOREGROUND");
+
+	/* D. 异步 + 取消：把每级动作后的窗口拉长，中途 cancel */
+	printf("== fake sysfs: dev_adapt 异步 + dev_task cancel ==\n");
+	setenv("AIKERNEL_ADAPT_LEVEL_DELAY_MS", "3000", 1);
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\",\"driver\":\"usb-storage\"}", &out);
+	CHECK(rc == AI_OK && has(out, "\"async\":true"), "异步模式 async=true");
+	CHECK(has(out, "\"status\":\"queued\""), "异步立刻返回（queued）");
+	CHECK(grab_str(out, "task_id", task_id, sizeof(task_id)) == 0,
+	      "异步返回 task_id");
+	free_out(&out);
+	{
+		char *so = NULL;
+		int i, alive = 0;
+
+		/* 等 daemon 进到 L1 的动作之后（窗口内） */
+		for (i = 0; i < 20; i++) {
+			char args[256];
+
+			usleep(100 * 1000);
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"status\",\"task_id\":\"%s\"}",
+				 task_id);
+			rc = call_dev("dev_task", args, &so);
+			if (rc == AI_OK && has(so, "\"process_alive\":true") &&
+			    has(so, "\"level\":1"))
+				alive = 1;
+			free_out(&so);
+			if (alive)
+				break;
+		}
+		CHECK(alive, "后台 daemon 在跑（process_alive=true, level=1）");
+	}
+	{
+		char args[256];
+
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"cancel\",\"task_id\":\"%s\"}", task_id);
+		rc = call_dev("dev_task", args, &out);
+	}
+	CHECK(rc == AI_OK && has(out, "\"action\":\"cancel\""), "cancel 返回 OK");
+	CHECK(has(out, "\"canceled\":true"), "cancel 标记 canceled=true");
+	CHECK(has(out, "\"restored_ok\":true"), "cancel 后驱动已恢复到快照值");
+	CHECK(has(out, "\"process_gone\":true"), "cancel 后后台进程消失");
+	free_out(&out);
+	{
+		char args[256];
+
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"status\",\"task_id\":\"%s\"}", task_id);
+		rc = call_dev("dev_task", args, &out);
+	}
+	CHECK(rc == AI_OK && has(out, "\"status\":\"canceled\""),
+	      "任务状态最终为 canceled");
+	CHECK(has(out, "\"process_alive\":false"), "cancel 后 process_alive=false");
+	CHECK(has(out, "\"current_driver\":\"usbhid\""), "取消后 current_driver=usbhid");
+	free_out(&out);
+	unsetenv("AIKERNEL_ADAPT_LEVEL_DELAY_MS");
+
+	/* E. 不存在的任务 */
+	rc = call_dev("dev_task", "{\"action\":\"status\",\"task_id\":\"t-nope\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"task_not_found\""),
+	      "不存在的 task_id 报 task_not_found");
+	free_out(&out);
+	rc = call_dev("dev_task", "{\"action\":\"bogus\"}", &out);
+	CHECK(rc != AI_OK && has(out, "\"error_code\":\"invalid_arg\""),
+	      "非法 action 报 invalid_arg");
+	free_out(&out);
+}
+
+/* ------------------------------------------------------------------ */
 /* live 模式：真 /sys 六步（硬编码安全目标 1-1）                           */
 /* ------------------------------------------------------------------ */
 
@@ -905,23 +1111,282 @@ static int live_run(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* live-adapt：真机四级递进（成功 / 失败 / 取消）+ 证据落盘               */
+/* ------------------------------------------------------------------ */
+
+/* 等输入节点出现：重新绑定后 udev 重建 /dev/input/by-id 链接有几秒延迟 */
+static int input_by_id_has_mouse(void)
+{
+	int tries;
+
+	for (tries = 0; tries < 30; tries++) {
+		DIR *d;
+		struct dirent *de;
+		int found = 0;
+
+		d = opendir("/dev/input/by-id");
+		if (d) {
+			while ((de = readdir(d)) != NULL) {
+				if (strstr(de->d_name, "VMware") &&
+				    strstr(de->d_name, "Mouse"))
+					found = 1;
+			}
+			closedir(d);
+		}
+		if (found)
+			return 1;
+		usleep(100 * 1000);
+	}
+	return 0;
+}
+
+static int ad_task_status(const char *task_id, char **out)
+{
+	char args[256];
+
+	snprintf(args, sizeof(args),
+		 "{\"action\":\"status\",\"task_id\":\"%s\"}", task_id);
+	return call_dev("dev_task", args, out);
+}
+
+/* 轮询到终态；返回最终 status 文本（done/failed/canceled/timeout） */
+static int ad_wait(const char *task_id, int timeout_ms, char *st, size_t stcap,
+		   char **last, const char *emit_prefix)
+{
+	int waited = 0, rc;
+	char *out = NULL;
+
+	st[0] = '\0';
+	for (;;) {
+		free_out(&out);
+		rc = ad_task_status(task_id, &out);
+		if (rc == AI_OK && grab_str(out, "status", st, stcap) == 0 &&
+		    (strcmp(st, "done") == 0 || strcmp(st, "failed") == 0 ||
+		     strcmp(st, "canceled") == 0))
+			break;
+		if (waited >= timeout_ms) {
+			snprintf(st, stcap, "%s", "timeout");
+			break;
+		}
+		usleep(200 * 1000);
+		waited += 200;
+	}
+	if (emit_prefix && g_emit) {
+		char name[128];
+
+		snprintf(name, sizeof(name), "%s.json", emit_prefix);
+		emit(name, "dev_task status (poll final)", rc, out);
+	}
+	if (last) {
+		*last = out;
+		out = NULL;
+	}
+	free_out(&out);
+	return 0;
+}
+
+static int live_adapt_run(void)
+{
+	char *out = NULL;
+	char task_id[128], st[32], drv[64], sig_before[4096], sig_after[4096];
+	int rc, pid = 0;
+
+	printf("== LIVE-ADAPT: 真机四级递进（只碰 1-1） ==\n");
+	sigs(sig_before, sizeof(sig_before));
+	emit("40-adapt-preflight-sysfs.txt", "protected hub signature before", 0,
+	     sig_before);
+
+	/* ---------- A. 成功路径：1-1 → usbhid ---------- */
+	rc = call_dev("dev_adapt", "{\"device\":\"1-1\",\"driver\":\"usbhid\"}",
+		      &out);
+	CHECK(rc == AI_OK && has(out, "\"accepted\":true"),
+	      "A1 adapt 接受任务并立刻返回");
+	CHECK(has(out, "\"async\":true"), "A1 异步执行（async=true）");
+	CHECK(grab_str(out, "task_id", task_id, sizeof(task_id)) == 0,
+	      "A1 返回 task_id");
+	emit("41-adapt-A-start.json",
+	     "dev_adapt {device:1-1,driver:usbhid}", rc, out);
+	free_out(&out);
+
+	ad_wait(task_id, 60000, st, sizeof(st), &out, "42-adapt-A-final");
+	CHECK(strcmp(st, "done") == 0, "A2 任务终态 done");
+	CHECK(has(out, "\"ok\":true"), "A2 ok=true");
+	CHECK(has(out, "\"level\":1"), "A2 在 L1 成功");
+	CHECK(has(out, "\"name\":\"in_tree_new_id\""), "A2 L1=in_tree_new_id");
+	CHECK(has(out, "\"verify\":true"), "A2 L1 verify=true");
+	CHECK(has(out, "\"current_driver\":\"usbhid\""),
+	      "A2 读回 current_driver=usbhid");
+	CHECK(has(out, "\"process_alive\":false"), "A2 daemon 已退出");
+	free_out(&out);
+
+	iface_driver(drv, sizeof(drv));
+	CHECK(strcmp(drv, "usbhid") == 0, "A3 sysfs 侧 1-1:1.0 → usbhid");
+	CHECK(input_by_id_has_mouse(), "A3 /dev/input/by-id 有 VMware 鼠标节点");
+	{
+		char buf[256 * 1024];
+		int found = 0;
+
+		if (read_text("/proc/bus/input/devices", buf, sizeof(buf)) == 0 &&
+		    strstr(buf, "VMware Virtual USB Mouse"))
+			found = 1;
+		CHECK(found, "A3 /proc/bus/input/devices 列出该鼠标");
+	}
+	{
+		char *lo = NULL;
+
+		rc = call_dev("dev_task", "{\"action\":\"log\"}", &lo);
+		CHECK(rc == AI_OK && has(lo, "level_start") &&
+		      has(lo, "task_end"), "A4 全量日志含 level_start/task_end");
+		emit("43-adapt-A-log.json", "dev_task {action:log}", rc, lo);
+		free_out(&lo);
+	}
+
+	/* ---------- B. 失败路径：1-1 → usb-storage（不兼容） ---------- */
+	if (access("/sys/bus/usb/drivers/usb-storage", F_OK) != 0) {
+		SKIP("B 失败路径", "usb-storage 未加载（先 modprobe usb-storage）");
+	} else {
+		rc = call_dev("dev_adapt",
+			      "{\"device\":\"1-1\",\"driver\":\"usb-storage\"}",
+			      &out);
+		CHECK(rc == AI_OK && has(out, "\"accepted\":true"),
+		      "B1 adapt 接受失败路径任务");
+		CHECK(grab_str(out, "task_id", task_id, sizeof(task_id)) == 0,
+		      "B1 返回 task_id");
+		emit("44-adapt-B-start.json",
+		     "dev_adapt {device:1-1,driver:usb-storage}", rc, out);
+		free_out(&out);
+
+		ad_wait(task_id, 120000, st, sizeof(st), &out,
+			"45-adapt-B-final");
+		CHECK(strcmp(st, "failed") == 0, "B2 任务终态 failed");
+		CHECK(has(out, "\"ok\":false"), "B2 ok=false（不假成功）");
+		CHECK(has(out, "\"error_code\":\"all_levels_failed\""),
+		      "B2 error_code=all_levels_failed");
+		CHECK(has(out, "\"levels_total\":4"), "B2 四级全部执行");
+		CHECK(has(out, "\"name\":\"in_tree_new_id\"") &&
+		      has(out, "\"name\":\"driver_override\"") &&
+		      has(out, "\"name\":\"generic_driver\"") &&
+		      has(out, "\"name\":\"param_quirk\""),
+		      "B2 四级都有记录");
+		CHECK(has(out, "\"code\":\"probe_failed\""),
+		      "B2 L1 new_id 后 probe 失败（真实 ENXIO）");
+		CHECK(has(out, "\"code\":\"override_unsupported\""),
+		      "B2 L2 本内核无 driver_override（fail-closed）");
+		CHECK(has(out, "\"code\":\"quirk_param_readonly\"") ||
+		      has(out, "\"code\":\"quirk_param_unavailable\"") ||
+		      has(out, "\"code\":\"probe_failed\""),
+		      "B2 L4 参数 quirk 尝试后失败（只读/缺失/写后仍 probe 失败）");
+		CHECK(has(out, "quirk 已恢复") ||
+		      has(out, "quirk_param_readonly") ||
+		      has(out, "quirk_param_unavailable"),
+		      "B2 L4 参数 quirk 用完即恢复（或压根没写）");
+		CHECK(has(out, "\"current_driver\":\"usbhid\""),
+		      "B2 四级全失败后设备回到 usbhid");
+		CHECK(has(out, "\"rollback_attempted\":true"),
+		      "B2 每级都尝试过回滚");
+		emit("45-adapt-B-final.json",
+		     "dev_task status (usb-storage failure)", 0, out);
+		free_out(&out);
+
+		iface_driver(drv, sizeof(drv));
+		CHECK(strcmp(drv, "usbhid") == 0, "B3 sysfs 侧 1-1:1.0 → usbhid");
+		CHECK(input_by_id_has_mouse(), "B3 鼠标输入节点仍在");
+	}
+
+	/* ---------- C. 取消：延迟窗口内 cancel → 进程消失 + 驱动恢复 ---------- */
+	setenv("AIKERNEL_ADAPT_LEVEL_DELAY_MS", "4000", 1);
+	rc = call_dev("dev_adapt",
+		      "{\"device\":\"1-1\",\"driver\":\"usb-storage\"}", &out);
+	CHECK(rc == AI_OK && has(out, "\"async\":true"), "C1 取消测试任务已启动");
+	CHECK(grab_str(out, "task_id", task_id, sizeof(task_id)) == 0,
+	      "C1 返回 task_id");
+	pid = (int)strtol(strstr(out, "\"pid\":") ? strstr(out, "\"pid\":") + 6
+						  : "0", NULL, 10);
+	emit("46-adapt-C-start.json",
+	     "dev_adapt {device:1-1,driver:usb-storage} (delay=4000ms)", rc, out);
+	free_out(&out);
+	CHECK(pid > 0, "C1 拿到后台 daemon pid");
+	{
+		int i, running = 0;
+		char *so = NULL;
+
+		for (i = 0; i < 25; i++) {
+			usleep(120 * 1000);
+			rc = ad_task_status(task_id, &so);
+			if (rc == AI_OK && has(so, "\"process_alive\":true") &&
+			    has(so, "\"level\":1")) {
+				running = 1;
+				emit("47-adapt-C-running.json",
+				     "dev_task status (running, level=1)", rc,
+				     so);
+			}
+			free_out(&so);
+			if (running)
+				break;
+		}
+		CHECK(running, "C2 任务在跑（process_alive=true, level=1）");
+	}
+	{
+		char args[512];
+
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"cancel\",\"task_id\":\"%s\","
+			 "\"reason\":\"W82D 取消实测\"}", task_id);
+		rc = call_dev("dev_task", args, &out);
+	}
+	CHECK(rc == AI_OK && has(out, "\"canceled\":true"), "C3 cancel 返回 canceled=true");
+	CHECK(has(out, "\"restored_ok\":true"), "C3 取消后设备已恢复到任务前驱动");
+	CHECK(has(out, "\"process_gone\":true"), "C3 后台进程已消失");
+	CHECK(has(out, "\"signal\":\"SIGTERM\""), "C3 用 SIGTERM 优雅取消");
+	CHECK(has(out, "\"current_driver\":\"usbhid\""), "C3 current_driver=usbhid");
+	emit("48-adapt-C-cancel.json", "dev_task {action:cancel}", rc, out);
+	free_out(&out);
+	{
+		char p[64];
+
+		snprintf(p, sizeof(p), "/proc/%d", pid);
+		CHECK(access(p, F_OK) != 0, "C4 /proc/<pid> 已消失（进程确实没了）");
+	}
+	rc = ad_task_status(task_id, &out);
+	CHECK(rc == AI_OK && has(out, "\"status\":\"canceled\""),
+	      "C4 任务状态最终为 canceled");
+	CHECK(has(out, "\"process_alive\":false"), "C4 process_alive=false");
+	emit("49-adapt-C-final.json", "dev_task status (canceled)", rc, out);
+	free_out(&out);
+	iface_driver(drv, sizeof(drv));
+	CHECK(strcmp(drv, "usbhid") == 0, "C5 sysfs 侧 1-1:1.0 → usbhid（已恢复）");
+	CHECK(input_by_id_has_mouse(), "C5 鼠标输入节点仍在");
+	unsetenv("AIKERNEL_ADAPT_LEVEL_DELAY_MS");
+
+	/* ---------- D. 保护节点前后一致 ---------- */
+	sigs(sig_after, sizeof(sig_after));
+	emit("50-adapt-post-sysfs.txt", "protected hub signature after", 0,
+	     sig_after);
+	CHECK(strcmp(sig_before, sig_after) == 0,
+	      "D1 受保护 hub 六节点签名前后逐字一致");
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
 {
 	char tmp[] = "/tmp/aik-devtest-XXXXXX";
 	char tmp2[] = "/tmp/aik-devtest-XXXXXX";
 	char state[PATH_MAX];
-	int live = 0;
+	int live = 0, live_adapt = 0;
 	int i;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--live") == 0)
 			live = 1;
+		else if (strcmp(argv[i], "--live-adapt") == 0)
+			live_adapt = 1;
 		else if (strcmp(argv[i], "--emit") == 0 && i + 1 < argc)
 			g_emit = argv[++i];
 	}
 
-	if (live) {
+	if (live || live_adapt) {
 		if (g_emit) {
 			mkdir_p(g_emit);
 			snprintf(state, sizeof(state), "%s/state", g_emit);
@@ -932,7 +1397,10 @@ int main(int argc, char **argv)
 		setenv("AIKERNEL_DEVICE_DIR", state, 1);
 		if (live_preflight() != 0)
 			return 3;
-		live_run();
+		if (live)
+			live_run();
+		if (live_adapt)
+			live_adapt_run();
 		printf("\n== test_device_tools: %s (%d checks, %d fails) ==\n",
 		       fails ? "FAIL" : "ALL PASS", checks, fails);
 		return fails ? 1 : 0;
@@ -957,6 +1425,7 @@ int main(int argc, char **argv)
 	test_pure();
 	test_fake_tree(tmp, state);
 	test_fake_rollback(tmp, state);
+	test_fake_adapt(state);
 
 	/* 第二棵树：多接口/无 override 设备的安全闸门 */
 	setenv("AIKERNEL_USB_SYSFS_ROOT", tmp2, 1);
