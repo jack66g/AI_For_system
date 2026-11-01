@@ -1,11 +1,12 @@
 {
-  "created": "2026-11-01T19:48:27+08:00",
+  "created": "2026-11-02T00:38:06+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
     "kernel overlay manifest: kernel-overlays/MANIFEST.sha256",
-    "verification: run_all 59/59, audit W75 CHECK PASS (230 tools/9 domains/20 desktop/seed 247)",
+    "verification: run_all 59/59, audit PASS (230 tools/9 domains/20 desktop/seed 247)",
     "W81+W82+W82B 增补未发版（alpha.14.0 ISO 仍 197 工具）；B-117 内核 #62 已含 /proc/ai/lsm/rules 注入面",
+    "T2 存储层 C 实现：json(dtoa)/gzip/npz/snapshot/WAL/sqlite；6 套差分测试全绿（json 40148·npz 104·snapshot 89·wal 57·snapshot_write 21·sqlite 196+）；尚未接入产品构建（T4 接线）",
     "MANIFEST hashes canonical LF checkout bytes"
   ],
   "overlay_count": 168,
@@ -28,11 +29,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 47861714,
-    "regular_files": 1106,
-    "source_files": 1106,
+    "bytes": 57110971,
+    "regular_files": 1129,
+    "source_files": 1129,
     "symlinks": 4,
-    "tracked_files": 1110
+    "tracked_files": 1133
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
