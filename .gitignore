@@ -95,3 +95,11 @@ fix-w*/
 /agent/ai/retrieval/tests/test_ranker
 /agent/ai/retrieval/tests/test_ppr
 /agent/ai/retrieval/tests/test_retrieval
+/agent/ai/engine/tests/engine.actual.json
+/agent/ai/store/tests/test_store_json
+/agent/ai/store/tests/test_store_npz
+/agent/ai/store/tests/test_store_snapshot
+/agent/ai/store/tests/test_store_snapshot_write
+/agent/ai/store/tests/test_store_wal
+/agent/ai/store/tests/test_store_sqlite
+/agent/ai/store/tests/test_npz_write

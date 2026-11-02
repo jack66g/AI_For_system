@@ -159,6 +159,41 @@ int aik_engine_archive(aik_engine *e, const char *id);
 int aik_engine_restore(aik_engine *e, const char *id);
 
 /*
+ * aik_engine_update - 记忆 PATCH（sme/memory_manager.py::update_memory）
+ *
+ * patch 为 JSON 对象（借用；NULL 视为 {}）。可含 text / metadata / tags /
+ * importance / weight / summary；键缺失或值为 null 表示"不改"。语义逐条
+ * 对齐参考：
+ *   - text：仅当 `patch.text.strip() != memory.text` 才算变化（落盘文本仍
+ *     是 patch 原文）；变化时重编码 → space.remove + space.insert → 更新
+ *     text / embedding / region_id；
+ *   - metadata：整字典替换，但 patch 不带 "ns" 时保留旧 metadata["ns"]；
+ *     metadata-only 变化不 touched；
+ *   - tags 整列表替换；importance clamp 到 [0,1]；weight 下限 0；
+ *     summary 允许置 ""（与 NULL 不同）。
+ * 有实质变化才 touched（last_hit=now、freshness=1、version+1）；实质变化
+ * 或 metadata 变化都会重建 BM25 索引。
+ *
+ * 返回 0=成功（用 aik_engine_get 取更新后的记忆）、1=id 不存在、-1=错误。
+ * 类型不符（tags 非字符串数组等）按 -1 处理（route 层已做 422 校验）。
+ */
+int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
+		      char *err, size_t errlen);
+
+/*
+ * aik_engine_delete - 删除记忆（含派生摘要级联）
+ *
+ * 对齐 sme/memory_manager.py::delete_memory：
+ *   - 先删 source=="summary" 且（目标 id 在其 children 或 metadata.covers
+ *     包含目标 id）的派生记忆（递归级联）；
+ *   - space.remove、删除所有涉及该 id 的 graph 边；
+ *   - 其他记忆的 neighbors/children 去掉该 id，parent_id 指向它时置 NULL；
+ *   - 重建 BM25 索引（Python 的 retriever.drop_memory 的全量等价）。
+ * 返回 0=删除、1=id 不存在、-1=错误（err 已写）。
+ */
+int aik_engine_delete(aik_engine *e, const char *id, char *err, size_t errlen);
+
+/*
  * aik_engine_search - 两阶段检索（sme/engine.py::_search_locked）
  *
  * views 含活跃 + archived（可见性由 retriever 判）；query 向量用同一
@@ -172,6 +207,18 @@ int aik_engine_search(aik_engine *e, const aik_search_query *q,
 		      aik_search_hit **out, size_t *n_out,
 		      char *err, size_t errlen);
 
+/*
+ * aik_engine_search_regions - 仅 Region 阶段（engine.search_regions）
+ *
+ * hashing 编码查询文本后调 aik_space_query_regions（分数/排序/取整一致）。
+ * *out 为**单块 malloc**（调用者 free()），其中 aik_region_hit.region 借用
+ * 引擎内部 Region（在下一次修改 space 前有效）；top_k<=0 或没有 Region 时
+ * *out=NULL、*n_out=0。成功 0，-1 错误。
+ */
+int aik_engine_search_regions(aik_engine *e, const char *text, int top_k,
+			      aik_region_hit **out, size_t *n_out,
+			      char *err, size_t errlen);
+
 /* memory_stats + region_stats + engine_stats（键序 = Python to_dict） */
 int aik_engine_stats(aik_engine *e, aik_json **out, char *err, size_t errlen);
 
@@ -182,9 +229,57 @@ int aik_engine_export(aik_engine *e, aik_json **out, char *err, size_t errlen);
 int aik_engine_regions(aik_engine *e, aik_json **out, char *err, size_t errlen);
 
 /*
- * aik_engine_save - T4c 才实现（NPZ 写侧）
+ * aik_engine_evolve - 一次演化（/regions/evolve）
  *
- * 一律返回 -1 并写「save 未启用（NPZ 写侧 T4c）」，绝不写半成品。
+ * 调 aik_space_evolution_pass；返回 {"events":[{"kind","region_id",
+ * "detail"}]}，detail 用 Python 原格式：
+ *   split        "{keep} -> {other} members (density %.1f)"（density 为拆分前）
+ *   merge        "absorbed {absorbed_id} ({n} members)"
+ *   region_created "{n} members"
+ *   region_deleted ""
+ * region_id 是真实 Region id。*out 由调用者 aik_json_free；成功 0。
+ */
+int aik_engine_evolve(aik_engine *e, aik_json **out, char *err, size_t errlen);
+
+/*
+ * aik_engine_graph - 记忆图（MemoryEdge.to_dict 键序）
+ *
+ * {"edges":[{source,target,kind,weight,note}...]}，顺序即边插入序。
+ */
+int aik_engine_graph(aik_engine *e, aik_json **out, char *err, size_t errlen);
+
+/*
+ * aik_engine_link - 建一条记忆图边（sme/memory_manager.py::link）
+ *
+ * kind 为 NULL 时取 "reference"，note 为 NULL 时取 ""。kind=="cause" 时
+ * 额外加反向边 b -> a / "conversation" / weight=1 / note="timeline"。
+ * 不修改 Memory.neighbors。返回 0=成功、1=a 或 b 不存在、-1=错误
+ * （a==b 自环也按 -1 处理，Python 抛 ValueError）。
+ */
+int aik_engine_link(aik_engine *e, const char *a, const char *b,
+		    const char *kind, double weight, const char *note,
+		    char *err, size_t errlen);
+
+/*
+ * aik_engine_save - 写快照（JSON[.gz] + NPZ sidecar）
+ *
+ * 对齐 sme/engine.py::_save_locked + sme/storage/snapshot.py::save_snapshot：
+ *   1) space.sync_geometry()；config 副本的 embedding.revision_stamp =
+ *      embedding_revision(config)（provider|model|dim[|mrlN][|seedN][|rev]）；
+ *   2) 快照键序 schema_version,counters,config,memories(无向量),regions,
+ *      region_edges,memory_edges,module_state,wal_sequence,
+ *      [embedding_file,embedding_generation]；
+ *   3) 有向量时写 "<embedding_base>.<32hex>.npz"（见 store_npz_write.h），
+ *      JSON 追加两个 embedding_* 键（basename / 代次）；
+ *   4) path 以 .gz 结尾或（storage.compress && 以 .json 结尾）时 gzip；
+ *      .json 且 compress 时自动补 .gz（与 Python 一致）；父目录 mkdir -p；
+ *      aik_snapshot_save 原子写（tmp → fsync → rename → dir fsync）；
+ *   5) 成功后删除同前缀 "<stem>.embeddings.<32hex>.npz" 中未被当前明文/
+ *      gzip 清单引用的旧代次（失败不影响保存成功）。
+ *
+ * path 为 NULL/空时用 config.storage.path。成功 0 并把 autosave 计数器
+ * 清零；失败 -1（err 已写，绝不留下半成品 JSON；本次新 NPZ 会尽力删除）。
+ * 空库（没有向量）不写 NPZ、不写 embedding_* 键。
  */
 int aik_engine_save(aik_engine *e, const char *path, char *err, size_t errlen);
 

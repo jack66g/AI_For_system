@@ -35,15 +35,19 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "../../include/engine/engine.h"
+#include "../../include/memory/embed_hash.h"
+#include "../../include/space/space.h"
 #include "../../include/store/store_json.h"
 #include "../../include/store/store_npz.h"
 #include "../../include/store/store_snapshot.h"
 
+#include <dirent.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* memory.c 内部符号：深拷贝 DOM（测试构造配置用） */
@@ -1545,16 +1549,16 @@ static void run_legacy_load(void)
 		}
 	}
 
-	/* save 必须明确失败（T4c） */
+	/* save 现在必须成功（T4c NPZ 写侧）；路径以 .gz 结尾 → gzip */
 	{
-		char *out_path = path_join(tmpdir, "should-not-exist.json.gz");
+		char *out_path = path_join(tmpdir, "legacy-save.json.gz");
 
 		if (!out_path)
 			die("out of memory");
-		check_int("load.save_disabled",
-			  aik_engine_save(e, out_path, err, sizeof(err)), -1);
-		check_int("load.save_wrote_nothing",
-			  access(out_path, F_OK) == 0 ? 1 : 0, 0);
+		check_int("load.save_rc",
+			  aik_engine_save(e, out_path, err, sizeof(err)), 0);
+		check_int("load.save_file_exists",
+			  access(out_path, F_OK) == 0 ? 1 : 0, 1);
 		free(out_path);
 
 	/* archive / restore 往返（最后做，不影响上面的 stats 断言） */
@@ -1606,10 +1610,1428 @@ static void run_legacy_load(void)
 	free(snap_src);
 }
 
+/* ------------------------------------------------------------------ */
+/* 段 3：T4c 写路径（update/delete/link/graph/evolve/search_regions） */
+/*        + save/load 往返 + autosave                                  */
+/* ------------------------------------------------------------------ */
+struct cfg_opts {
+	int dim;
+	int autosave;
+	int autosave_interval;
+	const char *pathname;
+	const char *model;
+	const char *revision;
+	long long hash_seed;
+	int auto_evolve;
+	double min_join_cosine;
+	int min_region_size;
+	int split_threshold;
+	double max_density;
+	double merge_distance;
+	double neighbor_factor;
+};
+
+static void cfg_defaults(struct cfg_opts *o)
+{
+	memset(o, 0, sizeof(*o));
+	o->dim = 8;
+	o->autosave = 0;
+	o->autosave_interval = 100;
+	o->pathname = "data/engine.json";
+	o->model = "m";
+	o->revision = "r1";
+	o->hash_seed = 7;
+	o->auto_evolve = 0;
+	o->min_join_cosine = 0.7;
+	o->min_region_size = 3;
+	o->split_threshold = 48;
+	o->max_density = 120.0;
+	o->merge_distance = 0.12;
+	o->neighbor_factor = 1.8;
+}
+
+static aik_config *make_cfg(const char *tmpdir, const struct cfg_opts *o,
+			    char *err, size_t errlen)
+{
+	aik_json *raw = jobj();
+	aik_json *emb = jobj();
+	aik_json *reg = jobj();
+	aik_json *stor = jobj();
+	char *full = path_join(tmpdir, o->pathname);
+	aik_config *cfg;
+
+	if (!full)
+		die("out of memory");
+	jput(emb, "provider", jstr("hashing"));
+	jput(emb, "model", jstr(o->model));
+	jput(emb, "dim", jint(o->dim));
+	jput(emb, "hash_factors", jint(3));
+	jput(emb, "hash_window", jint(3));
+	jput(emb, "hash_seed", jint(o->hash_seed));
+	jput(emb, "normalize", jbool(1));
+	jput(emb, "mrl_dim", jint(0));
+	jput(emb, "revision", jstr(o->revision));
+	jput(reg, "min_region_size", jint(o->min_region_size));
+	jput(reg, "min_join_cosine", jnum(o->min_join_cosine));
+	jput(reg, "split_threshold", jint(o->split_threshold));
+	jput(reg, "max_density", jnum(o->max_density));
+	jput(reg, "merge_distance", jnum(o->merge_distance));
+	jput(reg, "neighbor_factor", jnum(o->neighbor_factor));
+	jput(reg, "auto_evolve", jbool(o->auto_evolve));
+	jput(reg, "evolve_interval", jint(40));
+	jput(stor, "path", jstr(full));
+	jput(stor, "autosave", jbool(o->autosave));
+	jput(stor, "autosave_interval", jint(o->autosave_interval));
+	jput(stor, "compress", jbool(1));
+	jput(stor, "backend", jstr("json"));
+	jput(raw, "embedding", emb);
+	jput(raw, "region", reg);
+	jput(raw, "storage", stor);
+	cfg = aik_config_from_json(raw, err, errlen);
+	aik_json_free(raw);
+	free(full);
+	return cfg;
+}
+
+static aik_engine *new_test_engine(aik_config *cfg, char *err, size_t errlen)
+{
+	if (!cfg)
+		die("config: %s", err);
+	return aik_engine_new(cfg, 1, clock_now, NULL, id_gen, NULL, err,
+			      errlen);
+}
+
+static aik_memory *add_mem(aik_engine *e, const char *text,
+			   const aik_json *md, const char **tags,
+			   size_t n_tags, double importance,
+			   const char *source, const char *ns, char *err,
+			   size_t errlen)
+{
+	return aik_engine_add(e, text, md, tags, n_tags, importance, source,
+			      NULL, NULL, ns, NULL, err, errlen);
+}
+
+/* Python 风格深比较（INT/NUM/BOOL 按数值；对象键序无关） */
+static int t_is_num(const aik_json *v)
+{
+	aik_json_type t = aik_json_typeof(v);
+
+	return t == AIK_JSON_INT || t == AIK_JSON_NUM || t == AIK_JSON_BOOL;
+}
+
+static double t_num(const aik_json *v)
+{
+	if (aik_json_typeof(v) == AIK_JSON_BOOL)
+		return aik_json_bool(v) ? 1.0 : 0.0;
+	if (aik_json_typeof(v) == AIK_JSON_INT)
+		return (double)aik_json_int(v);
+	return aik_json_num(v);
+}
+
+static int t_eq(const aik_json *a, const aik_json *b)
+{
+	aik_json_type ta = aik_json_typeof(a);
+	aik_json_type tb = aik_json_typeof(b);
+	size_t i;
+	size_t n;
+
+	if (t_is_num(a) && t_is_num(b))
+		return t_num(a) == t_num(b);
+	if (ta != tb)
+		return 0;
+	switch (ta) {
+	case AIK_JSON_NULL:
+		return 1;
+	case AIK_JSON_BOOL:
+		return aik_json_bool(a) == aik_json_bool(b);
+	case AIK_JSON_INT:
+		return aik_json_int(a) == aik_json_int(b);
+	case AIK_JSON_NUM:
+		return aik_json_num(a) == aik_json_num(b);
+	case AIK_JSON_STR:
+		return strcmp(aik_json_str(a), aik_json_str(b)) == 0;
+	case AIK_JSON_ARR:
+		n = aik_json_count(a);
+		if (n != aik_json_count(b))
+			return 0;
+		for (i = 0; i < n; i++) {
+			if (!t_eq(aik_json_at(a, i), aik_json_at(b, i)))
+				return 0;
+		}
+		return 1;
+	case AIK_JSON_OBJ:
+		n = aik_json_count(a);
+		if (n != aik_json_count(b))
+			return 0;
+		for (i = 0; i < n; i++) {
+			const char *key = aik_json_key_at(a, i);
+			const aik_json *bv = aik_json_get(b, key);
+
+			if (!bv || !t_eq(aik_json_val_at(a, i), bv))
+				return 0;
+		}
+		for (i = 0; i < n; i++) {
+			const char *key = aik_json_key_at(b, i);
+
+			if (!aik_json_get(a, key))
+				return 0;
+		}
+		return 1;
+	}
+	return 0;
+}
+
+static void check_json(const char *path, const aik_json *got,
+		       const aik_json *exp)
+{
+	checks++;
+	if (!t_eq(got, exp)) {
+		char *gs = NULL;
+		char *es = NULL;
+		size_t gl = 0;
+		size_t el = 0;
+
+		mismatches++;
+		if (aik_json_dump(got, &gs, &gl) != 0)
+			gs = NULL;
+		if (aik_json_dump(exp, &es, &el) != 0)
+			es = NULL;
+		printf("MISMATCH %s\n  got: %.400s\n  exp: %.400s\n", path,
+		       gs ? gs : "(dump failed)", es ? es : "(dump failed)");
+		free(gs);
+		free(es);
+	}
+}
+
+/* 目录里 *.npz 的个数；name_out 收最后一个文件名 */
+static int count_npz(const char *dir, char *name_out, size_t name_len)
+{
+	DIR *d = opendir(dir);
+	struct dirent *de;
+	int n = 0;
+
+	if (!d)
+		return -1;
+	while ((de = readdir(d)) != NULL) {
+		size_t nl = strlen(de->d_name);
+
+		if (nl > 4 && strcmp(de->d_name + nl - 4, ".npz") == 0) {
+			n++;
+			if (name_out && name_len)
+				snprintf(name_out, name_len, "%s", de->d_name);
+		}
+	}
+	closedir(d);
+	return n;
+}
+
+static int is_32hex(const char *s)
+{
+	size_t i;
+
+	if (!s || strlen(s) != 32)
+		return 0;
+	for (i = 0; i < 32; i++) {
+		char c = s[i];
+
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+			return 0;
+	}
+	return 1;
+}
+
+/* 取快照顶层键序，逗号连接 */
+static void top_level_keys(const aik_json *root, char *out, size_t outlen)
+{
+	size_t n = aik_json_count(root);
+	size_t i;
+	size_t off = 0;
+
+	out[0] = '\0';
+	for (i = 0; i < n; i++) {
+		int w = snprintf(out + off, outlen - off, "%s%s", i ? "," : "",
+				 aik_json_key_at(root, i) ?
+					 aik_json_key_at(root, i) : "?");
+
+		if (w < 0 || (size_t)w >= outlen - off)
+			break;
+		off += (size_t)w;
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* 3a：update 语义                                                    */
+/* ------------------------------------------------------------------ */
+static void run_update_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_memory *m;
+	const char *mid;
+	double old_emb[8];
+	long long old_version;
+	double old_last_hit;
+	aik_json *patch;
+	aik_json *md;
+	aik_json *tags;
+	const char *tagv[2] = { "a", "b" };
+	aik_json *graph = NULL;
+	aik_json *searched = NULL;
+	aik_search_query q;
+
+	cfg_defaults(&o);
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+	g_now += 100.0;
+
+	md = jobj();
+	jput(md, "k", jstr("v"));
+	m = add_mem(e, "alpha beta", md, NULL, 0, 0.5, "user", "bench", err,
+		    sizeof(err));
+	aik_json_free(md);
+	if (!m)
+		die("add: %s", err);
+	mid = m->id;
+	check_str("update.meta.ns", aik_json_str(aik_json_get(m->metadata,
+							      "ns")), "bench");
+	check_int("update.meta.count", (long long)aik_json_count(m->metadata), 2);
+	memcpy(old_emb, m->embedding, sizeof(old_emb));
+	old_version = m->version;
+	old_last_hit = m->last_hit;
+
+	/* text 变化：重编码 + version+1 + last_hit 刷新 */
+	g_now += 50.0;
+	patch = jobj();
+	jput(patch, "text", jstr("gamma delta"));
+	check_int("update.text.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	m = aik_engine_get(e, mid);
+	check_str("update.text.value", m->text, "gamma delta");
+	check_int("update.text.version", m->version, old_version + 1);
+	check_num("update.text.last_hit", m->last_hit, g_now, 1e-9);
+	check_int("update.text.last_hit_changed", m->last_hit > old_last_hit, 1);
+	check_int("update.text.embedding_changed",
+		  memcmp(old_emb, m->embedding, sizeof(old_emb)) != 0, 1);
+	check_int("update.text.region", m->region_id != NULL, 1);
+	check_str("update.text.ns_kept",
+		  aik_json_str(aik_json_get(m->metadata, "ns")), "bench");
+
+	/* metadata-only：不 touched，但 ns 保留 */
+	old_version = m->version;
+	old_last_hit = m->last_hit;
+	patch = jobj();
+	md = jobj();
+	jput(md, "topic", jstr("x"));
+	jput(patch, "metadata", md);
+	check_int("update.meta.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	m = aik_engine_get(e, mid);
+	check_int("update.meta.version_same", m->version, old_version);
+	check_num("update.meta.last_hit_same", m->last_hit, old_last_hit, 0.0);
+	check_int("update.meta.count2", (long long)aik_json_count(m->metadata),
+		  2);
+	check_str("update.meta.topic",
+		  aik_json_str(aik_json_get(m->metadata, "topic")), "x");
+	check_str("update.meta.ns_kept2",
+		  aik_json_str(aik_json_get(m->metadata, "ns")), "bench");
+
+	/* 显式 ns 覆盖 */
+	patch = jobj();
+	md = jobj();
+	jput(md, "ns", jstr("other"));
+	jput(patch, "metadata", md);
+	check_int("update.meta.ns_rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	m = aik_engine_get(e, mid);
+	check_int("update.meta.ns_count",
+		  (long long)aik_json_count(m->metadata), 1);
+	check_str("update.meta.ns_value",
+		  aik_json_str(aik_json_get(m->metadata, "ns")), "other");
+
+	/* 空 patch / 空白 text 等值：无变化 */
+	old_version = m->version;
+	patch = jobj();
+	check_int("update.noop.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_int("update.noop.version", aik_engine_get(e, mid)->version,
+		  old_version);
+
+	patch = jobj();
+	jput(patch, "text", jstr(" gamma delta "));
+	check_int("update.strip.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	m = aik_engine_get(e, mid);
+	check_str("update.strip.text", m->text, "gamma delta");
+	check_int("update.strip.version", m->version, old_version);
+
+	/* importance clamp / weight 下限 */
+	patch = jobj();
+	jput(patch, "importance", jnum(3.0));
+	check_int("update.imp.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_num("update.imp.clamp_hi", aik_engine_get(e, mid)->importance,
+		  1.0, 0.0);
+	patch = jobj();
+	jput(patch, "importance", jnum(-2.0));
+	check_int("update.imp.low_rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_num("update.imp.clamp_lo", aik_engine_get(e, mid)->importance,
+		  0.0, 0.0);
+	patch = jobj();
+	jput(patch, "weight", jnum(-5.0));
+	check_int("update.weight.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_num("update.weight.floor", aik_engine_get(e, mid)->weight, 0.0,
+		  0.0);
+
+	/* tags 整列表替换 */
+	patch = jobj();
+	tags = jarr();
+	for (size_t i = 0; i < 2; i++) {
+		aik_json *x = jstr(tagv[i]);
+
+		jpush(tags, x);
+	}
+	jput(patch, "tags", tags);
+	check_int("update.tags.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	m = aik_engine_get(e, mid);
+	check_int("update.tags.count", (long long)m->n_tags, 2);
+	check_str("update.tags.0", m->tags[0], "a");
+	check_str("update.tags.1", m->tags[1], "b");
+
+	/* summary：设置 / null 不改 / "" 覆盖 */
+	patch = jobj();
+	jput(patch, "summary", jstr("sum"));
+	check_int("update.summary.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_str("update.summary.value", aik_engine_get(e, mid)->summary, "sum");
+	old_version = aik_engine_get(e, mid)->version;
+	patch = jobj();
+	jput(patch, "summary", jnull());
+	check_int("update.summary.null_rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_str("update.summary.null_keep",
+		  aik_engine_get(e, mid)->summary, "sum");
+	check_int("update.summary.null_version",
+		  aik_engine_get(e, mid)->version, old_version);
+	patch = jobj();
+	jput(patch, "summary", jstr(""));
+	check_int("update.summary.empty_rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), 0);
+	aik_json_free(patch);
+	check_str("update.summary.empty", aik_engine_get(e, mid)->summary, "");
+
+	/* 不存在 */
+	patch = jobj();
+	check_int("update.missing",
+		  aik_engine_update(e, "m_ffffffffffff", patch, err,
+				    sizeof(err)), 1);
+	aik_json_free(patch);
+
+	/* BM25 已刷新：新文本可检索 */
+	memset(&q, 0, sizeof(q));
+	q.text = "gamma";
+	q.top_k = 5;
+	q.top_regions = 3;
+	check_int("update.search.rc",
+		  aik_engine_search(e, &q, NULL, NULL, err, sizeof(err)), -1);
+	{
+		aik_search_hit *hits = NULL;
+		size_t n_hits = 0;
+		int found = 0;
+
+		if (aik_engine_search(e, &q, &hits, &n_hits, err,
+				      sizeof(err)) == 0) {
+			for (size_t i = 0; i < n_hits; i++) {
+				if (strcmp(hits[i].memory_id, mid) == 0)
+					found = 1;
+			}
+			aik_search_hits_free(hits, n_hits);
+		}
+		check_int("update.search.found", found, 1);
+	}
+	(void)graph;
+	(void)searched;
+	aik_engine_free(e);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3b：delete 级联 + archive 保留 neighbors/children                  */
+/* ------------------------------------------------------------------ */
+static void run_delete_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_json *items;
+	aik_json *x;
+	aik_json *graph = NULL;
+	aik_memory *m3;
+	long long imported = 0;
+	aik_search_query q;
+	aik_search_hit *hits = NULL;
+	size_t n_hits = 0;
+
+	cfg_defaults(&o);
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+
+	items = jarr();
+	/* 派生摘要：children 含 a2，covers 含 a3 */
+	x = jobj();
+	jput(x, "id", jstr("m_0000000000a1"));
+	jput(x, "text", jstr("parent summary text"));
+	jput(x, "source", jstr("summary"));
+	{
+		aik_json *ch = jarr();
+
+		jpush(ch, jstr("m_0000000000a2"));
+		jput(x, "children", ch);
+	}
+	{
+		aik_json *md = jobj();
+		aik_json *cv = jarr();
+
+		jpush(cv, jstr("m_0000000000a3"));
+		jput(md, "covers", cv);
+		jput(x, "metadata", md);
+	}
+	jpush(items, x);
+
+	x = jobj();
+	jput(x, "id", jstr("m_0000000000a2"));
+	jput(x, "text", jstr("child source zzuniquezz"));
+	{
+		aik_json *nb = jarr();
+
+		jpush(nb, jstr("m_0000000000a3"));
+		jput(x, "neighbors", nb);
+	}
+	{
+		aik_json *ch = jarr();
+
+		jpush(ch, jstr("m_0000000000a1"));
+		jput(x, "children", ch);
+	}
+	jpush(items, x);
+
+	x = jobj();
+	jput(x, "id", jstr("m_0000000000a3"));
+	jput(x, "text", jstr("other source"));
+	jput(x, "parent_id", jstr("m_0000000000a2"));
+	{
+		aik_json *nb = jarr();
+
+		jpush(nb, jstr("m_0000000000a2"));
+		jput(x, "neighbors", nb);
+	}
+	jpush(items, x);
+
+	if (aik_engine_import(e, items, &imported, err, sizeof(err)) != 0)
+		die("import: %s", err);
+	aik_json_free(items);
+	check_int("delete.imported", imported, 3);
+
+	/* link：a2 -> a3 cause（再加反向 conversation） */
+	check_int("delete.link.rc",
+		  aik_engine_link(e, "m_0000000000a2", "m_0000000000a3",
+				  "cause", 1.0, "why", err, sizeof(err)), 0);
+	if (aik_engine_graph(e, &graph, err, sizeof(err)) != 0)
+		die("graph: %s", err);
+	check_int("delete.graph.before",
+		  (long long)aik_json_count(aik_json_get(graph, "edges")), 2);
+	aik_json_free(graph);
+	graph = NULL;
+
+	/* archive/restore 保留 neighbors/children/parent */
+	m3 = aik_engine_get(e, "m_0000000000a3");
+	check_int("delete.archive.rc", aik_engine_archive(e, m3->id), 0);
+	check_int("delete.archive.neighbors", (long long)m3->n_neighbors, 1);
+	check_int("delete.restore.rc", aik_engine_restore(e, m3->id), 0);
+	check_int("delete.restore.neighbors", (long long)m3->n_neighbors, 1);
+	check_str("delete.restore.parent", m3->parent_id, "m_0000000000a2");
+
+	/* 删除 a2 → a1（summary 派生）级联；a3 保留但引用被清理 */
+	check_int("delete.rc", aik_engine_delete(e, "m_0000000000a2", err,
+						 sizeof(err)), 0);
+	check_int("delete.parent_gone",
+		  aik_engine_get(e, "m_0000000000a1") == NULL, 1);
+	check_int("delete.child_gone",
+		  aik_engine_get(e, "m_0000000000a2") == NULL, 1);
+	m3 = aik_engine_get(e, "m_0000000000a3");
+	check_int("delete.other_present", m3 != NULL, 1);
+	check_int("delete.other_parent_null", m3->parent_id == NULL, 1);
+	check_int("delete.other_neighbors", (long long)m3->n_neighbors, 0);
+	check_int("delete.count", (long long)aik_engine_memory_count(e), 1);
+	if (aik_engine_graph(e, &graph, err, sizeof(err)) != 0)
+		die("graph: %s", err);
+	check_int("delete.graph.after",
+		  (long long)aik_json_count(aik_json_get(graph, "edges")), 0);
+	aik_json_free(graph);
+
+	/* BM25：被删文本不再命中 */
+	memset(&q, 0, sizeof(q));
+	q.text = "zzuniquezz";
+	q.top_k = 5;
+	q.top_regions = 3;
+	if (aik_engine_search(e, &q, &hits, &n_hits, err, sizeof(err)) == 0) {
+		int found = 0;
+
+		for (size_t i = 0; i < n_hits; i++) {
+			if (strcmp(hits[i].memory_id, "m_0000000000a2") == 0)
+				found = 1;
+		}
+		aik_search_hits_free(hits, n_hits);
+		check_int("delete.search.gone", found, 0);
+	} else {
+		check_int("delete.search.rc", -1, 0);
+	}
+
+	check_int("delete.missing",
+		  aik_engine_delete(e, "m_ffffffffffff", err, sizeof(err)), 1);
+
+	aik_engine_free(e);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3c：link / graph 键序                                              */
+/* ------------------------------------------------------------------ */
+static void run_link_graph_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_memory *m1;
+	aik_memory *m2;
+	aik_json *graph = NULL;
+	const aik_json *edges;
+	const aik_json *e0;
+	aik_json *kinds = NULL;
+
+	cfg_defaults(&o);
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+	m1 = add_mem(e, "link alpha", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err));
+	m2 = add_mem(e, "link beta", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err));
+	if (!m1 || !m2)
+		die("add: %s", err);
+
+	check_int("link.cause.rc",
+		  aik_engine_link(e, m1->id, m2->id, "cause", 1.5, "why", err,
+				  sizeof(err)), 0);
+	check_int("link.neighbors_untouched", (long long)m1->n_neighbors, 0);
+	if (aik_engine_graph(e, &graph, err, sizeof(err)) != 0)
+		die("graph: %s", err);
+	edges = aik_json_get(graph, "edges");
+	check_int("graph.edge_count", (long long)aik_json_count(edges), 2);
+	e0 = aik_json_at(edges, 0);
+	check_str("graph.e0.source", aik_json_str(aik_json_get(e0, "source")),
+		  m1->id);
+	check_str("graph.e0.target", aik_json_str(aik_json_get(e0, "target")),
+		  m2->id);
+	check_str("graph.e0.kind", aik_json_str(aik_json_get(e0, "kind")),
+		  "cause");
+	check_num("graph.e0.weight", aik_json_num(aik_json_get(e0, "weight")),
+		  1.5, 0.0);
+	check_str("graph.e0.note", aik_json_str(aik_json_get(e0, "note")),
+		  "why");
+	kinds = jobj();
+	{
+		size_t i;
+		size_t n = aik_json_count(e0);
+		char buf[256];
+
+		buf[0] = '\0';
+		for (i = 0; i < n; i++) {
+			const char *k = aik_json_key_at(e0, i);
+			size_t off = strlen(buf);
+
+			snprintf(buf + off, sizeof(buf) - off, "%s%s",
+				 i ? "," : "", k ? k : "?");
+		}
+		check_str("graph.e0.keys", buf, "source,target,kind,weight,note");
+	}
+	aik_json_free(kinds);
+	{
+		const aik_json *e1 = aik_json_at(edges, 1);
+
+		check_str("graph.e1.source",
+			  aik_json_str(aik_json_get(e1, "source")), m2->id);
+		check_str("graph.e1.target",
+			  aik_json_str(aik_json_get(e1, "target")), m1->id);
+		check_str("graph.e1.kind", aik_json_str(aik_json_get(e1, "kind")),
+			  "conversation");
+		check_num("graph.e1.weight",
+			  aik_json_num(aik_json_get(e1, "weight")), 1.0, 0.0);
+		check_str("graph.e1.note", aik_json_str(aik_json_get(e1, "note")),
+			  "timeline");
+	}
+	aik_json_free(graph);
+
+	check_int("link.missing",
+		  aik_engine_link(e, m1->id, "m_ffffffffffff", "reference", 1.0,
+				  "", err, sizeof(err)), 1);
+	check_int("link.self",
+		  aik_engine_link(e, m1->id, m1->id, "reference", 1.0, "", err,
+				  sizeof(err)), -1);
+	check_int("link.reference.rc",
+		  aik_engine_link(e, m1->id, m2->id, "reference", 1.0, "",
+				  err, sizeof(err)), 0);
+
+	aik_engine_free(e);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3d：search_regions 与独立 space 的 query_regions 一致              */
+/* ------------------------------------------------------------------ */
+static int member_sets_equal(const aik_region *a, const aik_region *b)
+{
+	size_t na = aik_region_size(a);
+	size_t nb = aik_region_size(b);
+	const char **sa;
+	const char **sb;
+	size_t i;
+	int ok = 1;
+
+	if (na != nb)
+		return 0;
+	sa = calloc(na ? na : 1, sizeof(*sa));
+	sb = calloc(nb ? nb : 1, sizeof(*sb));
+	if (!sa || !sb) {
+		free(sa);
+		free(sb);
+		return 0;
+	}
+	for (i = 0; i < na; i++) {
+		sa[i] = aik_region_member(a, i);
+		sb[i] = aik_region_member(b, i);
+	}
+	for (i = 0; i < na && ok; i++) {
+		size_t j;
+		int found = 0;
+
+		for (j = 0; j < nb; j++) {
+			if (sa[i] && sb[j] && strcmp(sa[i], sb[j]) == 0) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found)
+			ok = 0;
+	}
+	free(sa);
+	free(sb);
+	return ok;
+}
+
+static void run_search_regions_tests(void)
+{
+	static const char *texts[3] = { "region alpha", "region beta",
+					"region gamma" };
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_region_config rc;
+	aik_space *sp;
+	aik_hash_params hp;
+	double *qv;
+	aik_region_hit *a_hits = NULL;
+	aik_region_hit *b_hits = NULL;
+	size_t a_n = 0;
+	size_t b_n = 0;
+	size_t i;
+	int rc0;
+
+	cfg_defaults(&o);
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+	for (i = 0; i < 3; i++) {
+		if (!add_mem(e, texts[i], NULL, NULL, 0, 0.5, "user", NULL, err,
+			     sizeof(err)))
+			die("add: %s", err);
+	}
+
+	memset(&rc, 0, sizeof(rc));
+	rc.min_region_size = o.min_region_size;
+	rc.min_join_cosine = o.min_join_cosine;
+	rc.split_threshold = o.split_threshold;
+	rc.max_density = o.max_density;
+	rc.merge_distance = o.merge_distance;
+	rc.neighbor_factor = o.neighbor_factor;
+	rc.auto_evolve = 0;
+	rc.evolve_interval = 40;
+	sp = aik_space_new(&rc, o.dim, err, sizeof(err));
+	if (!sp)
+		die("space: %s", err);
+	for (i = 0; i < aik_engine_memory_count(e); i++) {
+		const aik_memory *m = aik_engine_memory_at(e, i);
+
+		if (aik_space_insert(sp, m->id, m->embedding, err,
+				     sizeof(err)) != 0)
+			die("space insert: %s", err);
+	}
+
+	hp.dim = o.dim;
+	hp.factors = 3;
+	hp.window = 3;
+	hp.seed = 7;
+	hp.normalize_output = 1;
+	hp.mrl_dim = 0;
+	qv = malloc((size_t)o.dim * sizeof(double));
+	if (!qv)
+		die("out of memory");
+	if (aik_hash_embed_one(&hp, "region query", qv, (size_t)o.dim, err,
+			       sizeof(err)) <= 0)
+		die("embed: %s", err);
+
+	check_int("regions.query.rc",
+		  aik_engine_search_regions(e, "region query", 5, &a_hits,
+					    &a_n, err, sizeof(err)), 0);
+	check_int("space.query.rc",
+		  aik_space_query_regions(sp, qv, 5, &b_hits, &b_n, err,
+					  sizeof(err)), 0);
+	check_int("regions.query.count", (long long)a_n, (long long)b_n);
+	for (i = 0; i < a_n && i < b_n; i++) {
+		char path[64];
+
+		snprintf(path, sizeof(path), "regions.query[%zu].score", i);
+		check_num(path, a_hits[i].score, b_hits[i].score, 1e-12);
+		snprintf(path, sizeof(path), "regions.query[%zu].distance", i);
+		check_num(path, a_hits[i].distance, b_hits[i].distance, 1e-12);
+		snprintf(path, sizeof(path), "regions.query[%zu].members", i);
+		check_int(path, member_sets_equal(a_hits[i].region,
+						  b_hits[i].region), 1);
+	}
+	free(a_hits);
+	free(b_hits);
+
+	/* top_k<=0：空结果 */
+	a_hits = NULL;
+	a_n = 99;
+	check_int("regions.top0.rc",
+		  aik_engine_search_regions(e, "region query", 0, &a_hits,
+					    &a_n, err, sizeof(err)), 0);
+	check_int("regions.top0.null", a_hits == NULL, 1);
+	check_int("regions.top0.count", (long long)a_n, 0);
+
+	/* 空文本：与 Python 一样按 "_empty_" 编码，不崩溃 */
+	rc0 = aik_engine_search_regions(e, "", 5, &a_hits, &a_n, err,
+					sizeof(err));
+	check_int("regions.empty.rc", rc0, 0);
+	if (rc0 == 0) {
+		check_int("regions.empty.count", a_n > 0, 1);
+		check_int("regions.empty.region", a_hits[0].region != NULL, 1);
+	}
+	free(a_hits);
+	free(qv);
+	aik_space_free(sp);
+	aik_engine_free(e);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3e：evolve（split / merge 事件格式）                               */
+/* ------------------------------------------------------------------ */
+static void run_evolve_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_engine *e2;
+	aik_json *regions = NULL;
+	aik_json *stats = NULL;
+	aik_json *ev = NULL;
+	const aik_json *evs;
+	const aik_json *first;
+	const char *detail;
+	double density;
+	size_t a = 0;
+	size_t b = 0;
+	double dens = 0.0;
+	char expected[256];
+	char keeper_id[64];
+	char *tmpdir2;
+
+	/* ---- split ---- */
+	cfg_defaults(&o);
+	o.min_join_cosine = -1.0;
+	o.split_threshold = 2;
+	o.max_density = 0.05;
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+	if (!add_mem(e, "split one", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e, "split two", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e, "split three", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e, "split four", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)))
+		die("add: %s", err);
+
+	/* stats 强制 sync_geometry，保证 /regions 的 density 是精确值 */
+	if (aik_engine_stats(e, &stats, err, sizeof(err)) != 0)
+		die("stats: %s", err);
+	aik_json_free(stats);
+	stats = NULL;
+	if (aik_engine_regions(e, &regions, err, sizeof(err)) != 0)
+		die("regions: %s", err);
+	check_int("evolve.split.regions_before",
+		  (long long)aik_json_count(aik_json_get(regions, "regions")), 1);
+	{
+		const aik_json *r0 = aik_json_at(
+			aik_json_get(regions, "regions"), 0);
+
+		density = aik_json_num(aik_json_get(r0, "density"));
+		snprintf(keeper_id, sizeof(keeper_id), "%s",
+			 aik_json_str(aik_json_get(r0, "id")));
+	}
+	aik_json_free(regions);
+	regions = NULL;
+	check_int("evolve.split.density_high", density >= o.max_density, 1);
+
+	check_int("evolve.split.rc",
+		  aik_engine_evolve(e, &ev, err, sizeof(err)), 0);
+	evs = aik_json_get(ev, "events");
+	check_int("evolve.split.events", (long long)aik_json_count(evs) > 0, 1);
+	first = aik_json_at(evs, 0);
+	check_str("evolve.split.kind", aik_json_str(aik_json_get(first, "kind")),
+		  "split");
+	check_str("evolve.split.region_id",
+		  aik_json_str(aik_json_get(first, "region_id")), keeper_id);
+	detail = aik_json_str(aik_json_get(first, "detail"));
+	if (!detail)
+		detail = "";
+	check_int("evolve.split.parse",
+		  sscanf(detail, "%zu -> %zu members (density %lf)", &a, &b,
+			 &dens) == 3,
+		  1);
+	check_int("evolve.split.members", (long long)(a + b), 4);
+	check_int("evolve.split.keep_ge_other", a >= b, 1);
+	check_int("evolve.split.nonempty", b >= 1, 1);
+	snprintf(expected, sizeof(expected),
+		 "%zu -> %zu members (density %.1f)", a, b, density);
+	check_str("evolve.split.detail", detail, expected);
+	aik_json_free(ev);
+	ev = NULL;
+
+	if (aik_engine_regions(e, &regions, err, sizeof(err)) != 0)
+		die("regions: %s", err);
+	check_int("evolve.split.regions_after",
+		  (long long)aik_json_count(aik_json_get(regions, "regions")), 1);
+	aik_json_free(regions);
+	aik_engine_free(e);
+
+	/* ---- merge 格式：由 split 后的小 Region 在同一轮被吸收 ----
+	 *
+	 * split 产生 2/1 两个 Region；min_region_size=3 让两者都进 small
+	 * 候选，min_join_cosine=-1 让吸收门槛必然通过，因此同一 evolution_pass
+	 * 里再产生一条 merge 事件（absorbed=1 成员的小 Region）。
+	 * 这里重新构造一次并在同一事件数组里校验两种 detail 格式。
+	 */
+	tmpdir2 = make_tmpdir();
+	cfg_defaults(&o);
+	o.min_join_cosine = -1.0;
+	o.split_threshold = 2;
+	o.max_density = 0.05;
+	o.min_region_size = 3;
+	e2 = new_test_engine(make_cfg(tmpdir2, &o, err, sizeof(err)), err,
+			     sizeof(err));
+	if (!e2)
+		die("engine: %s", err);
+	if (!add_mem(e2, "merge one", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e2, "merge two", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e2, "merge three", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)) ||
+	    !add_mem(e2, "merge four", NULL, NULL, 0, 0.5, "user", NULL, err,
+		     sizeof(err)))
+		die("add: %s", err);
+	{
+		int erc = aik_engine_evolve(e2, &ev, err, sizeof(err));
+
+		check_int("evolve.merge.rc", erc, 0);
+		if (erc != 0) {
+			printf("evolve merge error: %s\n", err);
+			aik_engine_free(e2);
+			free(tmpdir2);
+			return;
+		}
+	}
+	evs = aik_json_get(ev, "events");
+	check_int("evolve.merge.events",
+		  (long long)aik_json_count(evs) >= 2, 1);
+	{
+		size_t k;
+		size_t n_ev = aik_json_count(evs);
+		int found_merge = 0;
+		int found_split = 0;
+
+		for (k = 0; k < n_ev; k++) {
+			const aik_json *item = aik_json_at(evs, k);
+			const char *kind =
+				aik_json_str(aik_json_get(item, "kind"));
+			const char *detail2 =
+				aik_json_str(aik_json_get(item, "detail"));
+
+			if (!kind)
+				kind = "";
+			if (!detail2)
+				detail2 = "";
+			if (strcmp(kind, "split") == 0) {
+				found_split = 1;
+				continue;
+			}
+			if (strcmp(kind, "merge") != 0)
+				continue;
+			found_merge = 1;
+			{
+				char absorbed[64] = "";
+				size_t members = 0;
+				int ok = sscanf(
+						 detail2,
+						 "absorbed %63s (%zu members)",
+						 absorbed, &members) == 2 &&
+					 members >= 1 && strlen(absorbed) > 0;
+				const char *rid = aik_json_str(
+					aik_json_get(item, "region_id"));
+
+				check_int("evolve.merge.parse", ok, 1);
+				check_int("evolve.merge.size",
+					  members >= 1, 1);
+				check_int("evolve.merge.region_id",
+					  rid != NULL &&
+						  strcmp(rid, absorbed) != 0,
+					  1);
+				{
+					char full[256];
+
+					snprintf(full, sizeof(full),
+						 "absorbed %s (%zu members)",
+						 absorbed, members);
+					check_str("evolve.merge.detail", detail2,
+						  full);
+				}
+			}
+		}
+		check_int("evolve.merge.found_split", found_split, 1);
+		check_int("evolve.merge.found_merge", found_merge, 1);
+	}
+	aik_json_free(ev);
+	ev = NULL;
+	aik_engine_free(e2);
+	free(tmpdir2);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3f：save/load 往返（含 .gz、NPZ、键序、旧代次清理）                */
+/* ------------------------------------------------------------------ */
+static void run_save_load_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	aik_engine *e2;
+	aik_json *export_before = NULL;
+	aik_json *regions_before = NULL;
+	aik_json *export_after = NULL;
+	aik_json *regions_after = NULL;
+	aik_json *md;
+	const char *tags1[2] = { "t1", "t2" };
+	const char *tags2[1] = { "x" };
+	char *path;
+	char *snap_path;
+	char *data_dir;
+	char npz_name[256] = "";
+	char npz_name2[256] = "";
+	char first_gen[64] = "";
+	char second_gen[64] = "";
+	char keys[512];
+	aik_snapshot snap;
+	const aik_json *root;
+	const aik_json *mems;
+	size_t i;
+	long long n_imported = 0;
+	int npz_count;
+
+	cfg_defaults(&o);
+	path = path_join(tmpdir, "data/engine.json");
+	data_dir = path_join(tmpdir, "data");
+	snap_path = path_join(tmpdir, "data/engine.json.gz");
+	if (!path || !data_dir || !snap_path)
+		die("out of memory");
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+
+	for (i = 0; i < 4; i++) {
+		char text[64];
+
+		snprintf(text, sizeof(text), "save memory %zu", i);
+		md = NULL;
+		if (i == 0) {
+			md = jobj();
+			jput(md, "a", jint(1));
+		} else if (i == 1) {
+			md = jobj();
+			jput(md, "b", jstr("two"));
+		}
+		if (!add_mem(e, text, md, i == 0 ? tags1 : (i == 1 ? tags2 : NULL),
+			     i == 0 ? 2 : (i == 1 ? 1 : 0),
+			     i == 2 ? 0.9 : 0.2, "user", NULL, err,
+			     sizeof(err)))
+			die("add: %s", err);
+		aik_json_free(md);
+	}
+	/* 第 5 条随后归档 */
+	md = NULL;
+	if (!add_mem(e, "save memory archived", md, NULL, 0, 0.7, "user", NULL,
+		     err, sizeof(err)))
+		die("add: %s", err);
+	{
+		const aik_memory *last =
+			aik_engine_memory_at(e, aik_engine_memory_count(e) - 1);
+
+		check_int("save.archive.rc", aik_engine_archive(e, last->id), 0);
+	}
+	check_int("save.link.rc",
+		  aik_engine_link(e, aik_engine_memory_at(e, 0)->id,
+				  aik_engine_memory_at(e, 2)->id, "reference",
+				  1.0, "note1", err, sizeof(err)), 0);
+
+	if (aik_engine_export(e, &export_before, err, sizeof(err)) != 0)
+		die("export: %s", err);
+	if (aik_engine_regions(e, &regions_before, err, sizeof(err)) != 0)
+		die("regions: %s", err);
+
+	/* 保存：.json + compress → .json.gz */
+	check_int("save.rc", aik_engine_save(e, path, err, sizeof(err)), 0);
+	check_int("save.gz_exists", access(snap_path, F_OK) == 0, 1);
+	npz_count = count_npz(data_dir, npz_name, sizeof(npz_name));
+	check_int("save.npz_count", npz_count, 1);
+	check_int("save.npz_name_len", (long long)strlen(npz_name), 54);
+	check_int("save.npz_prefix",
+		  strncmp(npz_name, "engine.embeddings.", 18) == 0, 1);
+	{
+		char hexpart[33];
+
+		memcpy(hexpart, npz_name + 18, 32);
+		hexpart[32] = '\0';
+		check_int("save.npz_hex", is_32hex(hexpart), 1);
+		check_str("save.npz_suffix", npz_name + 50, ".npz");
+	}
+
+	/* 快照结构 */
+	memset(&snap, 0, sizeof(snap));
+	check_int("save.snapshot.load",
+		  aik_snapshot_load(snap_path, &snap, err, sizeof(err)), 0);
+	root = snap.root;
+	top_level_keys(root, keys, sizeof(keys));
+	check_str("save.snapshot.keys", keys,
+		  "schema_version,counters,config,memories,regions,"
+		  "region_edges,memory_edges,module_state,wal_sequence,"
+		  "embedding_file,embedding_generation");
+	check_int("save.schema_version",
+		  need_int(root, "schema_version", "snapshot"), 2);
+	check_int("save.wal_sequence",
+		  need_int(root, "wal_sequence", "snapshot"), 0);
+	check_int("save.counters.keys",
+		  (long long)aik_json_count(need(root, "counters", "snapshot")),
+		  4);
+	check_str("save.counters.first",
+		  aik_json_key_at(need(root, "counters", "snapshot"), 0),
+		  "splits");
+	{
+		const aik_json *ms = need(root, "module_state", "snapshot");
+		const aik_json *qa = aik_json_get(ms, "qapair");
+		const aik_json *fg = aik_json_get(ms, "factgraph");
+		const aik_json *pf = aik_json_get(ms, "profile");
+
+		check_int("save.module.qapair.pairs",
+			  aik_json_typeof(qa ? aik_json_get(qa, "pairs") : NULL) ==
+				  AIK_JSON_ARR,
+			  1);
+		check_int("save.module.factgraph.entities",
+			  aik_json_typeof(fg ? aik_json_get(fg, "entities")
+					     : NULL) == AIK_JSON_ARR,
+			  1);
+		check_int("save.module.profile.snapshots",
+			  aik_json_typeof(pf ? aik_json_get(pf, "snapshots")
+					     : NULL) == AIK_JSON_OBJ,
+			  1);
+		check_int("save.module.pending",
+			  (long long)aik_json_count(
+				  aik_json_get(ms, "pending_questions")),
+			  0);
+	}
+	check_str("save.revision_stamp",
+		  aik_json_str(aik_json_get(
+			  aik_json_get(need(root, "config", "snapshot"),
+				       "embedding"),
+			  "revision_stamp")),
+		  "hashing|m|8|seed7|r1");
+	snprintf(first_gen, sizeof(first_gen), "%s",
+		 need_str(root, "embedding_generation", "snapshot"));
+	check_int("save.generation.hex", is_32hex(first_gen), 1);
+	check_int("save.embedding_file",
+		  strcmp(need_str(root, "embedding_file", "snapshot"),
+			 npz_name) == 0,
+		  1);
+	mems = need(root, "memories", "snapshot");
+	check_int("save.memories.count", (long long)aik_json_count(mems), 5);
+	{
+		const aik_json *m0 = aik_json_at(mems, 0);
+
+		check_int("save.memories.no_embedding",
+			  aik_json_get(m0, "embedding") == NULL, 1);
+	}
+	/* NPZ：5 条向量（含 archived），generation 匹配 */
+	{
+		char *npz_path = path_join(data_dir, npz_name);
+		aik_npz *z;
+		unsigned char *buf = NULL;
+		size_t blen = 0;
+		aik_npy npy;
+
+		if (!npz_path)
+			die("out of memory");
+		z = aik_npz_open(npz_path, err, sizeof(err));
+		check_int("save.npz.open", z != NULL, 1);
+		if (z) {
+			check_int("save.npz.ids",
+				  aik_npz_read(z, "ids", &buf, &blen, err,
+					       sizeof(err)) == 0,
+				  1);
+			if (buf) {
+				check_int("save.npz.ids.parse",
+					  aik_npy_parse(buf, blen, &npy, err,
+							sizeof(err)) == 0,
+					  1);
+				check_int("save.npz.ids.count",
+					  (long long)aik_npy_nelem(&npy), 5);
+				check_str("save.npz.ids.descr", npy.descr,
+					  "<U14");
+			}
+			free(buf);
+			buf = NULL;
+			check_int("save.npz.gen",
+				  aik_npz_read(z, "generation", &buf, &blen,
+					       err, sizeof(err)) == 0,
+				  1);
+			if (buf) {
+				char got[64] = "";
+
+				check_int("save.npz.gen.parse",
+					  aik_npy_parse(buf, blen, &npy, err,
+							sizeof(err)) == 0,
+					  1);
+				check_int("save.npz.gen.get",
+					  aik_npy_get_ustr(&npy, 0, got,
+							   sizeof(got)) > 0,
+					  1);
+				check_str("save.npz.gen.value", got, first_gen);
+			}
+			free(buf);
+			aik_npz_close(z);
+		}
+		free(npz_path);
+	}
+	aik_snapshot_free(&snap);
+
+	/* 新引擎（默认配置，dim 64）load → 快照 config 覆盖为 dim 8 */
+	e2 = new_test_engine(aik_config_defaults(err, sizeof(err)), err,
+			     sizeof(err));
+	if (!e2)
+		die("engine2: %s", err);
+	check_int("save.load.rc", aik_engine_load(e2, snap_path, err,
+						  sizeof(err)), 0);
+	check_int("save.load.count",
+		  (long long)aik_engine_memory_count(e2), 5);
+	{
+		const aik_memory *m0 = aik_engine_memory_at(e2, 0);
+		const aik_memory *ml;
+		int archived = 0;
+
+		check_int("save.load.dim", m0->dim, 8);
+		check_str("save.load.first_id", m0->id,
+			  aik_engine_memory_at(e, 0)->id);
+		ml = aik_engine_memory_at(e2, aik_engine_memory_count(e2) - 1);
+		archived = ml->archived;
+		check_int("save.load.archived", archived, 1);
+		check_int("save.load.archived_region_null",
+			  ml->region_id == NULL, 1);
+	}
+	if (aik_engine_export(e2, &export_after, err, sizeof(err)) != 0)
+		die("export2: %s", err);
+	if (aik_engine_regions(e2, &regions_after, err, sizeof(err)) != 0)
+		die("regions2: %s", err);
+	check_json("save.load.memories",
+		   aik_json_get(export_after, "memories"),
+		   aik_json_get(export_before, "memories"));
+	check_json("save.load.graph", aik_json_get(export_after, "graph"),
+		   aik_json_get(export_before, "graph"));
+	check_json("save.load.stats", aik_json_get(export_after, "stats"),
+		   aik_json_get(export_before, "stats"));
+	check_json("save.load.regions", regions_after, regions_before);
+
+	/* 再存一次：新代次 + 旧代次被清理 */
+	check_int("save.again.rc", aik_engine_save(e2, path, err, sizeof(err)),
+		  0);
+	npz_count = count_npz(data_dir, npz_name2, sizeof(npz_name2));
+	check_int("save.again.npz_count", npz_count, 1);
+	check_int("save.again.replaced", strcmp(npz_name, npz_name2) != 0, 1);
+	memset(&snap, 0, sizeof(snap));
+	if (aik_snapshot_load(snap_path, &snap, err, sizeof(err)) == 0) {
+		snprintf(second_gen, sizeof(second_gen), "%s",
+			 aik_json_str(aik_json_get(snap.root,
+						   "embedding_generation")));
+		check_int("save.again.gen_changed",
+			  strcmp(first_gen, second_gen) != 0, 1);
+		check_str("save.again.file",
+			  aik_json_str(aik_json_get(snap.root,
+						    "embedding_file")),
+			  npz_name2);
+	}
+	aik_snapshot_free(&snap);
+
+	(void)n_imported;
+	aik_json_free(export_before);
+	aik_json_free(regions_before);
+	aik_json_free(export_after);
+	aik_json_free(regions_after);
+	aik_engine_free(e);
+	aik_engine_free(e2);
+	free(path);
+	free(snap_path);
+	free(data_dir);
+	free(tmpdir);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3g：autosave（成功按间隔落盘 / 失败 fail closed）                  */
+/* ------------------------------------------------------------------ */
+static void run_autosave_tests(void)
+{
+	char err[512];
+	char *tmpdir = make_tmpdir();
+	struct cfg_opts o;
+	aik_engine *e;
+	char *auto_path;
+	char *auto_gz;
+	aik_memory *m;
+
+	cfg_defaults(&o);
+	o.autosave = 1;
+	o.autosave_interval = 2;
+	o.pathname = "data/auto.json";
+	auto_path = path_join(tmpdir, "data/auto.json");
+	auto_gz = path_join(tmpdir, "data/auto.json.gz");
+	if (!auto_path || !auto_gz)
+		die("out of memory");
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			    sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+	m = add_mem(e, "auto one", NULL, NULL, 0, 0.5, "user", NULL, err,
+		    sizeof(err));
+	check_int("autosave.one.added", m != NULL, 1);
+	check_int("autosave.one.no_file", access(auto_gz, F_OK) != 0, 1);
+	m = add_mem(e, "auto two", NULL, NULL, 0, 0.5, "user", NULL, err,
+		    sizeof(err));
+	check_int("autosave.two.added", m != NULL, 1);
+	check_int("autosave.two.saved", access(auto_gz, F_OK) == 0, 1);
+	m = add_mem(e, "auto three", NULL, NULL, 0, 0.5, "user", NULL, err,
+		    sizeof(err));
+	check_int("autosave.three.added", m != NULL, 1);
+	check_int("autosave.three.count",
+		  (long long)aik_engine_memory_count(e), 3);
+	aik_engine_free(e);
+	free(auto_path);
+	free(auto_gz);
+
+	/* 保存失败：父目录路径被普通文件占住 → add 返回 NULL，err 有内容 */
+	{
+		char *blocked = path_join(tmpdir, "blocked");
+
+		if (!blocked)
+			die("out of memory");
+		{
+			FILE *f = fopen(blocked, "wb");
+
+			if (!f)
+				die("cannot create %s", blocked);
+			fputs("x", f);
+			fclose(f);
+		}
+		o.autosave = 1;
+		o.autosave_interval = 1;
+		o.pathname = "blocked/engine.json";
+		e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+				    sizeof(err));
+		if (!e)
+			die("engine: %s", err);
+		err[0] = '\0';
+		m = add_mem(e, "auto fail", NULL, NULL, 0, 0.5, "user", NULL,
+			    err, sizeof(err));
+		check_int("autosave.fail.null", m == NULL, 1);
+		check_int("autosave.fail.err", err[0] != '\0', 1);
+		/* fail closed 但内存写入已发生（Python 也是先写后抛） */
+		check_int("autosave.fail.count",
+			  (long long)aik_engine_memory_count(e), 1);
+		aik_engine_free(e);
+		free(blocked);
+	}
+	free(tmpdir);
+}
+
 int main(void)
 {
 	run_api_case();
 	run_legacy_load();
+	run_update_tests();
+	run_delete_tests();
+	run_link_graph_tests();
+	run_search_regions_tests();
+	run_evolve_tests();
+	run_save_load_tests();
+	run_autosave_tests();
 	printf("SUMMARY engine checks=%zu mismatches=%zu\n", checks,
 	       mismatches);
 	return mismatches ? 1 : 0;

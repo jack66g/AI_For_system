@@ -30,6 +30,57 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/*
+ * routes.c 的 T4d handler。
+ *
+ * T4d 只改 routes.c / http.c / tests（http.h 不动），所以新增 handler 的
+ * 原型在 routes.c 与本文件各声明一份；两份必须与定义逐字一致。
+ */
+void aik_http_route_memory_patch(aik_http_server *s,
+				 const aik_http_request *req,
+				 const char *memory_id,
+				 aik_http_response *resp);
+void aik_http_route_memory_delete(aik_http_server *s,
+				  const aik_http_request *req,
+				  const char *memory_id,
+				  aik_http_response *resp);
+void aik_http_route_memory_archive(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp);
+void aik_http_route_memory_restore(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp);
+void aik_http_route_regions_search(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+void aik_http_route_regions_evolve(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+void aik_http_route_graph(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp);
+void aik_http_route_graph_link(aik_http_server *s,
+			       const aik_http_request *req,
+			       aik_http_response *resp);
+void aik_http_route_facts(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp);
+void aik_http_route_facts_history(aik_http_server *s,
+				  const aik_http_request *req,
+				  aik_http_response *resp);
+void aik_http_route_facts_multi_hop(aik_http_server *s,
+				    const aik_http_request *req,
+				    aik_http_response *resp);
+void aik_http_route_profile(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_qapairs(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_metrics(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_metrics_report(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+
 struct aik_http_server {
 	int fd;
 	int port;
@@ -41,20 +92,6 @@ struct aik_http_server {
 /* ------------------------------------------------------------------ */
 /* 小工具                                                             */
 /* ------------------------------------------------------------------ */
-static char *dup_str(const char *s)
-{
-	size_t n;
-	char *p;
-
-	if (!s)
-		s = "";
-	n = strlen(s) + 1;
-	p = malloc(n);
-	if (p)
-		memcpy(p, s, n);
-	return p;
-}
-
 static void set_err(char *err, size_t errlen, const char *fmt, ...)
 {
 	va_list ap;
@@ -587,6 +624,24 @@ static int authorized(aik_http_server *s, const aik_http_request *req)
 /* ------------------------------------------------------------------ */
 typedef void (*route_fn)(aik_http_server *, const aik_http_request *,
 			 aik_http_response *);
+typedef void (*id_route_fn)(aik_http_server *, const aik_http_request *,
+			    const char *, aik_http_response *);
+
+/* 复制路径段后调用 handler；失败（OOM）返回 0 */
+static int call_id_route(aik_http_server *s, const aik_http_request *req,
+			 const char *id, size_t n, id_route_fn fn,
+			 aik_http_response *resp)
+{
+	char *copy = malloc(n + 1);
+
+	if (!copy)
+		return 0;
+	memcpy(copy, id, n);
+	copy[n] = '\0';
+	fn(s, req, copy, resp);
+	free(copy);
+	return 1;
+}
 
 static void dispatch(aik_http_server *s, const aik_http_request *req,
 		     aik_http_response *resp)
@@ -601,9 +656,21 @@ static void dispatch(aik_http_server *s, const aik_http_request *req,
 		{ "/memories/batch", "POST", aik_http_route_add_batch },
 		{ "/memories/search", "POST", aik_http_route_search },
 		{ "/regions", "GET", aik_http_route_regions },
+		{ "/regions/search", "POST", aik_http_route_regions_search },
+		{ "/regions/evolve", "POST", aik_http_route_regions_evolve },
 		{ "/stats", "GET", aik_http_route_stats },
 		{ "/export", "GET", aik_http_route_export },
 		{ "/import", "POST", aik_http_route_import },
+		{ "/graph", "GET", aik_http_route_graph },
+		{ "/graph/link", "POST", aik_http_route_graph_link },
+		{ "/facts", "GET", aik_http_route_facts },
+		{ "/facts/history", "GET", aik_http_route_facts_history },
+		{ "/facts/multi_hop", "POST",
+		  aik_http_route_facts_multi_hop },
+		{ "/profile", "GET", aik_http_route_profile },
+		{ "/qapairs", "GET", aik_http_route_qapairs },
+		{ "/metrics", "GET", aik_http_route_metrics },
+		{ "/metrics/report", "GET", aik_http_route_metrics_report },
 	};
 	size_t i;
 	int partial = 0;
@@ -617,47 +684,54 @@ static void dispatch(aik_http_server *s, const aik_http_request *req,
 		}
 		partial = 1;
 	}
-	/* /memories/{id} 与 /memories/{id}/hit（id 为一个非空路径段） */
+	/*
+	 * /memories/{id}（GET/PATCH/DELETE）与
+	 * /memories/{id}/{hit|archive|restore}（POST）；id 为一个非空路径段。
+	 */
 	if (strncmp(req->path, "/memories/", 10) == 0) {
 		const char *id = req->path + 10;
 		const char *slash = strchr(id, '/');
 
-		if (!slash) {
-			if (*id) {
-				if (strcmp(req->method, "GET") == 0) {
-					char *copy = dup_str(id);
+		if (*id && !slash) {
+			id_route_fn fn = NULL;
 
-					if (!copy) {
+			if (strcmp(req->method, "GET") == 0)
+				fn = aik_http_route_memory_get;
+			else if (strcmp(req->method, "PATCH") == 0)
+				fn = aik_http_route_memory_patch;
+			else if (strcmp(req->method, "DELETE") == 0)
+				fn = aik_http_route_memory_delete;
+			if (fn) {
+				if (!call_id_route(s, req, id, strlen(id), fn,
+						   resp))
+					aik_http_response_detail(
+						resp, 500,
+						"Internal Server Error");
+				return;
+			}
+			partial = 1;
+		} else if (slash && slash != id) {
+			id_route_fn fn = NULL;
+
+			if (strcmp(slash, "/hit") == 0)
+				fn = aik_http_route_memory_hit;
+			else if (strcmp(slash, "/archive") == 0)
+				fn = aik_http_route_memory_archive;
+			else if (strcmp(slash, "/restore") == 0)
+				fn = aik_http_route_memory_restore;
+			if (fn) {
+				if (strcmp(req->method, "POST") == 0) {
+					if (!call_id_route(
+						    s, req, id,
+						    (size_t)(slash - id), fn,
+						    resp))
 						aik_http_response_detail(
 							resp, 500,
 							"Internal Server Error");
-						return;
-					}
-					aik_http_route_memory_get(s, req,
-								  copy, resp);
-					free(copy);
 					return;
 				}
 				partial = 1;
 			}
-		} else if (strcmp(slash, "/hit") == 0 && slash != id) {
-			if (strcmp(req->method, "POST") == 0) {
-				size_t n = (size_t)(slash - id);
-				char *copy = malloc(n + 1);
-
-				if (!copy) {
-					aik_http_response_detail(
-						resp, 500,
-						"Internal Server Error");
-					return;
-				}
-				memcpy(copy, id, n);
-				copy[n] = '\0';
-				aik_http_route_memory_hit(s, req, copy, resp);
-				free(copy);
-				return;
-			}
-			partial = 1;
 		}
 	}
 	if (partial)

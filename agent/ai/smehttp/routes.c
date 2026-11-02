@@ -15,6 +15,23 @@
  *   GET  /regions              {"count","regions"}
  *   POST /import               ImportRequest → {"imported":n}
  *
+ * T4d 追加（本文件末尾）：
+ *   PATCH  /memories/{id}          UpdateMemoryRequest → memory.to_dict()
+ *   DELETE /memories/{id}          {"deleted": id}
+ *   POST   /memories/{id}/archive  {"archived": id}
+ *   POST   /memories/{id}/restore  {"restored": id}
+ *   POST   /regions/search         RegionSearchRequest → {"count","results"}
+ *   POST   /regions/evolve         {"events":[{kind,region_id,detail}]}
+ *   GET    /graph                  {"edge_count","edges"}
+ *   POST   /graph/link             LinkRequest → {"linked":true}
+ *   GET    /facts                  {"enabled":false,"entities":[],"relations":[],"facts":[]}
+ *   GET    /facts/history          {"enabled":false,"versions":[]}
+ *   POST   /facts/multi_hop        {"enabled":false,"results":[]}
+ *   GET    /profile                {"enabled":false,"profile_facts":[],"snapshots":{}}
+ *   GET    /qapairs                {"enabled":false,"count":0,"pairs":[]}
+ *   GET    /metrics                {"enabled":false,"summary":{}}
+ *   GET    /metrics/report         404 {"detail":"telemetry disabled"}
+ *
  * 校验错误体沿用 FastAPI/Pydantic v2 形状：
  *   {"detail":[{"type","loc","msg","input"[,"ctx"]}, ...]}
  * loc 从 ["body", ...] 起，batch 项追加 "memories",<i>，字段按模型声明顺序
@@ -82,6 +99,15 @@ static aik_json *jb_str(const char *s, int *bad)
 static aik_json *jb_int(long long i, int *bad)
 {
 	aik_json *v = aik_json_new_int(i);
+
+	if (!v)
+		*bad = 1;
+	return v;
+}
+
+static aik_json *jb_num(double d, int *bad)
+{
+	aik_json *v = aik_json_new_num(d);
 
 	if (!v)
 		*bad = 1;
@@ -473,6 +499,27 @@ static void v_opt_str(vctx *v, const aik_json *obj, const char *field,
 		return;
 	}
 	*out = aik_json_str(j);
+}
+
+/*
+ * Optional[float]：缺失或 null → 不改；INT/NUM 均接受（Pydantic lax 的
+ * int → float）；其他类型 float_type。
+ */
+static void v_opt_num(vctx *v, const aik_json *obj, const char *field,
+		      const vloc *base)
+{
+	const aik_json *j = aik_json_get(obj, field);
+	vloc loc = *base;
+	aik_json_type t;
+
+	loc.field = field;
+	loc.elem = -1;
+	if (!j)
+		return;
+	t = aik_json_typeof(j);
+	if (t == AIK_JSON_NULL || t == AIK_JSON_NUM || t == AIK_JSON_INT)
+		return;
+	v_add(v, "float_type", V_MSG_FLOAT, j, &loc, 0);
 }
 
 /* 必填 str（Nullable 由调用方另行处理） */
@@ -1350,4 +1397,668 @@ void aik_http_route_import(aik_http_server *s, const aik_http_request *req,
 		}
 		aik_http_response_json(resp, 200, o);
 	}
+}
+
+
+/* ================================================================== */
+/* T4d：PATCH / DELETE / archive / restore                             */
+/* ================================================================== */
+/*
+ * handler 原型（http.h 不在本棒修改范围，http.c 内重复声明同一组符号）。
+ */
+void aik_http_route_memory_patch(aik_http_server *s,
+				 const aik_http_request *req,
+				 const char *memory_id,
+				 aik_http_response *resp);
+void aik_http_route_memory_delete(aik_http_server *s,
+				  const aik_http_request *req,
+				  const char *memory_id,
+				  aik_http_response *resp);
+void aik_http_route_memory_archive(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp);
+void aik_http_route_memory_restore(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp);
+void aik_http_route_regions_search(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+void aik_http_route_regions_evolve(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+void aik_http_route_graph(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp);
+void aik_http_route_graph_link(aik_http_server *s,
+			       const aik_http_request *req,
+			       aik_http_response *resp);
+void aik_http_route_facts(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp);
+void aik_http_route_facts_history(aik_http_server *s,
+				  const aik_http_request *req,
+				  aik_http_response *resp);
+void aik_http_route_facts_multi_hop(aik_http_server *s,
+				    const aik_http_request *req,
+				    aik_http_response *resp);
+void aik_http_route_profile(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_qapairs(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_metrics(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp);
+void aik_http_route_metrics_report(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp);
+
+/*
+ * py_repr_str - Python repr(str) 的最小复刻
+ *
+ * PATCH 404 的 detail 是 `str(KeyError(f"memory {id} not found"))`，即 repr：
+ * 默认单引号；键里含单引号且不含双引号时改用双引号；反斜杠、引号、\n \r \t
+ * 与控制字符按 Python 的转义写出。memory id 正常只含 [A-Za-z0-9_]，这里
+ * 只是为了让任意路径段都与参考逐字节一致。
+ */
+static char *py_repr_str(const char *s)
+{
+	const char *str = s ? s : "";
+	int use_double = strchr(str, '\'') != NULL &&
+			 strchr(str, '"') == NULL;
+	char quote = use_double ? '"' : '\'';
+	char *out = malloc(strlen(str) * 4 + 3);
+	char *p = out;
+
+	if (!out)
+		return NULL;
+	*p++ = quote;
+	for (; *str; str++) {
+		unsigned char c = (unsigned char)*str;
+
+		if (c == (unsigned char)quote || c == '\\') {
+			*p++ = '\\';
+			*p++ = (char)c;
+		} else if (c == '\n') {
+			*p++ = '\\';
+			*p++ = 'n';
+		} else if (c == '\r') {
+			*p++ = '\\';
+			*p++ = 'r';
+		} else if (c == '\t') {
+			*p++ = '\\';
+			*p++ = 't';
+		} else if (c < 0x20 || c == 0x7f) {
+			snprintf(p, 5, "\\x%02x", c);
+			p += 4;
+		} else {
+			*p++ = (char)c;
+		}
+	}
+	*p++ = quote;
+	*p = '\0';
+	return out;
+}
+
+/* PATCH 404：detail == str(KeyError("memory <id> not found")) */
+static void respond_update_missing(aik_http_response *resp, const char *memory_id)
+{
+	char key[512];
+	char *detail;
+	int n;
+
+	n = snprintf(key, sizeof(key), "memory %s not found",
+		     memory_id ? memory_id : "");
+	if (n < 0 || (size_t)n >= sizeof(key)) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	detail = py_repr_str(key);
+	if (!detail) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_detail(resp, 404, detail);
+	free(detail);
+}
+
+/*
+ * validate_update - UpdateMemoryRequest（字段序 text, metadata, tags,
+ * importance, weight, summary）；全部可选，无 missing。成功 0，有错误/-1。
+ */
+static int validate_update(vctx *v, const aik_json *obj, const vloc *base)
+{
+	size_t before = v->errors ? aik_json_count(v->errors) : 0;
+	const aik_json *j;
+	vloc loc;
+
+	/* text: Optional[str] + 非空白 */
+	loc = *base;
+	loc.field = "text";
+	loc.elem = -1;
+	j = aik_json_get(obj, "text");
+	if (j && aik_json_typeof(j) != AIK_JSON_NULL) {
+		if (aik_json_typeof(j) != AIK_JSON_STR)
+			v_add(v, "string_type", V_MSG_STRING, j, &loc, 0);
+		else if (text_is_blank(aik_json_str(j)))
+			v_add(v, "value_error", V_MSG_BLANK, j, &loc, 1);
+	}
+
+	/* metadata: Optional[dict[str, Any]] */
+	loc = *base;
+	loc.field = "metadata";
+	loc.elem = -1;
+	j = aik_json_get(obj, "metadata");
+	if (j && aik_json_typeof(j) != AIK_JSON_NULL &&
+	    aik_json_typeof(j) != AIK_JSON_OBJ)
+		v_add(v, "dict_type", V_MSG_DICT, j, &loc, 0);
+
+	/* tags: Optional[list[str]] */
+	{
+		const char *const *tags = NULL;
+		size_t n_tags = 0;
+
+		v_str_list(v, obj, "tags", base, 1, &tags, &n_tags);
+	}
+
+	/* importance / weight: Optional[float] */
+	v_opt_num(v, obj, "importance", base);
+	v_opt_num(v, obj, "weight", base);
+
+	/* summary: Optional[str] */
+	{
+		const char *summary = NULL;
+
+		v_opt_str(v, obj, "summary", base, &summary);
+	}
+
+	if (v->oom)
+		return -1;
+	if (v->errors && aik_json_count(v->errors) != before)
+		return -1;
+	return 0;
+}
+
+void aik_http_route_memory_patch(aik_http_server *s,
+				 const aik_http_request *req,
+				 const char *memory_id,
+				 aik_http_response *resp)
+{
+	vctx v;
+	vloc base;
+	aik_json *body;
+	aik_memory *m;
+	aik_json *dom;
+	char err[256];
+	int rc;
+
+	memset(&v, 0, sizeof(v));
+	memset(&base, 0, sizeof(base));
+	base.elem = -1;
+	body = parse_body(req, &v, resp);
+	if (!body)
+		return;
+	if (aik_json_typeof(body) != AIK_JSON_OBJ) {
+		v_add(&v, "dict_type", V_MSG_DICT, body, &base, 0);
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	if (validate_update(&v, body, &base) != 0) {
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	aik_json_free(v.errors);
+	v.errors = NULL;
+	rc = aik_engine_update(aik_http_server_engine(s), memory_id, body, err,
+			       sizeof(err));
+	aik_json_free(body);
+	if (rc == 1) {
+		respond_update_missing(resp, memory_id);
+		return;
+	}
+	if (rc != 0) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	m = aik_engine_get(aik_http_server_engine(s), memory_id);
+	if (!m) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	dom = aik_memory_to_json(m, 1);
+	if (!dom) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, dom);
+}
+
+void aik_http_route_memory_delete(aik_http_server *s,
+				  const aik_http_request *req,
+				  const char *memory_id,
+				  aik_http_response *resp)
+{
+	char err[256];
+	int rc;
+	int bad = 0;
+	aik_json *o;
+
+	(void)req;
+	rc = aik_engine_delete(aik_http_server_engine(s), memory_id, err,
+			       sizeof(err));
+	if (rc == 1) {
+		aik_http_response_detail(resp, 404, "memory not found");
+		return;
+	}
+	if (rc != 0) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	o = jb_obj(&bad);
+	jb_put(o, "deleted", jb_str(memory_id, &bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+/* archive / restore 共用：0 → {"<key>": id}，1 → 404，-1 → 500 */
+static void respond_archive_op(aik_http_server *s, const char *memory_id,
+			       int archive, aik_http_response *resp)
+{
+	int rc;
+	int bad = 0;
+	aik_json *o;
+
+	rc = archive ? aik_engine_archive(aik_http_server_engine(s), memory_id)
+		     : aik_engine_restore(aik_http_server_engine(s), memory_id);
+	if (rc == 1) {
+		aik_http_response_detail(resp, 404, "memory not found");
+		return;
+	}
+	if (rc != 0) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	o = jb_obj(&bad);
+	jb_put(o, archive ? "archived" : "restored", jb_str(memory_id, &bad),
+	       &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_memory_archive(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp)
+{
+	(void)req;
+	respond_archive_op(s, memory_id, 1, resp);
+}
+
+void aik_http_route_memory_restore(aik_http_server *s,
+				   const aik_http_request *req,
+				   const char *memory_id,
+				   aik_http_response *resp)
+{
+	(void)req;
+	respond_archive_op(s, memory_id, 0, resp);
+}
+
+/* ================================================================== */
+/* T4d：/regions/search 与 /regions/evolve                            */
+/* ================================================================== */
+/* RegionHit.to_dict 键序：region_id, score, distance, size, density */
+void aik_http_route_regions_search(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp)
+{
+	vctx v;
+	vloc base;
+	aik_json *body;
+	const aik_json *j;
+	const char *text = NULL;
+	int top_k = 5;
+	aik_region_hit *hits = NULL;
+	size_t n_hits = 0;
+	char err[256];
+	int rc;
+	int bad = 0;
+	aik_json *out;
+	aik_json *results;
+	size_t i;
+
+	memset(&v, 0, sizeof(v));
+	memset(&base, 0, sizeof(base));
+	base.elem = -1;
+	body = parse_body(req, &v, resp);
+	if (!body)
+		return;
+	if (aik_json_typeof(body) != AIK_JSON_OBJ) {
+		v_add(&v, "dict_type", V_MSG_DICT, body, &base, 0);
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	base.field = "text";
+	j = aik_json_get(body, "text");
+	if (!j) {
+		v_add(&v, "missing", V_MSG_MISSING, body, &base, 0);
+	} else if (aik_json_typeof(j) != AIK_JSON_STR) {
+		v_add(&v, "string_type", V_MSG_STRING, j, &base, 0);
+	} else {
+		text = aik_json_str(j);
+	}
+	base.field = NULL;
+	v_int(&v, body, "top_k", &base, 5, &top_k);
+	if (v.oom) {
+		aik_json_free(v.errors);
+		v.errors = NULL;
+		aik_json_free(body);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	if (v.errors && aik_json_count(v.errors) > 0) {
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	aik_json_free(v.errors);
+	v.errors = NULL;
+	rc = aik_engine_search_regions(aik_http_server_engine(s), text, top_k,
+				       &hits, &n_hits, err, sizeof(err));
+	aik_json_free(body);
+	if (rc != 0) {
+		free(hits);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	out = jb_obj(&bad);
+	results = jb_arr(&bad);
+	jb_put(out, "count", jb_int((long long)n_hits, &bad), &bad);
+	for (i = 0; i < n_hits; i++) {
+		const aik_region *r = hits[i].region;
+		aik_json *hit = jb_obj(&bad);
+
+		jb_put(hit, "region_id",
+		       jb_str(r ? aik_region_id(r) : "", &bad), &bad);
+		jb_put(hit, "score", jb_num(hits[i].score, &bad), &bad);
+		jb_put(hit, "distance", jb_num(hits[i].distance, &bad), &bad);
+		jb_put(hit, "size",
+		       jb_int(r ? (long long)aik_region_size(r) : 0, &bad),
+		       &bad);
+		jb_put(hit, "density",
+		       jb_num(r ? aik_region_density(r) : 0.0, &bad), &bad);
+		jb_push(results, hit, &bad);
+	}
+	free(hits);
+	jb_put(out, "results", results, &bad);
+	if (bad) {
+		aik_json_free(out);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, out);
+}
+
+void aik_http_route_regions_evolve(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp)
+{
+	respond_engine_obj(s, req, resp, aik_engine_evolve);
+}
+
+/* ================================================================== */
+/* T4d：/graph 与 /graph/link                                         */
+/* ================================================================== */
+void aik_http_route_graph(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp)
+{
+	char err[256];
+	aik_json *dom = NULL;
+	const aik_json *edges;
+	aik_json *out;
+	aik_json *copy;
+	int bad = 0;
+
+	(void)req;
+	if (aik_engine_graph(aik_http_server_engine(s), &dom, err,
+			     sizeof(err)) != 0 ||
+	    !dom) {
+		aik_json_free(dom);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	edges = aik_json_get(dom, "edges");
+	if (aik_json_typeof(edges) != AIK_JSON_ARR) {
+		aik_json_free(dom);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	out = jb_obj(&bad);
+	jb_put(out, "edge_count",
+	       jb_int((long long)aik_json_count(edges), &bad), &bad);
+	copy = jclone(edges, &bad);
+	jb_put(out, "edges", copy, &bad);
+	aik_json_free(dom);
+	if (bad) {
+		aik_json_free(out);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, out);
+}
+
+/* LinkRequest{a,b,kind="reference",weight=1.0,note=""} */
+void aik_http_route_graph_link(aik_http_server *s,
+			       const aik_http_request *req,
+			       aik_http_response *resp)
+{
+	vctx v;
+	vloc base;
+	aik_json *body;
+	const aik_json *j;
+	const char *a = NULL;
+	const char *b = NULL;
+	const char *kind = NULL;
+	const char *note = NULL;
+	double weight = 1.0;
+	char err[256];
+	int rc;
+	int bad = 0;
+	aik_json *o;
+
+	memset(&v, 0, sizeof(v));
+	memset(&base, 0, sizeof(base));
+	base.elem = -1;
+	body = parse_body(req, &v, resp);
+	if (!body)
+		return;
+	if (aik_json_typeof(body) != AIK_JSON_OBJ) {
+		v_add(&v, "dict_type", V_MSG_DICT, body, &base, 0);
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	v_str(&v, body, "a", &base, NULL, &a);
+	v_str(&v, body, "b", &base, NULL, &b);
+	v_str(&v, body, "kind", &base, "reference", &kind);
+	base.field = "weight";
+	j = aik_json_get(body, "weight");
+	if (j) {
+		if (aik_json_typeof(j) == AIK_JSON_INT)
+			weight = (double)aik_json_int(j);
+		else if (aik_json_typeof(j) == AIK_JSON_NUM)
+			weight = aik_json_num(j);
+		else
+			v_add(&v, "float_type", V_MSG_FLOAT, j, &base, 0);
+	}
+	base.field = NULL;
+	v_str(&v, body, "note", &base, "", &note);
+	if (v.oom) {
+		aik_json_free(v.errors);
+		v.errors = NULL;
+		aik_json_free(body);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	if (v.errors && aik_json_count(v.errors) > 0) {
+		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	aik_json_free(v.errors);
+	v.errors = NULL;
+	rc = aik_engine_link(aik_http_server_engine(s), a, b, kind, weight, note,
+			     err, sizeof(err));
+	aik_json_free(body);
+	if (rc == 1) {
+		aik_http_response_detail(resp, 404,
+					 "one or both memories missing");
+		return;
+	}
+	if (rc != 0) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	o = jb_obj(&bad);
+	jb_put(o, "linked", jb_bool(1, &bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+/* ================================================================== */
+/* T4d：可选模块只读路由（C 引擎未接模块 = 参考的 enabled:false 空态） */
+/* ================================================================== */
+void aik_http_route_facts(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "entities", jb_arr(&bad), &bad);
+	jb_put(o, "relations", jb_arr(&bad), &bad);
+	jb_put(o, "facts", jb_arr(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_facts_history(aik_http_server *s,
+				  const aik_http_request *req,
+				  aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "versions", jb_arr(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_facts_multi_hop(aik_http_server *s,
+				    const aik_http_request *req,
+				    aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "results", jb_arr(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_profile(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "profile_facts", jb_arr(&bad), &bad);
+	jb_put(o, "snapshots", jb_obj(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_qapairs(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "count", jb_int(0, &bad), &bad);
+	jb_put(o, "pairs", jb_arr(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_metrics(aik_http_server *s, const aik_http_request *req,
+			    aik_http_response *resp)
+{
+	int bad = 0;
+	aik_json *o = jb_obj(&bad);
+
+	(void)s;
+	(void)req;
+	jb_put(o, "enabled", jb_bool(0, &bad), &bad);
+	jb_put(o, "summary", jb_obj(&bad), &bad);
+	if (bad) {
+		aik_json_free(o);
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return;
+	}
+	aik_http_response_json(resp, 200, o);
+}
+
+void aik_http_route_metrics_report(aik_http_server *s,
+				   const aik_http_request *req,
+				   aik_http_response *resp)
+{
+	(void)s;
+	(void)req;
+	aik_http_response_detail(resp, 404, "telemetry disabled");
 }
