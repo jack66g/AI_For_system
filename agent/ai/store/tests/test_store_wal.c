@@ -413,6 +413,86 @@ static void expect_replay_fail(const char *path, long long checkpoint)
 }
 
 /* ------------------------------------------------------------------ */
+/* T4e-D 新增 API：reset / ops / replay_ex                             */
+/* ------------------------------------------------------------------ */
+static void test_new_api(const char *dir)
+{
+	static const char *const rec1 = "{\"op\":\"add\",\"seq\":1}\n";
+	static const char *const rec2 = "{\"op\":\"transaction\",\"seq\":2}\n";
+	char err[256] = "";
+	char *p = path_in(dir, "api.wal");
+	char *bad = path_in(dir, "api-bad.wal");
+	struct stat st;
+	aik_json *op = NULL;
+	aik_wal *w = NULL;
+	int n = 0;
+	long long record = -1, last_seq = -1;
+
+	if (!p || !bad) {
+		report("out of memory");
+		free(p);
+		free(bad);
+		return;
+	}
+	(void)unlink(p);
+	(void)unlink(bad);
+
+	w = aik_wal_open(p, 1, err, sizeof(err));
+	CHECK(w != NULL);
+	CHECK(aik_wal_ops(w) == 0);
+	op = aik_json_parse("{\"op\":\"add\",\"seq\":1}", 20, err, sizeof(err));
+	CHECK(op != NULL);
+	if (op)
+		CHECK(aik_wal_append(w, op, err, sizeof(err)) == 0);
+	aik_json_free(op);
+	op = aik_json_parse("{\"op\":\"transaction\",\"seq\":2}", 28, err,
+			    sizeof(err));
+	CHECK(op != NULL);
+	if (op)
+		CHECK(aik_wal_append(w, op, err, sizeof(err)) == 0);
+	aik_json_free(op);
+	CHECK(aik_wal_ops(w) == 2);
+	CHECK(stat(p, &st) == 0 &&
+	      st.st_size == (off_t)(strlen(rec1) + strlen(rec2)));
+	/* reset：截断 + 计数清零，seq 由调用方（引擎）保留 */
+	CHECK(aik_wal_reset(w, err, sizeof(err)) == 0);
+	CHECK(aik_wal_ops(w) == 0);
+	CHECK(stat(p, &st) == 0 && st.st_size == 0);
+	op = aik_json_parse("{\"op\":\"add\",\"seq\":3}", 20, err, sizeof(err));
+	CHECK(op != NULL);
+	if (op)
+		CHECK(aik_wal_append(w, op, err, sizeof(err)) == 0);
+	aik_json_free(op);
+	CHECK(aik_wal_ops(w) == 1);
+	CHECK(aik_wal_close(w) == 0);
+	w = NULL;
+	CHECK(aik_wal_ops(NULL) == 0);
+	CHECK(aik_wal_reset(NULL, err, sizeof(err)) == -1);
+
+	/* replay_ex：行号与最大 seq */
+	CHECK(aik_wal_replay_ex(p, 0, replay_cb, &n, &record, &last_seq, err,
+				sizeof(err)) == 1);
+	CHECK(record == 1);
+	CHECK(last_seq == 3);
+	CHECK(n == 1);
+
+	/* 坏行：失败并回传出错行号，文件不改 */
+	CHECK(write_file(bad, "not-json\n", 9) == 0);
+	record = -1;
+	last_seq = -1;
+	CHECK(aik_wal_replay_ex(bad, 0, replay_cb, &n, &record, &last_seq, err,
+				sizeof(err)) == -1);
+	CHECK(record == 1);
+	CHECK(last_seq == 0);
+	CHECK(stat(bad, &st) == 0 && st.st_size == 9);
+
+	(void)unlink(p);
+	(void)unlink(bad);
+	free(p);
+	free(bad);
+}
+
+/* ------------------------------------------------------------------ */
 /* 主测试                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -675,6 +755,9 @@ int main(void)
 			}
 		}
 	}
+
+	/* T4e-D：reset / ops / replay_ex（引擎 WAL 接线所需的最小 API） */
+	test_new_api(dir);
 
 out:
 	if (dir) {

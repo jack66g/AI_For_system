@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -87,6 +88,14 @@ struct aik_http_server {
 	char host[128];
 	aik_engine *engine;		/* 借用 */
 	aik_config *config;		/* 借用（auth_token 每请求现读） */
+	char *config_file;		/* 自有；GET /config 展示 */
+	int source;			/* AIK_HTTP_SOURCE_* */
+	char *static_dir;		/* 自有；/ 与 /static/<file> */
+	pthread_mutex_t lock;		/* 串行化请求处理（引擎非线程安全） */
+	pthread_mutex_t conn_lock;
+	pthread_cond_t conn_cond;
+	int active_conns;
+	int closing;
 };
 
 /* ------------------------------------------------------------------ */
@@ -192,18 +201,20 @@ static const char *reason_phrase(int status)
 	}
 }
 
-static void write_response(int fd, const aik_http_response *r)
+static void write_response(int fd, const aik_http_response *r, int keep_alive)
 {
 	char head[256];
 	int n;
 
 	n = snprintf(head, sizeof(head),
 		     "HTTP/1.1 %d %s\r\n"
-		     "Content-Type: application/json\r\n"
+		     "Content-Type: %s\r\n"
 		     "Content-Length: %zu\r\n"
-		     "Connection: close\r\n"
+		     "Connection: %s\r\n"
 		     "\r\n",
-		     r->status, reason_phrase(r->status), r->body_len);
+		     r->status, reason_phrase(r->status),
+		     r->content_type ? r->content_type : "application/json",
+		     r->body_len, keep_alive ? "keep-alive" : "close");
 	if (n > 0)
 		write_all(fd, head, (size_t)n);
 	if (r->body && r->body_len > 0)
@@ -241,6 +252,22 @@ void aik_http_response_json(aik_http_response *resp, int status, aik_json *dom)
 	resp->status = status;
 	resp->body = buf;
 	resp->body_len = len;
+	resp->content_type = NULL;
+}
+
+void aik_http_response_bytes(aik_http_response *resp, int status,
+			     const char *content_type, char *body,
+			     size_t body_len)
+{
+	if (!resp) {
+		free(body);
+		return;
+	}
+	free(resp->body);
+	resp->status = status;
+	resp->body = body;
+	resp->body_len = body_len;
+	resp->content_type = content_type;
 }
 
 void aik_http_response_detail(aik_http_response *resp, int status,
@@ -335,10 +362,25 @@ aik_http_server *aik_http_server_new(aik_engine *engine, aik_config *config,
 			set_err(err, errlen, "http: out of memory");
 			return NULL;
 		}
+		if (pthread_mutex_init(&s->lock, NULL) != 0 ||
+		    pthread_mutex_init(&s->conn_lock, NULL) != 0 ||
+		    pthread_cond_init(&s->conn_cond, NULL) != 0) {
+			close(fd);
+			free(s);
+			set_err(err, errlen, "http: cannot init mutex");
+			return NULL;
+		}
 		s->fd = fd;
 		s->port = port;
 		s->engine = engine;
-		s->config = config;
+		/*
+		 * 引擎可能已通过 load 换成快照内嵌配置：以引擎当前配置为准
+		 * （Python 鉴权中间件读 engine.config.api.auth_token）。
+		 */
+		s->config = aik_engine_config(engine);
+		if (!s->config)
+			s->config = config;
+		s->source = AIK_HTTP_SOURCE_DEFAULTS;
 		if (getsockname(fd, (struct sockaddr *)&sa, &salen) == 0)
 			s->port = (int)ntohs(sa.sin_port);
 		hl = strlen(host);
@@ -358,6 +400,17 @@ void aik_http_server_free(aik_http_server *s)
 		return;
 	if (s->fd >= 0)
 		close(s->fd);
+	/* 等待活动连接线程退出（keep-alive 空闲超时上限 5s） */
+	pthread_mutex_lock(&s->conn_lock);
+	s->closing = 1;
+	while (s->active_conns > 0)
+		pthread_cond_wait(&s->conn_cond, &s->conn_lock);
+	pthread_mutex_unlock(&s->conn_lock);
+	pthread_cond_destroy(&s->conn_cond);
+	pthread_mutex_destroy(&s->conn_lock);
+	pthread_mutex_destroy(&s->lock);
+	free(s->config_file);
+	free(s->static_dir);
 	free(s);
 }
 
@@ -379,6 +432,67 @@ aik_engine *aik_http_server_engine(const aik_http_server *s)
 aik_config *aik_http_server_config(const aik_http_server *s)
 {
 	return s ? s->config : NULL;
+}
+
+const char *aik_http_server_config_file(const aik_http_server *s)
+{
+	return s && s->config_file ? s->config_file : "";
+}
+
+int aik_http_server_set_config_file(aik_http_server *s, const char *path)
+{
+	char *copy = NULL;
+
+	if (!s)
+		return -1;
+	if (path && *path) {
+		copy = strdup(path);
+		if (!copy)
+			return -1;
+	}
+	free(s->config_file);
+	s->config_file = copy;
+	return 0;
+}
+
+int aik_http_server_source(const aik_http_server *s)
+{
+	return s ? s->source : AIK_HTTP_SOURCE_DEFAULTS;
+}
+
+void aik_http_server_set_source(aik_http_server *s, int source)
+{
+	if (s)
+		s->source = source;
+}
+
+void aik_http_server_set_engine(aik_http_server *s, aik_engine *engine)
+{
+	if (!s)
+		return;
+	s->engine = engine;
+	s->config = engine ? aik_engine_config(engine) : NULL;
+}
+
+const char *aik_http_server_static_dir(const aik_http_server *s)
+{
+	return s && s->static_dir ? s->static_dir : "";
+}
+
+int aik_http_server_set_static_dir(aik_http_server *s, const char *path)
+{
+	char *copy = NULL;
+
+	if (!s)
+		return -1;
+	if (path && *path) {
+		copy = strdup(path);
+		if (!copy)
+			return -1;
+	}
+	free(s->static_dir);
+	s->static_dir = copy;
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -452,6 +566,8 @@ typedef struct {
 	size_t content_length;
 	int chunked;
 	int expect_continue;
+	int http11;
+	char *connection;
 	int bad;
 } parsed_head;
 
@@ -522,6 +638,7 @@ static int parse_head(char *head, size_t head_len, parsed_head *h)
 			h->bad = 1;
 			return -1;
 		}
+		h->http11 = strcmp(ver, "HTTP/1.1") == 0;
 		q = strchr(target, '?');
 		if (q) {
 			*q = '\0';
@@ -576,6 +693,9 @@ static int parse_head(char *head, size_t head_len, parsed_head *h)
 		} else if (strcasecmp(key, "expect") == 0) {
 			if (ci_contains(val, "100-continue"))
 				h->expect_continue = 1;
+		} else if (strcasecmp(key, "connection") == 0) {
+			if (!h->connection)
+				h->connection = val;
 		}
 	}
 	return 0;
@@ -671,6 +791,18 @@ static void dispatch(aik_http_server *s, const aik_http_request *req,
 		{ "/qapairs", "GET", aik_http_route_qapairs },
 		{ "/metrics", "GET", aik_http_route_metrics },
 		{ "/metrics/report", "GET", aik_http_route_metrics_report },
+		/* T4e 配置中心 + 动力学 */
+		{ "/config", "GET", aik_http_route_config_get },
+		{ "/config", "PUT", aik_http_route_config_put },
+		{ "/config/preset", "POST", aik_http_route_config_preset },
+		{ "/config/check", "POST", aik_http_route_config_check },
+		{ "/config/reset", "POST", aik_http_route_config_reset },
+		{ "/consolidate", "POST", aik_http_route_consolidate },
+		{ "/compress", "POST", aik_http_route_compress },
+		/* T4e 追加：上传导入 / 可视化 / 配置 UI */
+		{ "/import/file", "POST", aik_http_route_import_file },
+		{ "/visualize", "GET", aik_http_route_visualize },
+		{ "/", "GET", aik_http_route_index },
 	};
 	size_t i;
 	int partial = 0;
@@ -734,6 +866,14 @@ static void dispatch(aik_http_server *s, const aik_http_request *req,
 			}
 		}
 	}
+	/* /static/<file>：仅 GET；目录未配置时按 404（见 routes_extra.c） */
+	if (strncmp(req->path, "/static/", 8) == 0) {
+		if (strcmp(req->method, "GET") == 0) {
+			aik_http_route_static(s, req, resp);
+			return;
+		}
+		partial = 1;
+	}
 	if (partial)
 		aik_http_response_detail(resp, 405, "Method Not Allowed");
 	else
@@ -743,7 +883,15 @@ static void dispatch(aik_http_server *s, const aik_http_request *req,
 /* ------------------------------------------------------------------ */
 /* 单连接处理                                                         */
 /* ------------------------------------------------------------------ */
-static void handle_connection(aik_http_server *s, int fd)
+/* keep-alive 空闲超时（毫秒）；到点无新请求即关闭连接 */
+#define AIK_HTTP_KEEPALIVE_MS 5000
+
+/*
+ * 处理一次请求。
+ * 返回 1=已响应且连接可继续；0=对端关闭/空闲超时（未响应）；-1=已响应但
+ * 必须关闭连接（解析错误/请求体不完整/客户端要求 close）。
+ */
+static int handle_one_request(aik_http_server *s, int fd)
 {
 	char *buf = NULL;
 	size_t total = 0;
@@ -754,25 +902,27 @@ static void handle_connection(aik_http_server *s, int fd)
 	aik_http_request req;
 	aik_http_response resp;
 	int rc;
+	int keep_alive;
 
 	memset(&req, 0, sizeof(req));
 	memset(&resp, 0, sizeof(resp));
+	memset(&ph, 0, sizeof(ph));
 
 	buf = malloc((size_t)AIK_HTTP_MAX_HEADER + 1);
 	if (!buf)
-		return;
+		return -1;
 	rc = read_head(fd, buf, (size_t)AIK_HTTP_MAX_HEADER, &total, &head_len);
 	if (rc == 0 || rc == -1) {
 		free(buf);
-		return;		/* 对端空闲/关闭：直接断开 */
+		return 0;	/* 对端空闲/关闭：直接断开 */
 	}
 	if (rc == -2) {
 		free(buf);
 		aik_http_response_detail(&resp, 431,
 					 "Request Header Fields Too Large");
-		write_response(fd, &resp);
+		write_response(fd, &resp, 0);
 		aik_http_response_free(&resp);
-		return;
+		return -1;
 	}
 	/*
 	 * 注意：不能在这里写 buf[head_len]='\0'——head_len 之后的字节可能
@@ -782,25 +932,29 @@ static void handle_connection(aik_http_server *s, int fd)
 	if (parse_head(buf, head_len, &ph) != 0 || ph.bad) {
 		free(buf);
 		aik_http_response_detail(&resp, 400, "Bad Request");
-		write_response(fd, &resp);
+		write_response(fd, &resp, 0);
 		aik_http_response_free(&resp);
-		return;
+		return -1;
 	}
+	keep_alive = ph.http11
+		? (!ph.connection || strcasecmp(ph.connection, "close") != 0)
+		: (ph.connection &&
+		   strcasecmp(ph.connection, "keep-alive") == 0);
 	/* chunked 请求体不支持（411）；Content-Length 超限 413 */
 	if (ph.chunked) {
 		free(buf);
 		aik_http_response_detail(&resp, 411, "Length Required");
-		write_response(fd, &resp);
+		write_response(fd, &resp, 0);
 		aik_http_response_free(&resp);
-		return;
+		return -1;
 	}
 	if (ph.has_content_length &&
 	    ph.content_length > (size_t)AIK_HTTP_MAX_BODY) {
 		free(buf);
 		aik_http_response_detail(&resp, 413, "Payload Too Large");
-		write_response(fd, &resp);
+		write_response(fd, &resp, 0);
 		aik_http_response_free(&resp);
-		return;
+		return -1;
 	}
 	body_len = ph.has_content_length ? ph.content_length : 0;
 	if (ph.expect_continue && body_len > 0) {
@@ -813,9 +967,9 @@ static void handle_connection(aik_http_server *s, int fd)
 	if (!body) {
 		free(buf);
 		aik_http_response_detail(&resp, 500, "Internal Server Error");
-		write_response(fd, &resp);
+		write_response(fd, &resp, 0);
 		aik_http_response_free(&resp);
-		return;
+		return -1;
 	}
 	{
 		size_t have = total - head_len;
@@ -841,9 +995,9 @@ static void handle_connection(aik_http_server *s, int fd)
 			free(body);
 			free(buf);
 			aik_http_response_detail(&resp, 400, "Bad Request");
-			write_response(fd, &resp);
+			write_response(fd, &resp, 0);
 			aik_http_response_free(&resp);
-			return;
+			return -1;
 		}
 		body_len = have;
 	}
@@ -856,6 +1010,11 @@ static void handle_connection(aik_http_server *s, int fd)
 	req.body = body;
 	req.body_len = body_len;
 
+	/*
+	 * 引擎/配置非线程安全：鉴权 + 分派整体持锁（多连接并发时请求被
+	 * 串行处理，等价于单 worker 的 ASGI 服务）。响应写回在锁外进行。
+	 */
+	pthread_mutex_lock(&s->lock);
 	if (!authorized(s, &req)) {
 		aik_http_response_detail(&resp, 401, "unauthorized");
 	} else {
@@ -864,15 +1023,58 @@ static void handle_connection(aik_http_server *s, int fd)
 			aik_http_response_detail(&resp, 500,
 						 "Internal Server Error");
 	}
-	write_response(fd, &resp);
+	pthread_mutex_unlock(&s->lock);
+	write_response(fd, &resp, keep_alive);
 	aik_http_response_free(&resp);
 	free(body);
 	free(buf);
+	return keep_alive ? 1 : -1;
+}
+
+/* 同一连接上循环处理请求（HTTP/1.1 keep-alive；空闲超时关闭） */
+static void handle_connection(aik_http_server *s, int fd)
+{
+	for (;;) {
+		int rc = handle_one_request(s, fd);
+
+		if (rc <= 0)
+			return;
+		set_socket_timeout(fd, AIK_HTTP_KEEPALIVE_MS);
+	}
+}
+
+/* 每连接一个 detached 线程；请求处理由 s->lock 串行化 */
+struct conn_ctx {
+	aik_http_server *s;
+	int fd;
+};
+
+static void conn_done(aik_http_server *s)
+{
+	pthread_mutex_lock(&s->conn_lock);
+	s->active_conns--;
+	pthread_cond_broadcast(&s->conn_cond);
+	pthread_mutex_unlock(&s->conn_lock);
+}
+
+static void *conn_main(void *arg)
+{
+	struct conn_ctx *c = arg;
+	aik_http_server *s = c->s;
+	int fd = c->fd;
+
+	free(c);
+	handle_connection(s, fd);
+	close(fd);
+	conn_done(s);
+	return NULL;
 }
 
 int aik_http_server_serve_one(aik_http_server *s, int timeout_ms)
 {
 	int cfd;
+	struct conn_ctx *ctx;
+	pthread_t tid;
 
 	if (!s || s->fd < 0)
 		return -1;
@@ -882,8 +1084,29 @@ int aik_http_server_serve_one(aik_http_server *s, int timeout_ms)
 			return 1;
 		return -1;
 	}
-	set_socket_timeout(cfd, timeout_ms);
-	handle_connection(s, cfd);
-	close(cfd);
+	set_socket_timeout(cfd, timeout_ms > 0 ? timeout_ms
+					       : AIK_HTTP_DEFAULT_TIMEOUT_MS);
+	ctx = malloc(sizeof(*ctx));
+	if (!ctx) {
+		close(cfd);
+		return 0;
+	}
+	ctx->s = s;
+	ctx->fd = cfd;
+	pthread_mutex_lock(&s->conn_lock);
+	if (s->closing) {
+		pthread_mutex_unlock(&s->conn_lock);
+		free(ctx);
+		close(cfd);
+		return 1;
+	}
+	s->active_conns++;
+	pthread_mutex_unlock(&s->conn_lock);
+	if (pthread_create(&tid, NULL, conn_main, ctx) == 0) {
+		pthread_detach(tid);
+		return 0;
+	}
+	/* 线程创建失败：退回同步处理（功能不丢，只是不并发） */
+	conn_main(ctx);
 	return 0;
 }

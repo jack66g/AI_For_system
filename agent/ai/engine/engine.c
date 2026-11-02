@@ -24,9 +24,16 @@
  *   - autosave：非 WAL 模式每 storage.autosave_interval 次写操作存一次，
  *     保存失败 fail closed（写操作返回 -1/NULL，err 已写）。
  *
+ * T4e-D 已接线的部分（WAL）：
+ *   - persistence.enabled + storage.backend=json + sync_mode=fsync 真实可用
+ *     （file backend，每条 append 一次 write+fsync）；sqlite/grouped 拒绝；
+ *   - 写路径按参考 wal.append 逐字节记录 add / transaction；
+ *   - save 写快照 wal_sequence 并在配置路径上 checkpoint（截断 WAL）；
+ *   - load 按快照 wal_sequence 跳过已 checkpoint 的记录并重放，重放后
+ *     checkpoint；失败保留日志并让 load 失败。
+ *
  * 仍然 fail closed 的部分：
  *   - embedding.provider != "hashing" → aik_engine_new 报错（T5 接 openai）；
- *   - persistence.enabled（WAL）→ aik_engine_new 报错「WAL 尚未接线」；
  *   - maintenance/observability/namespaces/v2 模块 → engine_stats 不出现
  *     对应键（与 Python 关闭时一致），本轮也不实现其开启语义。
  *
@@ -48,10 +55,12 @@
 #include "../include/memory/embed_hash.h"
 #include "../include/retrieval/ranker.h"
 #include "../include/retrieval/retriever.h"
+#include "../include/retrieval/text.h"
 #include "../include/space/space.h"
 #include "../include/store/store_npz.h"
 #include "../include/store/store_npz_write.h"
 #include "../include/store/store_snapshot.h"
+#include "../include/store/store_wal.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -78,6 +87,29 @@ void aik_str_array_free(char **arr, size_t n);
 
 /* 前向声明：更新/归档后重建 BM25（定义在检索段） */
 static int engine_refresh_index(aik_engine *e, char *err, size_t errlen);
+/* 前向声明：WAL 用到的后面定义的辅助（快照/图/目录） */
+struct aik_edge;	/* 参数列表里先出现的 tag 是 prototype scope，先声明 */
+static int put_new(aik_json *obj, const char *key, aik_json *v);
+static int put_slot(aik_json **slot, aik_json *obj, const char *key);
+static aik_json *edge_json(const struct aik_edge *e);
+static int ensure_parent_dir(const char *path, char *err, size_t errlen);
+static int ci_ends_with(const char *s, const char *suffix);
+/* 前向声明：WAL replay 需要级联删除（定义在 delete 段） */
+static int engine_delete_impl(aik_engine *e, const char *id, char *err,
+			      size_t errlen);
+/* 前向声明：WAL 捕获/提交（定义在注册段之后，写路径先用到） */
+static int wal_guard(const aik_engine *e, char *err, size_t errlen);
+static int wal_dirty_add(aik_engine *e, const char *id);
+static int wal_deleted_add(aik_engine *e, const char *id);
+static int wal_edge_add(aik_engine *e, const char *source,
+			const char *target, const char *kind, double weight,
+			const char *note);
+static void wal_begin(aik_engine *e);
+static void wal_abort(aik_engine *e);
+static int wal_commit(aik_engine *e, int vectors, char *err, size_t errlen);
+static int wal_record_add(aik_engine *e, const aik_memory *m, char *err,
+			  size_t errlen);
+static int wal_record_add_transaction(aik_engine *e, char *err, size_t errlen);
 
 /* ------------------------------------------------------------------ */
 /* 数据结构                                                           */
@@ -88,6 +120,17 @@ struct aik_edge {
 	char *kind;
 	double weight;
 	char *note;
+};
+
+/* 一次 mutation 内累积的 WAL 变更（对齐 Python _mutation 的
+ * _wal_dirty/_wal_deleted/_wal_edges：三个集合按"首次出现"序，写出前排序） */
+struct wal_capture {
+	char **dirty;		/* 需要写 patches/memories 的记忆 id */
+	size_t n_dirty, cap_dirty;
+	char **deleted;		/* 被删除的记忆 id */
+	size_t n_deleted, cap_deleted;
+	struct aik_edge *edges;	/* 图变更（dict 语义：同 source/target/kind 覆盖） */
+	size_t n_edges, cap_edges;
 };
 
 /* 从配置解析出的一组运行参数（load 先在临时结构上解析，成功才提交） */
@@ -103,6 +146,11 @@ struct resolved {
 	int auto_evolve;
 	int autosave;
 	double autosave_interval;
+	/* T4e-D WAL */
+	int wal_enabled;
+	int wal_fsync;
+	char *wal_path;		/* 自有；未启用时 NULL */
+	long long checkpoint_every;
 };
 
 struct aik_engine {
@@ -128,6 +176,16 @@ struct aik_engine {
 	long long compressions;
 	struct resolved r;
 	long long autosave_ops;
+	/* ---- T4e-D WAL（file backend / fsync） ---- */
+	aik_wal *wal;		/* 懒打开句柄 */
+	long long wal_seq;	/* 已追加的最后序号 */
+	long long wal_checkpoint_seq;	/* 最近一次快照覆盖到的序号 */
+	long long wal_ops;	/* 自上次 checkpoint 以来的 append 数 */
+	long long wal_replayed;	/* load 累计重放条数 */
+	long long wal_checkpointed;	/* save 触发的 checkpoint 次数 */
+	char wal_recovery_error[192];	/* "" = 正常；否则 fail closed 原因 */
+	int wal_depth;		/* mutation 嵌套深度（>0 时捕获变更） */
+	struct wal_capture wcap;
 };
 
 /* ------------------------------------------------------------------ */
@@ -335,11 +393,48 @@ static int resolve_into(const aik_config *cfg, struct resolved *r,
 		return -1;
 	}
 	if (cfg_bool(cfg, "persistence.enabled", 0)) {
-		set_err(err, errlen,
-			"engine: persistence.enabled=true，但 WAL 尚未接线（T4c）");
-		return -1;
+		const char *backend = cfg_str(cfg, "storage.backend", "json");
+		const char *sync = cfg_str(cfg, "persistence.sync_mode", "fsync");
+		const char *wal_path = cfg_str(cfg, "persistence.wal_path", "");
+		const char *storage_path = cfg_str(cfg, "storage.path", "");
+		size_t need;
+
+		if (strcmp(backend, "sqlite") == 0) {
+			set_err(err, errlen,
+				"engine: persistence.enabled + storage.backend=sqlite 未接线（T4e-D 仅 file backend）");
+			return -1;
+		}
+		if (strcmp(sync, "fsync") != 0) {
+			set_err(err, errlen,
+				"engine: persistence.sync_mode=%s 未接线（T4e-D 仅 fsync）",
+				sync);
+			return -1;
+		}
+		need = strlen(wal_path[0] ? wal_path : storage_path) + 5;
+		r->wal_path = calloc(need, 1);
+		if (!r->wal_path) {
+			set_err(err, errlen, "engine: out of memory (wal path)");
+			return -1;
+		}
+		if (*wal_path)
+			memcpy(r->wal_path, wal_path, strlen(wal_path));
+		else
+			snprintf(r->wal_path, need, "%s.wal", storage_path);
+		r->wal_enabled = 1;
+		r->wal_fsync = 1;
+		r->checkpoint_every =
+			cfg_i64(cfg, "persistence.checkpoint_every", 10);
 	}
 	return 0;
+}
+
+/* 释放 resolved 自己持有的资源（wal_path） */
+static void resolved_free(struct resolved *r)
+{
+	if (!r)
+		return;
+	free(r->wal_path);
+	r->wal_path = NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -472,6 +567,8 @@ static int engine_add_edge(aik_engine *e, const char *source,
 		return -1;
 	}
 	e->n_edges++;
+	if (wal_edge_add(e, source, target, kind, weight, note) != 0)
+		return -1;	/* 边已加入；WAL 捕获 OOM 已是不可恢复错误 */
 	return 0;
 }
 
@@ -687,7 +784,935 @@ static int engine_register(aik_engine *e, aik_memory *m, char *err,
 		set_err(err, errlen, "engine: out of memory (memory table)");
 		return -1;
 	}
+	/* MemoryManager.on_upsert → _index_memory：mutation 内登记 dirty */
+	if (wal_dirty_add(e, m->id) != 0) {
+		set_err(err, errlen, "engine: out of memory (wal dirty)");
+		return -1;
+	}
 	return 0;
+}
+
+/* ================================================================== */
+/* T4e-D：WAL（file backend / fsync / 恢复 / checkpoint）              */
+/*                                                                    */
+/* 逐条对齐 REF-PY e72bc75：                                          */
+/*   sme/storage/wal.py     append/reset/replay/_apply/stats          */
+/*   sme/engine.py          _record_write/_autosave/_save_locked/      */
+/*                          load/_recover_wal/_mutation/               */
+/*                          _apply_write_transaction                   */
+/*                                                                    */
+/* 记录格式（aik_json_dump 紧凑 + LF，与 json.dumps(separators=(",", */
+/* ":")) 逐字节一致，键序 = Python dict 插入序）：                     */
+/*   add          op,mid,text,source,metadata,tags,importance,state    */
+/*   transaction  op,memories,patches,deleted,edges,counters           */
+/*   add+link_to  op,memories,graph（参考 add 的事务形态，无 counters）*/
+/* seq 由 wal_append_op 最后追加，从 1 单调递增。                      */
+/* ================================================================== */
+
+/* 错误前置检查（参考每一处 self.wal.recovery_error 的 fail-closed 语义） */
+static int wal_guard(const aik_engine *e, char *err, size_t errlen)
+{
+	if (e && e->wal_recovery_error[0]) {
+		set_err(err, errlen, "%s", e->wal_recovery_error);
+		return -1;
+	}
+	return 0;
+}
+
+static void wal_set_recovery_error(aik_engine *e, const char *msg)
+{
+	set_err(e->wal_recovery_error, sizeof(e->wal_recovery_error), "%s", msg);
+}
+
+static void wal_capture_clear(struct wal_capture *c)
+{
+	size_t i;
+
+	for (i = 0; i < c->n_dirty; i++)
+		free(c->dirty[i]);
+	free(c->dirty);
+	for (i = 0; i < c->n_deleted; i++)
+		free(c->deleted[i]);
+	free(c->deleted);
+	for (i = 0; i < c->n_edges; i++)
+		edge_free(&c->edges[i]);
+	free(c->edges);
+	memset(c, 0, sizeof(*c));
+}
+
+static int wal_str_push(char ***arr, size_t *n, size_t *cap, const char *s)
+{
+	char **grown;
+	char *copy;
+	size_t next;
+
+	if (*n == *cap) {
+		next = *cap ? *cap * 2 : 8;
+		grown = realloc(*arr, next * sizeof(*grown));
+		if (!grown)
+			return -1;
+		*arr = grown;
+		*cap = next;
+	}
+	copy = aik_engine__dup(s);
+	if (!copy)
+		return -1;
+	(*arr)[(*n)++] = copy;
+	return 0;
+}
+
+/* MemoryManager._register / on_upsert 的 _wal_dirty.add（仅 mutation 内） */
+static int wal_dirty_add(aik_engine *e, const char *id)
+{
+	size_t i;
+
+	if (!e->r.wal_enabled || e->wal_depth <= 0 || !id)
+		return 0;
+	for (i = 0; i < e->wcap.n_dirty; i++)
+		if (strcmp(e->wcap.dirty[i], id) == 0)
+			return 0;
+	return wal_str_push(&e->wcap.dirty, &e->wcap.n_dirty,
+			    &e->wcap.cap_dirty, id);
+}
+
+/* on_delete 的 _wal_deleted.add（仅 mutation 内） */
+static int wal_deleted_add(aik_engine *e, const char *id)
+{
+	size_t i;
+
+	if (!e->r.wal_enabled || e->wal_depth <= 0 || !id)
+		return 0;
+	for (i = 0; i < e->wcap.n_deleted; i++)
+		if (strcmp(e->wcap.deleted[i], id) == 0)
+			return 0;
+	return wal_str_push(&e->wcap.deleted, &e->wcap.n_deleted,
+			    &e->wcap.cap_deleted, id);
+}
+
+/* MemoryGraph.on_change → _wal_edges[(source,target,kind)] = edge.to_dict() */
+static int wal_edge_add(aik_engine *e, const char *source, const char *target,
+			const char *kind, double weight, const char *note)
+{
+	struct wal_capture *c;
+	struct aik_edge *x;
+	size_t i;
+
+	if (!e->r.wal_enabled || e->wal_depth <= 0)
+		return 0;
+	c = &e->wcap;
+	for (i = 0; i < c->n_edges; i++) {
+		x = &c->edges[i];
+		if (strcmp(x->source, source) == 0 &&
+		    strcmp(x->target, target) == 0 &&
+		    strcmp(x->kind, kind) == 0) {
+			x->weight = weight;
+			if (note && *note) {
+				char *copy = aik_engine__dup(note);
+
+				if (!copy)
+					return -1;
+				free(x->note);
+				x->note = copy;
+			}
+			return 0;
+		}
+	}
+	if (c->n_edges == c->cap_edges) {
+		size_t next = c->cap_edges ? c->cap_edges * 2 : 8;
+		struct aik_edge *grown =
+			realloc(c->edges, next * sizeof(*grown));
+
+		if (!grown)
+			return -1;
+		c->edges = grown;
+		c->cap_edges = next;
+	}
+	x = &c->edges[c->n_edges];
+	memset(x, 0, sizeof(*x));
+	x->source = aik_engine__dup(source);
+	x->target = aik_engine__dup(target);
+	x->kind = aik_engine__dup(kind);
+	x->note = aik_engine__dup(note ? note : "");
+	x->weight = weight;
+	if (!x->source || !x->target || !x->kind || !x->note) {
+		edge_free(x);
+		return -1;
+	}
+	c->n_edges++;
+	return 0;
+}
+
+static void wal_begin(aik_engine *e)
+{
+	if (!e->r.wal_enabled)
+		return;
+	if (e->wal_depth == 0)
+		wal_capture_clear(&e->wcap);
+	e->wal_depth++;
+}
+
+/*
+ * wal_abort - 失败退出 mutation（参考 _mutation 的 except 分支）
+ *
+ * 已有部分变更被捕获时置 recovery_error（与参考
+ * "Uncommitted mutation; reload before saving or writing" 一致），
+ * 否则静默丢弃捕获。
+ */
+static void wal_abort(aik_engine *e)
+{
+	if (!e->r.wal_enabled)
+		return;
+	if (e->wal_depth > 0)
+		e->wal_depth--;
+	if (e->wal_depth > 0)
+		return;
+	if (e->wcap.n_dirty || e->wcap.n_deleted || e->wcap.n_edges)
+		wal_set_recovery_error(
+			e, "Uncommitted mutation; reload before saving or writing");
+	wal_capture_clear(&e->wcap);
+}
+
+static int wal_open(aik_engine *e, char *err, size_t errlen)
+{
+	if (e->wal)
+		return 0;
+	if (!e->r.wal_path || !*e->r.wal_path) {
+		set_err(err, errlen, "engine: WAL 路径为空");
+		return -1;
+	}
+	if (ensure_parent_dir(e->r.wal_path, err, errlen) != 0)
+		return -1;
+	e->wal = aik_wal_open(e->r.wal_path, e->r.wal_fsync, err, errlen);
+	return e->wal ? 0 : -1;
+}
+
+/* 追加一条记录：seq 最后追加；成功后推进 wal_seq/ops */
+static int wal_append_op(aik_engine *e, aik_json *op, char *err, size_t errlen)
+{
+	long long seq = e->wal_seq + 1;
+	aik_json *v = aik_json_new_int(seq);
+
+	if (!v || aik_json_obj_put(op, "seq", v) != 0) {
+		aik_json_free(v);
+		set_err(err, errlen, "engine: out of memory (wal seq)");
+		return -1;
+	}
+	if (wal_open(e, err, errlen) != 0)
+		return -1;
+	if (aik_wal_append(e->wal, op, err, errlen) != 0) {
+		wal_set_recovery_error(
+			e, "WAL write failed; reload before saving or writing");
+		return -1;
+	}
+	e->wal_seq = seq;
+	e->wal_ops++;
+	return 0;
+}
+
+/* op["add"]：参考 add() 的非事务分支（state 无 embedding） */
+static int wal_record_add(aik_engine *e, const aik_memory *m, char *err,
+			  size_t errlen)
+{
+	aik_json *op = NULL;
+	aik_json *tags = NULL;
+	aik_json *state = NULL;
+	size_t i;
+	int rc = -1;
+
+	if (!e->r.wal_enabled)
+		return 0;
+	op = aik_json_new_obj();
+	tags = aik_json_new_arr();
+	state = aik_memory_to_json(m, 0);
+	if (!op || !tags || !state)
+		goto oom;
+	for (i = 0; i < m->n_tags; i++) {
+		aik_json *t = aik_json_new_str(m->tags[i] ? m->tags[i] : "");
+
+		if (!t || aik_json_arr_push(tags, t) != 0) {
+			aik_json_free(t);
+			goto oom;
+		}
+	}
+	if (put_new(op, "op", aik_json_new_str("add")) != 0 ||
+	    put_new(op, "mid", aik_json_new_str(m->id)) != 0 ||
+	    put_new(op, "text", aik_json_new_str(m->text)) != 0 ||
+	    put_new(op, "source", aik_json_new_str(m->source)) != 0 ||
+	    put_new(op, "metadata", aik_json__clone(m->metadata)) != 0 ||
+	    put_slot(&tags, op, "tags") != 0 ||
+	    put_new(op, "importance", aik_json_new_num(m->importance)) != 0 ||
+	    put_slot(&state, op, "state") != 0)
+		goto oom;
+	rc = wal_append_op(e, op, err, errlen);
+	goto done;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal add)");
+done:
+	aik_json_free(tags);
+	aik_json_free(state);
+	aik_json_free(op);
+	return rc;
+}
+
+/* 排序一份 id 数组（Python sorted(set)；字符串按字节序 = 码点序） */
+static char **wal_sorted_copy(char *const *ids, size_t n)
+{
+	char **copy;
+	size_t i;
+
+	copy = malloc((n ? n : 1) * sizeof(*copy));
+	if (!copy)
+		return NULL;
+	for (i = 0; i < n; i++)
+		copy[i] = ids[i];
+	qsort(copy, n, sizeof(*copy), cmp_cstr);
+	return copy;
+}
+
+/*
+ * wal_commit - 结束 mutation 并写出 transaction 记录
+ *
+ * 对齐参考 _mutation 的 op 形状：
+ *   op,memories,patches,deleted,edges,counters（+seq）
+ * vectors 为真时变更记录进 memories（含向量），否则进 patches（无向量）。
+ * 三个集合都为空时不写记录（参考 any(op[k]) 判定）。
+ */
+static int wal_commit(aik_engine *e, int vectors, char *err, size_t errlen)
+{
+	struct wal_capture *c = &e->wcap;
+	aik_json *op = NULL;
+	aik_json *memories = NULL;
+	aik_json *patches = NULL;
+	aik_json *deleted = NULL;
+	aik_json *edges = NULL;
+	aik_json *counters = NULL;
+	char **sorted = NULL;
+	size_t i;
+	int rc = -1;
+
+	if (!e->r.wal_enabled)
+		return 0;
+	if (e->wal_depth > 0)
+		e->wal_depth--;
+	if (e->wal_depth > 0)
+		return 0;
+	if (!c->n_dirty && !c->n_deleted && !c->n_edges) {
+		wal_capture_clear(c);
+		return 0;
+	}
+	if (c->n_dirty) {
+		sorted = wal_sorted_copy(c->dirty, c->n_dirty);
+		if (!sorted)
+			goto oom;
+	}
+	op = aik_json_new_obj();
+	memories = aik_json_new_arr();
+	patches = aik_json_new_arr();
+	deleted = aik_json_new_arr();
+	edges = aik_json_new_arr();
+	counters = aik_json_new_obj();
+	if (!op || !memories || !patches || !deleted || !edges || !counters)
+		goto oom;
+	for (i = 0; i < c->n_dirty; i++) {
+		aik_memory *m = find_mem(e, sorted[i]);
+		aik_json *d;
+
+		if (!m)
+			continue;	/* 参考 if mid in self.memories */
+		d = aik_memory_to_json(m, vectors);
+		if (!d || aik_json_arr_push(vectors ? memories : patches, d) != 0) {
+			aik_json_free(d);
+			goto oom;
+		}
+	}
+	free(sorted);
+	sorted = NULL;
+	if (c->n_deleted) {
+		sorted = wal_sorted_copy(c->deleted, c->n_deleted);
+		if (!sorted)
+			goto oom;
+		for (i = 0; i < c->n_deleted; i++) {
+			aik_json *v = aik_json_new_str(sorted[i]);
+
+			if (!v || aik_json_arr_push(deleted, v) != 0) {
+				aik_json_free(v);
+				goto oom;
+			}
+		}
+		free(sorted);
+		sorted = NULL;
+	}
+	for (i = 0; i < c->n_edges; i++) {
+		aik_json *x = edge_json(&c->edges[i]);
+
+		if (!x || aik_json_arr_push(edges, x) != 0) {
+			aik_json_free(x);
+			goto oom;
+		}
+	}
+	if (put_new(counters, "consolidations",
+		    aik_json_new_int(e->consolidations)) != 0 ||
+	    put_new(counters, "compressions",
+		    aik_json_new_int(e->compressions)) != 0)
+		goto oom;
+	if (put_new(op, "op", aik_json_new_str("transaction")) != 0 ||
+	    put_slot(&memories, op, "memories") != 0 ||
+	    put_slot(&patches, op, "patches") != 0 ||
+	    put_slot(&deleted, op, "deleted") != 0 ||
+	    put_slot(&edges, op, "edges") != 0 ||
+	    put_slot(&counters, op, "counters") != 0)
+		goto oom;
+	rc = wal_append_op(e, op, err, errlen);
+	goto done;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal transaction)");
+done:
+	free(sorted);
+	aik_json_free(op);
+	aik_json_free(memories);
+	aik_json_free(patches);
+	aik_json_free(deleted);
+	aik_json_free(edges);
+	aik_json_free(counters);
+	wal_capture_clear(c);
+	return rc;
+}
+
+/* add(link_to=...) 的事务形态：op,memories(含向量),graph,seq（参考 add） */
+static int wal_record_add_transaction(aik_engine *e, char *err, size_t errlen)
+{
+	struct wal_capture *c = &e->wcap;
+	aik_json *op = NULL;
+	aik_json *memories = NULL;
+	aik_json *graph = NULL;
+	aik_json *edge_arr = NULL;
+	char **sorted = NULL;
+	size_t i;
+	int rc = -1;
+
+	if (!e->r.wal_enabled)
+		return 0;
+	if (e->wal_depth > 0)
+		e->wal_depth--;
+	if (!c->n_dirty) {
+		wal_capture_clear(c);
+		return 0;
+	}
+	sorted = wal_sorted_copy(c->dirty, c->n_dirty);
+	if (!sorted)
+		goto oom;
+	op = aik_json_new_obj();
+	memories = aik_json_new_arr();
+	graph = aik_json_new_obj();
+	edge_arr = aik_json_new_arr();
+	if (!op || !memories || !graph || !edge_arr)
+		goto oom;
+	for (i = 0; i < c->n_dirty; i++) {
+		aik_memory *m = find_mem(e, sorted[i]);
+		aik_json *d;
+
+		if (!m)
+			continue;
+		d = aik_memory_to_json(m, 1);
+		if (!d || aik_json_arr_push(memories, d) != 0) {
+			aik_json_free(d);
+			goto oom;
+		}
+	}
+	for (i = 0; i < e->n_edges; i++) {
+		aik_json *x = edge_json(&e->edges[i]);
+
+		if (!x || aik_json_arr_push(edge_arr, x) != 0) {
+			aik_json_free(x);
+			goto oom;
+		}
+	}
+	if (put_slot(&edge_arr, graph, "edges") != 0)
+		goto oom;
+	if (put_new(op, "op", aik_json_new_str("transaction")) != 0 ||
+	    put_slot(&memories, op, "memories") != 0 ||
+	    put_slot(&graph, op, "graph") != 0)
+		goto oom;
+	rc = wal_append_op(e, op, err, errlen);
+	goto done;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal add transaction)");
+done:
+	free(sorted);
+	aik_json_free(op);
+	aik_json_free(memories);
+	aik_json_free(graph);
+	aik_json_free(edge_arr);
+	wal_capture_clear(c);
+	return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* WAL replay（load）                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 应用一条记录（对齐 wal._apply / _apply_write_transaction）：
+ * 不重新写 WAL（wal_depth 为 0）、不触发 autosave、不重编码 transaction
+ * 内的向量（memories/patches 直接带/继承旧向量）；仅 add 的 state 缺
+ * 向量时按当前 provider 重编码（参考同样重编码，否则无法进 space）。
+ */
+static int wal_apply_record(aik_engine *e, aik_memory *m, char *err,
+			    size_t errlen)
+{
+	aik_memory *old;
+
+	if (!m || !m->id) {
+		aik_memory__free(m);
+		set_err(err, errlen, "WAL memory record has no id");
+		return -1;
+	}
+	old = find_mem(e, m->id);
+	if (old && !old->archived)
+		aik_space_remove(e->space, m->id);
+	if (m->archived) {
+		free(m->region_id);
+		m->region_id = NULL;
+		if (engine_put(e, m) != 0) {
+			aik_memory__free(m);
+			set_err(err, errlen,
+				"engine: out of memory (wal archive)");
+			return -1;
+		}
+		return 0;
+	}
+	if (!m->embedding) {
+		aik_memory__free(m);
+		set_err(err, errlen, "WAL memory record has no embedding");
+		return -1;
+	}
+	if (engine_register(e, m, err, errlen) != 0) {
+		aik_memory__free(m);
+		return -1;
+	}
+	return 0;
+}
+
+/* 旧式 add（无 state）：mm.add_memory(..., memory_id=mid) */
+static int wal_apply_legacy_add(aik_engine *e, const aik_json *op,
+				const char *mid, char *err, size_t errlen)
+{
+	aik_json *obj = NULL;
+	aik_json *meta = NULL;
+	aik_json *tags = NULL;
+	const aik_json *src_meta = aik_json_get(op, "metadata");
+	const aik_json *src_tags = aik_json_get(op, "tags");
+	const char *text = aik_json_str(aik_json_get(op, "text"));
+	const char *source = aik_json_str(aik_json_get(op, "source"));
+	double *emb = NULL;
+	int dim = 0;
+	aik_memory *m = NULL;
+	size_t i;
+	int rc = -1;
+
+	obj = aik_json_new_obj();
+	meta = aik_json_typeof(src_meta) == AIK_JSON_OBJ
+		       ? aik_json__clone(src_meta)
+		       : aik_json_new_obj();
+	tags = aik_json_new_arr();
+	if (!obj || !meta || !tags)
+		goto oom;
+	if (aik_json_typeof(src_tags) == AIK_JSON_ARR) {
+		for (i = 0; i < aik_json_count(src_tags); i++) {
+			const char *s = aik_json_str(aik_json_at(src_tags, i));
+			aik_json *t = aik_json_new_str(s ? s : "");
+
+			if (!t || aik_json_arr_push(tags, t) != 0) {
+				aik_json_free(t);
+				goto oom;
+			}
+		}
+	}
+	if (put_new(obj, "id", aik_json_new_str(mid)) != 0 ||
+	    put_new(obj, "text", aik_json_new_str(text ? text : "")) != 0 ||
+	    put_slot(&meta, obj, "metadata") != 0 ||
+	    put_slot(&tags, obj, "tags") != 0 ||
+	    put_new(obj, "importance",
+		    aik_json_new_num(json_num_or(op, "importance", 0.5))) != 0 ||
+	    put_new(obj, "source",
+		    aik_json_new_str(source ? source : "user")) != 0)
+		goto oom;
+	emb = engine_embed(e, text ? text : "", &dim, err, errlen);
+	if (!emb)
+		goto done;
+	m = memory_from_json(e, obj, emb, dim, err, errlen);
+	emb = NULL;
+	if (!m)
+		goto done;
+	rc = wal_apply_record(e, m, err, errlen);
+	goto done;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal add)");
+done:
+	free(emb);
+	aik_json_free(obj);
+	aik_json_free(meta);
+	aik_json_free(tags);
+	return rc;
+}
+
+static int wal_apply_add(aik_engine *e, const aik_json *op, char *err,
+			 size_t errlen)
+{
+	const char *mid = aik_json_str(aik_json_get(op, "mid"));
+	const aik_json *state = aik_json_get(op, "state");
+	double *emb = NULL;
+	int dim = 0;
+	aik_memory *m;
+
+	/* 幂等：该 add 已在快照/先前重放中落库 */
+	if (mid && find_mem(e, mid))
+		return 0;
+	if (aik_json_typeof(state) != AIK_JSON_OBJ)
+		return wal_apply_legacy_add(e, op, mid, err, errlen);
+	emb = json_embedding(state, &dim);
+	if (!emb) {
+		const char *text = aik_json_str(aik_json_get(state, "text"));
+
+		if (!text)
+			text = aik_json_str(aik_json_get(op, "text"));
+		emb = engine_embed(e, text ? text : "", &dim, err, errlen);
+		if (!emb)
+			return -1;
+	}
+	if (dim != e->r.dim) {
+		free(emb);
+		set_err(err, errlen,
+			"WAL add embedding dim %d != engine dim %d", dim, e->r.dim);
+		return -1;
+	}
+	m = memory_from_json(e, state, emb, dim, err, errlen);
+	if (!m)
+		return -1;
+	return wal_apply_record(e, m, err, errlen);
+}
+
+/* patches：Memory.from_dict({**previous.to_dict(), **patch}) */
+static int wal_apply_patch(aik_engine *e, const aik_json *patch, char *err,
+			   size_t errlen)
+{
+	const char *id = aik_json_str(aik_json_get(patch, "id"));
+	aik_memory *prev;
+	aik_json *merged = NULL;
+	double *emb = NULL;
+	int dim = 0;
+	aik_memory *m;
+	size_t i, n;
+	int rc = -1;
+
+	if (!id) {
+		set_err(err, errlen, "WAL patch has no id");
+		return -1;
+	}
+	prev = find_mem(e, id);
+	if (!prev) {
+		set_err(err, errlen, "WAL patch source is missing: %s", id);
+		return -1;
+	}
+	if (!prev->embedding) {
+		set_err(err, errlen, "WAL patch source has no embedding: %s", id);
+		return -1;
+	}
+	merged = aik_memory_to_json(prev, 1);
+	if (!merged)
+		goto oom;
+	n = aik_json_count(patch);
+	for (i = 0; i < n; i++) {
+		const char *key = aik_json_key_at(patch, i);
+		aik_json *v;
+
+		if (!key)
+			continue;
+		v = aik_json__clone(aik_json_val_at(patch, i));
+		if (!v || aik_json_obj_set(merged, key, v) != 0) {
+			aik_json_free(v);
+			goto oom;
+		}
+	}
+	emb = json_embedding(merged, &dim);
+	if (!emb) {
+		set_err(err, errlen, "WAL patch merged record has no embedding");
+		goto done;
+	}
+	m = memory_from_json(e, merged, emb, dim, err, errlen);
+	emb = NULL;
+	if (!m)
+		goto done;
+	rc = wal_apply_record(e, m, err, errlen);
+	goto done;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal patch)");
+done:
+	free(emb);
+	aik_json_free(merged);
+	return rc;
+}
+
+static int wal_apply_graph(aik_engine *e, const aik_json *graph, char *err,
+			   size_t errlen)
+{
+	const aik_json *edges = aik_json_get(graph, "edges");
+	size_t i;
+
+	if (aik_json_typeof(edges) != AIK_JSON_ARR)
+		return 0;
+	engine_clear_edges(e);
+	for (i = 0; i < aik_json_count(edges); i++) {
+		const aik_json *x = aik_json_at(edges, i);
+		const char *source = aik_json_str(aik_json_get(x, "source"));
+		const char *target = aik_json_str(aik_json_get(x, "target"));
+		const char *kind = aik_json_str(aik_json_get(x, "kind"));
+		const char *note = aik_json_str(aik_json_get(x, "note"));
+
+		if (!source || !target) {
+			set_err(err, errlen,
+				"WAL graph edge %zu lacks source/target", i);
+			return -1;
+		}
+		if (engine_add_edge(e, source, target,
+				    kind ? kind : "reference",
+				    json_num_or(x, "weight", 1.0),
+				    note ? note : "") != 0) {
+			set_err(err, errlen,
+				"engine: out of memory (wal graph)");
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int wal_apply_transaction(aik_engine *e, const aik_json *op, char *err,
+				 size_t errlen)
+{
+	const aik_json *deleted = aik_json_get(op, "deleted");
+	const aik_json *memories = aik_json_get(op, "memories");
+	const aik_json *patches = aik_json_get(op, "patches");
+	const aik_json *edges = aik_json_get(op, "edges");
+	const aik_json *graph = aik_json_get(op, "graph");
+	const aik_json *counters = aik_json_get(op, "counters");
+	size_t i;
+
+	if (aik_json_typeof(deleted) == AIK_JSON_ARR) {
+		for (i = 0; i < aik_json_count(deleted); i++) {
+			const char *mid = aik_json_str(aik_json_at(deleted, i));
+
+			if (!mid)
+				continue;
+			if (engine_delete_impl(e, mid, err, errlen) == -1)
+				return -1;
+		}
+	}
+	if (aik_json_typeof(memories) == AIK_JSON_ARR) {
+		for (i = 0; i < aik_json_count(memories); i++) {
+			const aik_json *d = aik_json_at(memories, i);
+			double *emb;
+			int dim = 0;
+			aik_memory *m;
+
+			emb = json_embedding(d, &dim);
+			if (!emb) {
+				set_err(err, errlen,
+					"WAL memory record has no embedding");
+				return -1;
+			}
+			if (dim != e->r.dim) {
+				free(emb);
+				set_err(err, errlen,
+					"WAL memory embedding dim %d != engine dim %d",
+					dim, e->r.dim);
+				return -1;
+			}
+			m = memory_from_json(e, d, emb, dim, err, errlen);
+			if (!m)
+				return -1;
+			if (wal_apply_record(e, m, err, errlen) != 0)
+				return -1;
+		}
+	}
+	if (aik_json_typeof(patches) == AIK_JSON_ARR) {
+		for (i = 0; i < aik_json_count(patches); i++)
+			if (wal_apply_patch(e, aik_json_at(patches, i), err,
+					    errlen) != 0)
+				return -1;
+	}
+	if (aik_json_typeof(graph) == AIK_JSON_OBJ)
+		if (wal_apply_graph(e, graph, err, errlen) != 0)
+			return -1;
+	if (aik_json_typeof(edges) == AIK_JSON_ARR) {
+		for (i = 0; i < aik_json_count(edges); i++) {
+			const aik_json *x = aik_json_at(edges, i);
+			const char *source = aik_json_str(aik_json_get(x, "source"));
+			const char *target = aik_json_str(aik_json_get(x, "target"));
+			const char *kind = aik_json_str(aik_json_get(x, "kind"));
+			const char *note = aik_json_str(aik_json_get(x, "note"));
+
+			if (!source || !target) {
+				set_err(err, errlen,
+					"WAL edge %zu lacks source/target", i);
+				return -1;
+			}
+			if (engine_add_edge(e, source, target,
+					    kind ? kind : "reference",
+					    json_num_or(x, "weight", 1.0),
+					    note ? note : "") != 0) {
+				set_err(err, errlen,
+					"engine: out of memory (wal edges)");
+				return -1;
+			}
+		}
+	}
+	if (aik_json_typeof(counters) == AIK_JSON_OBJ) {
+		if (json_is_num(aik_json_get(counters, "consolidations")))
+			e->consolidations = json_int_or(counters, "consolidations",
+							e->consolidations);
+		if (json_is_num(aik_json_get(counters, "compressions")))
+			e->compressions = json_int_or(counters, "compressions",
+						      e->compressions);
+	}
+	return 0;
+}
+
+static int wal_apply_op(void *ctx, const aik_json *op, char *err, size_t errlen)
+{
+	aik_engine *e = ctx;
+	const char *kind = aik_json_str(aik_json_get(op, "op"));
+
+	if (!kind) {
+		set_err(err, errlen, "WAL record has no op");
+		return -1;
+	}
+	if (strcmp(kind, "transaction") == 0)
+		return wal_apply_transaction(e, op, err, errlen);
+	if (strcmp(kind, "add") == 0)
+		return wal_apply_add(e, op, err, errlen);
+	set_err(err, errlen, "unsupported WAL operation: '%s'", kind);
+	return -1;
+}
+
+/* 从 store 的 "wal: record N: detail" 剥出 detail（load 的错误文案用） */
+static const char *wal_detail(const char *msg, long long rec)
+{
+	char prefix[64];
+	size_t n;
+
+	if (!msg || !msg[0])
+		return "replay failed";
+	n = (size_t)snprintf(prefix, sizeof(prefix), "wal: record %lld: ", rec);
+	if (n < sizeof(prefix) && strncmp(msg, prefix, n) == 0)
+		return msg + n;
+	return msg;
+}
+
+/* ------------------------------------------------------------------ */
+/* WAL 路径等价判定（Python _save_locked 的 recovery_path）            */
+/* ------------------------------------------------------------------ */
+
+/* os.path.abspath 等价：相对路径拼 getcwd，再按 normpath 规则折叠 */
+static char *path_abspath(const char *path)
+{
+	const char *p;
+	const char *s;
+	char *joined = NULL;
+	char *out;
+	size_t o = 0;
+
+	if (!path || !*path)
+		return NULL;
+	if (path[0] == '/') {
+		p = path;
+	} else {
+		char *cwd = getcwd(NULL, 0);
+		size_t n;
+
+		if (!cwd)
+			return NULL;
+		n = strlen(cwd) + strlen(path) + 2;
+		joined = malloc(n);
+		if (!joined) {
+			free(cwd);
+			return NULL;
+		}
+		snprintf(joined, n, "%s/%s", cwd, path);
+		free(cwd);
+		p = joined;
+	}
+	out = malloc(strlen(p) + 2);
+	if (!out) {
+		free(joined);
+		return NULL;
+	}
+	out[o++] = '/';
+	s = p;
+	while (*s) {
+		const char *seg;
+		size_t len;
+
+		while (*s == '/')
+			s++;
+		seg = s;
+		while (*s && *s != '/')
+			s++;
+		len = (size_t)(s - seg);
+		if (len == 0 || (len == 1 && seg[0] == '.'))
+			continue;
+		if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+			while (o > 1 && out[o - 1] != '/')
+				o--;
+			if (o > 1)
+				o--;
+			continue;
+		}
+		if (o > 1)
+			out[o++] = '/';
+		memcpy(out + o, seg, len);
+		o += len;
+	}
+	if (o == 0)
+		out[o++] = '/';
+	out[o] = '\0';
+	free(joined);
+	return out;
+}
+
+/* 去掉 ".json.gz"（参考 recovery_path：仅该后缀被剥离，大小写不敏感） */
+static void path_strip_json_gz(char *p)
+{
+	size_t n = strlen(p);
+
+	if (ci_ends_with(p, ".json.gz"))
+		p[n - 3] = '\0';
+}
+
+/* 保存路径是否等价于配置的 recovery 路径（= storage.path） */
+static int wal_path_is_recovery(const aik_engine *e, const char *path)
+{
+	const char *storage = cfg_str(e->cfg, "storage.path", NULL);
+	char *a;
+	char *b;
+	int same = 0;
+
+	if (!path || !*path || !storage || !*storage)
+		return 0;
+	a = path_abspath(path);
+	b = path_abspath(storage);
+	if (a && b) {
+		path_strip_json_gz(a);
+		path_strip_json_gz(b);
+		same = strcmp(a, b) == 0;
+	}
+	free(a);
+	free(b);
+	return same;
 }
 
 /*
@@ -697,6 +1722,10 @@ static int engine_register(aik_engine *e, aik_memory *m, char *err,
  * 调 aik_engine_save(storage.path)。保存失败即 fail closed：错误写 err，
  * 写操作返回 -1/NULL（内存里已完成的改动不回滚，与 Python 抛异常一致）。
  * 成功的 save 会把计数器清零（aik_engine_save 内做）。
+ *
+ * WAL 模式（T4e-D）：不数 interval，改看 ops_since_checkpoint() >=
+ * persistence.checkpoint_every 时 checkpoint（save）；与参考 _autosave
+ * 一致（storage.autosave=false 时 WAL 也不自动 checkpoint）。
  */
 static int engine_autosave(aik_engine *e, char *err, size_t errlen)
 {
@@ -704,6 +1733,11 @@ static int engine_autosave(aik_engine *e, char *err, size_t errlen)
 
 	if (!e->r.autosave)
 		return 0;
+	if (e->r.wal_enabled) {
+		if (e->wal_ops < e->r.checkpoint_every)
+			return 0;
+		return aik_engine_save(e, NULL, err, errlen);
+	}
 	e->autosave_ops++;
 	if ((double)e->autosave_ops < e->r.autosave_interval)
 		return 0;
@@ -772,6 +1806,12 @@ void aik_engine_free(aik_engine *e)
 		return;
 	engine_clear_memories(e);
 	engine_clear_edges(e);
+	if (e->wal) {
+		(void)aik_wal_close(e->wal);
+		e->wal = NULL;
+	}
+	wal_capture_clear(&e->wcap);
+	resolved_free(&e->r);
 	aik_space_free(e->space);
 	aik_retriever_free(e->ret);
 	if (e->owns_cfg)
@@ -779,23 +1819,34 @@ void aik_engine_free(aik_engine *e)
 	free(e);
 }
 
+aik_config *aik_engine_config(aik_engine *e)
+{
+	return e ? e->cfg : NULL;
+}
+
 /* ------------------------------------------------------------------ */
 /* 公开接口：写                                                       */
 /* ------------------------------------------------------------------ */
-aik_memory *aik_engine_add(aik_engine *e, const char *text,
-			   const aik_json *metadata,
-			   const char *const *tags, size_t n_tags,
-			   double importance, const char *source,
-			   const char *link_to, const char *link_kind,
-			   const char *ns, const char *conversation_id,
-			   char *err, size_t errlen)
+/*
+ * engine_add_core - add_memory 管线（不含 autosave）
+ *
+ * 与 aik_engine_add 的行为逐条一致（id/时钟/嵌入/space 注册/BM25/可选
+ * link_to 边），唯一区别是**不**调 engine_autosave。consolidate/compress
+ * 在内部批量创建 summary 记忆后只调用一次 autosave（与 Python
+ * consolidate()/compress() 的单次 _autosave 一致）。
+ */
+static aik_memory *engine_add_core(aik_engine *e, const char *text,
+				   const aik_json *metadata,
+				   const char *const *tags, size_t n_tags,
+				   double importance, const char *source,
+				   const char *link_to, const char *link_kind,
+				   const char *ns, char *err, size_t errlen)
 {
 	aik_memory *m;
 	const aik_json *j;
 	char idbuf[16];
 	size_t i;
 
-	(void)conversation_id;	/* v2 pipeline 专用，T4a 无副作用 */
 	if (!e) {
 		set_err(err, errlen, "engine: engine is NULL");
 		return NULL;
@@ -860,8 +1911,6 @@ aik_memory *aik_engine_add(aik_engine *e, const char *text,
 		set_err(err, errlen, "engine: out of memory (graph edge)");
 		return NULL;
 	}
-	if (engine_autosave(e, err, errlen) != 0)
-		return NULL;
 	return m;
 
 oom:
@@ -870,6 +1919,46 @@ oom:
 fail:
 	aik_memory__free(m);
 	return NULL;
+}
+
+aik_memory *aik_engine_add(aik_engine *e, const char *text,
+			   const aik_json *metadata,
+			   const char *const *tags, size_t n_tags,
+			   double importance, const char *source,
+			   const char *link_to, const char *link_kind,
+			   const char *ns, const char *conversation_id,
+			   char *err, size_t errlen)
+{
+	aik_memory *m;
+
+	(void)conversation_id;	/* v2 pipeline 专用，T4a 无副作用 */
+	if (wal_guard(e, err, errlen) != 0)
+		return NULL;
+	if (e && e->r.wal_enabled && link_to != NULL) {
+		/*
+		 * 参考 add()：wal 开启且带 link_to 时走事务形态
+		 * （op,memories,graph）——模块在 C 端为空，不写 modules。
+		 */
+		wal_begin(e);
+		m = engine_add_core(e, text, metadata, tags, n_tags, importance,
+				    source, link_to, link_kind, ns, err, errlen);
+		if (!m) {
+			wal_abort(e);
+			return NULL;
+		}
+		if (wal_record_add_transaction(e, err, errlen) != 0)
+			return NULL;
+	} else {
+		m = engine_add_core(e, text, metadata, tags, n_tags, importance,
+				    source, link_to, link_kind, ns, err, errlen);
+		if (!m)
+			return NULL;
+		if (e && wal_record_add(e, m, err, errlen) != 0)
+			return NULL;
+	}
+	if (engine_autosave(e, err, errlen) != 0)
+		return NULL;
+	return m;
 }
 
 int aik_engine_import(aik_engine *e, const aik_json *items,
@@ -942,8 +2031,18 @@ out:
 done:
 	if (out_count)
 		*out_count = count;
-	if (rc == 0 && engine_autosave(e, err, errlen) != 0)
-		rc = -1;
+	if (rc == 0) {
+		/*
+		 * 参考 import_memories：bulk import 不逐条写 WAL；WAL 开启时
+		 * 立即 checkpoint（save），否则走非 WAL 的 autosave 计数。
+		 */
+		if (e->r.wal_enabled) {
+			if (aik_engine_save(e, NULL, err, errlen) != 0)
+				rc = -1;
+		} else if (engine_autosave(e, err, errlen) != 0) {
+			rc = -1;
+		}
+	}
 	return rc;
 }
 
@@ -1201,6 +2300,7 @@ int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen)
 	const char *embedding_file;
 	char *npz_path = NULL;
 	char *dir = NULL;
+	long long snap_wal_seq = 0;
 	size_t i;
 	int rc = -1;
 
@@ -1214,6 +2314,7 @@ int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen)
 	if (aik_snapshot_validate(&snap, err, errlen) != 0)
 		goto done;
 	root = snap.root;
+	snap_wal_seq = json_int_or(root, "wal_sequence", 0);
 
 	newcfg = aik_config_from_json(aik_json_get(root, "config"), err,
 				      errlen);
@@ -1397,17 +2498,25 @@ int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen)
 	if (!ret_new)
 		goto done;
 
-	/* ---- 提交：此后不再失败 ---- */
+	/* ---- 提交：此后不再失败（WAL 重放失败除外，见下） ---- */
 	engine_clear_memories(e);
 	engine_clear_edges(e);
 	aik_space_free(e->space);
 	aik_retriever_free(e->ret);
 	if (e->owns_cfg)
 		aik_config_free(e->cfg);
+	/* 快照可能换了 storage/persistence 配置：旧 WAL 句柄与旧路径一起换掉 */
+	if (e->wal) {
+		(void)aik_wal_close(e->wal);
+		e->wal = NULL;
+	}
+	wal_capture_clear(&e->wcap);
+	resolved_free(&e->r);
 	e->cfg = newcfg;
 	e->owns_cfg = 1;
 	newcfg = NULL;
 	e->r = rnew;
+	rnew.wal_path = NULL;	/* 所有权转移给 e->r */
 	e->space = sp_new;
 	sp_new = NULL;
 	e->ret = ret_new;
@@ -1429,7 +2538,49 @@ int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen)
 	e->compressions =
 		json_int_or(aik_json_get(root, "counters"), "compressions", 0);
 	e->autosave_ops = 0;
+	e->wal_seq = snap_wal_seq;
+	e->wal_checkpoint_seq = snap_wal_seq;
+	e->wal_ops = 0;
+	e->wal_recovery_error[0] = '\0';
 	rc = 0;
+
+	/*
+	 * T4e-D：快照 + WAL 恢复。seq<=checkpoint 的记录由 store 跳过；
+	 * 重放 >0 条即 checkpoint（参考 _recover_wal 的 save），失败保留日志。
+	 */
+	if (e->r.wal_enabled) {
+		char werr[512];
+		long long rec = 0, last_seq = 0;
+		int n;
+
+		werr[0] = '\0';
+		n = aik_wal_replay_ex(e->r.wal_path, e->wal_checkpoint_seq,
+				      wal_apply_op, e, &rec, &last_seq, werr,
+				      sizeof(werr));
+		if (n < 0) {
+			set_err(err, errlen,
+				"WAL replay failed at record %lld; log retained: %s",
+				rec, wal_detail(werr, rec));
+			rc = -1;
+			goto done;
+		}
+		/* 参考 replay()：sequence = max(sequence, 扫描到的最大 seq) */
+		if (last_seq > e->wal_seq)
+			e->wal_seq = last_seq;
+		e->wal_replayed += n;
+		e->wal_ops = n;
+		if (n > 0 && aik_engine_save(e, NULL, err, errlen) != 0) {
+			char detail[512];
+
+			snprintf(detail, sizeof(detail), "%s",
+				 (err && err[0]) ? err : "save failed");
+			set_err(err, errlen,
+				"WAL recovery checkpoint failed; log retained: %s",
+				detail);
+			rc = -1;
+			goto done;
+		}
+	}
 	goto done;
 
 oom:
@@ -1458,6 +2609,7 @@ done:
 	free(vecs);
 	free(npz_path);
 	free(dir);
+	resolved_free(&rnew);
 	aik_snapshot_free(&snap);
 	return rc;
 }
@@ -1502,9 +2654,12 @@ int aik_engine_reinforce(aik_engine *e, const char *id,
 		set_err(err, errlen, "engine: engine is NULL");
 		return -1;
 	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
 	m = find_mem(e, id);
 	if (!m || m->archived)
 		return 1;
+	wal_begin(e);
 	reference = e->now(e->now_ud);
 	retention = retention_of(e, m->last_hit, reference);
 	weight_delta = cfg_num(e->cfg, "reinforcement.hit_weight_delta", 0.10) *
@@ -1542,6 +2697,12 @@ int aik_engine_reinforce(aik_engine *e, const char *id,
 			     aik_json_new_int(m->hit_count)) != 0) {
 		aik_json_free(out);
 		set_err(err, errlen, "engine: out of memory (reinforce)");
+		wal_abort(e);
+		return -1;
+	}
+	/* 参考 reinforce()：_mutation 结束后显式把 memory_id 加入 dirty */
+	if (wal_dirty_add(e, m->id) != 0 || wal_commit(e, 0, err, errlen) != 0) {
+		aik_json_free(out);
 		return -1;
 	}
 	if (engine_autosave(e, err, errlen) != 0) {
@@ -1561,14 +2722,22 @@ int aik_engine_archive(aik_engine *e, const char *id)
 
 	if (!e)
 		return -1;
+	if (wal_guard(e, NULL, 0) != 0)
+		return -1;
 	m = find_mem(e, id);
 	if (!m || m->archived)
 		return 1;
+	wal_begin(e);
 	aik_space_remove(e->space, m->id);
 	free(m->region_id);
 	m->region_id = NULL;
 	m->archived = 1;
-	if (engine_refresh_index(e, NULL, 0) != 0)
+	if (engine_refresh_index(e, NULL, 0) != 0) {
+		wal_abort(e);
+		return -1;
+	}
+	/* 参考 _drop_memory：归档记忆仍在 memories 里 → dirty（patches） */
+	if (wal_dirty_add(e, m->id) != 0 || wal_commit(e, 0, NULL, 0) != 0)
 		return -1;
 	if (engine_autosave(e, NULL, 0) != 0)
 		return -1;
@@ -1582,18 +2751,27 @@ int aik_engine_restore(aik_engine *e, const char *id)
 
 	if (!e)
 		return -1;
+	if (wal_guard(e, NULL, 0) != 0)
+		return -1;
 	m = find_mem(e, id);
 	if (!m || !m->archived)
 		return 1;
 	if (!m->embedding || m->dim <= 0)
 		return -1;
-	if (aik_space_insert(e->space, m->id, m->embedding, NULL, 0) != 0)
+	wal_begin(e);
+	if (aik_space_insert(e->space, m->id, m->embedding, NULL, 0) != 0) {
+		wal_abort(e);
 		return -1;
+	}
 	rid = aik_space_region_for(e->space, m->id);
 	free(m->region_id);
 	m->region_id = rid ? aik_engine__dup(rid) : NULL;
 	m->archived = 0;
-	if (engine_refresh_index(e, NULL, 0) != 0)
+	if (engine_refresh_index(e, NULL, 0) != 0) {
+		wal_abort(e);
+		return -1;
+	}
+	if (wal_dirty_add(e, m->id) != 0 || wal_commit(e, 0, NULL, 0) != 0)
 		return -1;
 	if (engine_autosave(e, NULL, 0) != 0)
 		return -1;
@@ -1906,14 +3084,18 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 	int has_importance = 0;
 	int has_weight = 0;
 	int has_summary = 0;
+	int has_text_param = 0;
 	int changed = 0;
 	int index_change = 0;
+	int committed = 0;
 	int rc = -1;
 
 	if (!e) {
 		set_err(err, errlen, "engine: engine is NULL");
 		return -1;
 	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
 	m = find_mem(e, id);
 	if (!m)
 		return 1;
@@ -1921,6 +3103,9 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 		set_err(err, errlen, "engine: update patch is not an object");
 		return -1;
 	}
+	/* 参考 _mutation(vectors=text is not None)：patch 带文本键即用 memories */
+	has_text_param =
+		aik_json_typeof(aik_json_get(patch, "text")) == AIK_JSON_STR;
 
 	/* ---- 暂存并校验所有字段（任何失败都不改记忆） ---- */
 	j = aik_json_get(patch, "text");
@@ -2004,6 +3189,7 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 	}
 
 	/* ---- text：重编码 → space.remove/insert → text/embedding ---- */
+	wal_begin(e);
 	if (new_text) {
 		const char *rid;
 		char *new_rid;
@@ -2076,14 +3262,24 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 		m->freshness = 1.0;
 		m->version += 1;
 	}
+	/* 参考 on_upsert：实质变化或 metadata-only 变化都登记 dirty */
+	if ((changed || has_meta) && wal_dirty_add(e, m->id) != 0) {
+		set_err(err, errlen, "engine: out of memory (wal dirty)");
+		goto out;
+	}
 	if ((changed || index_change) &&
 	    engine_refresh_index(e, err, errlen) != 0)
 		goto out;
+	if (wal_commit(e, has_text_param, err, errlen) != 0)
+		goto out;
+	committed = 1;
 	if (engine_autosave(e, err, errlen) != 0)
 		goto out;
 	rc = 0;
 
 out:
+	if (!committed)
+		wal_abort(e);
 	free(new_text);
 	free(new_summary);
 	free(new_emb);
@@ -2177,6 +3373,9 @@ static int engine_delete_impl(aik_engine *e, const char *id, char *err,
 	memmove(&e->mem[idx], &e->mem[idx + 1],
 		(e->n_mem - idx - 1) * sizeof(*e->mem));
 	e->n_mem--;
+	/* 参考 _drop_memory：不在 memories 里 → _wal_deleted.add */
+	if (wal_deleted_add(e, m->id) != 0)
+		rc = -1;
 
 	/* 派生摘要（source=="summary" 且 id 在 children/covers 里）递归删除 */
 	if (collect_derived(e, id, &derived, &n_derived, err, errlen) != 0)
@@ -2200,13 +3399,23 @@ static int engine_delete_impl(aik_engine *e, const char *id, char *err,
 	}
 	for (i = 0; i < e->n_mem; i++) {
 		aik_memory *other = e->mem[i];
+		int affected = 0;
 
+		if (other->parent_id && strcmp(other->parent_id, id) == 0)
+			affected = 1;
+		if (str_array_has(other->neighbors, other->n_neighbors, id))
+			affected = 1;
+		if (str_array_has(other->children, other->n_children, id))
+			affected = 1;
 		str_array_remove(other->neighbors, &other->n_neighbors, id);
 		str_array_remove(other->children, &other->n_children, id);
 		if (other->parent_id && strcmp(other->parent_id, id) == 0) {
 			free(other->parent_id);
 			other->parent_id = NULL;
 		}
+		/* 参考 delete_memory：受影响的其他记忆 on_upsert → dirty */
+		if (affected && wal_dirty_add(e, other->id) != 0)
+			rc = -1;
 	}
 	aik_memory__free(m);
 	return rc;
@@ -2220,10 +3429,19 @@ int aik_engine_delete(aik_engine *e, const char *id, char *err, size_t errlen)
 		set_err(err, errlen, "engine: invalid argument to delete");
 		return -1;
 	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
+	wal_begin(e);
 	rc = engine_delete_impl(e, id, err, errlen);
-	if (rc != 0)
+	if (rc != 0) {
+		wal_abort(e);
 		return rc;
-	if (engine_refresh_index(e, err, errlen) != 0)
+	}
+	if (engine_refresh_index(e, err, errlen) != 0) {
+		wal_abort(e);
+		return -1;
+	}
+	if (wal_commit(e, 0, err, errlen) != 0)
 		return -1;
 	if (engine_autosave(e, err, errlen) != 0)
 		return -1;
@@ -2787,6 +4005,8 @@ int aik_engine_link(aik_engine *e, const char *a, const char *b,
 		set_err(err, errlen, "engine: invalid argument to link");
 		return -1;
 	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
 	k = kind ? kind : "reference";
 	if (strcmp(a, b) == 0) {
 		/* Python MemoryGraph.add_edge 对自环抛 ValueError */
@@ -2796,16 +4016,21 @@ int aik_engine_link(aik_engine *e, const char *a, const char *b,
 	}
 	if (!find_mem(e, a) || !find_mem(e, b))
 		return 1;
+	wal_begin(e);
 	if (engine_add_edge(e, a, b, k, weight, note ? note : "") != 0) {
 		set_err(err, errlen, "engine: out of memory (graph edge)");
+		wal_abort(e);
 		return -1;
 	}
 	if (strcmp(k, "cause") == 0 &&
 	    engine_add_edge(e, b, a, "conversation", 1.0, "timeline") != 0) {
 		set_err(err, errlen, "engine: out of memory (graph edge)");
+		wal_abort(e);
 		return -1;
 	}
 	/* 不改 Memory.neighbors（与 memory_manager.link 一致） */
+	if (wal_commit(e, 0, err, errlen) != 0)
+		return -1;
 	if (engine_autosave(e, err, errlen) != 0)
 		return -1;
 	return 0;
@@ -2960,6 +4185,221 @@ oom:
 	aik_json_free(root);
 	set_err(err, errlen, "engine: out of memory (export)");
 	return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 配置热重建（PUT /config）                                          */
+/* ------------------------------------------------------------------ */
+struct emb_identity {
+	const char *provider;
+	const char *model;
+	const char *revision;
+	long long dim;
+	long long mrl_dim;
+	long long hash_factors;
+	long long hash_seed;
+};
+
+static void emb_identity(const aik_config *c, struct emb_identity *id)
+{
+	id->provider = cfg_str(c, "embedding.provider", "hashing");
+	id->model = cfg_str(c, "embedding.model", "text-embedding-3-small");
+	id->revision = cfg_str(c, "embedding.revision", "");
+	id->dim = cfg_i64(c, "embedding.dim", 64);
+	id->mrl_dim = cfg_i64(c, "embedding.mrl_dim", 0);
+	id->hash_factors = cfg_i64(c, "embedding.hash_factors", 3);
+	id->hash_seed = cfg_i64(c, "embedding.hash_seed", 0);
+}
+
+static int emb_append(char *buf, size_t cap, size_t *off, const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+
+	if (*off >= cap)
+		return -1;
+	va_start(ap, fmt);
+	n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+	va_end(ap);
+	if (n < 0 || (size_t)n >= cap - *off)
+		return -1;
+	*off += (size_t)n;
+	return 0;
+}
+
+/*
+ * embedding_identity_changed - 身份变化判定 + 中文提示
+ *
+ * 返回 1 表示变化（msg 已写），0 表示未变。基础三元组（provider/model/
+ * dim）的提示文案与参考逐字一致；额外四项（mrl_dim/revision/hash_factors/
+ * hash_seed）是 TASK-BOOK §7.3 的有意闸门修正，追加在箭头之后。
+ */
+static int embedding_identity_changed(const aik_config *a,
+				      const aik_config *b,
+				      char *msg, size_t msglen)
+{
+	struct emb_identity o, n;
+	char extra[384];
+	size_t off = 0;
+	int changed = 0;
+
+	emb_identity(a, &o);
+	emb_identity(b, &n);
+	extra[0] = '\0';
+	if (o.mrl_dim != n.mrl_dim) {
+		if (emb_append(extra, sizeof(extra), &off,
+			       "%smrl_dim %lld→%lld", off ? "，" : "",
+			       o.mrl_dim, n.mrl_dim) != 0)
+			return 0;
+		changed = 1;
+	}
+	if (strcmp(o.revision, n.revision) != 0) {
+		if (emb_append(extra, sizeof(extra), &off,
+			       "%srevision \"%s\"→\"%s\"", off ? "，" : "",
+			       o.revision, n.revision) != 0)
+			return 0;
+		changed = 1;
+	}
+	if (o.hash_factors != n.hash_factors) {
+		if (emb_append(extra, sizeof(extra), &off,
+			       "%shash_factors %lld→%lld", off ? "，" : "",
+			       o.hash_factors, n.hash_factors) != 0)
+			return 0;
+		changed = 1;
+	}
+	if (o.hash_seed != n.hash_seed) {
+		if (emb_append(extra, sizeof(extra), &off,
+			       "%shash_seed %lld→%lld", off ? "，" : "",
+			       o.hash_seed, n.hash_seed) != 0)
+			return 0;
+		changed = 1;
+	}
+	if (strcmp(o.provider, n.provider) != 0 ||
+	    strcmp(o.model, n.model) != 0 || o.dim != n.dim)
+		changed = 1;
+	if (!changed)
+		return 0;
+	if (extra[0]) {
+		snprintf(msg, msglen,
+			 "embedding 配置变更（%s/%s/%lld → %s/%s/%lld；%s）"
+			 "会使现有记忆的向量维度与新配置不一致，需要新库或清空"
+			 "现有记忆后重启服务；请先导出记忆并清空，再修改 "
+			 "embedding 配置",
+			 o.provider, o.model, o.dim, n.provider, n.model, n.dim,
+			 extra);
+	} else {
+		snprintf(msg, msglen,
+			 "embedding 配置变更（%s/%s/%lld → %s/%s/%lld）"
+			 "会使现有记忆的向量维度与新配置不一致，需要新库或清空"
+			 "现有记忆后重启服务；请先导出记忆并清空，再修改 "
+			 "embedding 配置",
+			 o.provider, o.model, o.dim, n.provider, n.model, n.dim);
+	}
+	return 1;
+}
+
+int aik_engine_rebuild(aik_engine *old, aik_config *new_cfg,
+		       aik_engine **out, char *err, size_t errlen)
+{
+	aik_json *ex = NULL;
+	const aik_json *edges;
+	aik_engine *neu = NULL;
+	aik_region_stats st;
+	size_t i, n;
+	int rc = -1;
+
+	if (out)
+		*out = NULL;
+	if (!old || !new_cfg || !out) {
+		set_err(err, errlen, "engine: invalid argument to rebuild");
+		if (new_cfg)
+			aik_config_free(new_cfg);
+		return -1;
+	}
+	if (old->n_mem > 0) {
+		char msg[768];
+
+		if (embedding_identity_changed(old->cfg, new_cfg, msg,
+					       sizeof(msg))) {
+			set_err(err, errlen, "%s", msg);
+			aik_config_free(new_cfg);
+			return 1;
+		}
+	}
+	if (aik_engine_export(old, &ex, err, errlen) != 0) {
+		aik_config_free(new_cfg);
+		return -1;
+	}
+	neu = aik_engine_new(new_cfg, 1, old->now, old->now_ud, old->id_fn,
+			     old->id_ud, err, errlen);
+	if (!neu) {
+		aik_json_free(ex);
+		return -1;
+	}
+	new_cfg = NULL;		/* 所有权已交给 neu */
+	if (aik_engine_import(neu, aik_json_get(ex, "memories"), NULL, err,
+			      errlen) != 0)
+		goto done;
+	edges = aik_json_get(aik_json_get(ex, "graph"), "edges");
+	n = edges ? aik_json_count(edges) : 0;
+	for (i = 0; i < n; i++) {
+		const aik_json *x = aik_json_at(edges, i);
+		const char *src = aik_json_str(aik_json_get(x, "source"));
+		const char *tgt = aik_json_str(aik_json_get(x, "target"));
+		const char *kind = aik_json_str(aik_json_get(x, "kind"));
+		const char *note = aik_json_str(aik_json_get(x, "note"));
+		double w = json_num_or(x, "weight", 1.0);
+
+		if (!src || !tgt)
+			continue;
+		if (engine_add_edge(neu, src, tgt,
+				    kind ? kind : "reference", w,
+				    note ? note : "") != 0) {
+			set_err(err, errlen,
+				"engine: out of memory (rebuild graph)");
+			goto done;
+		}
+	}
+	/*
+	 * 计数器口径与 Python rebuild_engine_with 一致：参考在 import 之后
+	 * 用旧引擎计数**整体覆盖**新引擎计数器（import 期间自动演化产生的
+	 * 增量被丢弃）。C 的统计口径是 base + space 实时计数，因此把 base
+	 * 反解成 old_total - new_space_count，使可观察总量等于旧值。
+	 */
+	if (aik_space_region_stats(old->space, &st) == 0) {
+		long long old_splits =
+			old->splits_base + (long long)st.split_count;
+		long long old_merges =
+			old->merges_base + (long long)st.merge_count;
+		aik_region_stats nst;
+
+		if (aik_space_region_stats(neu->space, &nst) == 0) {
+			neu->splits_base =
+				old_splits - (long long)nst.split_count;
+			neu->merges_base =
+				old_merges - (long long)nst.merge_count;
+		} else {
+			neu->splits_base = old_splits;
+			neu->merges_base = old_merges;
+		}
+	}
+	neu->consolidations = old->consolidations;
+	neu->compressions = old->compressions;
+	/*
+	 * WAL 序号延续（参考 export_json 携带 wal_sequence，import_json 取
+	 * max 后继续追加）：新引擎在同一 WAL 文件上从旧 seq 之后写，避免
+	 * 序号回绕导致 checkpoint 跳过错判。wal_ops（自上次 checkpoint 的
+	 * 追加数）按参考从 0 起算。
+	 */
+	neu->wal_seq = old->wal_seq;
+	neu->wal_checkpoint_seq = old->wal_checkpoint_seq;
+	*out = neu;
+	neu = NULL;
+	rc = 0;
+done:
+	aik_engine_free(neu);
+	aik_json_free(ex);
+	return rc;
 }
 
 static aik_json *double_array_json(const double *v, int dim)
@@ -3636,6 +5076,8 @@ int aik_engine_save(aik_engine *e, const char *path, char *err, size_t errlen)
 		set_err(err, errlen, "engine: engine is NULL");
 		return -1;
 	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
 	path_in = (path && *path) ? path : cfg_str(e->cfg, "storage.path", NULL);
 	if (!path_in || !*path_in) {
 		set_err(err, errlen, "engine: save path is empty");
@@ -3773,7 +5215,7 @@ int aik_engine_save(aik_engine *e, const char *path, char *err, size_t errlen)
 	    put_slot(&region_edges, root, "region_edges") != 0 ||
 	    put_slot(&memory_edges, root, "memory_edges") != 0 ||
 	    put_slot(&module_state, root, "module_state") != 0 ||
-	    put_new(root, "wal_sequence", aik_json_new_int(0)) != 0) {
+	    put_new(root, "wal_sequence", aik_json_new_int(e->wal_seq)) != 0) {
 		set_err(err, errlen, "engine: out of memory (snapshot)");
 		goto done;
 	}
@@ -3847,6 +5289,23 @@ int aik_engine_save(aik_engine *e, const char *path, char *err, size_t errlen)
 	if (wrote_npz)
 		cleanup_embeddings(snap_path, emb_base);
 	e->autosave_ops = 0;
+	/*
+	 * 参考 _save_locked：只有保存到 recovery 路径（storage.path 等价）才算
+	 * checkpoint；export 到别处不截断 WAL。截断失败 → 保存失败（日志保留），
+	 * 绝不报告已落盘。
+	 */
+	if (e->r.wal_enabled && wal_path_is_recovery(e, path_in)) {
+		e->wal_checkpoint_seq = e->wal_seq;
+		e->wal_checkpointed++;
+		/* 参考 wal.reset：文件存在才截断（不存在时保持不存在） */
+		if (file_exists(e->r.wal_path)) {
+			if (wal_open(e, err, errlen) != 0)
+				goto done;
+			if (aik_wal_reset(e->wal, err, errlen) != 0)
+				goto done;
+		}
+		e->wal_ops = 0;
+	}
 	rc = 0;
 
 done:
@@ -3867,5 +5326,1481 @@ done:
 	aik_json_free(memory_edges);
 	aik_json_free(module_state);
 	aik_json_free(root);
+	return rc;
+}
+
+int aik_engine_wal_stats(const aik_engine *e, aik_json **out,
+			 char *err, size_t errlen)
+{
+	aik_json *obj;
+
+	if (out)
+		*out = NULL;
+	if (!e || !out) {
+		set_err(err, errlen, "engine: invalid argument to wal_stats");
+		return -1;
+	}
+	obj = aik_json_new_obj();
+	if (!obj)
+		goto oom;
+	if (put_new(obj, "enabled", aik_json_new_bool(e->r.wal_enabled)) != 0 ||
+	    put_new(obj, "path",
+		    aik_json_new_str(e->r.wal_path ? e->r.wal_path : "")) != 0 ||
+	    put_new(obj, "sync_mode", aik_json_new_str("fsync")) != 0 ||
+	    put_new(obj, "sequence", aik_json_new_int(e->wal_seq)) != 0 ||
+	    put_new(obj, "checkpoint_sequence",
+		    aik_json_new_int(e->wal_checkpoint_seq)) != 0 ||
+	    put_new(obj, "pending_ops", aik_json_new_int(e->wal_ops)) != 0 ||
+	    put_new(obj, "replayed", aik_json_new_int(e->wal_replayed)) != 0 ||
+	    put_new(obj, "checkpointed",
+		    aik_json_new_int(e->wal_checkpointed)) != 0) {
+		aik_json_free(obj);
+		goto oom;
+	}
+	*out = obj;
+	return 0;
+
+oom:
+	set_err(err, errlen, "engine: out of memory (wal stats)");
+	return -1;
+}
+
+/* ================================================================== */
+/* T4e-E1-B：consolidation / compression                              */
+/*                                                                    */
+/* 逐条对齐 REF-PY e72bc75：                                          */
+/*   sme/dynamics/consolidation.py  ConsolidationEngine               */
+/*                                  find_groups/_find_groups_in_members/ */
+/*                                  _greedy_clusters/_region_coherent/ */
+/*                                  consolidate/_template_summary/    */
+/*                                  _common_tokens/_already_consolidated */
+/*   sme/dynamics/compression.py    CompressionEngine                  */
+/*                                  find_compressible/compress/       */
+/*                                  _summarize/_region_compressed     */
+/*   sme/memory_manager.py          summary_memory / set_parent       */
+/*   sme/engine.py                  consolidate()/compress()（单次    */
+/*                                  _autosave + 计数器自增）           */
+/*                                                                    */
+/* LLM 摘要：本阶段 C 无 LLM（aik_engine_new 只接受 hashing），       */
+/* summary_source=="llm" 时仍走 template（与参考在 llm 不可用时的    */
+/* 行为一致：Python 里 self.llm is None 也走 template）。             */
+/* ================================================================== */
+#define DYN_MIN_GROUP_SIZE 3	/* ConsolidationConfig.min_group_size */
+#define DYN_MAX_GROUPS 20	/* find_groups(max_groups=20) */
+#define DYN_MAX_REGIONS 10	/* find_compressible(max_regions=10) */
+
+struct dyn_group {
+	aik_memory **items;
+	size_t n;
+};
+
+struct dyn_groups {
+	struct dyn_group *v;
+	size_t n;
+	size_t cap;
+};
+
+struct dyn_bucket {
+	char *key;
+	aik_memory **items;
+	size_t n;
+	size_t cap;
+};
+
+struct dyn_buf {
+	char *s;
+	size_t n;
+	size_t cap;
+};
+
+struct dyn_cand {
+	const char *tok;
+	long long score;
+};
+
+struct dyn_tokcnt {
+	char *tok;
+	size_t cnt;
+};
+
+static void dyn_groups_reset(struct dyn_groups *gs)
+{
+	size_t i;
+
+	for (i = 0; i < gs->n; i++)
+		free(gs->v[i].items);
+	free(gs->v);
+	gs->v = NULL;
+	gs->n = 0;
+	gs->cap = 0;
+}
+
+static int dyn_groups_push(struct dyn_groups *gs, aik_memory *const *items,
+			   size_t n)
+{
+	struct dyn_group *g;
+
+	if (gs->n == gs->cap) {
+		size_t next = gs->cap ? gs->cap * 2 : 8;
+		struct dyn_group *grown = realloc(gs->v, next * sizeof(*grown));
+
+		if (!grown)
+			return -1;
+		gs->v = grown;
+		gs->cap = next;
+	}
+	g = &gs->v[gs->n];
+	g->items = NULL;
+	g->n = 0;
+	if (n > 0) {
+		g->items = malloc(n * sizeof(*g->items));
+		if (!g->items)
+			return -1;
+		memcpy(g->items, items, n * sizeof(*g->items));
+	}
+	g->n = n;
+	gs->n++;
+	return 0;
+}
+
+/* ---------------- 字符串缓冲 ---------------- */
+static int dyn_buf_addn(struct dyn_buf *b, const char *s, size_t n)
+{
+	size_t cap;
+	char *p;
+
+	if (b->n + n + 1 > b->cap) {
+		cap = b->cap ? b->cap : 64;
+		while (cap < b->n + n + 1)
+			cap *= 2;
+		p = realloc(b->s, cap);
+		if (!p)
+			return -1;
+		b->s = p;
+		b->cap = cap;
+	}
+	if (n > 0 && s)
+		memcpy(b->s + b->n, s, n);
+	b->n += n;
+	b->s[b->n] = '\0';
+	return 0;
+}
+
+static int dyn_buf_add(struct dyn_buf *b, const char *s)
+{
+	return dyn_buf_addn(b, s ? s : "", s ? strlen(s) : 0);
+}
+
+static char *dyn_buf_take(struct dyn_buf *b)
+{
+	char *s = b->s;
+
+	if (!s)
+		s = aik_engine__dup("");
+	b->s = NULL;
+	b->n = 0;
+	b->cap = 0;
+	return s;
+}
+
+/* UTF-8 码点个数（Python len(str)） */
+static size_t dyn_utf8_len(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)(s ? s : "");
+	size_t n = 0;
+
+	while (*p) {
+		if ((*p & 0xc0) != 0x80)
+			n++;
+		p++;
+	}
+	return n;
+}
+
+/* ---------------- Python 真值与 str(metadata.get("ns", "")) --------- */
+static int dyn_json_truthy(const aik_json *v)
+{
+	switch (aik_json_typeof(v)) {
+	case AIK_JSON_BOOL:
+		return aik_json_bool(v) ? 1 : 0;
+	case AIK_JSON_INT:
+		return aik_json_int(v) != 0;
+	case AIK_JSON_NUM:
+		return aik_json_num(v) != 0.0;
+	case AIK_JSON_STR:
+		return aik_json_str(v) && aik_json_str(v)[0] != '\0';
+	case AIK_JSON_ARR:
+	case AIK_JSON_OBJ:
+		return aik_json_count(v) > 0;
+	case AIK_JSON_NULL:
+	default:
+		return 0;
+	}
+}
+
+/*
+ * ns 分桶键：str(m.metadata.get(NS_KEY, ""))
+ *
+ * 缺键 → ""；None → "None"；bool → "True"/"False"；数字走 CPython repr。
+ * 数组/对象分支参考实现不存在（str(list/dict)），这里退化为 "" 并在
+ * T4E-E1-B.md 记为已知差异。
+ */
+static char *dyn_ns_key(const aik_json *metadata)
+{
+	const aik_json *v = aik_json_get(metadata, "ns");
+	char buf[64];
+
+	if (!v)
+		return aik_engine__dup("");
+	switch (aik_json_typeof(v)) {
+	case AIK_JSON_STR:
+		return aik_engine__dup(aik_json_str(v));
+	case AIK_JSON_NULL:
+		return aik_engine__dup("None");
+	case AIK_JSON_BOOL:
+		return aik_engine__dup(aik_json_bool(v) ? "True" : "False");
+	case AIK_JSON_INT:
+		snprintf(buf, sizeof(buf), "%lld", aik_json_int(v));
+		return aik_engine__dup(buf);
+	case AIK_JSON_NUM:
+		if (aik_json_dtoa(aik_json_num(v), buf, sizeof(buf)) < 0)
+			return NULL;
+		return aik_engine__dup(buf);
+	default:
+		return aik_engine__dup("");
+	}
+}
+
+/* ---------------- 成员枚举 / 排序 / 分桶 ---------------- */
+
+/*
+ * Region 成员（member_ids 顺序）∩ memories，过滤 archived 与
+ * source=="summary"（consolidation.py::find_groups 的 members_all）。
+ */
+/* sorted(member_ids)：Region.member_ids 在参考里是 set，迭代序随机；
+ * C 侧统一按 id 升序（= 快照数组序 = 设计稿 §2.3/§2.4 的确定性口径）。 */
+static int dyn_cmp_mem_id(const void *pa, const void *pb)
+{
+	aik_memory *const *a = pa;
+	aik_memory *const *b = pb;
+
+	if (!*a || !*b)
+		return 0;
+	return strcmp((*a)->id, (*b)->id);
+}
+
+static int dyn_region_members(aik_engine *e, const aik_region *r,
+			      aik_memory ***out, size_t *out_n)
+{
+	size_t cnt = aik_region_size(r);
+	aik_memory **arr;
+	size_t n = 0;
+	size_t i;
+
+	*out = NULL;
+	*out_n = 0;
+	arr = malloc((cnt ? cnt : 1) * sizeof(*arr));
+	if (!arr)
+		return -1;
+	for (i = 0; i < cnt; i++) {
+		const char *mid = aik_region_member(r, i);
+		aik_memory *m;
+
+		if (!mid)
+			continue;
+		m = find_mem(e, mid);
+		if (!m || m->archived)
+			continue;
+		if (m->source && strcmp(m->source, "summary") == 0)
+			continue;
+		arr[n++] = m;
+	}
+	qsort(arr, n, sizeof(*arr), dyn_cmp_mem_id);
+	*out = arr;
+	*out_n = n;
+	return 0;
+}
+
+/* Python list.sort(key=importance, reverse=True)：稳定（等值保持原序） */
+static void dyn_sort_by_importance(aik_memory **m, size_t n)
+{
+	size_t i;
+	size_t j;
+
+	for (i = 1; i < n; i++) {
+		aik_memory *cur = m[i];
+
+		j = i;
+		while (j > 0 && m[j - 1]->importance < cur->importance) {
+			m[j] = m[j - 1];
+			j--;
+		}
+		m[j] = cur;
+	}
+}
+
+static void dyn_buckets_free(struct dyn_bucket *bs, size_t nb)
+{
+	size_t i;
+
+	for (i = 0; i < nb; i++) {
+		free(bs[i].key);
+		free(bs[i].items);
+	}
+	free(bs);
+}
+
+static int dyn_bucket_append(struct dyn_bucket *b, aik_memory *m)
+{
+	if (b->n == b->cap) {
+		size_t next = b->cap ? b->cap * 2 : 8;
+		aik_memory **grown = realloc(b->items, next * sizeof(*grown));
+
+		if (!grown)
+			return -1;
+		b->items = grown;
+		b->cap = next;
+	}
+	b->items[b->n++] = m;
+	return 0;
+}
+
+/* 按 ns 分桶；桶顺序 = 成员首次出现序（Python dict 语义） */
+static int dyn_build_buckets(aik_memory *const *members, size_t n,
+			     struct dyn_bucket **out, size_t *out_nb)
+{
+	struct dyn_bucket *bs = NULL;
+	size_t nb = 0;
+	size_t cap = 0;
+	size_t i;
+	size_t j;
+
+	*out = NULL;
+	*out_nb = 0;
+	for (i = 0; i < n; i++) {
+		char *key = dyn_ns_key(members[i]->metadata);
+
+		if (!key)
+			goto fail;
+		for (j = 0; j < nb; j++) {
+			if (strcmp(bs[j].key, key) == 0)
+				break;
+		}
+		if (j == nb) {
+			if (nb == cap) {
+				size_t next = cap ? cap * 2 : 4;
+				struct dyn_bucket *grown =
+					realloc(bs, next * sizeof(*grown));
+
+				if (!grown) {
+					free(key);
+					goto fail;
+				}
+				bs = grown;
+				cap = next;
+			}
+			memset(&bs[nb], 0, sizeof(bs[nb]));
+			bs[nb].key = key;
+			nb++;
+		} else {
+			free(key);
+		}
+		if (dyn_bucket_append(&bs[j], members[i]) != 0)
+			goto fail;
+	}
+	*out = bs;
+	*out_nb = nb;
+	return 0;
+fail:
+	dyn_buckets_free(bs, nb);
+	return -1;
+}
+
+/* ---------------- 聚类 ---------------- */
+
+/* 贪心簇：anchor 未用时对每个未用 other 算余弦，>= threshold 入簇 */
+static int dyn_greedy_clusters(aik_memory **members, size_t n,
+			       double threshold, struct dyn_groups *out)
+{
+	char *used;
+	size_t *cluster;
+	size_t ai;
+	size_t oi;
+	int rc = -1;
+
+	used = calloc(n ? n : 1, 1);
+	cluster = malloc((n ? n : 1) * sizeof(*cluster));
+	if (!used || !cluster)
+		goto done;
+	for (ai = 0; ai < n; ai++) {
+		size_t cn = 0;
+
+		if (used[ai])
+			continue;
+		cluster[cn++] = ai;
+		for (oi = 0; oi < n; oi++) {
+			aik_memory *a = members[ai];
+			aik_memory *b = members[oi];
+
+			if (used[oi] || oi == ai)
+				continue;
+			if (!a->embedding || !b->embedding)
+				continue;
+			if (a->dim != b->dim)
+				continue;
+			if (cos_sim(a->embedding, b->embedding, a->dim) >=
+			    threshold)
+				cluster[cn++] = oi;
+		}
+		if (cn >= 2) {
+			aik_memory **items = malloc(cn * sizeof(*items));
+			size_t k;
+
+			if (!items)
+				goto done;
+			for (k = 0; k < cn; k++) {
+				items[k] = members[cluster[k]];
+				used[cluster[k]] = 1;
+			}
+			if (dyn_groups_push(out, items, cn) != 0) {
+				free(items);
+				goto done;
+			}
+			free(items);
+		}
+	}
+	rc = 0;
+done:
+	free(used);
+	free(cluster);
+	return rc;
+}
+
+/* 前 30 个成员的两两余弦均值（最多 200 对，break 只退内层，同参考） */
+static int dyn_region_coherent(aik_memory **members, size_t n,
+			       double threshold)
+{
+	size_t sample = n < 30 ? n : 30;
+	double total = 0.0;
+	int pairs = 0;
+	size_t i;
+	size_t j;
+
+	if (sample < 2)
+		return 0;
+	for (i = 0; i < sample; i++) {
+		for (j = i + 1; j < sample; j++) {
+			aik_memory *a = members[i];
+			aik_memory *b = members[j];
+
+			if (!a->embedding || !b->embedding)
+				continue;
+			if (a->dim != b->dim)
+				continue;
+			total += cos_sim(a->embedding, b->embedding, a->dim);
+			pairs++;
+			if (pairs >= 200)
+				break;
+		}
+	}
+	if (pairs == 0)
+		return 0;
+	return (total / (double)pairs) >= threshold * 0.6;
+}
+
+/*
+ * _find_groups_in_members：桶内贪心簇 + 整区连贯回退
+ *
+ * 返回 1 表示 groups 已达到 max_groups（调用方应立即收尾）。
+ */
+static int dyn_groups_in_members(aik_memory **members, size_t n,
+				 double threshold, int max_group,
+				 struct dyn_groups *groups)
+{
+	struct dyn_groups clusters;
+	const char **covered = NULL;
+	size_t n_covered = 0;
+	size_t cap_covered = 0;
+	size_t ci;
+	size_t i;
+	int rc = -1;
+
+	memset(&clusters, 0, sizeof(clusters));
+	dyn_sort_by_importance(members, n);
+	if (dyn_greedy_clusters(members, n, threshold, &clusters) != 0)
+		goto done;
+	for (ci = 0; ci < clusters.n; ci++) {
+		struct dyn_group *cl = &clusters.v[ci];
+		size_t take;
+
+		if (cl->n < DYN_MIN_GROUP_SIZE)
+			continue;
+		take = cl->n > (size_t)max_group ? (size_t)max_group : cl->n;
+		if (dyn_groups_push(groups, cl->items, take) != 0)
+			goto done;
+		for (i = 0; i < take; i++) {
+			const char *id = cl->items[i]->id;
+			size_t k;
+			int seen = 0;
+
+			for (k = 0; k < n_covered; k++) {
+				if (strcmp(covered[k], id) == 0) {
+					seen = 1;
+					break;
+				}
+			}
+			if (seen)
+				continue;
+			if (n_covered == cap_covered) {
+				size_t next = cap_covered ? cap_covered * 2 : 16;
+				const char **grown =
+					realloc(covered, next * sizeof(*grown));
+
+				if (!grown)
+					goto done;
+				covered = grown;
+				cap_covered = next;
+			}
+			covered[n_covered++] = id;
+		}
+		if (groups->n >= DYN_MAX_GROUPS) {
+			rc = 1;
+			goto done;
+		}
+	}
+	if (n <= (size_t)max_group && n > 0) {
+		double coverage = (double)n_covered / (double)n;
+
+		if (coverage >= 0.6) {
+			rc = 0;
+			goto done;
+		}
+		if (dyn_region_coherent(members, n, threshold)) {
+			if (dyn_groups_push(groups, members, n) != 0)
+				goto done;
+		}
+	}
+	rc = 0;
+done:
+	dyn_groups_reset(&clusters);
+	free(covered);
+	return rc;
+}
+
+/* find_groups(max_groups=20)：Region 插入序 → ns 桶 → 桶内聚合 */
+static int dyn_find_groups(aik_engine *e, struct dyn_groups *groups,
+			   char *err, size_t errlen)
+{
+	double threshold =
+		cfg_num(e->cfg, "consolidation.similarity_threshold", 0.5);
+	long long max_group =
+		cfg_i64(e->cfg, "consolidation.max_group_size", 12);
+	size_t nreg = aik_space_region_count(e->space);
+	size_t ri;
+	size_t bi;
+
+	if (max_group < 1)
+		max_group = 1;
+	for (ri = 0; ri < nreg; ri++) {
+		const aik_region *r = aik_space_region_at(e->space, ri);
+		aik_memory **members = NULL;
+		size_t nm = 0;
+		struct dyn_bucket *bs = NULL;
+		size_t nb = 0;
+		int hit;
+
+		if (!r)
+			continue;
+		if (dyn_region_members(e, r, &members, &nm) != 0)
+			goto oom;
+		if (nm < DYN_MIN_GROUP_SIZE) {
+			free(members);
+			continue;
+		}
+		if (dyn_build_buckets(members, nm, &bs, &nb) != 0) {
+			free(members);
+			goto oom;
+		}
+		hit = 0;
+		for (bi = 0; bi < nb; bi++) {
+			int rc;
+
+			if (bs[bi].n < DYN_MIN_GROUP_SIZE)
+				continue;
+			rc = dyn_groups_in_members(bs[bi].items, bs[bi].n,
+						   threshold, (int)max_group,
+						   groups);
+			if (rc < 0) {
+				dyn_buckets_free(bs, nb);
+				free(members);
+				goto oom;
+			}
+			if (rc == 1 || groups->n >= DYN_MAX_GROUPS) {
+				hit = 1;
+				break;
+			}
+		}
+		dyn_buckets_free(bs, nb);
+		free(members);
+		if (hit)
+			return 0;
+	}
+	return 0;
+oom:
+	set_err(err, errlen, "engine: out of memory (consolidation groups)");
+	return -1;
+}
+
+/* ---------------- summary_memory / set_parent ---------------- */
+static int dyn_set_parent(aik_engine *e, const char *child_id,
+			  const char *parent_id)
+{
+	aik_memory *child = find_mem(e, child_id);
+	aik_memory *parent = find_mem(e, parent_id);
+	size_t i;
+
+	if (!child || !parent)
+		return 1;
+	free(child->parent_id);
+	child->parent_id = aik_engine__dup(parent_id);
+	if (!child->parent_id)
+		return -1;
+	for (i = 0; i < parent->n_children; i++) {
+		if (parent->children[i] &&
+		    strcmp(parent->children[i], child_id) == 0)
+			break;
+	}
+	if (i == parent->n_children) {
+		char **grown = realloc(parent->children,
+				       (parent->n_children + 1) * sizeof(*grown));
+
+		if (!grown)
+			return -1;
+		parent->children = grown;
+		parent->children[parent->n_children] =
+			aik_engine__dup(child_id);
+		if (!parent->children[parent->n_children])
+			return -1;
+		parent->n_children++;
+	}
+	if (engine_add_edge(e, child_id, parent_id, "parent", 1.0, "child") != 0)
+		return -1;
+	/* 参考 set_parent 的 on_upsert(child)/on_upsert(parent) */
+	if (wal_dirty_add(e, child_id) != 0 || wal_dirty_add(e, parent_id) != 0)
+		return -1;
+	return 0;
+}
+
+/*
+ * summary_memory(text, member_ids, importance)
+ *
+ * 正常 add 管线（嵌入、space、id/时钟），然后 summary=text，再对每个成员
+ * set_parent(mid, summary.id) 并追加 summary→mid / kind=summary /
+ * weight=1 / note="covers" 边。**不** autosave（由调用方统一调用一次）。
+ */
+static aik_memory *dyn_summary_memory(aik_engine *e, const char *text,
+				      char *const *ids, size_t n_ids,
+				      double importance, char *err,
+				      size_t errlen)
+{
+	static const char *tags[] = { "summary" };
+	aik_memory *s;
+	size_t i;
+
+	s = engine_add_core(e, text, NULL, tags, 1, importance, "summary",
+			    NULL, NULL, NULL, err, errlen);
+	if (!s)
+		return NULL;
+	free(s->summary);
+	s->summary = aik_engine__dup(text);
+	if (!s->summary) {
+		set_err(err, errlen, "engine: out of memory (summary text)");
+		return NULL;
+	}
+	for (i = 0; i < n_ids; i++) {
+		int rc = dyn_set_parent(e, ids[i], s->id);
+
+		if (rc < 0) {
+			set_err(err, errlen,
+				"engine: out of memory (parent link)");
+			return NULL;
+		}
+		if (engine_add_edge(e, s->id, ids[i], "summary", 1.0,
+				    "covers") != 0) {
+			set_err(err, errlen,
+				"engine: out of memory (summary edge)");
+			return NULL;
+		}
+	}
+	return s;
+}
+
+/* ---------------- 摘要文本 ---------------- */
+
+static int dyn_cmp_cand(const void *pa, const void *pb)
+{
+	const struct dyn_cand *a = pa;
+	const struct dyn_cand *b = pb;
+
+	if (a->score != b->score)
+		return a->score > b->score ? -1 : 1;
+	return strcmp(a->tok, b->tok);
+}
+
+/*
+ * _common_tokens：每条记忆 tokenize(set) 计数；候选 cnt>=2 且码点长度>=4；
+ * 排序 (-cnt*len^2, tok)，取前 4，用 "、" 连接。
+ */
+static int dyn_common_tokens(aik_memory *const *group, size_t n, char **out,
+			     char *err, size_t errlen)
+{
+	struct dyn_tokcnt *arr = NULL;
+	size_t na = 0;
+	size_t cap = 0;
+	struct dyn_cand *cands = NULL;
+	size_t nc = 0;
+	struct dyn_buf b;
+	size_t gi;
+	size_t i;
+	size_t j;
+	int rc = -1;
+
+	*out = NULL;
+	memset(&b, 0, sizeof(b));
+	for (gi = 0; gi < n; gi++) {
+		aik_token_list tl;
+
+		if (aik_tokenize(group[gi]->text, 0, &tl, err, errlen) != 0)
+			goto done;
+		for (i = 0; i < tl.count; i++) {
+			const char *tok = tl.items[i];
+			int dup_seen = 0;
+
+			if (!tok)
+				continue;
+			for (j = 0; j < i; j++) {
+				if (tl.items[j] && strcmp(tl.items[j], tok) == 0) {
+					dup_seen = 1;
+					break;
+				}
+			}
+			if (dup_seen)
+				continue;
+			for (j = 0; j < na; j++) {
+				if (strcmp(arr[j].tok, tok) == 0) {
+					arr[j].cnt++;
+					break;
+				}
+			}
+			if (j < na)
+				continue;
+			if (na == cap) {
+				size_t next = cap ? cap * 2 : 16;
+				struct dyn_tokcnt *grown =
+					realloc(arr, next * sizeof(*grown));
+
+				if (!grown) {
+					aik_token_list_free(&tl);
+					goto done;
+				}
+				arr = grown;
+				cap = next;
+			}
+			arr[na].tok = aik_engine__dup(tok);
+			if (!arr[na].tok) {
+				aik_token_list_free(&tl);
+				goto done;
+			}
+			arr[na].cnt = 1;
+			na++;
+		}
+		aik_token_list_free(&tl);
+	}
+	cands = malloc((na ? na : 1) * sizeof(*cands));
+	if (!cands)
+		goto done;
+	for (i = 0; i < na; i++) {
+		size_t chars = dyn_utf8_len(arr[i].tok);
+
+		if (arr[i].cnt >= 2 && chars >= 4) {
+			cands[nc].tok = arr[i].tok;
+			cands[nc].score = (long long)arr[i].cnt *
+					  (long long)chars * (long long)chars;
+			nc++;
+		}
+	}
+	qsort(cands, nc, sizeof(*cands), dyn_cmp_cand);
+	for (i = 0; i < nc && i < 4; i++) {
+		if (i > 0 && dyn_buf_add(&b, "、") != 0)
+			goto done;
+		if (dyn_buf_add(&b, cands[i].tok) != 0)
+			goto done;
+	}
+	*out = dyn_buf_take(&b);
+	if (!*out)
+		goto done;
+	rc = 0;
+done:
+	free(b.s);
+	free(cands);
+	for (j = 0; j < na; j++)
+		free(arr[j].tok);
+	free(arr);
+	if (rc != 0)
+		set_err(err, errlen, "engine: out of memory (common tokens)");
+	return rc;
+}
+
+/* _template_summary */
+static int dyn_template_summary(aik_memory *const *group, size_t n, char **out,
+				char *err, size_t errlen)
+{
+	struct dyn_buf b;
+	char *topics = NULL;
+	char num[32];
+	size_t i;
+	size_t preview_n;
+	int rc = -1;
+
+	*out = NULL;
+	memset(&b, 0, sizeof(b));
+	if (dyn_common_tokens(group, n, &topics, err, errlen) != 0)
+		goto done;
+	snprintf(num, sizeof(num), "%zu", n);
+	if (topics && topics[0]) {
+		if (dyn_buf_add(&b, "关于「") != 0 ||
+		    dyn_buf_add(&b, topics) != 0 ||
+		    dyn_buf_add(&b, "」的 ") != 0 ||
+		    dyn_buf_add(&b, num) != 0 ||
+		    dyn_buf_add(&b, " 条相关记忆") != 0)
+			goto done;
+	} else {
+		if (dyn_buf_add(&b, num) != 0 ||
+		    dyn_buf_add(&b, " 条相关记忆") != 0)
+			goto done;
+	}
+	if (n > 3) {
+		char more[48];
+
+		snprintf(more, sizeof(more), "，共%zu条", n);
+		if (dyn_buf_add(&b, more) != 0)
+			goto done;
+	}
+	if (dyn_buf_add(&b, "：") != 0)
+		goto done;
+	preview_n = n < 3 ? n : 3;
+	for (i = 0; i < preview_n; i++) {
+		if (i > 0 && dyn_buf_add(&b, "；") != 0)
+			goto done;
+		if (dyn_buf_add(&b, group[i]->text) != 0)
+			goto done;
+	}
+	*out = dyn_buf_take(&b);
+	if (!*out)
+		goto done;
+	rc = 0;
+done:
+	free(b.s);
+	free(topics);
+	if (rc != 0)
+		set_err(err, errlen, "engine: out of memory (template summary)");
+	return rc;
+}
+
+/* compression.py::_summarize（template 分支） */
+static int dyn_compression_text(aik_memory *const *cands, size_t n, char **out,
+				char *err, size_t errlen)
+{
+	struct dyn_buf b;
+	char num[32];
+	size_t i;
+	size_t preview_n;
+	int rc = -1;
+
+	*out = NULL;
+	memset(&b, 0, sizeof(b));
+	snprintf(num, sizeof(num), "%zu", n);
+	if (dyn_buf_add(&b, "长期记忆摘要（") != 0 || dyn_buf_add(&b, num) != 0 ||
+	    dyn_buf_add(&b, "条）") != 0)
+		goto done;
+	if (n > 5) {
+		char more[48];
+
+		snprintf(more, sizeof(more), " 等%zu条", n);
+		if (dyn_buf_add(&b, more) != 0)
+			goto done;
+	}
+	if (dyn_buf_add(&b, "：") != 0)
+		goto done;
+	preview_n = n < 5 ? n : 5;
+	for (i = 0; i < preview_n; i++) {
+		if (i > 0 && dyn_buf_add(&b, "；") != 0)
+			goto done;
+		if (dyn_buf_add(&b, cands[i]->text) != 0)
+			goto done;
+	}
+	*out = dyn_buf_take(&b);
+	if (!*out)
+		goto done;
+	rc = 0;
+done:
+	free(b.s);
+	if (rc != 0)
+		set_err(err, errlen, "engine: out of memory (compression summary)");
+	return rc;
+}
+
+/* ---------------- 幂等判定 / metadata ---------------- */
+
+static size_t dyn_unique_count(char *const *ids, size_t n)
+{
+	size_t i;
+	size_t j;
+	size_t uniq = 0;
+
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < i; j++) {
+			if (strcmp(ids[j], ids[i]) == 0)
+				break;
+		}
+		if (j == i)
+			uniq++;
+	}
+	return uniq;
+}
+
+static int dyn_has_id(char *const *ids, size_t n, const char *id)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (strcmp(ids[i], id) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* set(metadata["covers"]) == set(ids)（元素必须是 id 字符串） */
+static int dyn_covers_matches(const aik_json *covers, char *const *ids,
+			      size_t n)
+{
+	size_t nc;
+	size_t i;
+	size_t j;
+	size_t uniq_c = 0;
+
+	if (aik_json_typeof(covers) != AIK_JSON_ARR)
+		return 0;
+	nc = aik_json_count(covers);
+	for (i = 0; i < nc; i++) {
+		if (!aik_json_str(aik_json_at(covers, i)))
+			return 0;
+	}
+	for (i = 0; i < nc; i++) {
+		const char *a = aik_json_str(aik_json_at(covers, i));
+
+		for (j = 0; j < i; j++) {
+			if (strcmp(aik_json_str(aik_json_at(covers, j)), a) == 0)
+				break;
+		}
+		if (j == i)
+			uniq_c++;
+	}
+	if (uniq_c != dyn_unique_count(ids, n))
+		return 0;
+	for (i = 0; i < nc; i++) {
+		const char *a = aik_json_str(aik_json_at(covers, i));
+
+		for (j = 0; j < i; j++) {
+			if (strcmp(aik_json_str(aik_json_at(covers, j)), a) == 0)
+				break;
+		}
+		if (j != i)
+			continue;
+		if (!dyn_has_id(ids, n, a))
+			return 0;
+	}
+	return 1;
+}
+
+/* _already_consolidated：已有 summary 且 covers 集合 == ids 集合 */
+static int dyn_already_consolidated(aik_engine *e, char *const *ids, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < e->n_mem; i++) {
+		const aik_memory *m = e->mem[i];
+		const aik_json *covers;
+
+		if (!m->source || strcmp(m->source, "summary") != 0)
+			continue;
+		covers = aik_json_get(m->metadata, "covers");
+		if (!dyn_json_truthy(covers))
+			continue;
+		if (dyn_covers_matches(covers, ids, n))
+			return 1;
+	}
+	return 0;
+}
+
+/* _region_compressed：source=="summary" 且 compresses_region == region.id */
+static int dyn_region_compressed(aik_engine *e, const char *region_id)
+{
+	size_t i;
+
+	if (!region_id)
+		return 0;
+	for (i = 0; i < e->n_mem; i++) {
+		const aik_memory *m = e->mem[i];
+		const aik_json *v;
+
+		if (!m->source || strcmp(m->source, "summary") != 0)
+			continue;
+		v = aik_json_get(m->metadata, "compresses_region");
+		if (aik_json_typeof(v) == AIK_JSON_STR &&
+		    strcmp(aik_json_str(v), region_id) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* sorted(ids) 的 JSON 数组（strcmp 序 = Python 码点序，UTF-8） */
+static aik_json *dyn_sorted_ids_json(char *const *ids, size_t n)
+{
+	aik_json *arr = aik_json_new_arr();
+	char **copy = NULL;
+	size_t i;
+
+	if (!arr)
+		return NULL;
+	if (n > 0) {
+		copy = malloc(n * sizeof(*copy));
+		if (!copy)
+			goto fail;
+		memcpy(copy, ids, n * sizeof(*copy));
+		qsort(copy, n, sizeof(*copy), cmp_cstr);
+	}
+	for (i = 0; i < n; i++) {
+		aik_json *v = aik_json_new_str(copy[i]);
+
+		if (!v || aik_json_arr_push(arr, v) != 0) {
+			aik_json_free(v);
+			goto fail;
+		}
+	}
+	free(copy);
+	return arr;
+fail:
+	free(copy);
+	aik_json_free(arr);
+	return NULL;
+}
+
+/*
+ * Python: ns_values = {m.metadata.get("ns") for m in group
+ *                      if m.metadata.get("ns")}；len==1 时写入摘要。
+ * 返回唯一值指针（借用）；多个不同值或没有 → *out_found=0。
+ */
+static const aik_json *dyn_group_ns(aik_memory *const *group, size_t n,
+				    int *out_found)
+{
+	const aik_json *ns = NULL;
+	int found = 0;
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		const aik_json *v = aik_json_get(group[i]->metadata, "ns");
+
+		if (!dyn_json_truthy(v))
+			continue;
+		if (!found) {
+			ns = v;
+			found = 1;
+		} else if (!json_equal(ns, v)) {
+			*out_found = 0;
+			return NULL;
+		}
+	}
+	*out_found = found;
+	return ns;
+}
+
+static int dyn_created_push(aik_memory ***arr, size_t *n, size_t *cap,
+			    aik_memory *m)
+{
+	if (*n == *cap) {
+		size_t next = *cap ? *cap * 2 : 16;
+		aik_memory **grown = realloc(*arr, next * sizeof(*grown));
+
+		if (!grown)
+			return -1;
+		*arr = grown;
+		*cap = next;
+	}
+	(*arr)[(*n)++] = m;
+	return 0;
+}
+
+static aik_json *dyn_created_json(aik_memory *const *created, size_t n)
+{
+	aik_json *arr = aik_json_new_arr();
+	size_t i;
+
+	if (!arr)
+		return NULL;
+	for (i = 0; i < n; i++) {
+		aik_json *row = aik_memory_to_json(created[i], 1);
+
+		if (!row || aik_json_arr_push(arr, row) != 0) {
+			aik_json_free(row);
+			aik_json_free(arr);
+			return NULL;
+		}
+	}
+	return arr;
+}
+
+/* ---------------- 公开接口 ---------------- */
+
+int aik_engine_consolidate(aik_engine *e, aik_json **out_created, char *err,
+			   size_t errlen)
+{
+	struct dyn_groups groups;
+	aik_memory **created = NULL;
+	size_t n_created = 0;
+	size_t cap_created = 0;
+	aik_json *arr = NULL;
+	double now;
+	size_t gi;
+	int committed = 0;
+	int rc = -1;
+
+	memset(&groups, 0, sizeof(groups));
+	if (out_created)
+		*out_created = NULL;
+	if (!e || !out_created) {
+		set_err(err, errlen, "engine: invalid argument to consolidate");
+		return -1;
+	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
+	wal_begin(e);
+	if (dyn_find_groups(e, &groups, err, errlen) != 0)
+		goto done;
+	now = e->now(e->now_ud);
+	for (gi = 0; gi < groups.n; gi++) {
+		struct dyn_group *g = &groups.v[gi];
+		char **ids;
+		char *text = NULL;
+		aik_memory *s;
+		const aik_json *ns;
+		aik_json *v;
+		int ns_found = 0;
+		size_t i;
+
+		ids = malloc(g->n * sizeof(*ids));
+		if (!ids) {
+			set_err(err, errlen, "engine: out of memory (covers)");
+			goto done;
+		}
+		for (i = 0; i < g->n; i++)
+			ids[i] = g->items[i]->id;
+		if (dyn_already_consolidated(e, ids, g->n)) {
+			free(ids);
+			continue;
+		}
+		if (dyn_template_summary(g->items, g->n, &text, err, errlen) !=
+		    0) {
+			free(ids);
+			goto done;
+		}
+		s = dyn_summary_memory(e, text, ids, g->n, 0.75, err, errlen);
+		free(text);
+		if (!s) {
+			free(ids);
+			goto done;
+		}
+		v = dyn_sorted_ids_json(ids, g->n);
+		if (!v || aik_json_obj_set(s->metadata, "covers", v) != 0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen, "engine: out of memory (covers)");
+			goto done;
+		}
+		v = aik_json_new_num(now);
+		if (!v || aik_json_obj_set(s->metadata, "consolidated_at", v) !=
+				  0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (consolidated_at)");
+			goto done;
+		}
+		ns = dyn_group_ns(g->items, g->n, &ns_found);
+		if (ns_found && ns) {
+			v = aik_json__clone(ns);
+			if (!v ||
+			    aik_json_obj_set(s->metadata, "ns", v) != 0) {
+				aik_json_free(v);
+				free(ids);
+				set_err(err, errlen,
+					"engine: out of memory (ns)");
+				goto done;
+			}
+		}
+		if (dyn_created_push(&created, &n_created, &cap_created, s) != 0) {
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (created list)");
+			goto done;
+		}
+		e->consolidations++;
+		free(ids);
+	}
+	/* consolidation.last_run_at = now()（仅引擎内部状态，无外部字段） */
+	if (wal_commit(e, 1, err, errlen) != 0)
+		goto done;
+	committed = 1;
+	if (engine_autosave(e, err, errlen) != 0)
+		goto done;
+	arr = dyn_created_json(created, n_created);
+	if (!arr) {
+		set_err(err, errlen, "engine: out of memory (created JSON)");
+		goto done;
+	}
+	*out_created = arr;
+	arr = NULL;
+	rc = 0;
+done:
+	if (!committed)
+		wal_abort(e);
+	aik_json_free(arr);
+	free(created);
+	dyn_groups_reset(&groups);
+	return rc;
+}
+
+/* find_compressible(max_regions=10) */
+static int dyn_find_compressible(aik_engine *e, struct dyn_groups *out,
+				 double now, char *err, size_t errlen)
+{
+	double age_threshold =
+		cfg_num(e->cfg, "compression.age_days_threshold", 3.0);
+	long long min_compact =
+		cfg_i64(e->cfg, "compression.min_region_compact", 8);
+	size_t nreg = aik_space_region_count(e->space);
+	size_t ri;
+
+	if (min_compact < 1)
+		min_compact = 1;
+	for (ri = 0; ri < nreg; ri++) {
+		const aik_region *r = aik_space_region_at(e->space, ri);
+		size_t cnt;
+		aik_memory **cands = NULL;
+		size_t nc = 0;
+		struct dyn_bucket *bs = NULL;
+		size_t nb = 0;
+		size_t i;
+		size_t bi;
+		int stop = 0;
+
+		if (!r)
+			continue;
+		cnt = aik_region_size(r);
+		if (cnt < (size_t)min_compact)
+			continue;
+		if (dyn_region_compressed(e, aik_region_id(r)))
+			continue;
+		cands = malloc((cnt ? cnt : 1) * sizeof(*cands));
+		if (!cands)
+			goto oom;
+		for (i = 0; i < cnt; i++) {
+			const char *mid = aik_region_member(r, i);
+			aik_memory *m;
+			double age;
+
+			if (!mid)
+				continue;
+			m = find_mem(e, mid);
+			if (!m || m->archived)
+				continue;
+			if (m->source && strcmp(m->source, "summary") == 0)
+				continue;
+			age = (now - m->last_hit) / 86400.0;
+			if (age < 0.0)
+				age = 0.0;	/* age_days: max(0, ...) */
+			if (age < age_threshold)
+				continue;
+			cands[nc++] = m;
+		}
+		qsort(cands, nc, sizeof(*cands), dyn_cmp_mem_id);
+		if (nc > 0 &&
+		    dyn_build_buckets(cands, nc, &bs, &nb) != 0) {
+			free(cands);
+			goto oom;
+		}
+		for (bi = 0; bi < nb; bi++) {
+			if (bs[bi].n < (size_t)min_compact)
+				continue;
+			if (dyn_groups_push(out, bs[bi].items, bs[bi].n) != 0) {
+				dyn_buckets_free(bs, nb);
+				free(cands);
+				goto oom;
+			}
+		}
+		dyn_buckets_free(bs, nb);
+		free(cands);
+		if (out->n >= DYN_MAX_REGIONS)
+			stop = 1;
+		if (stop)
+			break;
+	}
+	return 0;
+oom:
+	set_err(err, errlen, "engine: out of memory (compressible regions)");
+	return -1;
+}
+
+int aik_engine_compress(aik_engine *e, aik_json **out_created, char *err,
+			size_t errlen)
+{
+	struct dyn_groups lists;
+	aik_memory **created = NULL;
+	size_t n_created = 0;
+	size_t cap_created = 0;
+	aik_json *arr = NULL;
+	double now;
+	size_t gi;
+	int committed = 0;
+	int rc = -1;
+
+	memset(&lists, 0, sizeof(lists));
+	if (out_created)
+		*out_created = NULL;
+	if (!e || !out_created) {
+		set_err(err, errlen, "engine: invalid argument to compress");
+		return -1;
+	}
+	if (wal_guard(e, err, errlen) != 0)
+		return -1;
+	wal_begin(e);
+	now = e->now(e->now_ud);
+	if (dyn_find_compressible(e, &lists, now, err, errlen) != 0)
+		goto done;
+	for (gi = 0; gi < lists.n; gi++) {
+		struct dyn_group *g = &lists.v[gi];
+		const char *rid;
+		char *rid_copy;
+		char *text = NULL;
+		char **ids;
+		aik_memory *s;
+		const aik_json *ns;
+		aik_json *v;
+		int ns_found = 0;
+		size_t i;
+
+		if (g->n == 0)
+			continue;
+		rid = aik_space_region_for(e->space, g->items[0]->id);
+		rid_copy = rid ? aik_engine__dup(rid) : NULL;
+		if (rid && !rid_copy) {
+			set_err(err, errlen, "engine: out of memory (region id)");
+			goto done;
+		}
+		ids = malloc(g->n * sizeof(*ids));
+		if (!ids) {
+			free(rid_copy);
+			set_err(err, errlen, "engine: out of memory (covers)");
+			goto done;
+		}
+		for (i = 0; i < g->n; i++)
+			ids[i] = g->items[i]->id;
+		if (dyn_compression_text(g->items, g->n, &text, err, errlen) !=
+		    0) {
+			free(ids);
+			free(rid_copy);
+			goto done;
+		}
+		s = dyn_summary_memory(e, text, ids, g->n, 0.7, err, errlen);
+		free(text);
+		if (!s) {
+			free(ids);
+			free(rid_copy);
+			goto done;
+		}
+		v = rid_copy ? aik_json_new_str(rid_copy) : aik_json_new_null();
+		free(rid_copy);
+		if (!v || aik_json_obj_set(s->metadata, "compresses_region", v) !=
+				  0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (compresses_region)");
+			goto done;
+		}
+		v = aik_json_new_num(now);
+		if (!v ||
+		    aik_json_obj_set(s->metadata, "compressed_at", v) != 0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (compressed_at)");
+			goto done;
+		}
+		v = aik_json_new_int((long long)g->n);
+		if (!v || aik_json_obj_set(s->metadata, "cover_count", v) != 0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (cover_count)");
+			goto done;
+		}
+		v = dyn_sorted_ids_json(ids, g->n);
+		if (!v || aik_json_obj_set(s->metadata, "covers", v) != 0) {
+			aik_json_free(v);
+			free(ids);
+			set_err(err, errlen, "engine: out of memory (covers)");
+			goto done;
+		}
+		ns = dyn_group_ns(g->items, g->n, &ns_found);
+		if (ns_found && ns) {
+			v = aik_json__clone(ns);
+			if (!v ||
+			    aik_json_obj_set(s->metadata, "ns", v) != 0) {
+				aik_json_free(v);
+				free(ids);
+				set_err(err, errlen,
+					"engine: out of memory (ns)");
+				goto done;
+			}
+		}
+		if (dyn_created_push(&created, &n_created, &cap_created, s) != 0) {
+			free(ids);
+			set_err(err, errlen,
+				"engine: out of memory (created list)");
+			goto done;
+		}
+		e->compressions++;
+		free(ids);
+	}
+	if (wal_commit(e, 1, err, errlen) != 0)
+		goto done;
+	committed = 1;
+	if (engine_autosave(e, err, errlen) != 0)
+		goto done;
+	arr = dyn_created_json(created, n_created);
+	if (!arr) {
+		set_err(err, errlen, "engine: out of memory (created JSON)");
+		goto done;
+	}
+	*out_created = arr;
+	arr = NULL;
+	rc = 0;
+done:
+	if (!committed)
+		wal_abort(e);
+	aik_json_free(arr);
+	free(created);
+	dyn_groups_reset(&lists);
 	return rc;
 }

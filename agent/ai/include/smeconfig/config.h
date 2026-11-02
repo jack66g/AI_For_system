@@ -71,6 +71,17 @@ int aik_config_get_num(const aik_config *c, const char *dotted, double *out);
 int aik_config_get_bool(const aik_config *c, const char *dotted, int *out);
 const char *aik_config_get_str(const aik_config *c, const char *dotted);
 
+/*
+ * aik_config_set_dotted - 用 JSON 值覆盖 dotted 路径（启动期文件/env 重放）
+ *
+ * 中间段缺失/不是对象时创建空对象；已存在的最后一段保持首次出现位置
+ * （aik_json_obj_set 语义）。value 深拷贝，调用方保留所有权。不修改
+ * `_explicit` 集合（Python 的 env/file 重放同样不写 _explicit_keys）。
+ * 成功 0，参数非法/OOM/序列化失败 -1。
+ */
+int aik_config_set_dotted(aik_config *c, const char *dotted,
+			  const aik_json *value);
+
 /* 释放（NULL 安全） */
 void aik_config_free(aik_config *c);
 

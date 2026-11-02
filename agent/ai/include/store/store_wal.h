@@ -41,6 +41,19 @@ aik_wal *aik_wal_open(const char *path, int fsync_each,
  */
 int aik_wal_append(aik_wal *w, const aik_json *op, char *err, size_t errlen);
 
+/*
+ * aik_wal_reset - checkpoint 后截断日志（T4e-D）
+ *
+ * ftruncate(fd, 0) + fsync，并把 append 计数清零；seq 由调用方（引擎）持有，
+ * store 不解释也不保存它（参考 wal.reset 只删文件，sequence 属引擎状态）。
+ * 成功 0；失败 -1 并写 err "wal: ..."（日志保留，调用方必须把 reset 失败
+ * 当作 checkpoint 失败，不能报告已落盘）。
+ */
+int aik_wal_reset(aik_wal *w, char *err, size_t errlen);
+
+/* 自 open（或最近一次 reset）以来成功 append 的条数（未 open 返回 0） */
+long long aik_wal_ops(const aik_wal *w);
+
 /* 关闭并释放句柄；成功 0，close 失败 -1（句柄总是被释放） */
 int aik_wal_close(aik_wal *w);
 
@@ -64,5 +77,18 @@ typedef int (*aik_wal_visit)(void *ctx, const aik_json *op,
 int aik_wal_replay(const char *path, long long checkpoint,
 		   aik_wal_visit fn, void *ctx,
 		   char *err, size_t errlen);
+
+/*
+ * aik_wal_replay_ex - 同 aik_wal_replay，另回传行号与最大序号（T4e-D）
+ *
+ * *out_record 在返回时总是被写：失败时为出错记录（1 起，与 err 里的 N 一致），
+ * 成功时为最后一条被检查的行号（空文件/文件不存在为 0）。*out_last_seq
+ * 为扫描到的最大 seq（含被 checkpoint 跳过的记录；缺失 seq 记 0），引擎用
+ * 它把 wal.sequence 推进到参考 replay() 的 max(sequence, seq)。两个出参都
+ * 可为 NULL。replay 语义与 aik_wal_replay 完全相同（不截断、不删除）。
+ */
+int aik_wal_replay_ex(const char *path, long long checkpoint,
+		      aik_wal_visit fn, void *ctx, long long *out_record,
+		      long long *out_last_seq, char *err, size_t errlen);
 
 #endif /* _AIK_STORE_WAL_H */

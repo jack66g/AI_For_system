@@ -26,7 +26,7 @@ SME_LIB := ../smeconfig/libaiksmeconfig.a
 ENG_LIB := ../engine/libaikengine.a
 
 LIB := libaiksmehttp.a
-OBJS := http.o routes.o
+OBJS := http.o routes.o routes_config.o routes_extra.o
 BINS := smehttp
 TESTS := tests/test_http
 
@@ -43,6 +43,11 @@ routes.o: routes.c ../include/smehttp/http.h ../include/engine/engine.h \
 	../include/retrieval/retriever.h ../include/smeconfig/config.h \
 	../include/store/store_json.h
 	$(CC) $(CFLAGS) -c -o $@ routes.c
+
+routes_config.o: routes_config.c ../include/smehttp/http.h \
+	../include/engine/engine.h ../include/smeconfig/config.h \
+	../include/smeconfig/config_items.h ../include/store/store_json.h
+	$(CC) $(CFLAGS) -c -o $@ routes_config.c
 
 smehttp: main.c $(LIB) $(ENG_LIB) $(SME_LIB) $(RETR_LIB) $(SPACE_LIB) \
 	$(STORE_LIB)

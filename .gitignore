@@ -103,3 +103,8 @@ fix-w*/
 /agent/ai/store/tests/test_store_wal
 /agent/ai/store/tests/test_store_sqlite
 /agent/ai/store/tests/test_npz_write
+/agent/ai/engine/tests/test_dynamics
+/agent/ai/engine/tests/test_rebuild
+/agent/ai/engine/tests/test_wal_engine
+/agent/ai/smeconfig/tests/test_config_items
+/agent/ai/tests/engine.actual.json

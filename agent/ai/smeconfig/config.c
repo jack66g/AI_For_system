@@ -491,6 +491,57 @@ const char *aik_config_get_str(const aik_config *c, const char *dotted)
 	return aik_json_str(v);
 }
 
+/* 深拷贝在文件中已有 json_clone（obj_child 之后） */
+
+int aik_config_set_dotted(aik_config *c, const char *dotted,
+			  const aik_json *value)
+{
+	char *path;
+	char *part;
+	char *dot;
+	aik_json *cur;
+	size_t plen;
+
+	if (!c || !dotted || !*dotted || !value)
+		return -1;
+	plen = strlen(dotted);
+	path = malloc(plen + 1);
+	if (!path)
+		return -1;
+	memcpy(path, dotted, plen + 1);
+	cur = c->dom;
+	part = path;
+	while ((dot = strchr(part, '.')) != NULL) {
+		aik_json *next;
+
+		*dot = '\0';
+		next = (aik_json *)aik_json_get(cur, part);
+		if (!next || aik_json_typeof(next) != AIK_JSON_OBJ) {
+			next = aik_json_new_obj();
+
+			if (!next ||
+			    aik_json_obj_set(cur, part, next) != 0) {
+				aik_json_free(next);
+				free(path);
+				return -1;
+			}
+		}
+		cur = next;
+		part = dot + 1;
+	}
+	if (*part) {
+		aik_json *copy = json_clone(value);
+
+		if (!copy || aik_json_obj_set(cur, part, copy) != 0) {
+			aik_json_free(copy);
+			free(path);
+			return -1;
+		}
+	}
+	free(path);
+	return 0;
+}
+
 void aik_config_free(aik_config *c)
 {
 	size_t i;

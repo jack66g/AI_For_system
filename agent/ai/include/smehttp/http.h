@@ -65,6 +65,7 @@ typedef struct {
 	int status;
 	char *body;
 	size_t body_len;
+	const char *content_type;	/* NULL → application/json（静态借用） */
 } aik_http_response;
 
 /*
@@ -96,6 +97,40 @@ aik_engine *aik_http_server_engine(const aik_http_server *s);
 aik_config *aik_http_server_config(const aik_http_server *s);
 
 /*
+ * 配置中心运行期状态（T4e）
+ *
+ * source 与 resolve_engine 的 {"defaults","file","env"} 对应；config_file
+ * 是 GET /config 下发的配置路径（可以是尚未存在的默认路径）。
+ */
+enum aik_http_source {
+	AIK_HTTP_SOURCE_DEFAULTS = 0,
+	AIK_HTTP_SOURCE_FILE = 1,
+	AIK_HTTP_SOURCE_ENV = 2
+};
+
+const char *aik_http_server_config_file(const aik_http_server *s);
+/* 复制一份保存；path 为 NULL/空串表示未设置。成功 0，OOM -1 */
+int aik_http_server_set_config_file(aik_http_server *s, const char *path);
+int aik_http_server_source(const aik_http_server *s);
+void aik_http_server_set_source(aik_http_server *s, int source);
+
+/*
+ * 配置 UI 静态资源目录（/ 与 /static/<file>）
+ *
+ * 为空时这两个路由返回 404（与没有静态目录的部署一致）。成功 0，OOM -1。
+ */
+const char *aik_http_server_static_dir(const aik_http_server *s);
+int aik_http_server_set_static_dir(aik_http_server *s, const char *path);
+
+/*
+ * 热替换引擎（PUT/POST /config 成功后调用）
+ *
+ * server 只借用引擎：调用方在替换后自行释放旧引擎；server 的 config
+ * 指针同步指向新引擎配置（鉴权每请求现读）。engine 为 NULL 时仅解绑。
+ */
+void aik_http_server_set_engine(aik_http_server *s, aik_engine *engine);
+
+/*
  * 响应构造辅助
  *
  * aik_http_response_json 接管 dom 的所有权（dump 后释放）；dump 失败按
@@ -105,6 +140,15 @@ aik_config *aik_http_server_config(const aik_http_server *s);
 void aik_http_response_json(aik_http_response *resp, int status, aik_json *dom);
 void aik_http_response_detail(aik_http_response *resp, int status,
 			      const char *detail);
+/*
+ * aik_http_response_bytes - 二进制/静态响应（接管 body 所有权）
+ *
+ * content_type 借用（必须是静态字符串或与 body 同生命周期）；body 为
+ * malloc 缓冲，body_len 可为 0。写入时 Content-Type 用该值。
+ */
+void aik_http_response_bytes(aik_http_response *resp, int status,
+			     const char *content_type, char *body,
+			     size_t body_len);
 void aik_http_response_free(aik_http_response *resp);
 
 /* ------------------------------------------------------------------ */
@@ -133,5 +177,50 @@ void aik_http_route_memory_get(aik_http_server *s, const aik_http_request *req,
 void aik_http_route_memory_hit(aik_http_server *s, const aik_http_request *req,
 			       const char *memory_id,
 			       aik_http_response *resp);
+
+/* ------------------------------------------------------------------ */
+/* T4e 配置中心 + 动力学（routes_config.c 实现）                       */
+/* ------------------------------------------------------------------ */
+/*
+ * GET    /config          {config_file, source, groups, presets}
+ * PUT    /config          ConfigPutRequest{values={}, save=false}
+ * POST   /config/preset   PresetRequest{key, save=true}
+ * POST   /config/check    ConfigCheckRequest{ping=false}
+ * POST   /config/reset    无请求体；删配置文件 + 默认/环境变量重建
+ * POST   /consolidate     {"created":[...]}
+ * POST   /compress        {"created":[...]}
+ */
+void aik_http_route_config_get(aik_http_server *s,
+			       const aik_http_request *req,
+			       aik_http_response *resp);
+void aik_http_route_config_put(aik_http_server *s,
+			       const aik_http_request *req,
+			       aik_http_response *resp);
+void aik_http_route_config_preset(aik_http_server *s,
+				  const aik_http_request *req,
+				  aik_http_response *resp);
+void aik_http_route_config_check(aik_http_server *s,
+				 const aik_http_request *req,
+				 aik_http_response *resp);
+void aik_http_route_config_reset(aik_http_server *s,
+				 const aik_http_request *req,
+				 aik_http_response *resp);
+void aik_http_route_consolidate(aik_http_server *s,
+				const aik_http_request *req,
+				aik_http_response *resp);
+void aik_http_route_compress(aik_http_server *s, const aik_http_request *req,
+			     aik_http_response *resp);
+
+/* T4e 追加：multipart 导入 / 可视化 / 配置 UI 静态资源（routes_extra.c） */
+void aik_http_route_import_file(aik_http_server *s,
+				const aik_http_request *req,
+				aik_http_response *resp);
+void aik_http_route_visualize(aik_http_server *s,
+			      const aik_http_request *req,
+			      aik_http_response *resp);
+void aik_http_route_index(aik_http_server *s, const aik_http_request *req,
+			  aik_http_response *resp);
+void aik_http_route_static(aik_http_server *s, const aik_http_request *req,
+			   aik_http_response *resp);
 
 #endif /* _AIK_SMEHTTP_HTTP_H */

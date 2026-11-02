@@ -7,8 +7,11 @@
 # 目录显式 .NOTPARALLEL，子 make 也带 -j1。
 #
 #   make -C agent/ai/engine -j1 all      # 产出 libaikengine.a
-#   make -C agent/ai/engine -j1 test     # 构建并运行 tests/test_engine
+#   make -C agent/ai/engine -j1 test     # 构建并运行 test_engine + test_dynamics
 #   make -C agent/ai/engine -j1 clean all test
+#
+# T4e-E1-B：新增 tests/test_dynamics（consolidation/compression 差分测试，
+# 数据走 $AIK_PARITY_VECTORS，默认 $HOME/aikernel-longterm/parity/vectors）。
 
 .NOTPARALLEL:
 
@@ -25,7 +28,8 @@ RETR_LIB := ../retrieval/libaikretrieval.a
 SME_LIB := ../smeconfig/libaiksmeconfig.a
 LIB := libaikengine.a
 OBJS := engine.o memory.o
-TESTS := tests/test_engine
+TESTS := tests/test_engine tests/test_dynamics tests/test_rebuild \
+	tests/test_wal_engine
 
 all: $(LIB)
 
@@ -34,9 +38,10 @@ $(LIB): $(OBJS)
 
 engine.o: engine.c ../include/engine/engine.h \
 	../include/memory/embed_hash.h ../include/retrieval/ranker.h \
-	../include/retrieval/retriever.h ../include/space/space.h \
+	../include/retrieval/retriever.h ../include/retrieval/text.h \
+	../include/space/space.h \
 	../include/store/store_json.h ../include/store/store_npz.h \
-	../include/store/store_snapshot.h
+	../include/store/store_snapshot.h ../include/store/store_wal.h
 	$(CC) $(CFLAGS) -c -o $@ engine.c
 
 memory.o: memory.c ../include/engine/engine.h ../include/store/store_json.h
@@ -60,12 +65,37 @@ tests/test_engine: tests/test_engine.c $(LIB) $(SME_LIB) $(RETR_LIB) \
 	$(CC) $(CFLAGS) -o $@ tests/test_engine.c $(LIB) $(SME_LIB) \
 		$(RETR_LIB) $(SPACE_LIB) $(STORE_LIB) $(LDLIBS)
 
+tests/test_dynamics: tests/test_dynamics.c $(LIB) $(SME_LIB) $(RETR_LIB) \
+	$(SPACE_LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_dynamics.c $(LIB) $(SME_LIB) \
+		$(RETR_LIB) $(SPACE_LIB) $(STORE_LIB) $(LDLIBS)
+
+tests/test_rebuild: tests/test_rebuild.c $(LIB) $(SME_LIB) $(RETR_LIB) \
+	$(SPACE_LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_rebuild.c $(LIB) $(SME_LIB) \
+		$(RETR_LIB) $(SPACE_LIB) $(STORE_LIB) $(LDLIBS)
+
+# T4e-D：Engine WAL 接线（file backend / fsync / 恢复 / checkpoint；
+# 向量走 $AIK_PARITY_VECTORS，默认 $HOME/aikernel-longterm/parity/vectors）
+tests/test_wal_engine: tests/test_wal_engine.c $(LIB) $(SME_LIB) $(RETR_LIB) \
+	$(SPACE_LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_wal_engine.c $(LIB) $(SME_LIB) \
+		$(RETR_LIB) $(SPACE_LIB) $(STORE_LIB) $(LDLIBS)
+
 test: $(TESTS)
 	./tests/test_engine
+	./tests/test_dynamics
+	./tests/test_rebuild
+	./tests/test_wal_engine
+
+# T4e-E1-B：consolidation/compression 差分测试（数据默认
+# $HOME/aikernel-longterm/parity/vectors）
+test-dynamics: $(TESTS)
+	./tests/test_dynamics
 
 clean:
 	rm -f $(OBJS) $(LIB) $(TESTS)
 
 FORCE:
 
-.PHONY: all test clean FORCE
+.PHONY: all test test-dynamics clean FORCE

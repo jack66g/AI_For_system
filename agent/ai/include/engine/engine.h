@@ -11,7 +11,9 @@
  *     MemoryStats / RegionStats 的 to_dict 键序）
  *
  * 本接口是**进程内**契约：没有 HTTP 传输、没有路由层校验（T4b）、没有
- * WAL（T4c）与后台线程。所有子系统沿用 L1 既有实现：
+ * 后台线程。WAL（T4e-D）只接 file backend + sync_mode=fsync（懒打开，
+ * 单线程内同步 write+fsync）；sqlite/grouped 明确拒绝。
+ * 所有子系统沿用 L1 既有实现：
  *   smeconfig（配置）/ space（Region + 空间）/ retrieval（两阶段检索）/
  *   store（JSON DOM + 快照 + NPZ）/ memory（hashing 嵌入）。
  *
@@ -87,13 +89,40 @@ typedef struct aik_memory {
  *
  * 明确拒绝的配置（fail closed，不静默降级）：
  *   - embedding.provider != "hashing"：T4a 只有 hashing 本地嵌入；
- *   - persistence.enabled 为真：WAL 尚未接线（T4c）。
+ *   - persistence.enabled 且 storage.backend=sqlite：sqlite WAL 未接线
+ *     （T4e-D 只接 file backend）；
+ *   - persistence.enabled 且 persistence.sync_mode != "fsync"：grouped
+ *     （后台组提交线程）等模式未接线。
+ * persistence.enabled + storage.backend=json + sync_mode=fsync 已真实可用：
+ * WAL 路径 = persistence.wal_path（非空）否则 storage.path + ".wal"；
+ * WAL 懒打开（首次 append 才建文件），每条记录一次 write + fsync。
  */
 aik_engine *aik_engine_new(aik_config *cfg, int take_ownership,
 			   aik_now_fn now, void *now_ud,
 			   aik_id_fn id, void *id_ud,
 			   char *err, size_t errlen);
 void aik_engine_free(aik_engine *e);
+
+/* 借用当前配置（只读语义；路由 / 启动期覆盖使用） */
+aik_config *aik_engine_config(aik_engine *e);
+
+/*
+ * aik_engine_rebuild - 配置热重建（PUT /config 的 export→new→import→swap）
+ *
+ * 对齐 sme/api/server.py::rebuild_engine_with：
+ *   1) 旧库非空且 embedding 身份变化 → 拒绝（返回 1，err 为可直接展示的
+ *      中文提示）。身份 = provider/model/dim **加** mrl_dim/revision/
+ *      hash_factors/hash_seed（TASK-BOOK §7.3 的有意修正；上游只比前三项）；
+ *   2) 旧引擎 export（memories 含向量 + graph）→ 新引擎 import →
+ *      原样恢复图边与计数器（splits/merges/consolidations/compressions）；
+ *   3) 成功返回 0，*out 为新引擎（**接管 new_cfg 所有权**，调用者负责
+ *      free 旧引擎与释放旧配置的所有权关系）；失败返回 -1，err 为
+ *      "应用配置失败，引擎保持原配置：..." 或具体原因；**new_cfg 一律被
+ *      接管/释放**（调用方不要 free）。
+ * 任何失败都不修改旧引擎。
+ */
+int aik_engine_rebuild(aik_engine *old, aik_config *new_cfg,
+		       aik_engine **out, char *err, size_t errlen);
 
 /*
  * aik_engine_load - 读 T2 快照（engine.json.gz/明文 + NPZ sidecar）
@@ -106,8 +135,14 @@ void aik_engine_free(aik_engine *e);
  *   - space 用 aik_space_load_state 恢复 regions/region_edges（只传
  *     非 archived 向量），**不重新聚类**；archived 的 region_id 置 NULL；
  *   - memory_edges 原样恢复；counters（splits/merges/consolidations/
- *     compressions）恢复（Python 把 splits/merges 写回 region_manager）。
- * 成功 0，失败 -1 且引擎保持调用前状态。
+ *     compressions）恢复（Python 把 splits/merges 写回 region_manager）；
+ *   - WAL（T4e-D）：快照 wal_sequence 作为 checkpoint，replay 跳过
+ *     seq<=checkpoint（seq=0 总是重放），按参考 wal._apply 应用
+ *     add/transaction（不重复写 WAL、不触发 autosave）；重放条数 >0 时
+ *     立即 checkpoint（save）。replay 失败返回 -1，err 含
+ *     "WAL replay failed at record N; log retained"，日志文件原样保留。
+ * 成功 0，失败 -1 且引擎保持调用前状态（提交后的 WAL 重放失败除外：
+ * 引擎已载入快照，与参考 load() 抛 WALRecoveryError 的状态一致）。
  */
 int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen);
 
@@ -118,6 +153,10 @@ int aik_engine_load(aik_engine *e, const char *path, char *err, size_t errlen);
  * 保留（缺失才用当前 provider 重编码）；archived 只进 memories + 冷存档。
  * 整批 space.set_bulk(True) 抑制逐条演化，结束后若 auto_evolve 且
  * write_ops>0 调一次 evolution_pass。成功 0，*out_count 为导入条数。
+ *
+ * WAL（T4e-D）：bulk import 不逐条写 WAL（参考同）；persistence.enabled
+ * 时导入完成立即 checkpoint（aik_engine_save → storage.path），否则走
+ * 非 WAL 的 autosave 计数。
  */
 int aik_engine_import(aik_engine *e, const aik_json *items,
 		      long long *out_count, char *err, size_t errlen);
@@ -280,8 +319,25 @@ int aik_engine_link(aik_engine *e, const char *a, const char *b,
  * path 为 NULL/空时用 config.storage.path。成功 0 并把 autosave 计数器
  * 清零；失败 -1（err 已写，绝不留下半成品 JSON；本次新 NPZ 会尽力删除）。
  * 空库（没有向量）不写 NPZ、不写 embedding_* 键。
+ *
+ * WAL（T4e-D）：快照 wal_sequence = 当前 WAL 序号（未启用时为 0，字节与
+ * 旧版快照一致）。仅当保存路径与 config.storage.path 等价（abspath 归一
+ * 后去掉 ".json.gz"）且 WAL 启用时 checkpoint：checkpoint_sequence = seq、
+ * autosave 计数清零、checkpointed++、WAL 截断（seq 保留）。保存到其他
+ * 路径（export）不截断 WAL。WAL 截断失败 → 保存返回 -1（日志保留）。
  */
 int aik_engine_save(aik_engine *e, const char *path, char *err, size_t errlen);
+
+/*
+ * aik_engine_wal_stats - WAL 运行状态（只读快照）
+ *
+ * 键序：enabled, path, sync_mode, sequence, checkpoint_sequence,
+ * pending_ops, replayed, checkpointed。未启用 WAL 时 enabled=false、
+ * path=""、sequence/checkpoint_sequence=0。用于自测与后续 HTTP 观测；
+ * 成功 0，*out 由调用者 aik_json_free。
+ */
+int aik_engine_wal_stats(const aik_engine *e, aik_json **out,
+			 char *err, size_t errlen);
 
 /*
  * aik_memory_to_json - Memory.to_dict 的逐键逐序复刻
@@ -301,5 +357,46 @@ aik_json *aik_memory_to_json(const aik_memory *m, int include_embedding);
  * keyword_score、vector_score、metadata_match。memory_id 必须仍存在。
  */
 aik_json *aik_search_hit_to_json(aik_engine *e, const aik_search_hit *hit);
+
+/*
+ * aik_engine_consolidate - 记忆融合（sme/dynamics/consolidation.py）
+ *
+ * 按 space.regions 插入序找组（每组 <= consolidation.max_group_size）：
+ *   - Region 成员（member_ids 序）过滤 archived / source=="summary"；
+ *   - 按 metadata["ns"] 的 str() 分桶，桶内 importance 降序后贪心聚类
+ *     （余弦 >= consolidation.similarity_threshold），簇 >= 3 才成组；
+ *   - 小桶（<= max_group_size）覆盖率 < 0.6 且整体连贯时整桶融合；
+ *   - 最多 20 组；已有 summary 的 covers 集合相同的组跳过（幂等）。
+ * 每组生成一条 summary 记忆（source="summary"、tags=["summary"]、
+ * importance=0.75，走正常 add 管线：嵌入/space/id/时钟），把成员挂为
+ * children 并加 parent/summary 图边；metadata 追加 covers(sorted)、
+ * consolidated_at，组内唯一非空 ns 时写 ns。template 摘要文本与参考
+ * _template_summary/_common_tokens 逐字一致（本阶段无 LLM，summary_source
+ * =="llm" 时同样走 template）。
+ *
+ * 成功 0，*out_created 为 {"created":[...]} 形状的 ARR（创建序，元素为
+ * memory.to_dict(include_embedding=1)），调用者 aik_json_free；失败 -1
+ * （err 已写）。结束后 e->consolidations 自增并执行一次 autosave（与
+ * Python consolidate() 的单次 _autosave 一致）。
+ */
+int aik_engine_consolidate(aik_engine *e, aik_json **out_created,
+			   char *err, size_t errlen);
+
+/*
+ * aik_engine_compress - 长期压缩（sme/dynamics/compression.py）
+ *
+ * 遍历 Region（插入序）：size >= compression.min_region_compact、
+ * 尚未被本 Region 的 summary 压缩（metadata.compresses_region）时，取
+ * member_ids 序中未 archived、非 summary、age_days(last_hit) >=
+ * compression.age_days_threshold 的记忆，按 ns 分桶，桶 >= 阈值才成为
+ * 一个候选组；最多 10 组。每组生成一条 summary 记忆（importance=0.7），
+ * metadata 追加 compresses_region / compressed_at / cover_count /
+ * covers(sorted) / 可选 ns；模板文本与参考 _summarize 逐字一致。
+ *
+ * 成功 0，*out_created 同 aik_engine_consolidate；结束时
+ * e->compressions 自增并执行一次 autosave。
+ */
+int aik_engine_compress(aik_engine *e, aik_json **out_created,
+			char *err, size_t errlen);
 
 #endif /* _AIK_ENGINE_ENGINE_H */

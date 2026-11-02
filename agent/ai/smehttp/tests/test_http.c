@@ -35,6 +35,8 @@
 
 #include "smehttp/http.h"
 
+#include "smeconfig/config_items.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1639,6 +1641,1157 @@ static void test_modules(int port)
 	aik_json_free(root);
 }
 
+/* ================================================================== */
+/* T4e 配置中心 + 动力学（routes_config.c）                            */
+/* ================================================================== */
+/*
+ * 用例覆盖（任务书 E2-C）：
+ *   - GET /config 的 groups/presets 与 parity/vectors/config 逐字节；
+ *   - PUT /config 成功 / 未知项 / 非法值 / api_key 掩码跳过 / save 落盘；
+ *   - mrl_dim 闸门（非空库改 embedding 身份 → ok:false，引擎保持原配置）；
+ *   - POST /config/preset（未知 key 400、minimal 应用）；
+ *   - POST /config/check 的形状与 llm/embedding 探测文案；
+ *   - POST /config/reset 删文件 + 回默认 + 向量复现；
+ *   - POST /consolidate / /compress 的 {"created":[...]} 形状。
+ */
+static void clear_sme_env(void)
+{
+	static const char *const names[] = {
+		"SME_CONFIG_PATH", "SME_LLM_BASE_URL", "SME_LLM_API_KEY",
+		"SME_LLM_MODEL", "SME_API_TOKEN", "SME_API_AUTH_TOKEN",
+		"SME_EMBEDDING_PROVIDER", "SME_EMBEDDING_MODEL",
+		"SME_EMBEDDING_DIM", "SME_EMBEDDING_BASE_URL",
+		"SME_EMBEDDING_API_KEY",
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		(void)unsetenv(names[i]);
+}
+
+/* 不带配置文件的服务器：走默认配置 + source="defaults" */
+static int start_server_defaults(test_server *ts, const char *tmpdir)
+{
+	int fds[2];
+	char line[256];
+	size_t used = 0;
+	int port = -1;
+	pid_t pid;
+
+	snprintf(ts->cfg_path, sizeof(ts->cfg_path), "%s/sme-defaults.json",
+		 tmpdir);
+	snprintf(ts->db_path, sizeof(ts->db_path),
+		 "%s/engine-defaults.json.gz", tmpdir);
+	(void)unlink(ts->cfg_path);
+	(void)unlink(ts->db_path);
+	if (pipe(fds) != 0)
+		return -1;
+	pid = fork();
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		close(fds[0]);
+		if (dup2(fds[1], STDOUT_FILENO) < 0)
+			_exit(127);
+		close(fds[1]);
+		execl(server_bin(), "smehttp", "--config", ts->cfg_path,
+		      "--host", "127.0.0.1", "--port", "0", (char *)NULL);
+		_exit(127);
+	}
+	close(fds[1]);
+	ts->pid = pid;
+	ts->port = -1;
+	for (;;) {
+		ssize_t n;
+		char *nl;
+
+		if (used + 1 >= sizeof(line))
+			break;
+		n = read(fds[0], line + used, sizeof(line) - 1 - used);
+		if (n <= 0)
+			break;
+		used += (size_t)n;
+		line[used] = '\0';
+		nl = strchr(line, '\n');
+		if (!nl)
+			continue;
+		*nl = '\0';
+		if (strncmp(line, "LISTENING ", 10) == 0)
+			port = atoi(line + 10);
+		break;
+	}
+	close(fds[0]);
+	if (port <= 0) {
+		(void)kill(pid, SIGKILL);
+		(void)waitpid(pid, NULL, 0);
+		return -1;
+	}
+	ts->port = port;
+	return 0;
+}
+
+/* AIK_PARITY_VECTORS 或 ~/aikernel-longterm/parity/vectors */
+static const char *vectors_root(void)
+{
+	const char *env = getenv("AIK_PARITY_VECTORS");
+	static char buf[512];
+	const char *home;
+
+	if (env && *env)
+		return env;
+	home = getenv("HOME");
+	snprintf(buf, sizeof(buf), "%s/aikernel-longterm/parity/vectors",
+		 home && *home ? home : ".");
+	return buf;
+}
+
+static int vector_path(char *out, size_t cap, const char *name)
+{
+	int n = snprintf(out, cap, "%s/config/%s", vectors_root(), name);
+
+	return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+static char *read_file_all(const char *path, size_t *out_len)
+{
+	FILE *f = fopen(path, "rb");
+	long n;
+	char *buf;
+	size_t got;
+
+	*out_len = 0;
+	if (!f)
+		return NULL;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return NULL;
+	}
+	n = ftell(f);
+	if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		return NULL;
+	}
+	buf = malloc((size_t)n + 1);
+	if (!buf) {
+		fclose(f);
+		return NULL;
+	}
+	got = fread(buf, 1, (size_t)n, f);
+	fclose(f);
+	if (got != (size_t)n) {
+		free(buf);
+		return NULL;
+	}
+	buf[got] = '\0';
+	*out_len = got;
+	return buf;
+}
+
+/* JSON 节点 dump 后与向量文件逐字节比较 */
+static void check_vector(const aik_json *node, const char *name,
+			 const char *what)
+{
+	char path[640];
+	char *exp = NULL;
+	char *got = NULL;
+	size_t elen = 0;
+	size_t glen = 0;
+
+	if (vector_path(path, sizeof(path), name) != 0 ||
+	    !(exp = read_file_all(path, &elen))) {
+		check_true(0, "%s: vector %s missing (%s)", what, name,
+			   path);
+		return;
+	}
+	if (aik_json_dump(node, &got, &glen) != 0 || !got) {
+		free(exp);
+		check_true(0, "%s: cannot dump JSON node", what);
+		return;
+	}
+	check_int((long long)glen, (long long)elen, what);
+	check_true(glen == elen && memcmp(got, exp, glen) == 0,
+		   "%s: not byte-identical with %s", what, path);
+	free(got);
+	free(exp);
+}
+
+/* 文件字节与向量文件逐字节比较（save_config 输出） */
+static void check_file_vs_vector(const char *path, const char *name,
+				 const char *what)
+{
+	char vpath[640];
+	char *exp = NULL;
+	char *got = NULL;
+	size_t elen = 0;
+	size_t glen = 0;
+
+	if (vector_path(vpath, sizeof(vpath), name) != 0 ||
+	    !(exp = read_file_all(vpath, &elen))) {
+		check_true(0, "%s: vector %s missing (%s)", what, name,
+			   vpath);
+		return;
+	}
+	got = read_file_all(path, &glen);
+	check_true(got != NULL, "%s: cannot read %s", what, path);
+	if (!got) {
+		free(exp);
+		return;
+	}
+	check_int((long long)glen, (long long)elen, what);
+	check_true(glen == elen && memcmp(got, exp, glen) == 0,
+		   "%s: not byte-identical with %s", what, vpath);
+	free(got);
+	free(exp);
+}
+
+/* groups -> items 里按 path 找 payload；未找到返回 NULL */
+static const aik_json *config_item_payload(const aik_json *groups,
+					   const char *path)
+{
+	size_t g;
+	size_t n = aik_json_count(groups);
+
+	for (g = 0; g < n; g++) {
+		const aik_json *items =
+			aik_json_get(aik_json_at(groups, g), "items");
+		size_t i;
+
+		for (i = 0; i < aik_json_count(items); i++) {
+			const aik_json *it = aik_json_at(items, i);
+			const char *p =
+				aik_json_str(aik_json_get(it, "path"));
+
+			if (p && strcmp(p, path) == 0)
+				return it;
+		}
+	}
+	return NULL;
+}
+
+static int payload_is_int(const aik_json *groups, const char *path,
+			  long long want)
+{
+	const aik_json *p = config_item_payload(groups, path);
+	const aik_json *v = p ? aik_json_get(p, "value") : NULL;
+
+	return aik_json_typeof(v) == AIK_JSON_INT && aik_json_int(v) == want;
+}
+
+static int payload_is_num(const aik_json *groups, const char *path,
+			  double want)
+{
+	const aik_json *p = config_item_payload(groups, path);
+	const aik_json *v = p ? aik_json_get(p, "value") : NULL;
+
+	return (aik_json_typeof(v) == AIK_JSON_NUM ||
+		aik_json_typeof(v) == AIK_JSON_INT) &&
+	       aik_json_num(v) == want;
+}
+
+static int payload_is_bool(const aik_json *groups, const char *path,
+			   int want)
+{
+	const aik_json *p = config_item_payload(groups, path);
+	const aik_json *v = p ? aik_json_get(p, "value") : NULL;
+
+	return aik_json_typeof(v) == AIK_JSON_BOOL &&
+	       aik_json_bool(v) == (want ? 1 : 0);
+}
+
+static int payload_is_str(const aik_json *groups, const char *path,
+			  const char *want)
+{
+	const aik_json *p = config_item_payload(groups, path);
+	const aik_json *v = p ? aik_json_get(p, "value") : NULL;
+
+	return aik_json_typeof(v) == AIK_JSON_STR && want &&
+	       strcmp(aik_json_str(v), want) == 0;
+}
+
+/* 发请求并解析 JSON（body_out 可选：拿原始响应体） */
+static aik_json *call_json(int port, const char *method, const char *path,
+			   const char *body, int *status_out,
+			   char **body_out)
+{
+	char *resp_body = NULL;
+	aik_json *root;
+
+	if (http_call(port, method, path, body, NULL, status_out,
+		      &resp_body) != 0)
+		return NULL;
+	root = parse_json(resp_body);
+	if (body_out)
+		*body_out = resp_body;
+	else
+		free(resp_body);
+	return root;
+}
+
+/* {"ok":false,"errors":{...}}：断言并返回 errors（借用） */
+static const aik_json *expect_ok_false(const aik_json *root,
+				       const char *what)
+{
+	static const char *const keys[] = { "ok", "errors" };
+	const aik_json *ok = aik_json_get(root, "ok");
+	const aik_json *errors = aik_json_get(root, "errors");
+
+	check_keys(root, keys, 2, what);
+	check_true(aik_json_typeof(ok) == AIK_JSON_BOOL &&
+			   aik_json_bool(ok) == 0,
+		   "%s: ok is not false", what);
+	check_true(aik_json_typeof(errors) == AIK_JSON_OBJ,
+		   "%s: errors is not an object", what);
+	return errors;
+}
+
+/* {"ok":true,"applied":N,"config_file":path} */
+static void expect_applied_count(const aik_json *root, long long n,
+				 const char *config_file, const char *what)
+{
+	static const char *const keys[] = {
+		"ok", "applied", "config_file"
+	};
+	const aik_json *ok = aik_json_get(root, "ok");
+	const aik_json *applied = aik_json_get(root, "applied");
+
+	check_keys(root, keys, 3, what);
+	check_true(aik_json_typeof(ok) == AIK_JSON_BOOL &&
+			   aik_json_bool(ok) == 1,
+		   "%s: ok is not true", what);
+	check_true(aik_json_typeof(applied) == AIK_JSON_INT,
+		   "%s: applied is not int", what);
+	check_int(aik_json_int(applied), n, what);
+	if (config_file)
+		check_str(aik_json_str(aik_json_get(root, "config_file")),
+			  config_file, what);
+}
+
+/* 顶层 {"detail":[...]} 的第一条错误 */
+static const aik_json *first_detail(const aik_json *root, const char *what)
+{
+	const aik_json *detail = detail_of(root);
+
+	check_true(aik_json_typeof(detail) == AIK_JSON_ARR &&
+			   aik_json_count(detail) == 1,
+		   "%s: detail is not a 1-element array", what);
+	return aik_json_at(detail, 0);
+}
+
+/* loc == ["body", idx]（idx 为整数） */
+static int loc_is_body_index(const aik_json *loc, long long idx)
+{
+	const char *s0;
+
+	if (aik_json_typeof(loc) != AIK_JSON_ARR || aik_json_count(loc) != 2)
+		return 0;
+	s0 = aik_json_str(aik_json_at(loc, 0));
+	if (!s0 || strcmp(s0, "body") != 0)
+		return 0;
+	return aik_json_typeof(aik_json_at(loc, 1)) == AIK_JSON_INT &&
+	       aik_json_int(aik_json_at(loc, 1)) == idx;
+}
+
+/* ------------------------------------------------------------------ */
+/* groups_mutated.json（进程内等价路径）                              */
+/* ------------------------------------------------------------------ */
+static int set_item_str(aik_json *dom, const char *path, const char *val)
+{
+	const aik_config_item *it = aik_config_item_find(path);
+	aik_json *v;
+	int rc;
+
+	if (!it)
+		return -1;
+	v = aik_json_new_str(val);
+	if (!v)
+		return -1;
+	rc = aik_config_item_set(dom, it, v);
+	aik_json_free(v);
+	return rc;
+}
+
+static int set_item_num(aik_json *dom, const char *path, double val)
+{
+	const aik_config_item *it = aik_config_item_find(path);
+	aik_json *v;
+	int rc;
+
+	if (!it)
+		return -1;
+	v = aik_json_new_num(val);
+	if (!v)
+		return -1;
+	rc = aik_config_item_set(dom, it, v);
+	aik_json_free(v);
+	return rc;
+}
+
+/*
+ * 默认配置 DOM 上改密钥/令牌/枚举/阈值后 groups 与 groups_mutated.json
+ * 逐字节一致。embedding.provider=openai 无法经 HTTP 生效（引擎拒绝非
+ * hashing），因此走进程内等价路径（与 record_config.py 的构造一致）。
+ */
+static void test_config_groups_mutated(void)
+{
+	char err[256];
+	aik_config *cfg;
+	const aik_json *dom;
+	aik_json *copy = NULL;
+	aik_json *display = NULL;
+	aik_json *groups = NULL;
+	char *text = NULL;
+	size_t len = 0;
+	int ok;
+
+	err[0] = '\0';
+	cfg = aik_config_defaults(err, sizeof(err));
+	check_true(cfg != NULL, "config.mutated: defaults: %s", err);
+	if (!cfg)
+		return;
+	dom = aik_config_dom(cfg);
+	ok = dom && aik_json_dump(dom, &text, &len) == 0 && text;
+	if (ok) {
+		copy = aik_json_parse(text, len, err, sizeof(err));
+		free(text);
+		text = NULL;
+		ok = copy != NULL;
+	}
+	check_true(ok, "config.mutated: cannot deep-copy default DOM");
+	if (ok) {
+		ok = set_item_str(copy, "llm.api_key", "sk-test") == 0 &&
+		     set_item_str(copy, "embedding.api_key", "emb-test") == 0 &&
+		     set_item_str(copy, "api.auth_token", "tok") == 0 &&
+		     set_item_str(copy, "embedding.provider", "openai") == 0 &&
+		     set_item_str(copy, "retrieval.fusion", "weighted") == 0 &&
+		     set_item_str(copy, "llm.reasoning_effort", "none") == 0 &&
+		     set_item_num(copy, "consolidation.similarity_threshold",
+				  0.9) == 0;
+		check_true(ok, "config.mutated: item set failed");
+	}
+	if (ok) {
+		display = aik_config_display(copy);
+		groups = display ? aik_config_groups_build(display) : NULL;
+		check_true(groups != NULL,
+			   "config.mutated: groups build failed");
+		if (groups) {
+			const aik_json *p =
+				config_item_payload(groups, "llm.api_key");
+
+			check_str(aik_json_str(aik_json_get(p, "value")),
+				  "******", "config.mutated llm.api_key mask");
+			check_true(aik_json_typeof(
+					   aik_json_get(p, "set")) ==
+					   AIK_JSON_BOOL &&
+					   aik_json_bool(
+						   aik_json_get(p, "set")) ==
+						   1,
+				   "config.mutated llm.api_key.set");
+			check_vector(groups, "groups_mutated.json",
+				     "config.mutated groups");
+		}
+	}
+	aik_json_free(groups);
+	aik_json_free(display);
+	aik_json_free(copy);
+	aik_config_free(cfg);
+}
+
+/* ------------------------------------------------------------------ */
+/* GET /config（默认配置来源）                                        */
+/* ------------------------------------------------------------------ */
+static void test_config_get_defaults(int port, const char *cfg_path)
+{
+	int status = -1;
+	aik_json *root = call_json(port, "GET", "/config", NULL, &status,
+				   NULL);
+	static const char *const keys[] = {
+		"config_file", "source", "groups", "presets"
+	};
+	const aik_json *groups;
+	const aik_json *presets;
+	const aik_json *p;
+
+	check_int(status, 200, "config.get status");
+	check_true(root != NULL, "config.get: body is not JSON");
+	if (!root)
+		return;
+	check_keys(root, keys, 4, "config.get");
+	check_str(aik_json_str(aik_json_get(root, "config_file")), cfg_path,
+		  "config.get config_file");
+	check_str(aik_json_str(aik_json_get(root, "source")), "defaults",
+		  "config.get source");
+	groups = aik_json_get(root, "groups");
+	presets = aik_json_get(root, "presets");
+	check_vector(groups, "groups_default.json", "config.get groups");
+	check_vector(presets, "presets.json", "config.get presets");
+	check_int((long long)aik_json_count(groups), 9,
+		  "config.get groups count");
+	check_str(aik_json_str(aik_json_get(aik_json_at(groups, 0), "key")),
+		  "llm", "config.get first group");
+	check_str(aik_json_str(aik_json_get(aik_json_at(groups, 8), "key")),
+		  "extensions", "config.get last group");
+	p = config_item_payload(groups, "llm.base_url");
+	check_str(aik_json_str(aik_json_get(p, "value")),
+		  "https://api.openai.com/v1", "config.get llm.base_url");
+	check_true(aik_json_typeof(aik_json_get(p, "modified")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(p, "modified")) == 1,
+		   "config.get llm.base_url.modified");
+	p = config_item_payload(groups, "llm.api_key");
+	check_str(aik_json_str(aik_json_get(p, "value")), "",
+		  "config.get llm.api_key mask");
+	check_true(aik_json_typeof(aik_json_get(p, "set")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(p, "set")) == 0,
+		   "config.get llm.api_key.set");
+	check_true(payload_is_int(groups, "embedding.mrl_dim", 0),
+		   "config.get embedding.mrl_dim");
+	aik_json_free(root);
+}
+
+/* POST /config/check（默认配置：hashing + LLM 未配置） */
+static void test_config_check_defaults(int port)
+{
+	int status = -1;
+	aik_json *root = call_json(port, "POST", "/config/check", "{}",
+				   &status, NULL);
+	static const char *const keys[] = {
+		"config_valid", "errors", "engine_build_ok", "llm",
+		"embedding"
+	};
+	static const char *const probe_keys[] = {
+		"configured", "ok", "detail"
+	};
+	const aik_json *llm;
+	const aik_json *emb;
+
+	check_int(status, 200, "config.check status");
+	check_true(root != NULL, "config.check: body is not JSON");
+	if (!root)
+		return;
+	check_keys(root, keys, 5, "config.check");
+	check_true(aik_json_typeof(aik_json_get(root, "config_valid")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(root, "config_valid")) ==
+				   1,
+		   "config.check config_valid is not true");
+	check_true(arr_empty(aik_json_get(root, "errors")),
+		   "config.check errors is not []");
+	check_true(aik_json_typeof(aik_json_get(root, "engine_build_ok")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(
+				   aik_json_get(root, "engine_build_ok")) == 1,
+		   "config.check engine_build_ok is not true");
+	llm = aik_json_get(root, "llm");
+	check_keys(llm, probe_keys, 3, "config.check llm");
+	check_true(aik_json_typeof(aik_json_get(llm, "configured")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(llm, "configured")) == 0,
+		   "config.check llm.configured is not false");
+	check_true(aik_json_typeof(aik_json_get(llm, "ok")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(llm, "ok")) == 1,
+		   "config.check llm.ok is not true");
+	check_str(aik_json_str(aik_json_get(llm, "detail")),
+		  "LLM 未配置（llm.base_url 为空 → 纯离线可用）",
+		  "config.check llm.detail");
+	emb = aik_json_get(root, "embedding");
+	check_keys(emb, probe_keys, 3, "config.check embedding");
+	check_true(aik_json_typeof(aik_json_get(emb, "configured")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(emb, "configured")) == 0,
+		   "config.check embedding.configured is not false");
+	check_true(aik_json_typeof(aik_json_get(emb, "ok")) ==
+			   AIK_JSON_BOOL &&
+			   aik_json_bool(aik_json_get(emb, "ok")) == 1,
+		   "config.check embedding.ok is not true");
+	check_str(aik_json_str(aik_json_get(emb, "detail")),
+		  "embedding=hashing（hashing-d64-w3，无需网络）",
+		  "config.check embedding.detail");
+	aik_json_free(root);
+}
+
+/* ------------------------------------------------------------------ */
+/* PUT /config                                                        */
+/* ------------------------------------------------------------------ */
+static void test_config_put(int port, const char *cfg_path)
+{
+	int status = -1;
+	aik_json *root;
+	const aik_json *errors;
+	const aik_json *first;
+	const aik_json *groups;
+
+	/* 1) 无实际改动的 save=true：落盘文件与 Python save_config 逐字节 */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"retrieval.top_k\":10},"
+			 "\"save\":true}",
+			 &status, NULL);
+	check_int(status, 200, "config.put save status");
+	check_true(root != NULL, "config.put save: body is not JSON");
+	if (root)
+		expect_applied_count(root, 1, cfg_path, "config.put save");
+	aik_json_free(root);
+	check_true(access(cfg_path, F_OK) == 0,
+		   "config.put save: config file was not written");
+	check_file_vs_vector(cfg_path, "config_file.expected.txt",
+			     "config.put save bytes");
+
+	/* 2) values 非对象 → 422 dict_type loc ["body","values"] */
+	root = call_json(port, "PUT", "/config", "{\"values\":[]}", &status,
+			 NULL);
+	check_int(status, 422, "config.put values-type status");
+	first = root ? first_detail(root, "config.put values-type") : NULL;
+	if (first) {
+		check_str(aik_json_str(aik_json_get(first, "type")),
+			  "dict_type", "config.put values-type.type");
+		check_str(aik_json_str(aik_json_get(first, "msg")),
+			  "Input should be a valid dictionary",
+			  "config.put values-type.msg");
+		check_true(loc_is(aik_json_get(first, "loc"), "body",
+				  "values"),
+			   "config.put values-type.loc");
+	}
+	aik_json_free(root);
+
+	/* 3) save 非 bool → 422 bool_type loc ["body","save"] */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{},\"save\":\"yes\"}", &status, NULL);
+	check_int(status, 422, "config.put save-type status");
+	first = root ? first_detail(root, "config.put save-type") : NULL;
+	if (first) {
+		check_str(aik_json_str(aik_json_get(first, "type")),
+			  "bool_type", "config.put save-type.type");
+		check_str(aik_json_str(aik_json_get(first, "msg")),
+			  "Input should be a valid boolean",
+			  "config.put save-type.msg");
+		check_true(loc_is(aik_json_get(first, "loc"), "body", "save"),
+			   "config.put save-type.loc");
+	}
+	aik_json_free(root);
+
+	/* 4) 非法 JSON → 422 json_invalid */
+	root = call_json(port, "PUT", "/config", "{\"values\":", &status,
+			 NULL);
+	check_int(status, 422, "config.put json-invalid status");
+	first = root ? first_detail(root, "config.put json-invalid") : NULL;
+	if (first) {
+		check_str(aik_json_str(aik_json_get(first, "type")),
+			  "json_invalid", "config.put json-invalid.type");
+		check_str(aik_json_str(aik_json_get(first, "msg")),
+			  "JSON decode error",
+			  "config.put json-invalid.msg");
+		check_true(loc_is_body_index(aik_json_get(first, "loc"), 0),
+			   "config.put json-invalid.loc");
+		check_true(aik_json_typeof(aik_json_get(first, "ctx")) ==
+				   AIK_JSON_OBJ,
+			   "config.put json-invalid.ctx");
+	}
+	aik_json_free(root);
+
+	/* 5) 未知配置项 */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"nope.item\":\"1\"}}", &status, NULL);
+	check_int(status, 200, "config.put unknown status");
+	errors = root ? expect_ok_false(root, "config.put unknown") : NULL;
+	if (errors) {
+		check_str(aik_json_str(aik_json_get(errors, "nope.item")),
+			  "未知的配置项", "config.put unknown.errors");
+	}
+	aik_json_free(root);
+
+	/* 6) 非法值（字符串走 parse_value） */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"llm.max_tokens\":\"abc\"}}",
+			 &status, NULL);
+	check_int(status, 200, "config.put bad-value status");
+	errors = root ? expect_ok_false(root, "config.put bad-value") : NULL;
+	if (errors)
+		check_str(aik_json_str(
+				  aik_json_get(errors, "llm.max_tokens")),
+			  "最大 token 必须是整数",
+			  "config.put bad-value.errors");
+	aik_json_free(root);
+
+	/* 6b) 原生 JSON 走 validate_value（bool 当 int） */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"llm.max_tokens\":true}}", &status,
+			 NULL);
+	check_int(status, 200, "config.put bad-native status");
+	errors = root ? expect_ok_false(root, "config.put bad-native") : NULL;
+	if (errors)
+		check_str(aik_json_str(
+				  aik_json_get(errors, "llm.max_tokens")),
+			  "应为整数", "config.put bad-native.errors");
+	aik_json_free(root);
+
+	/* 7) api_key 掩码 "******" 跳过（只有另一个值生效） */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"llm.api_key\":\"******\","
+			 "\"retrieval.top_k\":\"10\"},\"save\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.put mask status");
+	if (root)
+		expect_applied_count(root, 1, cfg_path, "config.put mask");
+	aik_json_free(root);
+
+	/* 7b) 空串同样跳过；全部跳过 → applied 0 */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"llm.api_key\":\"\"}}", &status,
+			 NULL);
+	check_int(status, 200, "config.put mask-empty status");
+	if (root)
+		expect_applied_count(root, 0, cfg_path,
+				     "config.put mask-empty");
+	aik_json_free(root);
+
+	/* 8) 成功应用（save=false）：值生效、source 仍为 file */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"retrieval.top_k\":12,"
+			 "\"llm.temperature\":\"0.9\"},\"save\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.put apply status");
+	if (root)
+		expect_applied_count(root, 2, cfg_path, "config.put apply");
+	aik_json_free(root);
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.put verify status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+
+		check_str(aik_json_str(aik_json_get(root, "source")),
+			  "file", "config.put verify source");
+		check_true(payload_is_int(groups, "retrieval.top_k", 12),
+			   "config.put verify retrieval.top_k");
+		check_true(payload_is_num(groups, "llm.temperature", 0.9),
+			   "config.put verify llm.temperature");
+		check_true(payload_is_str(groups, "llm.api_key", ""),
+			   "config.put verify llm.api_key untouched");
+		check_true(aik_json_typeof(aik_json_get(
+				   config_item_payload(groups,
+						       "retrieval.top_k"),
+				   "modified")) == AIK_JSON_BOOL &&
+				   aik_json_bool(aik_json_get(
+					   config_item_payload(
+						   groups, "retrieval.top_k"),
+					   "modified")) == 1,
+			   "config.put verify retrieval.top_k.modified");
+	}
+	aik_json_free(root);
+
+	/* 9) 顶层非对象 → 422 dict_type loc ["body"] */
+	root = call_json(port, "PUT", "/config", "[]", &status, NULL);
+	check_int(status, 422, "config.put body-type status");
+	first = root ? first_detail(root, "config.put body-type") : NULL;
+	if (first)
+		check_true(loc_is(aik_json_get(first, "loc"), "body", NULL),
+			   "config.put body-type.loc");
+	aik_json_free(root);
+}
+
+/* LLM 已配置时的 /config/check（含 ping 的明确限制） */
+static void test_config_check_llm(int port)
+{
+	int status = -1;
+	aik_json *root;
+	const aik_json *llm;
+	const aik_json *groups;
+
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"llm.base_url\":"
+			 "\"http://127.0.0.1:9/v1\","
+			 "\"llm.api_key\":\"sk-test\","
+			 "\"llm.model\":\"m-test\"},\"save\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.put llm status");
+	if (root)
+		expect_applied_count(root, 3, NULL, "config.put llm");
+	aik_json_free(root);
+
+	root = call_json(port, "POST", "/config/check", "{\"ping\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.check llm status");
+	if (root) {
+		llm = aik_json_get(root, "llm");
+		check_true(aik_json_typeof(aik_json_get(llm, "configured")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(
+					   aik_json_get(llm, "configured")) == 1,
+			   "config.check llm.configured is not true");
+		check_true(aik_json_typeof(aik_json_get(llm, "ok")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(aik_json_get(llm, "ok")) == 1,
+			   "config.check llm.ok is not true");
+		check_str(aik_json_str(aik_json_get(llm, "detail")),
+			  "LLM 已配置：http://127.0.0.1:9/v1 model=m-test "
+			  "key=已填",
+			  "config.check llm.detail");
+	}
+	aik_json_free(root);
+
+	/* ping=true：C 版本没有 LLM HTTP 客户端 → ok=false + 明确文案 */
+	root = call_json(port, "POST", "/config/check", "{\"ping\":true}",
+			 &status, NULL);
+	check_int(status, 200, "config.check ping status");
+	if (root) {
+		llm = aik_json_get(root, "llm");
+		check_true(aik_json_typeof(aik_json_get(llm, "configured")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(
+					   aik_json_get(llm, "configured")) == 1,
+			   "config.check ping llm.configured");
+		check_true(aik_json_typeof(aik_json_get(llm, "ok")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(aik_json_get(llm, "ok")) == 0,
+			   "config.check ping llm.ok is not false");
+		check_str(aik_json_str(aik_json_get(llm, "detail")),
+			  "LLM 已配置：http://127.0.0.1:9/v1 model=m-test "
+			  "key=已填；请求失败：C 版本未内置 LLM HTTP 客户端",
+			  "config.check ping llm.detail");
+	}
+	aik_json_free(root);
+
+	/* 密钥回显仍是掩码 + set:true */
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.get masked status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+		check_true(payload_is_str(groups, "llm.api_key", "******"),
+			   "config.get llm.api_key is not masked");
+		check_true(aik_json_typeof(aik_json_get(
+				   config_item_payload(groups,
+						       "llm.api_key"),
+				   "set")) == AIK_JSON_BOOL &&
+				   aik_json_bool(aik_json_get(
+					   config_item_payload(
+						   groups, "llm.api_key"),
+					   "set")) == 1,
+			   "config.get llm.api_key.set is not true");
+	}
+	aik_json_free(root);
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /config/preset                                                */
+/* ------------------------------------------------------------------ */
+static void test_config_preset(int port, const char *cfg_path)
+{
+	int status = -1;
+	aik_json *root;
+	const aik_json *detail;
+	const aik_json *applied;
+	const aik_json *groups;
+	const char *applied0;
+	const char *applied_last;
+
+	/* 未知 key → 400 */
+	root = call_json(port, "POST", "/config/preset",
+			 "{\"key\":\"nope\"}", &status, NULL);
+	check_int(status, 400, "config.preset unknown status");
+	if (root)
+		check_str(aik_json_str(detail_of(root)),
+			  "未知预设 key：nope（可选：chat、kb_dynamic、"
+			  "kb_static、robot、minimal）",
+			  "config.preset unknown detail");
+	aik_json_free(root);
+
+	/* 缺 key → 422 missing loc ["body","key"] */
+	root = call_json(port, "POST", "/config/preset", "{}", &status, NULL);
+	check_int(status, 422, "config.preset missing status");
+	detail = root ? first_detail(root, "config.preset missing") : NULL;
+	if (detail) {
+		check_str(aik_json_str(aik_json_get(detail, "type")),
+			  "missing", "config.preset missing.type");
+		check_true(loc_is(aik_json_get(detail, "loc"), "body", "key"),
+			   "config.preset missing.loc");
+	}
+	aik_json_free(root);
+
+	/* save 非 bool → 422 bool_type */
+	root = call_json(port, "POST", "/config/preset",
+			 "{\"key\":\"minimal\",\"save\":1}", &status, NULL);
+	check_int(status, 422, "config.preset save-type status");
+	detail = root ? first_detail(root, "config.preset save-type") : NULL;
+	if (detail)
+		check_str(aik_json_str(aik_json_get(detail, "type")),
+			  "bool_type", "config.preset save-type.type");
+	aik_json_free(root);
+
+	/* minimal（save 默认 true）：applied 为预设原序 17 项 */
+	root = call_json(port, "POST", "/config/preset",
+			 "{\"key\":\"minimal\"}", &status, NULL);
+	check_int(status, 200, "config.preset minimal status");
+	check_true(root != NULL, "config.preset minimal: body is not JSON");
+	if (root) {
+		static const char *const keys[] = { "ok", "applied" };
+		const aik_json *ok = aik_json_get(root, "ok");
+
+		check_keys(root, keys, 2, "config.preset minimal");
+		check_true(aik_json_typeof(ok) == AIK_JSON_BOOL &&
+				   aik_json_bool(ok) == 1,
+			   "config.preset minimal ok is not true");
+		applied = aik_json_get(root, "applied");
+		check_true(aik_json_typeof(applied) == AIK_JSON_ARR,
+			   "config.preset minimal applied is not an array");
+		check_int((long long)aik_json_count(applied), 17,
+			  "config.preset minimal applied count");
+		applied0 = aik_json_str(aik_json_at(applied, 0));
+		check_str(applied0, "policy.decay_enabled",
+			  "config.preset minimal applied[0]");
+		applied_last =
+			aik_json_str(aik_json_at(applied, 16));
+		check_str(applied_last, "namespaces.enabled",
+			  "config.preset minimal applied[16]");
+	}
+	aik_json_free(root);
+
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.preset verify status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+
+		check_str(aik_json_str(aik_json_get(root, "source")),
+			  "file", "config.preset source");
+		check_true(payload_is_bool(groups, "policy.decay_enabled", 0),
+			   "config.preset policy.decay_enabled");
+		check_true(payload_is_bool(groups, "region.auto_evolve", 0),
+			   "config.preset region.auto_evolve");
+		check_true(payload_is_num(groups, "retrieval.keyword_weight",
+					  0.3),
+			   "config.preset retrieval.keyword_weight");
+		/*
+		 * memory.* 是会话层项：不在 SMEConfig.to_dict()/from_dict()
+		 * 的映射里，热重建后按参考语义回落到注册表默认（参考实现
+		 * 同样如此）；preset 的值只落在配置文件里。
+		 */
+		check_true(payload_is_bool(groups, "memory.reinforce_on", 1),
+			   "config.preset memory.reinforce_on (registry default)");
+		check_true(payload_is_int(groups, "memory.consolidate_every", 8),
+			   "config.preset memory.consolidate_every (registry default)");
+	}
+	aik_json_free(root);
+
+	/* preset 的会话层值必须写进配置文件（save 默认 true） */
+	{
+		char perr[256];
+		aik_json *filecfg = aik_config_load_file(cfg_path, perr,
+							 sizeof(perr));
+		const aik_config_item *it;
+		const aik_json *v;
+
+		check_true(filecfg != NULL,
+			   "config.preset: cannot load saved config file");
+		if (filecfg) {
+			it = aik_config_item_find("memory.reinforce_on");
+			v = it ? aik_config_item_get(filecfg, it) : NULL;
+			check_true(aik_json_typeof(v) == AIK_JSON_BOOL &&
+					   aik_json_bool(v) == 0,
+				   "config.preset file memory.reinforce_on");
+			it = aik_config_item_find("memory.consolidate_every");
+			v = it ? aik_config_item_get(filecfg, it) : NULL;
+			check_true(aik_json_typeof(v) == AIK_JSON_INT &&
+					   aik_json_int(v) == 1000000000LL,
+				   "config.preset file memory.consolidate_every");
+		}
+		aik_json_free(filecfg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /config/reset                                                 */
+/* ------------------------------------------------------------------ */
+static void test_config_reset(int port, const char *cfg_path)
+{
+	int status = -1;
+	aik_json *root;
+	const aik_json *groups;
+
+	check_true(access(cfg_path, F_OK) == 0,
+		   "config.reset: preset should have written the file");
+	root = call_json(port, "POST", "/config/reset", NULL, &status, NULL);
+	check_int(status, 200, "config.reset status");
+	if (root) {
+		static const char *const keys[] = { "ok" };
+		const aik_json *ok = aik_json_get(root, "ok");
+
+		check_keys(root, keys, 1, "config.reset");
+		check_true(aik_json_typeof(ok) == AIK_JSON_BOOL &&
+				   aik_json_bool(ok) == 1,
+			   "config.reset ok is not true");
+	}
+	aik_json_free(root);
+	check_true(access(cfg_path, F_OK) != 0,
+		   "config.reset: config file was not deleted");
+
+	/* 回默认：source=defaults，groups 与默认向量逐字节一致 */
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.reset verify status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+
+		check_str(aik_json_str(aik_json_get(root, "source")),
+			  "defaults", "config.reset source");
+		check_str(aik_json_str(aik_json_get(root, "config_file")),
+			  cfg_path, "config.reset config_file");
+		check_vector(groups, "groups_default.json",
+			     "config.reset groups");
+		check_true(payload_is_str(groups, "llm.base_url",
+					  "https://api.openai.com/v1"),
+			   "config.reset llm.base_url");
+		check_true(payload_is_str(groups, "llm.api_key", ""),
+			   "config.reset llm.api_key");
+	}
+	aik_json_free(root);
+
+	/* 文件已不存在时再 reset 也成功（幂等） */
+	root = call_json(port, "POST", "/config/reset", NULL, &status, NULL);
+	check_int(status, 200, "config.reset again status");
+	if (root)
+		check_true(aik_json_typeof(aik_json_get(root, "ok")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(aik_json_get(root, "ok")) == 1,
+			   "config.reset again ok");
+	aik_json_free(root);
+}
+
+/* ------------------------------------------------------------------ */
+/* mrl_dim 闸门（非空库改 embedding 身份必须拒绝）                    */
+/* ------------------------------------------------------------------ */
+static void test_config_gate(int port)
+{
+	int status = -1;
+	aik_json *root;
+	const aik_json *errors;
+	const aik_json *groups;
+	const char *msg;
+	long long before = -1;
+
+	/* 基线 */
+	root = call_json(port, "GET", "/health", NULL, &status, NULL);
+	check_int(status, 200, "config.gate health status");
+	if (root) {
+		const aik_json *m = aik_json_get(root, "memories");
+
+		if (aik_json_typeof(m) == AIK_JSON_INT)
+			before = aik_json_int(m);
+	}
+	aik_json_free(root);
+	check_true(before > 0, "config.gate: engine should hold memories");
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.gate get status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+
+		check_true(payload_is_int(groups, "embedding.mrl_dim", 0),
+			   "config.gate mrl_dim baseline");
+	}
+	aik_json_free(root);
+
+	/* mrl_dim 0 → 32：旧库非空 → ok:false + 中文提示，引擎保持原配置 */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"embedding.mrl_dim\":32},"
+			 "\"save\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.gate put status");
+	errors = root ? expect_ok_false(root, "config.gate put") : NULL;
+	if (errors) {
+		msg = aik_json_str(aik_json_get(errors, "_global"));
+		check_true(msg && strncmp(msg, "embedding 配置变更（",
+					  strlen("embedding 配置变更（")) ==
+				   0,
+			   "config.gate _global prefix (got '%s')",
+			   msg ? msg : "(null)");
+		check_true(msg && strstr(msg, "mrl_dim 0→32") != NULL,
+			   "config.gate _global should mention mrl_dim 0→32");
+	}
+	aik_json_free(root);
+
+	/* 配置未改、引擎仍可检索 */
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.gate verify status");
+	if (root) {
+		const aik_json *p;
+
+		groups = aik_json_get(root, "groups");
+		check_true(payload_is_int(groups, "embedding.mrl_dim", 0),
+			   "config.gate mrl_dim unchanged");
+		p = config_item_payload(groups, "embedding.mrl_dim");
+		check_true(aik_json_typeof(aik_json_get(p, "modified")) ==
+				   AIK_JSON_BOOL &&
+				   aik_json_bool(
+					   aik_json_get(p, "modified")) == 0,
+			   "config.gate mrl_dim.modified");
+	}
+	aik_json_free(root);
+	root = call_json(port, "POST", "/memories/search",
+			 "{\"text\":\"T4b 测试记忆\"}", &status, NULL);
+	check_int(status, 200, "config.gate search status");
+	if (root)
+		check_true(aik_json_typeof(aik_json_get(root, "count")) ==
+				   AIK_JSON_INT &&
+				   aik_json_int(aik_json_get(root, "count")) >
+					   0,
+			   "config.gate search count");
+	aik_json_free(root);
+
+	/* 合法 PUT（save=false）：top_k 生效且记忆数不变 */
+	root = call_json(port, "PUT", "/config",
+			 "{\"values\":{\"retrieval.top_k\":7},"
+			 "\"save\":false}",
+			 &status, NULL);
+	check_int(status, 200, "config.gate apply status");
+	if (root)
+		expect_applied_count(root, 1, NULL, "config.gate apply");
+	aik_json_free(root);
+	root = call_json(port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "config.gate apply verify status");
+	if (root) {
+		groups = aik_json_get(root, "groups");
+		check_true(payload_is_int(groups, "retrieval.top_k", 7),
+			   "config.gate top_k applied");
+	}
+	aik_json_free(root);
+	root = call_json(port, "GET", "/health", NULL, &status, NULL);
+	check_int(status, 200, "config.gate health2 status");
+	if (root)
+		check_int(aik_json_int(aik_json_get(root, "memories")),
+			  before, "config.gate memories preserved");
+	aik_json_free(root);
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /consolidate 与 POST /compress（形状）                        */
+/* ------------------------------------------------------------------ */
+static void test_dynamics_http(int port)
+{
+	static const char *const keys[] = { "created" };
+	int status = -1;
+	aik_json *root;
+
+	root = call_json(port, "POST", "/consolidate", NULL, &status, NULL);
+	check_int(status, 200, "dynamics consolidate status");
+	if (root) {
+		check_keys(root, keys, 1, "dynamics consolidate");
+		check_true(aik_json_typeof(aik_json_get(root, "created")) ==
+				   AIK_JSON_ARR,
+			   "dynamics consolidate created is not an array");
+	}
+	aik_json_free(root);
+
+	root = call_json(port, "POST", "/compress", NULL, &status, NULL);
+	check_int(status, 200, "dynamics compress status");
+	if (root) {
+		check_keys(root, keys, 1, "dynamics compress");
+		check_true(aik_json_typeof(aik_json_get(root, "created")) ==
+				   AIK_JSON_ARR,
+			   "dynamics compress created is not an array");
+	}
+	aik_json_free(root);
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
@@ -1649,10 +2802,13 @@ int main(void)
 		"T4b 测试记忆：苹果公司总部在库比蒂诺。";
 	test_server srv;
 
+	/* 配置中心用例与宿主环境无关：清掉可能影响默认配置的 SME_* */
+	clear_sme_env();
 	if (!mkdtemp(tmpdir)) {
 		fprintf(stderr, "test_http: mkdtemp: %s\n", strerror(errno));
 		return 1;
 	}
+	test_config_groups_mutated();
 	if (start_server(&srv, tmpdir, "plain", "") != 0) {
 		fprintf(stderr, "test_http: cannot start server (plain)\n");
 		return 1;
@@ -1671,8 +2827,24 @@ int main(void)
 	test_evolve(srv.port);
 	test_graph(srv.port);
 	test_modules(srv.port);
+	test_config_gate(srv.port);
+	test_dynamics_http(srv.port);
 	check_true(stop_server(&srv) == 0,
 		   "plain server did not exit 0 on SIGTERM");
+
+	/* 默认配置来源：GET /config 向量 + PUT/check/preset/reset */
+	if (start_server_defaults(&srv, tmpdir) != 0) {
+		fprintf(stderr, "test_http: cannot start server (defaults)\n");
+		return 1;
+	}
+	test_config_get_defaults(srv.port, srv.cfg_path);
+	test_config_check_defaults(srv.port);
+	test_config_put(srv.port, srv.cfg_path);
+	test_config_check_llm(srv.port);
+	test_config_preset(srv.port, srv.cfg_path);
+	test_config_reset(srv.port, srv.cfg_path);
+	check_true(stop_server(&srv) == 0,
+		   "defaults server did not exit 0 on SIGTERM");
 
 	if (start_server(&srv, tmpdir, "auth", "secret") != 0) {
 		fprintf(stderr, "test_http: cannot start server (auth)\n");

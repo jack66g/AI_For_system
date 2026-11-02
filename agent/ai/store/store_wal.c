@@ -33,6 +33,7 @@
 struct aik_wal {
 	int fd;
 	int fsync_each;
+	long long ops;
 };
 
 static void wal_err(char *err, size_t errlen, const char *fmt, ...)
@@ -123,6 +124,33 @@ int aik_wal_append(aik_wal *w, const aik_json *op, char *err, size_t errlen)
 		wal_err(err, errlen, "wal: fsync failed: %s", strerror(errno));
 		return -1;
 	}
+	w->ops++;
+	return 0;
+}
+
+long long aik_wal_ops(const aik_wal *w)
+{
+	return w ? w->ops : 0;
+}
+
+int aik_wal_reset(aik_wal *w, char *err, size_t errlen)
+{
+	if (err && errlen)
+		err[0] = '\0';
+	if (!w) {
+		wal_err(err, errlen, "wal: null handle");
+		return -1;
+	}
+	if (ftruncate(w->fd, 0) != 0) {
+		wal_err(err, errlen, "wal: truncate failed: %s", strerror(errno));
+		return -1;
+	}
+	/* checkpoint 的持久化语义：截断本身必须落盘，与 sync_mode 无关 */
+	if (fsync(w->fd) != 0) {
+		wal_err(err, errlen, "wal: fsync failed: %s", strerror(errno));
+		return -1;
+	}
+	w->ops = 0;
 	return 0;
 }
 
@@ -217,15 +245,19 @@ static int line_is_blank(const unsigned char *p, size_t n)
 	return 1;
 }
 
-int aik_wal_replay(const char *path, long long checkpoint,
-		   aik_wal_visit fn, void *ctx,
-		   char *err, size_t errlen)
+int aik_wal_replay_ex(const char *path, long long checkpoint,
+		      aik_wal_visit fn, void *ctx, long long *out_record,
+		      long long *out_last_seq, char *err, size_t errlen)
 {
 	unsigned char *buf = NULL;
 	size_t len = 0, pos = 0;
-	long long record = 0, visited = 0;
+	long long record = 0, visited = 0, last_seq = 0;
 	int rrc;
 
+	if (out_record)
+		*out_record = 0;
+	if (out_last_seq)
+		*out_last_seq = 0;
 	if (err && errlen)
 		err[0] = '\0';
 	if (!path || !*path) {
@@ -254,6 +286,8 @@ int aik_wal_replay(const char *path, long long checkpoint,
 		line_len = nl ? (size_t)(nl - (buf + pos)) : len - pos;
 		pos = nl ? (size_t)(nl - buf) + 1 : len;
 		record++;
+		if (out_record)
+			*out_record = record;
 		/* 空行/纯空白行跳过（参考 line.strip() 为空即 continue），
 		 * 行号仍递增；这类行不交给回调、也不算错误。 */
 		if (line_is_blank(buf + start, line_len))
@@ -297,6 +331,8 @@ int aik_wal_replay(const char *path, long long checkpoint,
 			}
 		}
 		/* 参考 if seq and seq <= checkpoint：seq=0 永不被跳过 */
+		if (seqval > last_seq)
+			last_seq = seqval;
 		if (seqval != 0 && seqval <= checkpoint) {
 			aik_json_free(parsed);
 			continue;
@@ -314,5 +350,15 @@ int aik_wal_replay(const char *path, long long checkpoint,
 		aik_json_free(parsed);
 	}
 	free(buf);
+	if (out_last_seq)
+		*out_last_seq = last_seq;
 	return (int)visited;
+}
+
+int aik_wal_replay(const char *path, long long checkpoint,
+		   aik_wal_visit fn, void *ctx,
+		   char *err, size_t errlen)
+{
+	return aik_wal_replay_ex(path, checkpoint, fn, ctx, NULL, NULL, err,
+				 errlen);
 }
