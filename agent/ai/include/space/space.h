@@ -15,6 +15,11 @@
  * 追加接口（契约外，供 parity 测试取演化历史）：
  *   aik_space_history_count / aik_space_history_at —— 只读借用内部事件
  *   数组，指针在下次修改 space 前有效。
+ *
+ * T4a 追加（不改既有函数语义）：
+ *   aik_space_load_state / aik_space_set_bulk / aik_space_set_id_fn /
+ *   aik_space_set_clock —— 快照恢复、批量写入抑制演化、Region id 生成
+ *   钩子、Region 时间源注入（见文件末尾）。
  */
 #ifndef _AIK_SPACE_SPACE_H
 #define _AIK_SPACE_SPACE_H
@@ -22,6 +27,7 @@
 #include <stddef.h>
 
 #include "space/region.h"
+#include "store/store_json.h"
 
 typedef struct aik_space aik_space;
 
@@ -140,5 +146,71 @@ int aik_space_write_ops(const aik_space *sp);
 /* 追加接口：内部演化历史（只读借用） */
 size_t aik_space_history_count(const aik_space *sp);
 const aik_space_event *aik_space_history_at(const aik_space *sp, size_t i);
+
+/* ------------------------------------------------------------------ */
+/* T4a 追加：快照状态恢复 / bulk 抑制 / Region id 生成钩子            */
+/* ------------------------------------------------------------------ */
+
+/* 一条待恢复的记忆向量（id/vector 借用，调用期间必须有效） */
+typedef struct {
+	const char *id;
+	const double *vector;
+	int dim;
+} aik_space_vector;
+
+/*
+ * aik_space_load_state - 用快照的 regions/region_edges + 向量恢复空间
+ *
+ * 对齐 sme/engine.py::_load_locked 与 sme/space/space.py::load_state：
+ *   - 先清空当前运行态（向量/Region/边/候选/write_ops），再把 vectors 注册
+ *     进空间；vectors 应只含活跃（非 archived）记忆；
+ *   - regions 数组顺序即 Region 插入序，id/member_ids/generation/
+ *     parent_region/created_at 按快照保留（同 id 后者替换、保持首次位置）；
+ *   - 成员 = member_ids ∩ 向量 id；过滤后为空的 Region 丢弃；
+ *   - 存活 Region 用 long double 全量重算 centroid/radius/bbox/density
+ *     （与 T3b 的 sync_geometry 同一套算法）；
+ *   - created_at 取快照值；重算几何后 last_updated = 注入时钟
+ *     （aik_space_set_clock，默认 time(NULL)；与 Python update_geometry 的
+ *     now() 一致），快照里的 last_updated 不采用；
+ *   - region_edges 只保留两端都存活的边（无向去重、距离沿用快照）；
+ *   - membership 由成员表反建（向量未归属任何 Region 时为 NULL）；
+ *   - write_ops = 0，演化候选/close 集合/merge 窗口清空。
+ *
+ * 不重新聚类。失败返回 -1 并写 err：参数校验（sp/dim/数组类型/向量维度）
+ * 失败时空间保持原状；进入恢复流程后的失败（OOM/数据不合法）会清空空间，
+ * 不留半成品。
+ */
+int aik_space_load_state(aik_space *sp, int dim,
+			 const aik_space_vector *vectors, size_t n_vectors,
+			 const aik_json *regions, const aik_json *region_edges,
+			 char *err, size_t errlen);
+
+/*
+ * aik_space_set_bulk - 批量写入期间抑制自动演化（insert/remove 后的
+ * maybe_evolve）。显式 aik_space_evolution_pass 不受影响。
+ */
+void aik_space_set_bulk(aik_space *sp, int bulk);
+
+/*
+ * aik_space_set_id_fn - 设置新建 Region 的 id 生成器
+ *
+ * fn 以 prefix="r" 调用，成功时把 NUL 结尾的 id 写进 out[16] 并返回 0；
+ * fn 为 NULL 或返回非 0/空串时回退默认的 "r%06zu" 自增格式。fn 对
+ * create_region 与 split 新生的子 Region 都生效。
+ */
+void aik_space_set_id_fn(aik_space *sp,
+			 int (*fn)(void *ud, const char *prefix, char out[16]),
+			 void *ud);
+
+/*
+ * aik_space_set_clock - 注入 Region 时间源（默认 time(NULL)）
+ *
+ * 设置后：新建 Region（含 split 子 Region）的 created_at、以及
+ * mark_stale / 全量几何重算（sync_geometry、load）后的 last_updated 都取
+ * fn(ud)。已有 Region 立即继承该时钟（之后的重算生效，已写入的 created_at
+ * 不变）。fn 为 NULL 时恢复默认墙钟；未设置时行为与 T3b 完全一致。
+ */
+typedef double (*aik_space_now_fn)(void *ud);
+void aik_space_set_clock(aik_space *sp, aik_space_now_fn fn, void *ud);
 
 #endif /* _AIK_SPACE_SPACE_H */

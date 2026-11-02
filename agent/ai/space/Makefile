@@ -7,7 +7,8 @@
 # `make -C ../store -j1 all`。构建串行：本目录显式 .NOTPARALLEL。
 #
 #   make -C agent/ai/space -j1 all      # 产出 libaikspace.a
-#   make -C agent/ai/space -j1 test     # 构建并运行 tests/test_space
+#   make -C agent/ai/space -j1 test     # 构建并运行 tests/test_space、
+#                                       # tests/test_space_load
 #   make -C agent/ai/space -j1 clean all test
 
 .NOTPARALLEL:
@@ -21,8 +22,8 @@ LDLIBS := -lz -lm
 
 STORE_LIB := ../store/libaikstore.a
 LIB := libaikspace.a
-OBJS := region.o space.o
-TESTS := tests/test_space
+OBJS := region.o space.o space_load.o
+TESTS := tests/test_space tests/test_space_load
 
 all: $(LIB)
 
@@ -32,8 +33,13 @@ $(LIB): $(OBJS)
 region.o: region.c ../include/space/region.h
 	$(CC) $(CFLAGS) -c -o $@ region.c
 
-space.o: space.c ../include/space/space.h ../include/space/region.h
+space.o: space.c ../include/space/space.h ../include/space/region.h \
+	 space_internal.h
 	$(CC) $(CFLAGS) -c -o $@ space.c
+
+space_load.o: space_load.c space_internal.h ../include/space/space.h \
+	 ../include/space/region.h ../include/store/store_json.h
+	$(CC) $(CFLAGS) -c -o $@ space_load.c
 
 $(STORE_LIB):
 	$(MAKE) -C ../store -j1 all
@@ -41,8 +47,12 @@ $(STORE_LIB):
 tests/test_space: tests/test_space.c $(LIB) $(STORE_LIB)
 	$(CC) $(CFLAGS) -o $@ tests/test_space.c $(LIB) $(STORE_LIB) $(LDLIBS)
 
+tests/test_space_load: tests/test_space_load.c $(LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_space_load.c $(LIB) $(STORE_LIB) $(LDLIBS)
+
 test: $(TESTS)
 	./tests/test_space
+	./tests/test_space_load
 
 clean:
 	rm -f $(OBJS) $(LIB) $(TESTS)

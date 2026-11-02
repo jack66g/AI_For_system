@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-02T02:07:44+08:00",
+  "created": "2026-11-02T09:56:46+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -9,7 +9,8 @@
     "T2 存储层 C 实现：json(dtoa)/gzip/npz/snapshot/WAL/sqlite；6 套差分测试全绿（json 40148·npz 104·snapshot 89·wal 57·snapshot_write 21·sqlite 196+）；尚未接入产品构建（T4 接线）",
     "MANIFEST hashes canonical LF checkout bytes",
     "T3a: hashing(BLAKE2b-64bit)+Unicode 13 lower+tokenize+BM25；1765/42/18 全绿（tag t3a-hashing）",
-    "T3b: Region 几何/演化 + 两阶段检索 + ranker + PPR/BFS；space 4252/ranker 118/ppr 12/retrieval 全绿（tag t3b-retrieval）"
+    "T3b: Region 几何/演化 + 两阶段检索 + ranker + PPR/BFS；space 4252/ranker 118/ppr 12/retrieval 全绿（tag t3b-retrieval）",
+    "T4a: SME config(137 keys)+engine(Memory/add/search/reinforce/archive/stats/export/import/load)+space load+clock；HTTP 10 路由；config 527/space 4120/engine 117/http 64/HTTP e2e 8456 全 0（tag t4a-engine）"
   ],
   "overlay_count": 168,
   "registry": {
@@ -31,11 +32,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 57464222,
-    "regular_files": 1159,
-    "source_files": 1159,
+    "bytes": 57804285,
+    "regular_files": 1178,
+    "source_files": 1178,
     "symlinks": 4,
-    "tracked_files": 1163
+    "tracked_files": 1182
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",

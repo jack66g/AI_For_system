@@ -81,3 +81,17 @@ longterm/
 fix-w*/
 .tmp/
 *.bundle
+
+# C 单元测试/服务二进制（make 产物，不入库）
+/agent/ai/engine/tests/test_engine
+/agent/ai/smeconfig/tests/test_config
+/agent/ai/smehttp/smehttp
+/agent/ai/smehttp/tests/test_http
+/agent/ai/space/tests/test_space
+/agent/ai/space/tests/test_space_load
+/agent/ai/retrieval/tests/test_embed_hash
+/agent/ai/retrieval/tests/test_text
+/agent/ai/retrieval/tests/test_bm25
+/agent/ai/retrieval/tests/test_ranker
+/agent/ai/retrieval/tests/test_ppr
+/agent/ai/retrieval/tests/test_retrieval

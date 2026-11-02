@@ -8,6 +8,10 @@
  *     压到 <=1 ulp（远小于 1e-9 的验收门槛），同时在 split 种子选择的
  *     近似平局上给出稳定、可复现的结果（见交付报告的语义偏差一节）。
  * 增量质心 (n*c+v)/(n+1) 同样在 long double 中计算后存 double。
+ *
+ * T4a：last_updated 取 Region 内注入的时钟（aik_region__set_clock，默认
+ * time(NULL)）；created_at 由 space 层创建时传入。未注入时钟时行为与
+ * T3b 完全一致。
  */
 #include "../include/space/region.h"
 
@@ -37,14 +41,17 @@ struct aik_region {
 	double created_at;
 	double last_updated;
 	int stale;
+	/* T4a：注入的 Region 时间源（NULL → time(NULL)） */
+	double (*now_fn)(void *ud);
+	void *now_ud;
 };
 
 /* ------------------------------------------------------------------ */
 /* 内部辅助                                                           */
 /* ------------------------------------------------------------------ */
-static double aik_now(void)
+static double region_now(const aik_region *r)
 {
-	return (double)time(NULL);
+	return r && r->now_fn ? r->now_fn(r->now_ud) : (double)time(NULL);
 }
 
 static char *dup_str(const char *s)
@@ -86,6 +93,7 @@ int aik_region__append_member(aik_region *r, const char *memory_id);
 int aik_region__drop_member(aik_region *r, const char *memory_id);
 void aik_region__set_members(aik_region *r, char **members, size_t n);
 void aik_region__set_generation(aik_region *r, int generation);
+void aik_region__set_clock(aik_region *r, double (*fn)(void *ud), void *ud);
 void aik_region__mark_stale(aik_region *r);
 void aik_region__incremental_centroid(aik_region *r, const double *vec);
 int aik_region__stale(const aik_region *r);
@@ -207,12 +215,20 @@ void aik_region__set_generation(aik_region *r, int generation)
 		r->generation = generation;
 }
 
+void aik_region__set_clock(aik_region *r, double (*fn)(void *ud), void *ud)
+{
+	if (!r)
+		return;
+	r->now_fn = fn;
+	r->now_ud = ud;
+}
+
 void aik_region__mark_stale(aik_region *r)
 {
 	if (!r)
 		return;
 	r->stale = 1;
-	r->last_updated = aik_now();
+	r->last_updated = region_now(r);
 }
 
 int aik_region__stale(const aik_region *r)
@@ -319,7 +335,7 @@ void aik_region__refresh_geometry(aik_region *r, aik_region_lookup_fn lookup,
 		}
 	}
 	r->stale = 0;
-	r->last_updated = aik_now();
+	r->last_updated = region_now(r);
 }
 
 /* ------------------------------------------------------------------ */

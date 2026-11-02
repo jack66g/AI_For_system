@@ -25,25 +25,8 @@
 #include <string.h>
 #include <time.h>
 
-/* ------------------------------------------------------------------ */
-/* region.c 内部接口（结构体定义不对外暴露）                          */
-/* ------------------------------------------------------------------ */
-typedef const double *(*aik_region_lookup_fn)(void *ctx,
-					      const char *memory_id);
-
-aik_region *aik_region__new(int dim, const char *id, const char *parent_id,
-			    int generation, double created_at,
-			    char *err, size_t errlen);
-void aik_region__free(aik_region *r);
-int aik_region__append_member(aik_region *r, const char *memory_id);
-int aik_region__drop_member(aik_region *r, const char *memory_id);
-void aik_region__set_members(aik_region *r, char **members, size_t n);
-void aik_region__set_generation(aik_region *r, int generation);
-void aik_region__mark_stale(aik_region *r);
-void aik_region__incremental_centroid(aik_region *r, const double *vec);
-int aik_region__stale(const aik_region *r);
-void aik_region__refresh_geometry(aik_region *r, aik_region_lookup_fn lookup,
-				  void *ctx);
+/* region.c 内部构造/几何 + 本文件对 space_load.c 暴露的最小内部接口 */
+#include "space_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* 常量与内部类型                                                     */
@@ -116,6 +99,15 @@ struct aik_space {
 	int write_ops;
 	int split_count;
 	int merge_count;
+
+	/* T4a：批量写入抑制演化（aik_space_set_bulk） */
+	int bulk;
+	/* T4a：新建 Region 的 id 生成钩子（aik_space_set_id_fn） */
+	int (*id_fn)(void *ud, const char *prefix, char out[16]);
+	void *id_fn_ud;
+	/* T4a：Region 时间源（aik_space_set_clock）；NULL → time(NULL) */
+	double (*now_fn)(void *ud);
+	void *now_ud;
 };
 
 /* ------------------------------------------------------------------ */
@@ -150,6 +142,12 @@ static char *dup_str(const char *s)
 static double aik_now(void)
 {
 	return (double)time(NULL);
+}
+
+/* 注入时钟优先，否则墙钟（T4a；未设置时与原行为一致） */
+static double space_now(const aik_space *sp)
+{
+	return sp && sp->now_fn ? sp->now_fn(sp->now_ud) : aik_now();
 }
 
 static void free_str_array(char **arr, size_t n)
@@ -422,6 +420,16 @@ static void region_remove_at(aik_space *sp, size_t idx)
 
 static void next_region_id(aik_space *sp, char *buf, size_t buflen)
 {
+	/* 调用方装了生成器就优先用它；失败/空串回退默认格式（T4a） */
+	if (sp->id_fn) {
+		char tmp[16];
+
+		tmp[0] = '\0';
+		if (sp->id_fn(sp->id_fn_ud, "r", tmp) == 0 && tmp[0] != '\0') {
+			snprintf(buf, buflen, "%s", tmp);
+			return;
+		}
+	}
 	sp->region_seq++;
 	snprintf(buf, buflen, "r%06zu", sp->region_seq);
 }
@@ -896,9 +904,10 @@ static aik_region *create_region(aik_space *sp, const char *member_id,
 	char *members[1];
 
 	next_region_id(sp, idbuf, sizeof(idbuf));
-	r = aik_region__new(sp->dim, idbuf, NULL, 1, aik_now(), err, errlen);
+	r = aik_region__new(sp->dim, idbuf, NULL, 1, space_now(sp), err, errlen);
 	if (!r)
 		return NULL;
+	aik_region__set_clock(r, sp->now_fn, sp->now_ud);
 	if (aik_region__append_member(r, member_id) < 0) {
 		aik_region__free(r);
 		set_err(err, errlen, "aik_space: out of memory");
@@ -1265,12 +1274,13 @@ static int split_region(aik_space *sp, const char *region_id,
 	old_generation = aik_region_generation(r);
 	pre_density = aik_region_density(r);
 	child = aik_region__new(sp->dim, new_id, region_id,
-				old_generation + 1, aik_now(), err, errlen);
+				old_generation + 1, space_now(sp), err, errlen);
 	if (!child) {
 		free_str_array(part_a, na);
 		free_str_array(part_b, nb);
 		return -1;
 	}
+	aik_region__set_clock(child, sp->now_fn, sp->now_ud);
 	/* keeper 保留原 id / created_at / parent，generation+1 */
 	aik_region__set_members(r, keep_part, n_keep);
 	aik_region__set_generation(r, old_generation + 1);
@@ -1730,6 +1740,9 @@ done:
 
 static int maybe_evolve(aik_space *sp, char *err, size_t errlen)
 {
+	/* 顺序同 Python _maybe_evolve：bulk 优先于 auto_evolve（T4a） */
+	if (sp->bulk)
+		return 0;
 	if (!sp->cfg.auto_evolve)
 		return 0;
 	if (sp->cfg.evolve_interval <= 0)
@@ -2195,3 +2208,201 @@ const aik_space_event *aik_space_history_at(const aik_space *sp, size_t i)
 		return NULL;
 	return &sp->history[i];
 }
+
+/* ------------------------------------------------------------------ */
+/* T4a：bulk 抑制 / id 生成钩子                                       */
+/* ------------------------------------------------------------------ */
+void aik_space_set_bulk(aik_space *sp, int bulk)
+{
+	if (sp)
+		sp->bulk = bulk != 0;
+}
+
+void aik_space_set_id_fn(aik_space *sp,
+			 int (*fn)(void *ud, const char *prefix, char out[16]),
+			 void *ud)
+{
+	if (!sp)
+		return;
+	sp->id_fn = fn;
+	sp->id_fn_ud = ud;
+}
+
+void aik_space_set_clock(aik_space *sp, aik_space_now_fn fn, void *ud)
+{
+	size_t i;
+
+	if (!sp)
+		return;
+	sp->now_fn = fn;
+	sp->now_ud = ud;
+	/* 已有 Region 继承新时钟：之后的 mark_stale / 几何重算生效，
+	 * 已写入的 created_at 不变 */
+	for (i = 0; i < sp->n_regions; i++)
+		aik_region__set_clock(sp->regions[i], fn, ud);
+}
+
+/* ------------------------------------------------------------------ */
+/* T4a：快照恢复所需的最小内部访问（space_load.c 使用）               */
+/* ------------------------------------------------------------------ */
+void aik_space__reset(aik_space *sp)
+{
+	size_t i;
+
+	if (!sp)
+		return;
+	for (i = 0; i < sp->vcap; i++) {
+		free(sp->vtab[i].id);
+		free(sp->vtab[i].vec);
+		sp->vtab[i].id = NULL;
+		sp->vtab[i].vec = NULL;
+		sp->vtab[i].region_id = NULL;
+		sp->vtab[i].hash = 0;
+		sp->vtab[i].used = 0;
+		sp->vtab[i].tomb = 0;
+	}
+	sp->vused = 0;
+	sp->vtomb = 0;
+	for (i = 0; i < sp->n_regions; i++)
+		aik_region__free(sp->regions[i]);
+	sp->n_regions = 0;
+	free_str_array(sp->split_cands, sp->n_split);
+	sp->split_cands = NULL;
+	sp->n_split = 0;
+	sp->cap_split = 0;
+	free_str_array(sp->small_cands, sp->n_small);
+	sp->small_cands = NULL;
+	sp->n_small = 0;
+	sp->cap_small = 0;
+	for (i = 0; i < sp->n_edges; i++) {
+		free(sp->edges[i].a);
+		free(sp->edges[i].b);
+	}
+	sp->n_edges = 0;
+	for (i = 0; i < sp->n_close; i++) {
+		free(sp->close_keys[i].a);
+		free(sp->close_keys[i].b);
+	}
+	sp->n_close = 0;
+	for (i = 0; i < sp->n_merge_ops; i++)
+		free(sp->merge_ops[i].region_id);
+	sp->n_merge_ops = 0;
+	aik_space_events_free(sp->history, sp->n_history);
+	sp->history = NULL;
+	sp->n_history = 0;
+	sp->cap_history = 0;
+	sp->write_ops = 0;
+	sp->region_seq = 0;
+}
+
+void aik_space__set_dim(aik_space *sp, int dim)
+{
+	if (sp && dim > 0)
+		sp->dim = dim;
+}
+
+aik_region *aik_space__new_region(aik_space *sp, const char *id,
+				  const char *parent_id, int generation,
+				  double created_at, char *err, size_t errlen)
+{
+	aik_region *r;
+
+	if (!sp)
+		return NULL;
+	r = aik_region__new(sp->dim, id, parent_id, generation, created_at,
+			    err, errlen);
+	if (!r)
+		return NULL;
+	/* load 恢复的 Region 也继承注入时钟：重算几何后 last_updated=时钟 */
+	aik_region__set_clock(r, sp->now_fn, sp->now_ud);
+	return r;
+}
+
+int aik_space__load_vector(aik_space *sp, const char *memory_id,
+			   const double *vec, char *err, size_t errlen)
+{
+	aik_vec_slot *slot;
+
+	if (!sp || !memory_id || !vec) {
+		set_err(err, errlen, "aik_space: invalid vector");
+		return -1;
+	}
+	slot = vec_lookup(sp, memory_id);
+	if (slot) {
+		memcpy(slot->vec, vec, (size_t)sp->dim * sizeof(double));
+		return 0;
+	}
+	return vec_insert(sp, memory_id, vec, err, errlen);
+}
+
+int aik_space__has_vector(const aik_space *sp, const char *memory_id)
+{
+	return sp && memory_id && vec_lookup(sp, memory_id) ? 1 : 0;
+}
+
+int aik_space__region_exists(const aik_space *sp, const char *region_id)
+{
+	return sp && region_id && region_find(sp, region_id) ? 1 : 0;
+}
+
+int aik_space__adopt_region(aik_space *sp, aik_region *r)
+{
+	size_t idx;
+
+	if (!sp || !r)
+		return -1;
+	/* Python dict 语义：同 id 后者替换、保持首次插入位置 */
+	idx = region_index(sp, aik_region_id(r));
+	if (idx != AIK_FULL_TABLE) {
+		aik_region__free(sp->regions[idx]);
+		sp->regions[idx] = r;
+		return 0;
+	}
+	return region_add(sp, r);
+}
+
+void aik_space__refresh_region(aik_space *sp, aik_region *r)
+{
+	if (sp && r)
+		region_full_refresh(sp, r);
+}
+
+int aik_space__set_membership(aik_space *sp, const char *memory_id,
+			      const aik_region *region)
+{
+	aik_vec_slot *slot;
+
+	if (!sp || !memory_id)
+		return -1;
+	slot = vec_lookup(sp, memory_id);
+	if (!slot)
+		return -1;
+	slot->region_id = region ? aik_region_id(region) : NULL;
+	return 0;
+}
+
+int aik_space__adopt_edge(aik_space *sp, const char *a, const char *b,
+			  double distance)
+{
+	if (!sp || !a || !b)
+		return -1;
+	return edge_set(sp, a, b, distance);
+}
+
+void aik_space__set_write_ops(aik_space *sp, int write_ops)
+{
+	if (sp)
+		sp->write_ops = write_ops;
+}
+
+double aik_space__now(const aik_space *sp)
+{
+	return space_now(sp);
+}
+
+void aik_space__reserve_region_seq(aik_space *sp, size_t seq)
+{
+	if (sp && seq > sp->region_seq)
+		sp->region_seq = seq;
+}
+
