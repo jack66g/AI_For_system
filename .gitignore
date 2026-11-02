@@ -108,3 +108,16 @@ fix-w*/
 /agent/ai/engine/tests/test_wal_engine
 /agent/ai/smeconfig/tests/test_config_items
 /agent/ai/tests/engine.actual.json
+
+# T5 autocondense C 产物
+/agent/ai/autocondense/autocondensed
+/agent/ai/autocondense/autocondense-mcp
+/agent/ai/autocondense/autocondense-hook
+/agent/ai/autocondense/libaikautocondense.a
+/agent/ai/autocondense/*.o
+/agent/ai/autocondense/tests/test_acconfig
+/agent/ai/autocondense/tests/test_acdigest
+/agent/ai/autocondense/tests/test_acsignals
+/agent/ai/autocondense/tests/test_acsme
+/agent/ai/autocondense/tests/test_acstate
+/agent/ai/autocondense/tests/test_acmcp
