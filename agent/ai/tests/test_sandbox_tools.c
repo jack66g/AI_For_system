@@ -7,7 +7,7 @@
  *   2. 通道名映射 tool_channel_from_str("sandbox")
  *   3. tools-sandbox.json 受限表：恰 7 件、无任何 W2（工具级与命令级）、
  *      exec 白名单=R46+9W1=55（W65 增 getent/systemd-analyze；绝无
- *      systemctl/kill/apt/嵌套派生工具；python3/gcc/cc 以 W1 受控开放）
+ *      systemctl/kill/apt/嵌套派生工具；gcc/cc 以 W1 受控开放；T7d 摘 python3）
  *   4. sandbox_spawn 执行链（mock aik-sandbox + mock ai）：
  *      - 参数组装：-p task -s sb-<name> -N，AIKERNEL_TOOLS_JSON 注入
  *      - 正常完成：stdout 尾部回传
@@ -268,10 +268,10 @@ int main(void)
 			}
 			CHECK(!cmd_w2, "受限表 exec 命令级 0 个 W2");
 			CHECK(!banned_hit, "受限表无黑名单命令");
-			CHECK(w1_hits == 11,
-			      "受限表 W1 命令恰 11 个（8 写 + python3/gcc/cc）");
-			CHECK(t->exec_cmd_count == 57,
-			      "受限表 exec 白名单 46R+11W1=57 命令（W72 新增编程三件）");
+			CHECK(w1_hits == 10,
+			      "受限表 W1 命令恰 10 个（8 写 + gcc/cc；T7d 摘 python3）");
+			CHECK(t->exec_cmd_count == 56,
+			      "受限表 exec 白名单 46R+10W1=56 命令（W72 编程两件）");
 		} else {
 			CHECK(0, "受限表 exec_run 白名单解析");
 		}

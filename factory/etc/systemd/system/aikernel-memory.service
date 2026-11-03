@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/sme-rest-server.py
+ExecStart=/usr/local/sbin/aikd --config /opt/sme/data/sme.config.json --import-seed /usr/local/share/aikernel/sme-seed.jsonl --static-dir /usr/local/share/aikd/static
 StandardOutput=append:/tmp/sme.log
 StandardError=append:/tmp/sme.log
 Restart=always

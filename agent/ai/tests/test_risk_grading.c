@@ -6,8 +6,8 @@
  *   1. tool_exec_effective_risk：curl 写参数 W2 / 只读 URL R；
  *      ollama pull W2·list R；timedatectl set-time W2·status R；
  *      ip addr add W2·show R；ethtool -s W2·查询 R；
- *      journalctl --vacuum W2·普通查询 R；crontab -l R·-r W2；
- *      systemctl status R·restart W2；mkdir W1；python3 W2。
+ *      journalctl --vacuum W2·普通查询 R；crontab 已摘除（W80）；
+ *      systemctl status R·restart W2；mkdir W1；python3 已摘除（T7d）。
  *   2. find 受控面拒绝 -delete；crontab 无参数拒绝（防清表）。
  *   3. 沙盒受限表剔除动态风险命令（curl/ip/ethtool/journalctl/
  *      ollama/timedatectl）且 0 W2——防子智能体 W2 逃逸。
@@ -91,7 +91,8 @@ int main(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "主注册表加载（tools.json）");
-	CHECK(reg.tool_count == 156, "注册表 156 件");
+	CHECK(reg.tool_count == 230,
+	      "注册表 230 件（W82B V6；T7d 修正 W77d 旧锚 156）");
 
 	/* ---- 0. W50 记忆管理面风险分级 ---- */
 	CHECK(strcmp(risk_of(&reg, "memory_update", "{}"), "W1") == 0,
@@ -160,12 +161,11 @@ int main(void)
 		"{\"command\":\"journalctl\",\"args\":[\"--vacuum-size=10M\"]}"),
 		"W2") == 0, "journalctl --vacuum-size → W2");
 
+	/* W80 起航 invariant：crontab 工具不随镜像发行（registry 无此名）。
+	 * T7d 修正 W55 时点的旧断言（-l R / -r W2）。 */
 	CHECK(strcmp(risk_of(&reg, "exec_run",
-		"{\"command\":\"crontab\",\"args\":[\"-l\"]}"), "R") == 0,
-		"crontab -l → R");
-	CHECK(strcmp(risk_of(&reg, "exec_run",
-		"{\"command\":\"crontab\",\"args\":[\"-r\"]}"), "W2") == 0,
-		"crontab -r → W2");
+		"{\"command\":\"crontab\",\"args\":[\"-l\"]}"), "W1") == 0,
+		"crontab 已摘除 → 工具级回退 W1（白名单外一致）");
 
 	CHECK(strcmp(risk_of(&reg, "exec_run",
 		"{\"command\":\"systemctl\",\"args\":[\"status\",\"sshd\"]}"),
@@ -208,9 +208,12 @@ int main(void)
 	CHECK(strcmp(risk_of(&reg, "exec_run",
 		"{\"command\":\"mkdir\",\"args\":[\"/tmp/w48x\"]}"), "W1") == 0,
 		"mkdir → W1");
+	/* T7d：python3 已从 exec 白名单摘除——有效风险回退到工具级兜底
+	 * （"W1"，与任意白名单外命令一致，无命令级风险）；执行面由
+	 * executor 以 UNKNOWN_COMMAND 拒绝（见 test_lease_gate）。 */
 	CHECK(strcmp(risk_of(&reg, "exec_run",
-		"{\"command\":\"python3\",\"args\":[\"/tmp/x.py\"]}"), "W2") == 0,
-		"python3 → W2");
+		"{\"command\":\"python3\",\"args\":[\"/tmp/x.py\"]}"), "W1") == 0,
+		"python3 已摘除（T7d）→ 工具级回退 W1（执行面拒绝）");
 	CHECK(strcmp(risk_of(&reg, "exec_run",
 		"{\"command\":\"tar\",\"args\":[\"-cf\",\"/tmp/a.tar\",\"/tmp\"]}"),
 		"W2") == 0, "tar → W2（W69 升级）");
@@ -247,11 +250,11 @@ int main(void)
 		if (getuid() == 0) {
 			ok = run_tool(&reg, "exec_run",
 				      "{\"command\":\"crontab\",\"args\":[]}", &out);
-			CHECK(ok == 0 && strstr(out, "覆盖当前表") != NULL,
-			      "crontab 无参数被拒绝（防 stdin 空内容清表）");
+			CHECK(ok == 0 && strstr(out, "不在 exec 白名单") != NULL,
+			      "crontab 已摘除（W80 invariant）→ 白名单外拒绝");
 			free(out);
 		} else {
-			SKIP("crontab W2 拒绝面需要 root（sudo 运行）");
+			SKIP("crontab 拒绝面需要 root（sudo 运行）");
 		}
 	}
 
@@ -292,10 +295,10 @@ int main(void)
 		CHECK(no_dyn, "受限表剔除动态风险命令（curl/ip/ethtool/"
 			      "journalctl/ollama/timedatectl）");
 		CHECK(no_tar, "受限表剔除 tar（W69 升 W2）");
-		CHECK(t->exec_cmd_count == 57,
-		      "受限表白名单 57 命令（W72 新增 python3/gcc/cc）");
-		CHECK(w1_hits == 11,
-		      "受限表 W1 命令 11 个（8 写 + 编程三件）");
+		CHECK(t->exec_cmd_count == 56,
+		      "受限表白名单 56 命令（W72：54+gcc/cc；T7d 摘 python3）");
+		CHECK(w1_hits == 10,
+		      "受限表 W1 命令 10 个（8 写 + gcc/cc）");
 	}
 
 	tool_registry_free(&reg);

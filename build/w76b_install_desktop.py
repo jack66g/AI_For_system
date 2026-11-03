@@ -136,7 +136,7 @@ def _apply_tree(root):
             p = os.path.join(dirpath, name)
             if os.path.islink(p):
                 continue
-            mode = 0o755 if name == "run.sh" else 0o644
+            mode = 0o755 if name in ("run.sh", "desktopd") else 0o644
             os.chmod(p, mode)
             _chown_root(p)
 
@@ -144,8 +144,9 @@ def _apply_tree(root):
 def install(src=DEFAULT_SRC, root=DEFAULT_ROOT, enable=True, quiet=False):
     src = os.path.abspath(src)
     root = os.path.abspath(root)
-    if not os.path.isfile(os.path.join(src, "server.py")):
-        raise SystemExit("desktop source missing server.py: %s" % src)
+    if not os.path.isfile(os.path.join(src, "desktopd")) or \
+            not os.access(os.path.join(src, "desktopd"), os.X_OK):
+        raise SystemExit("desktop source missing executable desktopd: %s" % src)
     if not os.path.isdir(os.path.join(src, "static")):
         raise SystemExit("desktop source missing static/: %s" % src)
     os.makedirs(BACKUP, exist_ok=True)
@@ -186,12 +187,18 @@ def install(src=DEFAULT_SRC, root=DEFAULT_ROOT, enable=True, quiet=False):
             os.unlink(wants)
 
     required = (
-        "/server.py", "/theme.json", "/static/index.html",
+        "/desktopd", "/theme.json", "/static/index.html",
         "/static/app.js", "/static/style.css", "/data/apps-catalog.json",
+        "/data/desktop.json", "/data/notifs.json", "/data/pin.json",
     )
     for rel in required:
         if not os.path.isfile(target + rel):
             raise SystemExit("W76b install incomplete: %s" % (target + rel))
+    # T7e reverse gate: python-era files must never ship again
+    for banned in ("/server.py", "/static/screenshot.py"):
+        if os.path.exists(target + banned):
+            raise SystemExit("T7e reverse gate: %s must not ship: %s"
+                             % (banned, target + banned))
     st = os.stat(state)
     if (st.st_mode & 0o777) != 0o700 or st.st_uid != uid:
         raise SystemExit("W76b state dir not 0700:%d: %s" % (uid, state))

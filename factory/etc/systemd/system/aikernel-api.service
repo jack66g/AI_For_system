@@ -9,7 +9,7 @@ Type=simple
 Environment=HOME=/root
 Environment=TERM=xterm
 Environment=AIKERNEL_TOOLS_JSON=/usr/local/share/aikernel/tools.json
-ExecStart=/usr/bin/python3 /usr/local/sbin/aikernel-api
+ExecStart=/usr/local/sbin/aikernel-api
 Restart=always
 RestartSec=3
 

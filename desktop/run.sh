@@ -9,4 +9,4 @@ export AIK_DESKTOP_PORT="${AIK_DESKTOP_PORT:-8091}"
 export AIK_DESKTOP_BIND="${AIK_DESKTOP_BIND:-127.0.0.1}"
 export AIK_DESKTOP_VM="${AIK_DESKTOP_VM:-0}"
 export AIK_DESKTOP_SCREENSHOT="${AIK_DESKTOP_SCREENSHOT:-0}"
-exec /usr/bin/python3 ./server.py
+exec ./desktopd

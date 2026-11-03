@@ -1,5 +1,5 @@
 AIKernel Agent 工具注册表生成报告（v2）
-生成时间: 2026-11-01T15:36:40
+生成时间: 2026-11-03T23:46:24
 来源: AIKernel 内核源码静态梳理
 QEMU dump: 未提供（使用内核源码默认表）
 
@@ -34,7 +34,7 @@ QEMU dump: 未提供（使用内核源码默认表）
   W1             55
   W2             76
   exec按命令    1（exec.run，逐命令见 exec.commands）
-exec 白名单命令数: 100 (R=52 W1=13 W2=35)；单源: tools.json exec.commands
+exec 白名单命令数: 99 (R=52 W1=13 W2=34)；单源: tools.json exec.commands
 
 能力域归属（W76 八域；主域 / 含多标签）:
   res         32 /  54

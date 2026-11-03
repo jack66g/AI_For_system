@@ -9,14 +9,14 @@
  *   <root>/config/config_file.expected.txt  save_config() 逐字节输出
  *
  * 覆盖（T4E-DESIGN.md §1.3）：
- *   1) 注册表 101/5/10、抽样字段、api_key 结尾项数量；
+ *   1) 注册表 97/5/10、抽样字段、api_key 结尾项数量；
  *   2) groups/presets 与向量逐字节一致（默认）；
  *   3) mutated 场景逐字节一致（掩码 ****** + set:true）；
  *   4) save_file 与 config_file.expected.txt 逐字节一致 + load_file 往返；
  *   5) parse_value 正/负例（含逐字错误文案）；
  *   6) validate_value 正/负例；
  *   7) validate_all：默认 0 告警、注入 LLM/embedding 后文案逐字；
- *   8) load_file：缺失/坏 JSON/顶层数组 -> 101 项默认；
+ *   8) load_file：缺失/坏 JSON/顶层数组 -> 97 项默认；
  *   9) value_equal 的 Python == 语义。
  *
  * 换行基准：向量 config_file.expected.txt 已归一到 LF（Linux 参考实现的
@@ -250,7 +250,7 @@ static void test_registry(void)
 	const aik_config_preset *p;
 	size_t i, api_key_items = 0;
 
-	check(aik_config_item_count == 101, "registry: %zu items != 101",
+	check(aik_config_item_count == 97, "registry: %zu items != 97",
 	      aik_config_item_count);
 	check(aik_config_preset_count == 5, "registry: %zu presets != 5",
 	      aik_config_preset_count);
@@ -388,7 +388,7 @@ static void test_registry(void)
 	check(aik_config_preset_find("nope") == NULL,
 	      "registry: unknown preset must be NULL");
 
-	/* defaults_config()：101 项、ITEMS 插入序 */
+	/* defaults_config()：97 项、ITEMS 插入序 */
 	{
 		aik_json *def = aik_config_defaults_build();
 		size_t n = 0;
@@ -400,7 +400,7 @@ static void test_registry(void)
 			for (i = 0; i < aik_config_item_count; i++)
 				if (aik_config_item_has(def, &aik_config_items[i]))
 					n++;
-			check(n == 101, "registry: defaults has %zu items != 101",
+			check(n == 97, "registry: defaults has %zu items != 97",
 			      n);
 			check(aik_json_count(def) == 25,
 			      "registry: defaults has %zu sections != 25",
@@ -448,7 +448,7 @@ static void test_groups_presets(const aik_json *cdef)
 	free(got);
 	free(want);
 
-	/* 结构抽样：9 个非空分组、101 项、空可视化组不下发 */
+	/* 结构抽样：9 个非空分组、97 项、空可视化组不下发 */
 	if (groups) {
 		size_t i, items = 0;
 		int has_viz = 0;
@@ -465,7 +465,7 @@ static void test_groups_presets(const aik_json *cdef)
 				   "visualization") == 0)
 				has_viz = 1;
 		}
-		check(items == 101, "groups: %zu items != 101", items);
+		check(items == 97, "groups: %zu items != 97", items);
 		check(!has_viz, "groups: empty visualization group leaked");
 	}
 
@@ -675,9 +675,9 @@ static void test_save_load(const aik_json *cdef)
 		check(!has_crlf, "save: output must be LF-only");
 		check(rawlen > 0 && raw[rawlen - 1] != '\n',
 		      "save: output must not end with newline");
-		check(rawlen == 15208, "save: %zu bytes != 15208", rawlen);
-		check(strstr(raw, "\"min_similarity\": -1.0") != NULL,
-		      "save: -1.0 must stay NUM");
+		check(rawlen == 14240, "save: %zu bytes != 14240", rawlen);
+		check(strstr(raw, "\"half_life_days\": 30.0") != NULL,
+		      "save: 30.0 must stay NUM");
 		check(strstr(raw, "\"max_density\": 120.0") != NULL,
 		      "save: 120.0 must stay NUM");
 	}
@@ -706,8 +706,8 @@ static void test_save_load(const aik_json *cdef)
 				const aik_json *d = aik_json_get(
 					help, "llm.max_tokens");
 
-				check(aik_json_count(help) == 101,
-				      "load: _help %zu != 101",
+				check(aik_json_count(help) == 97,
+				      "load: _help %zu != 97",
 				      aik_json_count(help));
 				check(first && strcmp(first, "llm.base_url") == 0,
 				      "load: _help first key");
@@ -739,7 +739,7 @@ static void test_save_load(const aik_json *cdef)
 				check(b != NULL && json_strict_eq(a, b),
 				      "load: section %s differs", key);
 			}
-			/* 101 项全部可读 */
+			/* 97 项全部可读 */
 			{
 				size_t hits = 0;
 
@@ -748,8 +748,8 @@ static void test_save_load(const aik_json *cdef)
 						    loaded,
 						    &aik_config_items[i]))
 						hits++;
-				check(hits == 101,
-				      "load: %zu items != 101", hits);
+				check(hits == 97,
+				      "load: %zu items != 97", hits);
 			}
 			/* 再存一次：字节完全相同（往返稳定） */
 			{
@@ -908,7 +908,7 @@ static void test_parse(void)
 	parse_ok("int 42", "llm.max_tokens", "42", "42");
 	parse_ok("int strip", "llm.max_tokens", " 42 ", "42");
 	parse_ok("int +7", "llm.max_tokens", "+7", "7");
-	parse_ok("int -0", "retrieval.keyword_candidates", "-0", "0");
+	parse_ok("int -0", "embedding.mrl_dim", "-0", "0");
 	parse_ok("int underscore", "llm.max_tokens", "1_0", "10");
 	parse_ok("int min", "llm.max_tokens", "1", "1");
 	parse_ok("int max", "llm.max_tokens", "128000", "128000");
@@ -1231,7 +1231,7 @@ static void test_load_fallback(void)
 	check(mkdtemp(tmpl) != NULL, "load: mkdtemp failed");
 	snprintf(path, sizeof(path), "%s/cfg.json", tmpl);
 
-	/* 缺失 -> 101 项默认 */
+	/* 缺失 -> 97 项默认 */
 	{
 		aik_json *dom = aik_config_load_file(path, err, sizeof(err));
 		size_t i, hits = 0;
@@ -1245,7 +1245,7 @@ static void test_load_fallback(void)
 				if (aik_config_item_has(dom,
 							&aik_config_items[i]))
 					hits++;
-			check(hits == 101, "load(missing): %zu items != 101",
+			check(hits == 97, "load(missing): %zu items != 97",
 			      hits);
 			aik_json_free(dom);
 		}
@@ -1382,7 +1382,7 @@ static void test_value_equal(void)
 	check(eq_lit("0", "-0.0") == 1, "equal: 0 == -0.0");
 	check(eq_lit("\"\"", "\"\"") == 1, "equal: empty str");
 
-	/* 实际配置里的 INT/NUM 桥：retrieval.min_similarity -1.0 vs -1 */
+	/* INT/NUM 等价桥（T7d 前 retrieval.min_similarity -1.0 vs -1 的用例） */
 	check(eq_lit("-1.0", "-1") == 1, "equal: -1.0 == -1");
 	check(eq_lit("0.3", "0.3") == 1, "equal: 0.3 == 0.3");
 }
@@ -1503,11 +1503,11 @@ static void test_set_get(void)
 		got = aik_config_item_get(def, it);
 		check(got && aik_json_int(got) == 1,
 		      "get: memory.graph_expand default");
-		it = aik_config_item_find("retrieval.min_similarity");
+		it = aik_config_item_find("retrieval.top_k");
 		got = aik_config_item_get(def, it);
 		check(got && aik_json_typeof(got) == AIK_JSON_INT &&
-		      aik_json_int(got) == -1,
-		      "get: min_similarity default is INT -1");
+		      aik_json_int(got) == 10,
+		      "get: top_k default is INT 10");
 		aik_json_free(def);
 	}
 

@@ -366,7 +366,11 @@ static int vm_ssh_exec(const char *cmd, char **out, char *errbuf,
 					   ? WEXITSTATUS(status)
 					   : 128 + WTERMSIG(status);
 
-				if (code == 0) {
+				if (code == 0 || ob.n > 0) {
+					/* T7f F-2: paramiko 语义——exec 通道打开
+					 * 即成功,远端命令退出码非零但 stdout 有内容
+					 * 时照常交给解析路径;仅连接/通道级失败
+					 * (空输出、超时、kill)才走 classify_ssh_err。 */
 					*out = dt_sb_finish(&ob);
 					free(errtext);
 					if (!*out) {
@@ -659,6 +663,12 @@ static int local_http_get(const char *path, const char *tok, char **body_out,
 	}
 	close(fd);
 	if (!resp.p) {
+		snprintf(errtype, etz, "URLError");
+		return -1;
+	}
+	if (dt_sb_finish(&resp) == NULL) {
+		/* T7f F-1: dt_sb_puts 不写 NUL 终结;此前的 strstr/strdup 会
+		 * 越过缓冲区尾读堆残片(间歇污染 /api/vm/status|tools)。 */
 		snprintf(errtype, etz, "URLError");
 		return -1;
 	}

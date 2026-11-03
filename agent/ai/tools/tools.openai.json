@@ -2140,7 +2140,7 @@
     "type": "function",
     "function": {
       "name": "exec_run",
-      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。核心能力：python3 执行 .py 脚本（W2 高危写，逐次红色确认；先 tee 落盘 /root /tmp 再以 python3 <script.py> 执行，禁止 -c/-m 与一切选项）、tee 写文件（input 配方）、只读诊断。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]（写目标限 /root /tmp /var/ai）。未给 input 时 stdin 接 /dev/null（无参 cat 不会挂起）；python3 每次执行逐次弹红色确认面板，审计全量落盘",
+      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。核心能力：tee 写文件（input 配方）、gcc/cc 受控编译（「写代码→编译→运行」闭环，W1 落点限 /tmp）、只读诊断。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]（写目标限 /root /tmp /var/ai）。未给 input 时 stdin 接 /dev/null（无参 cat 不会挂起）；W2 命令每次执行逐次弹红色确认面板，审计全量落盘。T7d 起系统镜像不携带 python3，白名单不再含解释器条目",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2226,7 +2226,6 @@
               "apt",
               "dpkg",
               "passwd",
-              "python3",
               "mount",
               "umount",
               "fstrim",
@@ -5898,7 +5897,7 @@
     "type": "function",
     "function": {
       "name": "app_ctl_probe",
-      "description": "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 --help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面（显式 http_ports/http_urls，或从 python3 -m http.server 参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境是否存在（只探测，implemented=false，不实现可访问性树操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级原因 + warnings。不做端口扫描、不碰外网。",
+      "description": "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 --help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面（显式 http_ports/http_urls，或从常见静态服务进程参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境是否存在（只探测，implemented=false，不实现可访问性树操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级原因 + warnings。不做端口扫描、不碰外网。",
       "parameters": {
         "type": "object",
         "properties": {

@@ -1,0 +1,933 @@
+{
+  "version": 1,
+  "source": "W76b factory virtual desktop catalog (derived from W76 L1 demo /api/apps)",
+  "apps": [
+    {
+      "id": "gnome-control-center",
+      "name": "Settings",
+      "name_en": "Settings",
+      "name_zh": "设置",
+      "comment": "",
+      "exec": "gnome-control-center",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Settings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/gnome-control-center.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "gnome-language-selector",
+      "name": "Language Support",
+      "name_en": "Language Support",
+      "name_zh": "语言支持",
+      "comment": "Configure multiple and native language support on your system",
+      "exec": "/usr/bin/gnome-language-selector",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Settings",
+        "DesktopSettings",
+        "X-GNOME-Settings-Panel",
+        "X-Unity-Settings-Panel",
+        "X-GNOME-PersonalSettings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/gnome-language-selector.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "gnome-session-properties",
+      "name": "Startup Applications",
+      "name_en": "Startup Applications",
+      "name_zh": "开机启动程序",
+      "comment": "Choose what applications to start when you log in",
+      "exec": "gnome-session-properties",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "Settings",
+        "X-GNOME-PersonalSettings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/gnome-session-properties.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "gnome-system-monitor-kde",
+      "name": "GNOME System Monitor",
+      "name_en": "GNOME System Monitor",
+      "name_zh": "系统监视器 KDE",
+      "comment": "View current processes and monitor system state",
+      "exec": "gnome-system-monitor",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "System",
+        "Monitor"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/gnome-system-monitor-kde.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "gnome-system-monitor",
+      "name": "System Monitor",
+      "name_en": "System Monitor",
+      "name_zh": "系统监视器",
+      "comment": "View current processes and monitor system state",
+      "exec": "gnome-system-monitor",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "System",
+        "Monitor"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/gnome-system-monitor.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "im-config",
+      "name": "Input Method",
+      "name_en": "Input Method",
+      "name_zh": "输入法配置",
+      "comment": "Set Keyboard Input Method",
+      "exec": "im-config",
+      "categories": [
+        "Settings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/im-config.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "info",
+      "name": "TeXInfo",
+      "name_en": "TeXInfo",
+      "name_zh": "TeXInfo 文档",
+      "comment": "The viewer for TexInfo documents",
+      "exec": "info",
+      "categories": [
+        "Utility",
+        "Documentation",
+        "ConsoleOnly"
+      ],
+      "terminal": true,
+      "icon": "/static/icons/gen/info.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-calc",
+      "name": "LibreOffice Calc",
+      "name_en": "LibreOffice Calc",
+      "name_zh": "LibreOffice 表格",
+      "comment": "使用 Calc 进行计算，并在电子表格中进行数据分析。",
+      "exec": "libreoffice --calc %U",
+      "categories": [
+        "Office",
+        "Spreadsheet"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-calc.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-draw",
+      "name": "LibreOffice Draw",
+      "name_en": "LibreOffice Draw",
+      "name_zh": "LibreOffice 绘图",
+      "comment": "使用 Draw 创建并编辑图形、流程图和徽标。",
+      "exec": "libreoffice --draw %U",
+      "categories": [
+        "Office",
+        "FlowChart",
+        "Graphics",
+        "2DGraphics",
+        "VectorGraphics"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-draw.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-impress",
+      "name": "LibreOffice Impress",
+      "name_en": "LibreOffice Impress",
+      "name_zh": "LibreOffice 演示",
+      "comment": "使用 Impress 创建并编辑幻灯片、会议和网页中使用的演示文稿。",
+      "exec": "libreoffice --impress %U",
+      "categories": [
+        "Office",
+        "Presentation"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-impress.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-math",
+      "name": "LibreOffice Math",
+      "name_en": "LibreOffice Math",
+      "name_zh": "LibreOffice 公式",
+      "comment": "使用 Math 创建并编辑科学公式和方程式。",
+      "exec": "libreoffice --math %U",
+      "categories": [
+        "Office",
+        "Math"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-math.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-startcenter",
+      "name": "LibreOffice",
+      "name_en": "LibreOffice",
+      "name_zh": "LibreOffice 启动器",
+      "comment": "办公生产套件与开放、标准化的 ODF 文档格式兼容。由 The Document Foundation 提供支持。",
+      "exec": "libreoffice %U",
+      "categories": [
+        "Office",
+        "X-Red-Hat-Base",
+        "X-SuSE-Core-Office",
+        "X-MandrivaLinux-Office-Other"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-startcenter.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "libreoffice-writer",
+      "name": "LibreOffice Writer",
+      "name_en": "LibreOffice Writer",
+      "name_zh": "LibreOffice 文字",
+      "comment": "使用 Writer 对信函、报告、文档以及网页中的文字和图像进行编辑。",
+      "exec": "libreoffice --writer %U",
+      "categories": [
+        "Office",
+        "WordProcessor"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/libreoffice-writer.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "nm-connection-editor",
+      "name": "Advanced Network Configuration",
+      "name_en": "Advanced Network Configuration",
+      "name_zh": "网络连接编辑器",
+      "comment": "Manage and change your network connection settings",
+      "exec": "nm-connection-editor",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Settings",
+        "X-GNOME-NetworkSettings",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/nm-connection-editor.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.freedesktop.IBus.Setup",
+      "name": "IBus Preferences",
+      "name_en": "IBus Preferences",
+      "name_zh": "IBus 输入法设置",
+      "comment": "Set IBus Preferences",
+      "exec": "ibus-setup",
+      "categories": [
+        "Settings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/org.freedesktop.IBus.Setup.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Calculator",
+      "name": "Calculator",
+      "name_en": "Calculator",
+      "name_zh": "计算器",
+      "comment": "Perform arithmetic, scientific or financial calculations",
+      "exec": "gnome-calculator",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility",
+        "Calculator"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Calculator.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Calendar",
+      "name": "Calendar",
+      "name_en": "Calendar",
+      "name_zh": "日历",
+      "comment": "Access and manage your calendars",
+      "exec": "gnome-calendar %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Office",
+        "Calendar",
+        "Core"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Calendar.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Characters",
+      "name": "Characters",
+      "name_en": "Characters",
+      "name_zh": "字符映射表",
+      "comment": "Utility application to find and insert unusual characters",
+      "exec": "/usr/bin/gnome-characters",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Characters.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Cheese",
+      "name": "Cheese",
+      "name_en": "Cheese",
+      "name_zh": "摄像头",
+      "comment": "Take photos and videos with your webcam, with fun graphical effects",
+      "exec": "cheese",
+      "categories": [
+        "GNOME",
+        "AudioVideo",
+        "Video",
+        "Recorder"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Cheese.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.DejaDup",
+      "name": "Backups",
+      "name_en": "Backups",
+      "name_zh": "备份",
+      "comment": "Change your backup settings",
+      "exec": "deja-dup %u",
+      "categories": [
+        "Utility",
+        "Archiving",
+        "GNOME",
+        "GTK",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.DejaDup.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.DiskUtility",
+      "name": "Disks",
+      "name_en": "Disks",
+      "name_zh": "磁盘工具",
+      "comment": "Manage Drives and Media",
+      "exec": "gnome-disks",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility",
+        "X-GNOME-Utilities",
+        "Settings",
+        "HardwareSettings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.DiskUtility.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Evince",
+      "name": "Document Viewer",
+      "name_en": "Document Viewer",
+      "name_zh": "文档查看器",
+      "comment": "View multi-page documents",
+      "exec": "evince %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Office",
+        "Viewer",
+        "Graphics",
+        "2DGraphics",
+        "VectorGraphics"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Evince.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.FileRoller",
+      "name": "Archive Manager",
+      "name_en": "Archive Manager",
+      "name_zh": "归档管理器",
+      "comment": "Create and modify an archive",
+      "exec": "file-roller %U",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "Utility",
+        "Archiving",
+        "Compression",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.FileRoller.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Logs",
+      "name": "Logs",
+      "name_en": "Logs",
+      "name_zh": "系统日志",
+      "comment": "View detailed event logs for the system",
+      "exec": "gnome-logs",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "System",
+        "Monitor",
+        "Utility",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Logs.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Mahjongg",
+      "name": "Mahjongg",
+      "name_en": "Mahjongg",
+      "name_zh": "麻将牌",
+      "comment": "Disassemble a pile of tiles by removing matching pairs",
+      "exec": "gnome-mahjongg",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Game",
+        "BoardGame"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Mahjongg.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Mines",
+      "name": "Mines",
+      "name_en": "Mines",
+      "name_zh": "扫雷",
+      "comment": "Clear hidden mines from a minefield",
+      "exec": "gnome-mines",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Game",
+        "LogicGame"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Mines.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Nautilus",
+      "name": "Files",
+      "name_en": "Files",
+      "name_zh": "文件管理器",
+      "comment": "Access and organize files",
+      "exec": "nautilus --new-window %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility",
+        "Core",
+        "FileManager"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Nautilus.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.PowerStats",
+      "name": "Power Statistics",
+      "name_en": "Power Statistics",
+      "name_zh": "电源统计",
+      "comment": "Observe power management",
+      "exec": "gnome-power-statistics",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "System",
+        "Monitor"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.PowerStats.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Sudoku",
+      "name": "Sudoku",
+      "name_en": "Sudoku",
+      "name_zh": "数独",
+      "comment": "Test your logic skills in this number grid puzzle",
+      "exec": "gnome-sudoku",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Game",
+        "LogicGame"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Sudoku.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Terminal",
+      "name": "Terminal",
+      "name_en": "Terminal",
+      "name_zh": "终端",
+      "comment": "Use the command line",
+      "exec": "gnome-terminal",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "System",
+        "TerminalEmulator"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Terminal.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Todo",
+      "name": "To Do",
+      "name_en": "To Do",
+      "name_zh": "待办事项",
+      "comment": "Manage your personal tasks",
+      "exec": "gnome-todo",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Todo.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.Totem",
+      "name": "Videos",
+      "name_en": "Videos",
+      "name_zh": "视频播放器",
+      "comment": "Play movies",
+      "exec": "totem %U",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "AudioVideo",
+        "Player",
+        "Video"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.Totem.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.baobab",
+      "name": "Disk Usage Analyzer",
+      "name_en": "Disk Usage Analyzer",
+      "name_zh": "磁盘用量分析",
+      "comment": "Check folder sizes and available disk space",
+      "exec": "baobab %U",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "System",
+        "Filesystem",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.baobab.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.eog",
+      "name": "Image Viewer",
+      "name_en": "Image Viewer",
+      "name_zh": "图片查看器",
+      "comment": "Browse and rotate images",
+      "exec": "eog %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Graphics",
+        "2DGraphics",
+        "RasterGraphics",
+        "Viewer"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.eog.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.font-viewer",
+      "name": "Fonts",
+      "name_en": "Fonts",
+      "name_zh": "字体查看器",
+      "comment": "View fonts on your system",
+      "exec": "gnome-font-viewer %u",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "Utility",
+        "X-GNOME-Utilities"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/org.gnome.font-viewer.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.gedit",
+      "name": "Text Editor",
+      "name_en": "Text Editor",
+      "name_zh": "文本编辑器",
+      "comment": "Edit text files",
+      "exec": "gedit %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Utility",
+        "TextEditor"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.gedit.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.gnome.seahorse.Application",
+      "name": "Passwords and Keys",
+      "name_en": "Passwords and Keys",
+      "name_zh": "密码与密钥",
+      "comment": "Manage your passwords and encryption keys",
+      "exec": "seahorse",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Security",
+        "Utility",
+        "DesktopSettings",
+        "X-XFCE-SettingsDialog"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.gnome.seahorse.Application.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "org.remmina.Remmina",
+      "name": "Remmina",
+      "name_en": "Remmina",
+      "name_zh": "远程桌面",
+      "comment": "连接到远程桌面",
+      "exec": "remmina-file-wrapper %U",
+      "categories": [
+        "GTK",
+        "GNOME",
+        "X-GNOME-NetworkSettings",
+        "Network"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/org.remmina.Remmina.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "rhythmbox",
+      "name": "Rhythmbox",
+      "name_en": "Rhythmbox",
+      "name_zh": "音乐播放器",
+      "comment": "Play and organize your music collection",
+      "exec": "rhythmbox %U",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "AudioVideo",
+        "Audio",
+        "Player"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/rhythmbox.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "shotwell",
+      "name": "Shotwell",
+      "name_en": "Shotwell",
+      "name_zh": "照片管理器",
+      "comment": "Organize your photos",
+      "exec": "shotwell %U",
+      "categories": [
+        "Graphics",
+        "Photography",
+        "GNOME",
+        "GTK"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/shotwell.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "simple-scan",
+      "name": "Document Scanner",
+      "name_en": "Document Scanner",
+      "name_zh": "文档扫描",
+      "comment": "Make a digital copy of your photos and documents",
+      "exec": "simple-scan",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Graphics",
+        "Scanning"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/simple-scan.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "software-properties-drivers",
+      "name": "Additional Drivers",
+      "name_en": "Additional Drivers",
+      "name_zh": "附加驱动",
+      "comment": "Configure third-party and proprietary drivers",
+      "exec": "/usr/bin/software-properties-gtk --open-tab=4",
+      "categories": [
+        "X-XFCE",
+        "GTK",
+        "Settings",
+        "HardwareSettings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/software-properties-drivers.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "software-properties-gtk",
+      "name": "Software & Updates",
+      "name_en": "Software & Updates",
+      "name_zh": "软件与更新",
+      "comment": "Configure the sources for installable software and updates",
+      "exec": "software-properties-gtk",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Settings",
+        "X-GNOME-SystemSettings",
+        "X-GNOME-Settings-Panel",
+        "X-Unity-Settings-Panel"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/software-properties-gtk.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "sol",
+      "name": "AisleRiot Solitaire",
+      "name_en": "AisleRiot Solitaire",
+      "name_zh": "纸牌接龙",
+      "comment": "Play many different solitaire games",
+      "exec": "sol",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Game",
+        "CardGame"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/sol.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "system-config-printer",
+      "name": "Printers",
+      "name_en": "Printers",
+      "name_zh": "打印机设置",
+      "comment": "Configure printers",
+      "exec": "system-config-printer",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Settings",
+        "HardwareSettings",
+        "X-GNOME-Settings-Panel",
+        "X-Unity-Settings-Panel",
+        "System",
+        "Printing"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/gen/system-config-printer.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "thunderbird",
+      "name": "Thunderbird 邮件/新闻",
+      "name_en": "Thunderbird Mail",
+      "name_zh": "雷鸟邮件",
+      "comment": "阅读邮件或新闻",
+      "exec": "thunderbird %u",
+      "categories": [
+        "Application",
+        "Network",
+        "Email"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/thunderbird.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "transmission-gtk",
+      "name": "Transmission",
+      "name_en": "Transmission",
+      "name_zh": "BT 下载",
+      "comment": "Download and share files over BitTorrent",
+      "exec": "transmission-gtk %U",
+      "categories": [
+        "Network",
+        "FileTransfer",
+        "P2P",
+        "GTK"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/transmission-gtk.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "update-manager",
+      "name": "Software Updater",
+      "name_en": "Software Updater",
+      "name_zh": "软件更新器",
+      "comment": "Show and install available updates",
+      "exec": "/usr/bin/update-manager",
+      "categories": [
+        "System",
+        "Settings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/update-manager.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "usb-creator-gtk",
+      "name": "Startup Disk Creator",
+      "name_en": "Startup Disk Creator",
+      "name_zh": "启动盘创建器",
+      "comment": "Create a startup disk using a CD or disc image",
+      "exec": "usb-creator-gtk",
+      "categories": [
+        "System",
+        "Settings",
+        "GTK",
+        "HardwareSettings"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/usb-creator-gtk.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "vim",
+      "name": "Vim",
+      "name_en": "Vim",
+      "name_zh": "Vim 编辑器",
+      "comment": "编辑文本文件",
+      "exec": "vim %F",
+      "categories": [
+        "Utility",
+        "TextEditor"
+      ],
+      "terminal": true,
+      "icon": "/static/icons/apps/vim.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    },
+    {
+      "id": "yelp",
+      "name": "Help",
+      "name_en": "Help",
+      "name_zh": "帮助中心",
+      "comment": "Get help with GNOME",
+      "exec": "yelp %u",
+      "categories": [
+        "GNOME",
+        "GTK",
+        "Core",
+        "Documentation",
+        "Utility"
+      ],
+      "terminal": false,
+      "icon": "/static/icons/apps/yelp.png",
+      "virtual": true,
+      "source": "w76b-demo-catalog"
+    }
+  ]
+}

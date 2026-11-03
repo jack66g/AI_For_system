@@ -1,0 +1,21 @@
+[Unit]
+Description=AIKernel mTLS TLS Gateway (127.0.0.1:8443 -> aikernel-api 127.0.0.1:8761)
+Documentation=file:///usr/local/share/doc/aik-tls-gateway/README.md
+After=network.target aikernel-api.service
+Wants=aikernel-api.service
+
+[Service]
+Type=simple
+Environment=AIK_TLS_GATEWAY_LISTEN=127.0.0.1:8443
+Environment=AIK_TLS_GATEWAY_BACKEND=127.0.0.1:8761
+Environment=AIK_TLS_DIR=/etc/aikernel/tls
+ExecStart=/usr/local/sbin/aik-tls-gateway
+Restart=on-failure
+RestartSec=3
+
+# 出厂默认 disabled:证书就位前不启动(见 README 启用步骤)。
+# 缺证书时进程立即退出,systemd start-limit 会将其置 failed,
+# journalctl -u aik-tls-gateway 可见“缺少证书文件”原因。
+
+[Install]
+WantedBy=multi-user.target

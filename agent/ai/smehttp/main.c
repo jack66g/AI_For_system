@@ -1,15 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * main.c - T4b `smehttp` 二进制（T4B-DESIGN.md §4，T4e 配置来源）
+ * main.c - T4b `smehttp` 二进制（T4B-DESIGN.md §4，T4e 配置来源；
+ *          T7a 增 `--import-seed`/AIKD_DATA_DIR，同一二进制以 `aikd`
+ *          名义部署为镜像内 SME 守护）
  *
- *   smehttp [--config PATH] [--host 127.0.0.1] [--port 8000]
- *           [--static-dir DIR] [--frozen-now SECONDS]
+ *   smehttp|aikd [--config PATH] [--host 127.0.0.1] [--port 8000]
+ *                [--static-dir DIR] [--frozen-now SECONDS]
+ *                [--import-seed PATH]
  *
  * 配置来源优先级（对齐 sme/api/server.py::resolve_engine）：
  *   --config > SME_CONFIG_PATH > data/sme.config.json（存在才用）> 内置默认。
  * 快照恢复后重放配置文件显式键（`_apply_file_overrides`）与环境变量
  * （SME_LLM_* / SME_EMBEDDING_* / SME_API_AUTH_TOKEN）；source 随之取
  * "file" / "env" / "defaults"。
+ *
+ * T7a 部署口径（aikd，aikernel-memory.service）：
+ *   - AIKD_DATA_DIR 非空时把 storage.path 覆写为 <dir>/engine.json
+ *     （等价 build-rootfs.sh:150 的 guest 路径 sed；覆写在文件显式键
+ *     与环境变量重放之后再打一遍，防被配置文件的 storage.path 回改）。
+ *   - --import-seed <sme-seed.jsonl>：监听前内部差量导入（seed.c，
+ *     /export 求差 + /memories/batch 语义，幂等），吞掉 sme-seed.sh 的
+ *     python heredoc；失败退出非 0，不静默降级。
  *
  * 建 engine（真实 /dev/urandom id；--frozen-now 注入冻结时钟）→
  * storage.path 指向的文件存在则 aik_engine_load（失败退出非 0）→ 绑定 →
@@ -23,6 +34,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "smehttp/http.h"
+#include "smehttp/seed.h"
 
 #include "smeconfig/config_items.h"
 
@@ -107,7 +119,9 @@ static void usage(FILE *out)
 {
 	fprintf(out,
 		"usage: smehttp [--config PATH] [--host HOST] [--port PORT]\n"
-		"               [--frozen-now SECONDS]\n");
+		"               [--static-dir DIR] [--frozen-now SECONDS]\n"
+		"               [--import-seed SEED_JSONL]\n"
+		"env: SME_CONFIG_PATH / SME_STATIC_DIR / AIKD_DATA_DIR\n");
 }
 
 static int parse_port(const char *s, int *out)
@@ -262,12 +276,40 @@ static void apply_file_overrides(aik_engine *engine, const char *path)
 }
 
 /* ------------------------------------------------------------------ */
+/*
+ * apply_data_dir - T7a：AIKD_DATA_DIR 数据根覆写（幂等，可重复调用）
+ *
+ * 非空时把 storage.path 覆写为 <dir>/engine.json —— 等价 build-rootfs.sh
+ * 对 guest 配置做的路径 sed；默认（env 未设）零改动，smehttp 既有行为
+ * 不受影响。在 (1) 引擎建前 (2) 文件/环境变量重放后 各打一遍，防配置
+ * 文件里的显式 storage.path 回改。
+ */
+static void apply_data_dir(aik_config *cfg)
+{
+	const char *dir = getenv("AIKD_DATA_DIR");
+	char path[1024];
+	aik_json *v;
+
+	if (!cfg || !dir || !*dir)
+		return;
+	if (snprintf(path, sizeof(path), "%s/engine.json", dir) >=
+	    (int)sizeof(path))
+		return;
+	v = aik_json_new_str(path);
+	if (!v)
+		return;
+	(void)aik_config_set_dotted(cfg, "storage.path", v);
+	aik_json_free(v);
+}
+
+/* ------------------------------------------------------------------ */
 int main(int argc, char **argv)
 {
 	const char *config_arg = NULL;
 	const char *host_arg = NULL;
 	const char *static_arg = NULL;
 	const char *frozen_arg = NULL;
+	const char *seed_arg = NULL;
 	const char *env_path;
 	const char *default_file = "data/sme.config.json";
 	const char *load_path = NULL;
@@ -317,6 +359,12 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			frozen_arg = argv[i];
+		} else if (strcmp(argv[i], "--import-seed") == 0) {
+			if (++i >= argc || !*argv[i]) {
+				usage(stderr);
+				return 2;
+			}
+			seed_arg = argv[i];
 		} else if (strcmp(argv[i], "--help") == 0 ||
 			   strcmp(argv[i], "-h") == 0) {
 			usage(stdout);
@@ -352,6 +400,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "smehttp: config: %s\n", err);
 		return 1;
 	}
+	apply_data_dir(cfg);	/* T7a：数据根覆写（第一遍，先于快照装载） */
 	id_init();
 	engine = aik_engine_new(cfg, 1, now_seconds, NULL, random_id, NULL, err,
 				sizeof(err));
@@ -362,10 +411,26 @@ int main(int argc, char **argv)
 	}
 	storage_path = aik_config_get_str(aik_engine_config(engine),
 					  "storage.path");
-	if (storage_path && *storage_path &&
-	    access(storage_path, F_OK) == 0) {
-		if (aik_engine_load(engine, storage_path, err, sizeof(err)) != 0) {
-			fprintf(stderr, "smehttp: load %s: %s\n", storage_path,
+	if (storage_path && *storage_path) {
+		/*
+		 * T7a：对齐 _restore_snapshot 的候选序 (base, base+".gz")。
+		 * storage.compress=true（出厂默认）时自动保存写的是
+		 * engine.json.gz——只按精确路径探测会在重启时空库启动，
+		 * 丢掉整库数据（参考 server.py 兼容 gzip 后缀）。
+		 */
+		const char *load_target = NULL;
+		char gz_buf[1024];
+
+		if (access(storage_path, F_OK) == 0) {
+			load_target = storage_path;
+		} else if (snprintf(gz_buf, sizeof(gz_buf), "%s.gz",
+				    storage_path) < (int)sizeof(gz_buf) &&
+			   access(gz_buf, F_OK) == 0) {
+			load_target = gz_buf;
+		}
+		if (load_target &&
+		    aik_engine_load(engine, load_target, err, sizeof(err)) != 0) {
+			fprintf(stderr, "smehttp: load %s: %s\n", load_target,
 				err);
 			aik_engine_free(engine);
 			return 1;
@@ -379,6 +444,8 @@ int main(int argc, char **argv)
 		aik_engine_free(engine);
 		return 1;
 	}
+	/* T7a：数据根覆写（第二遍，压制配置文件的显式 storage.path） */
+	apply_data_dir(aik_engine_config(engine));
 	source = file_source ? AIK_HTTP_SOURCE_FILE
 			     : (env_source ? AIK_HTTP_SOURCE_ENV
 					   : AIK_HTTP_SOURCE_DEFAULTS);
@@ -429,6 +496,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	aik_http_server_set_source(server, source);
+
+	/* T7a：监听前种子自导（幂等差量导入；失败即退，不静默降级） */
+	if (seed_arg) {
+		if (aik_seed_import(server, seed_arg, err, sizeof(err)) != 0) {
+			fprintf(stderr, "smehttp: import-seed: %s\n", err);
+			aik_http_server_free(server);
+			aik_engine_free(engine);
+			return 1;
+		}
+	}
 
 	{
 		struct sigaction sa;

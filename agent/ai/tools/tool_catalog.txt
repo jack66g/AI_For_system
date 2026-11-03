@@ -84,7 +84,7 @@ net_route_del 断网卡/锁死风险
 net_link_del AI 识别→暂停→授
 nft_txn ops 每条一个 nft 片
 procfs_read_net_nf_conntrack 内核连接跟踪表（
-exec_run python3 执行 .py 脚
+exec_run tee 写文件（input 
 memory_search 凡涉及 AIKernel 系
 memory_search_advanced 在普通检索上叠加
 memory_add 写入一条记忆到 SM

@@ -809,9 +809,10 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # ---------------------------------------------------------------------------
 EXPECTED_TOOL_COUNT = 230        # 主表 tools.json（W82B V6：226 + 4 应用兼容）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
-# W72：受限表 exec 命令数。W69 为 54（46R+8W1）；新增 python3/gcc/cc
-#（沙箱内 W1，主表 python3 仍 W2）后为 57。which 早已在 54 条的 R 全集中。
-EXPECTED_SANDBOX_EXEC_COUNT = 57
+# W72：受限表 exec 命令数。W69 为 54（46R+8W1）；W72 新增 python3/gcc/cc
+#（沙箱内 W1）后为 57；T7d 摘除 python3（镜像不再携带解释器）后为 56。
+# which 早已在 54 条的 R 全集中。
+EXPECTED_SANDBOX_EXEC_COUNT = 56
 
 EXPECTED_TOOL_NAMES = [
     "procfs_read_status",
@@ -1470,8 +1471,8 @@ EXEC_COMMANDS = [
     ex("gzip", RISK_W1, path_check=True, timeout=120),
     # W65 P2-04：受控编译器（W1，仅 /tmp 读写）。源码/产物/包含路径的
     # 非选项参数都过 path_check，命令内禁止 shell 元字符；TMPDIR 由
-    # executor 强制 /tmp。用于「写代码→编译→运行」闭环，替代此前只能
-    # 写 W2 python3 脚本调用编译器的绕行。
+    # executor 强制 /tmp。用于「写代码→编译→运行」闭环；T7d 摘除
+    # python3 后这是唯一在环编程路径。
     ex("gcc", RISK_W1, path_check=True, path_roots=["/tmp"], timeout=120,
        bin="/usr/bin/gcc"),
     ex("cc", RISK_W1, path_check=True, path_roots=["/tmp"], timeout=120,
@@ -1483,13 +1484,9 @@ EXEC_COMMANDS = [
     ex("apt", RISK_W2, timeout=300),
     ex("dpkg", RISK_W2, timeout=300),
     ex("passwd", RISK_W2, bin="/usr/bin/passwd"),
-    # W20 修5（用户拍板）：受控解释器入列——AI 编程助手核心能力
-    # （写代码→执行→报告，T3 D3/E1 被系统性阻断的根因）。
-    # 风险 W2：每次执行红色 y/N 确认，审计全程落盘；参数形态由
-    # executor 强校验：仅允许 `python3 <script.py> [参数...]`
-    # （首参必须 .py 脚本路径，禁止 -c/-m 等解释器表达式入口，
-    # 禁一切选项），shell 元字符黑名单照常全局生效。
-    ex("python3", RISK_W2, timeout=120, bin="/usr/bin/python3"),
+    # T7d：python3 子配方摘除（W20 修5 曾以 W2 入列；全 C 重构后
+    # 系统镜像不再携带 /usr/bin/python3，白名单不得引用不存在的
+    # 二进制——在环编程路径收敛到 gcc/cc 受控编译）。
     # fs-1/fs-9：挂载/卸载/TRIM（W2；mount 可把任意设备挂到任意点）
     ex("mount", RISK_W2, bin="/usr/bin/mount"),
     ex("umount", RISK_W2, bin="/usr/bin/umount"),
@@ -1856,10 +1853,9 @@ def tool_exec_run():
         "name": "exec_run",
         "channel": CH_EXEC,
         "description": "执行白名单 shell 命令（fork+execv 不经 shell）。"
-                       "核心能力：python3 执行 .py 脚本（W2 高危写，"
-                       "逐次红色确认；先 tee 落盘 /root /tmp 再以 "
-                       "python3 <script.py> 执行，禁止 -c/-m 与一切"
-                       "选项）、tee 写文件（input 配方）、只读诊断。"
+                       "核心能力：tee 写文件（input 配方）、gcc/cc 受控"
+                       "编译（「写代码→编译→运行」闭环，W1 落点限 /tmp）、"
+                       "只读诊断。"
                        "白名单/可执行路径/超时/风险分级单源于本工具内嵌的 "
                        "exec.commands（R 只读诊断 / W1 低危写（目标限 "
                        "/root /tmp /var/ai）/ W2 高危写）；参数含 shell "
@@ -1867,8 +1863,9 @@ def tool_exec_run():
                        "写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、"
                        "input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]"
                        "（写目标限 /root /tmp /var/ai）。未给 input 时 stdin "
-                       "接 /dev/null（无参 cat 不会挂起）；python3 每次执行"
-                       "逐次弹红色确认面板，审计全量落盘",
+                       "接 /dev/null（无参 cat 不会挂起）；W2 命令每次执行"
+                       "逐次弹红色确认面板，审计全量落盘。T7d 起系统镜像"
+                       "不携带 python3，白名单不再含解释器条目",
         "exec": {
             "default_timeout": EXEC_DEFAULT_TIMEOUT,
             "input_max_bytes": EXEC_INPUT_MAX_BYTES,
@@ -2314,12 +2311,12 @@ def tool_sandbox_destroy():
 SB_EXEC_ALLOW = ["mkdir", "touch", "cp", "mv", "ln", "sed", "tee",
                  "gzip"]
 
-# W72：沙箱内允许的编程命令。主表 python3 是 W2（宿主写面需确认）；
-# 受限表覆盖为 W1——W71 已实现 fresh procfs（宿主 PID 不可见）、
-# NO_NEW_PRIVS + 能力裁剪（仅 CAP_NET_RAW）、tmpfs 根、/usr ro bind，
-# 解释器/编译器的写面被限制在沙盒 tmpfs 内。gcc/cc 主表本就是 W1
-#（仅 /tmp）。which 早已在 R 全集中，用于子智能体探测工具链。
-SB_EXEC_W1_EXTRA = ["python3", "gcc", "cc"]
+# W72：沙箱内允许的编程命令。gcc/cc 主表本就是 W1（仅 /tmp）——
+# W71 已实现 fresh procfs（宿主 PID 不可见）、NO_NEW_PRIVS + 能力裁剪
+#（仅 CAP_NET_RAW）、tmpfs 根、/usr ro bind，编译器写面被限制在沙盒
+# tmpfs 内。which 早已在 R 全集中，用于子智能体探测工具链。
+# T7d：python3 摘除（镜像不再携带解释器；W72 曾以 W1 入列）。
+SB_EXEC_W1_EXTRA = ["gcc", "cc"]
 
 # W48 安全修复：这些命令的**命令级基础 risk 是 R，但带写参数时会动态升
 # W2**（curl POST/-o、ip addr add、ethtool -s、journalctl --vacuum、
@@ -4512,8 +4509,8 @@ def appctl_tools():
             "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答"
             "「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 "
             "--help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面"
-            "（显式 http_ports/http_urls，或从 python3 -m http.server "
-            "参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否"
+            "（显式 http_ports/http_urls，或从常见静态服务进程参数推断"
+            "端口；只连 127.0.0.1/localhost/::1）、dbus 是否"
             "可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境"
             "是否存在（只探测，implemented=false，不实现可访问性树"
             "操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级"
@@ -5307,15 +5304,13 @@ def main():
                 "sandbox_status", "sandbox_destroy"]
 
     def _sb_exec_cmd(c):
-        """受限表命令条目：python3 覆盖为 W1；cc 指向 gcc。
+        """受限表命令条目：cc 指向 gcc。
 
         /usr/bin/cc 在 VM 上是指向 /etc/alternatives/cc 的符号链接，而
         沙盒 /etc 只 bind 白名单文件（不含 alternatives），子进程内会
         ENOENT；直接指向 /usr/bin/gcc（同目录相对链接 gcc-11）可解析。
         """
         d = dict(c)
-        if d["command"] == "python3":
-            d["risk"] = RISK_W1
         if d["command"] == "cc":
             d["bin"] = "/usr/bin/gcc"
         return d
@@ -5328,7 +5323,7 @@ def main():
     if len(_sb_exec_cmds) != EXPECTED_SANDBOX_EXEC_COUNT:
         raise RuntimeError(
             f"受限表 exec 命令数 {len(_sb_exec_cmds)} != 期望 "
-            f"{EXPECTED_SANDBOX_EXEC_COUNT}（W72：54+python3/gcc/cc）")
+            f"{EXPECTED_SANDBOX_EXEC_COUNT}（W72：54+gcc/cc；T7d 摘 python3）")
     _sb_exec = {
         "default_timeout": EXEC_DEFAULT_TIMEOUT,
         "input_max_bytes": EXEC_INPUT_MAX_BYTES,
@@ -5342,13 +5337,14 @@ def main():
             st["description"] = (
                 "执行白名单 shell 命令（沙盒受限版）。只保留只读诊断与"
                 " mkdir/touch/cp/mv/ln/sed/tee/gzip 八个写命令，另含"
-                "沙箱内 W1 的 python3（仅 <script.py> 形态）/gcc/cc"
-                "（落点限 /tmp）与只读 which（tar 已升 W2 并剔除；"
+                "沙箱内 W1 的 gcc/cc（落点限 /tmp）"
+                "与只读 which（tar 已升 W2 并剔除；"
                 "所有写面限本沙盒 tmpfs）；绝无 systemctl/kill/apt 等"
                 "高危命令。白名单/可执行路径/超时/风险分级单源于"
                 "本工具内嵌的 exec.commands；参数含 shell 元字符或超长"
                 "整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方："
-                "command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容")
+                "command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容。"
+                "T7d 起不含 python3（镜像无解释器）")
             sb_tools.append(st)
         elif t["name"] in _sb_keep:
             sb_tools.append(dict(t))

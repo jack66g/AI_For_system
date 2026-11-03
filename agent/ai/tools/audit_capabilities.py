@@ -68,7 +68,10 @@ EXPECTED_DESKTOP_TOOLS = 20
 EXPECTED_SEED_COUNT = 247
 EXPECTED_SEED_KINDS = {"domain-header": 9, "tool": 230, "combo": 8}
 EXPECTED_TOOL_NAMES_SHA256 = "924313961e12c9aced2648163dcc55256b3a3554bc4d6d454a086ed55d80087d"
-READ_TARGET = 95.0
+# T7d 重校准：python3 子配方摘除后，FS-06/FS-07/FS-09/MEM-07 四个
+# 原以 escape:python3 充当读路径的对象归零（94/97→90/97=92.8%）。
+# 旧 95.0 把 escape 逃逸计入 read_any，属虚高；新基线只含一等读路径。
+READ_TARGET = 92.0
 SEMANTIC_TARGET = 50.0
 
 CHANNEL_CASE = {
@@ -198,7 +201,7 @@ GAPS = [
      "why": "设备型号/驱动/温度/风扇/电池只能逐文件 raw 读取，没有设备对象",
      "wave": "W85", "acceptance": "hardware.inventory/sensors 返回 JSON；无设备明确空态"},
     {"id": "G-024", "priority": "P2", "object": "文件完整性/校验和",
-     "current": "sha256sum/md5sum 不在白名单；只能 python3 hashlib 逃逸",
+     "current": "sha256sum/md5sum 不在白名单；python3 已摘除（T7d），无逃逸路径",
      "why": "无法做发布产物/配置漂移的 D0 校验，供应链验证不可用",
      "wave": "W83", "acceptance": "file.hash(path,algo) 返回 hex/size；大文件限流"},
     {"id": "G-025", "priority": "P2", "object": "登录会话",
@@ -266,7 +269,7 @@ SHELL_ONLY = [
     ("lsns", "命名空间", "L1 有，不在白名单；ip netns/proc 可替代", "G-034"),
     ("sensors", "温度/风扇", "L1/VM 均无；只能 sysfs raw", "G-023"),
     ("lspci/lsusb", "PCI/USB 清单", "未注册；只能 sysfs raw", "G-023"),
-    ("sha256sum/md5sum", "文件校验", "不在白名单；python3 可替代", "G-024"),
+    ("sha256sum/md5sum", "文件校验", "不在白名单；python3 已摘除（T7d），无替代", "G-024"),
     ("visudo", "sudoers 编辑", "只能 shell；D4", "G-012"),
     ("/lease issue|revoke|confirm", "租约签发/撤销/确认", "Principal root+TTY；AI 无工具（lease_request 未实现）", "G-001"),
     ("ssh-keygen", "SSH 密钥轮换", "只能 shell；D4", "G-013"),
@@ -411,19 +414,19 @@ OBJECTS = [
     O("FS-06", "文件/目录/元数据/ACL/xattr", "文件 ACL",
       ["escape:python3"],
       ["escape:sys_shell"], "raw", "D0/D2",
-      "仅 python3 os.getxattr(system.posix_acl_access) / shell getfacl；无白名单命令",
+      "python3 已摘除（T7d）：读路径归零；getfacl 不在白名单",
       gap="G-004"),
     O("FS-07", "文件/目录/元数据/ACL/xattr", "扩展属性 xattr",
       ["escape:python3"],
       ["escape:python3"], "raw", "D0/D2",
-      "仅 python3 os.listxattr；getfattr/setfattr 缺失", gap="G-005"),
+      "python3 已摘除（T7d）：读路径归零；getfattr/setfattr 缺失", gap="G-005"),
     O("FS-08", "文件/目录/元数据/ACL/xattr", "文件属性 chattr/lsattr",
       ["escape:sys_shell"],
       ["escape:sys_shell"], "raw", "D0/D2",
       "仅 shell lsattr/chattr；不在 exec 白名单", gap="G-006"),
     O("FS-09", "文件/目录/元数据/ACL/xattr", "文件完整性/校验和",
       ["escape:python3"],
-      [], "raw", "D0", "仅 python3 hashlib；无 sha256sum 白名单命令",
+      [], "raw", "D0", "python3 已摘除（T7d）：读路径归零；无 sha256sum 白名单命令",
       gap="G-024", write_na=True),
     O("FS-10", "文件/目录/元数据/ACL/xattr", "磁盘配额",
       [], [], "none", "D0/D3",
@@ -672,7 +675,7 @@ OBJECTS = [
       gap="G-003", write_na=True),
     O("MEM-07", "SME 记忆/trace/训练导出", "训练导出",
       ["escape:python3"], ["escape:python3"], "raw", "D0/D2",
-      "无 trace.export 工具；只能 python3 解析 JSONL 重组训练行", gap="G-003"),
+      "无 trace.export 工具；python3 已摘除（T7d），JSONL 重组路径归零", gap="G-003"),
     O("MEM-08", "SME 记忆/trace/训练导出", "会话历史",
       ["file:~/.aikernel/sessions", "file:/var/log/aikernel/sessions", "cmd:cat"],
       [], "structured", "D0", "cat ~/.aikernel/sessions/*.jsonl；无 session 工具",

@@ -6,7 +6,7 @@
  * $HOME/aikernel-longterm/parity/vectors/storage）：
  *   1) engine.json.gz：load → validate 通过；
  *   2) aik_json_dump(root) 与 snapshot.canonical.json 逐字节相等
- *      （6,897,081 字节），失败打印首个差异 offset 与前后 40 字节；
+ *      （6,896,995 字节），失败打印首个差异 offset 与前后 40 字节；
  *   3) memories/regions/region_edges/memory_edges 计数、schema_version、
  *      embedding_file 与 snapshot.meta.json 一致（含绝对值断言）；
  *   4) 负向：$TMPDIR 下截断 gz → load 失败；embedding_file 改成
@@ -348,7 +348,7 @@ static void test_positive(const char *gzpath, const char *canonpath,
 	CHECK(canon != NULL);
 	if (canon) {
 		CHECK((size_t)jint(meta, "canonical_bytes") == cn);
-		CHECK(cn == 6897081);
+		CHECK(cn == 6896995);
 		if (outlen != cn || memcmp(out, canon, cn) != 0)
 			report_diff((const unsigned char *)out, outlen, canon, cn);
 		else

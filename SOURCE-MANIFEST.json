@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-03T14:31:34+08:00",
+  "created": "2026-11-04T04:35:09+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -14,7 +14,8 @@
     "T4b: NPZ 写+engine save/autosave+update/delete/regions/evolve/graph/link；HTTP 287 checks；Python 可读 C 快照（tag t4b-persist）",
     "T4e: 配置中心 5 路由（101 项/5 预设/热重建/闸门修正）+ consolidate/compress + import/file + visualize PNG + config UI + WAL(json/fsync，逐字节) + keep-alive/多客户端；config 610/dynamics 1393/engine 158/rebuild 47/http 547；配置整链 27/0（tag t4-engine）",
     "T5: autocondense 全 C（acstate/acconfig/acsignals/acdigest/acsme/acserv/autocondensed/acmcp/achook）；REST 38/38 步 + 7 磁盘文件逐字节；MCP 10/10 行；hook 8/8 对拍；unit 185 checks；tag t5-autocondense",
-    "T6: desktop 后端全 C（desktopd/dtcore/dtjson/dtstate/dttheme/dtapps/dtstatic/dthttp/dtchat/dtvm）；七套向量 TCP 重放 229 步 / 1455 文件逐字节全绿 + 负向检出；单测 150 断言；LLM 走自有 mbedTLS 客户端；vm enabled 真实现（sshpass+ssh）；tag t6-desktop"
+    "T6: desktop 后端全 C（desktopd/dtcore/dtjson/dtstate/dttheme/dtapps/dtstatic/dthttp/dtchat/dtvm）；七套向量 TCP 重放 229 步 / 1455 文件逐字节全绿 + 负向检出；单测 150 断言；LLM 走自有 mbedTLS 客户端；vm enabled 真实现（sshpass+ssh）；tag t6-desktop",
+    "T7: 镜像整合+去 python3（desktopd/aikd/aikerneld-api/aik-tls-gateway 全 C；aikapi 273 步重放、aikd e2e、tlsgw 差分 68/0、desktop 229 步、run_all 59/59；rootfs 无 python 实证+反向门（.py=0/ELF7/shebang=0）；qemu 四阶段全绿；ISO alpha.15.0 04117cdf 330,057,728B；factory tar 285MB（-59.6%）；tag t7-image"
   ],
   "overlay_count": 168,
   "registry": {
@@ -36,11 +37,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 59262301,
-    "regular_files": 1243,
-    "source_files": 1243,
+    "bytes": 60541151,
+    "regular_files": 1268,
+    "source_files": 1268,
     "symlinks": 4,
-    "tracked_files": 1247
+    "tracked_files": 1272
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",

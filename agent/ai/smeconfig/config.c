@@ -2,7 +2,8 @@
 /*
  * config.c - T4a SME 配置中心（默认值 + JSON 覆盖 + 显式键）
  *
- * 语义逐条对齐 REF-PY e72bc75 `sme/config.py`：
+ * 语义逐条对齐参考实现 `sme/config.py`（T7d 起钉出厂树 /opt/sme，
+ * git 5a6604d+dirty，config.py md5 b17ee0fc；T4 时钉 REF-PY e72bc75）：
  *   - `aik_config_defaults` = 生成文件 config_default.h 的 JSON 解析结果；
  *   - `SMEConfig.from_dict` 只对已知 section 的已知字段 setattr（hasattr
  *     守卫），并把 `"<section>.<key>"` 记入 `_explicit_keys`；未知 section/
@@ -35,8 +36,7 @@ typedef struct {
 static const section_def SECTIONS[] = {
 	{ "embedding",
 	  "provider,model,dim,base_url,api_key,batch_size,normalize,"
-	  "hash_factors,hash_window,revision,mrl_dim,hash_seed,revision_stamp,"
-	  "query_prefix" },
+	  "hash_factors,hash_window,revision,mrl_dim,hash_seed,revision_stamp" },
 	{ "region",
 	  "min_region_size,min_join_cosine,split_threshold,max_density,"
 	  "merge_distance,neighbor_factor,auto_evolve,evolve_interval,"
@@ -44,8 +44,7 @@ static const section_def SECTIONS[] = {
 	{ "retrieval",
 	  "top_regions,region_options,top_k,vector_weight,keyword_weight,"
 	  "metadata_weight,region_dampening,summary_penalty,cjk_bigram,"
-	  "candidate_window,fusion,keyword_candidates,min_similarity,"
-	  "query_cache_size" },
+	  "candidate_window,fusion" },
 	{ "ranking",
 	  "semantic,importance,freshness,weight,decay,hit_count,recency,region" },
 	{ "policy", "full_memory,importance_threshold,decay_enabled" },

@@ -1,7 +1,7 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-10-23T04:13:48",
+  "generated_at": "2026-11-03T23:46:24",
   "purpose": "sandbox-subagent-restricted",
   "source": "tools.json 派生（sandbox 受限面，无 W2，防嵌套派生）",
   "tool_count": 7,
@@ -19,7 +19,7 @@
   },
   "exec_command_tiers": {
     "R": 46,
-    "W1": 11,
+    "W1": 10,
     "W2": 0
   },
   "tools": [
@@ -95,7 +95,7 @@
     {
       "name": "exec_run",
       "channel": "exec",
-      "description": "执行白名单 shell 命令（沙盒受限版）。只保留只读诊断与 mkdir/touch/cp/mv/ln/sed/tee/gzip 八个写命令，另含沙箱内 W1 的 python3（仅 <script.py> 形态）/gcc/cc（落点限 /tmp）与只读 which（tar 已升 W2 并剔除；所有写面限本沙盒 tmpfs）；绝无 systemctl/kill/apt 等高危命令。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容",
+      "description": "执行白名单 shell 命令（沙盒受限版）。只保留只读诊断与 mkdir/touch/cp/mv/ln/sed/tee/gzip 八个写命令，另含沙箱内 W1 的 gcc/cc（落点限 /tmp）与只读 which（tar 已升 W2 并剔除；所有写面限本沙盒 tmpfs）；绝无 systemctl/kill/apt 等高危命令。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容。T7d 起不含 python3（镜像无解释器）",
       "exec": {
         "default_timeout": 30,
         "input_max_bytes": 60000,
@@ -491,12 +491,6 @@
             "path_roots": [
               "/tmp"
             ]
-          },
-          {
-            "command": "python3",
-            "risk": "W1",
-            "bin": "/usr/bin/python3",
-            "timeout": 120
           }
         ]
       },
@@ -549,6 +543,10 @@
               "ethtool",
               "conntrack",
               "hostnamectl",
+              "sshd",
+              "networkctl",
+              "loginctl",
+              "udevadm",
               "resolvectl",
               "findmnt",
               "blkid",
@@ -581,7 +579,6 @@
               "apt",
               "dpkg",
               "passwd",
-              "python3",
               "mount",
               "umount",
               "fstrim",
@@ -602,8 +599,7 @@
               "aa-disable",
               "aik-backup",
               "aik-reset",
-              "aik-upgrade",
-              "crontab"
+              "aik-upgrade"
             ]
           },
           "args": {

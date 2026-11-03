@@ -11,8 +11,8 @@
  * 本测试在 agent/ai 根目录（chdir("..")）加载注册表并断言：
  *   1. 无环境变量时加载到 114 件，且 realpath(source_path) ==
  *      realpath(tools/tools.json)；
- *   2. 根 tools-sandbox.json 同样指向正典，exec 白名单 57 条
- *      （W72 新增 python3/gcc/cc；W69 tar 升 W2 后为 54 条）。
+ *   2. 根 tools-sandbox.json 同样指向正典，exec 白名单 56 条（T7d 摘 python3）
+ *      （W72 新增 gcc/cc，T7d 摘 python3；W69 tar 升 W2 后为 54 条）。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -64,8 +64,8 @@ int main(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "树根无环境变量加载 tools.json");
-	CHECK(reg.tool_count == 156,
-	      "树根加载到 156 件（W77d；未被旧副本遮蔽）");
+	CHECK(reg.tool_count == 230,
+	      "树根加载到 230 件（W82B V6；T7d 修正 W77d 旧锚 156）");
 	CHECK(reg.source_path && same_realpath(reg.source_path,
 					       "tools/tools.json"),
 	      "source_path 指向正典 tools/tools.json（符号链接已解析）");
@@ -80,8 +80,8 @@ int main(void)
 					       "tools/tools-sandbox.json"),
 	      "受限表 source_path 指向正典（未被旧副本遮蔽）");
 	t = tool_registry_find(&reg, "exec_run");
-	CHECK(t && t->exec_cmd_count == 57,
-	      "受限表 exec 白名单 57 条（W72 新增编程三件）");
+	CHECK(t && t->exec_cmd_count == 56,
+	      "受限表 exec 白名单 56 条（W72 编程两件；T7d 摘 python3）");
 	tool_registry_free(&reg);
 	unsetenv("AIKERNEL_TOOLS_JSON");
 

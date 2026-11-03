@@ -6,9 +6,13 @@
 # space / store，以及 zlib + libm + pthread。库不存在时按依赖顺序递归构建；
 # 构建串行：本目录显式 .NOTPARALLEL，子 make 也带 -j1。
 #
-#   make -C agent/ai/smehttp -j1 all       # libaiksmehttp.a + smehttp
+#   make -C agent/ai/smehttp -j1 all       # libaiksmehttp.a + smehttp + aikd
 #   make -C agent/ai/smehttp -j1 test      # 构建并运行 tests/test_http
 #   make -C agent/ai/smehttp -j1 clean all test
+#
+# T7a：aikd = 同一 main.c/seed.c 的第二链接名（镜像内部署名，装
+# /usr/local/sbin/aikd；--import-seed 种子自导见 seed.c）。两个二进制
+# 内容相同；clean 后同规则重建。
 
 .NOTPARALLEL:
 
@@ -27,7 +31,7 @@ ENG_LIB := ../engine/libaikengine.a
 
 LIB := libaiksmehttp.a
 OBJS := http.o routes.o routes_config.o routes_extra.o
-BINS := smehttp
+BINS := smehttp aikd
 TESTS := tests/test_http
 
 all: $(LIB) $(BINS)
@@ -49,9 +53,13 @@ routes_config.o: routes_config.c ../include/smehttp/http.h \
 	../include/smeconfig/config_items.h ../include/store/store_json.h
 	$(CC) $(CFLAGS) -c -o $@ routes_config.c
 
-smehttp: main.c $(LIB) $(ENG_LIB) $(SME_LIB) $(RETR_LIB) $(SPACE_LIB) \
-	$(STORE_LIB)
-	$(CC) $(CFLAGS) -o $@ main.c $(LIB) $(ENG_LIB) $(SME_LIB) \
+seed.o: seed.c ../include/smehttp/seed.h ../include/smehttp/http.h \
+	../include/store/store_json.h
+	$(CC) $(CFLAGS) -c -o $@ seed.c
+
+smehttp aikd: main.c seed.o $(LIB) $(ENG_LIB) $(SME_LIB) $(RETR_LIB) \
+	$(SPACE_LIB) $(STORE_LIB)
+	$(CC) $(CFLAGS) -o $@ main.c seed.o $(LIB) $(ENG_LIB) $(SME_LIB) \
 		$(RETR_LIB) $(SPACE_LIB) $(STORE_LIB) $(LDLIBS)
 
 # 依赖库：总是交给子 make 判定是否重建（避免手写的过期判断）
@@ -79,7 +87,7 @@ test: $(TESTS) $(BINS)
 	./tests/test_http
 
 clean:
-	rm -f $(OBJS) $(LIB) $(BINS) $(TESTS)
+	rm -f $(OBJS) seed.o $(LIB) $(BINS) $(TESTS)
 
 FORCE:
 

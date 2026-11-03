@@ -1463,6 +1463,667 @@
   {
     "type": "function",
     "function": {
+      "name": "event_listen",
+      "description": "订阅 NETLINK_AI(31) 内核 AI 事件推送（AI_CMD_EVENT）：先 REG 登记 portid（需 root/CAP_SYS_ADMIN）再收推送事件。事件类别：category=1 策略执行结果（event_id=decision_id）、2 模型装载/卸载。输出 JSON 行（ts/event_id/category/severity/code/param）。须在 AIKernel 内核上运行（非 AIKernel 内核明确报错）。组合：sysfs_write_policy_think 触发决策→本工具收结果→procfs_read_chains 溯源。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "proc_watch",
+      "description": "订阅进程事件流（proc connector CN_PROC，需 root/CAP_NET_ADMIN）：实时捕获 fork/exec/exit/uid/comm 事件（含 pid/tgid），补足轮询 procfs 的时点盲区，是『谁在动』的实时感知面。组合：可疑进程→procfs_read_status 采样→netlink_act_proc_freeze 隔离。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "taskstats_sample",
+      "description": "按 pid 拉取内核任务延迟记账（TASKSTATS netlink，CONFIG_TASK_DELAY_ACCT=y）：CPU/阻塞IO/换入/缺页延迟累计(ns)+上下文切换，单任务粒度归因『这个进程为什么卡』。组合：pressure 看全局压→本工具定位元凶→sched_nice/affinity 处置。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标进程 pid",
+            "minimum": 1,
+            "maximum": 4194304
+          }
+        },
+        "required": [
+          "pid"
+        ]
+      },
+      "sub": [
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nflog_dump",
+      "description": "订阅 NFLOG 包级取证流（nfnetlink_log CONFIG 绑定后内核单播回包）：需要 nftables 规则带 log/nflog 目标才有事件（无规则时返回 0 事件并提示）。每事件含五元组/hook/mark/prefix，payload_bytes>0 时附载荷首 N 字节十六进制。组合：netlink_sense 异常→config_write_nftables 加临时 log 规则→本工具取证→撤规则。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "description": "附载荷首 N 字节（0-256，0=不附）",
+            "minimum": 0,
+            "maximum": 256,
+            "default": 0
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_monitor",
+      "description": "订阅 rtnetlink 组播（链路/地址/IPv4+IPv6 路由变化）：实时感知网络拓扑变化（接口起落/地址增删/路由变更），输出 JSON 行（event/ifindex/ifname/addr/prefixlen/dst/oif/gateway）。组合：断网/换网第一手信号→procfs_read_net_nf_conntrack 复核→exec ip 诊断。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "udev_monitor",
+      "description": "订阅内核设备事件流（NETLINK_KOBJECT_UEVENT 组 1）：设备 add/remove/change/bind/unbind 实时感知（含 DEVPATH/SUBSYSTEM/DEVNAME 等属性），是『硬件在变』的感知面。组合：热插拔→exec lsblk 确认→策略响应；与 net_monitor 配对覆盖网络设备特例。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "description": "订阅时长毫秒（100-10000）",
+            "minimum": 100,
+            "maximum": 10000,
+            "default": 1000
+          },
+          "max_events": {
+            "type": "integer",
+            "description": "最多收集事件数（1-256）",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 32
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "psi_snapshot",
+      "description": "一次拿全系统压力快照：/proc/pressure/{cpu,memory,io} 三资源 some/full 均值 + loadavg + MemTotal/MemAvailable，替代 res 域 5 次单件采样（消除时点漂移）。W78 起 PSI 已编入。组合：本工具看全局压→taskstats_sample 定位元凶→处置→复测。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "kernel_ai_healthcheck",
+      "description": "in-kernel AI 子系统体检页：/proc/ai 的 status/control/hitrate/latency/决策与遥测计数一次读全（AIKernel 内核上；非该内核时各字段 unavailable）。aicore 域最高频前奏。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "disk_hogs",
+      "description": "存储占用快照：/proc/mounts 里 ext4/ext3/xfs/btrfs 挂载点逐个 statvfs，输出 used_pct/总量/可用。存储排查首诊一次成型。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "fs",
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "service_doctor",
+      "description": "服务故障首诊：一次拿 is-active + status + 最近 20 行 journal。参数 unit（如 sshd.service）。修复 combo-5 依赖：白名单已补 sshd（sshd -t 只读预检）。组合：config_read_sshd_config→（sshd -t 预检）→exec systemctl restart→复查。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string",
+            "description": "systemd unit 名（[A-Za-z0-9_.@-]）"
+          }
+        },
+        "required": [
+          "unit"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "baseline_diff",
+      "description": "把 sysctl_snapshot 的输出文本与当前 /proc/sys 实值逐键比对，输出差异清单（equal/baseline/current）。变更窗口与漂移巡检。组合：sysctl_snapshot 存基线→调参→本工具复核→sysctl_restore 回滚。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "baseline": {
+            "type": "string",
+            "description": "基线文本（sysctl_snapshot 输出，path=value 行）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sysctl_snapshot",
+      "description": "按前缀递归快照 /proc/sys（如 prefix=net.ipv4 或 net），输出 path=value 行（可喂给 baseline_diff/sysctl_restore）。R 只读。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "description": "sysctl 前缀（如 net / net.ipv4 / vm；空=全树，输出较大）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_list",
+      "description": "列出 aik-* 计划任务（systemd transient timers）。与 schedule_create/remove 配套；出厂未启 cron 守护，AI 定时任务统一走 systemd timer（W78 决策）。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sysctl_restore",
+      "description": "把 sysctl_snapshot 的输出整批写回 /proc/sys（逐键走既有 sysctl_set 通道与崩溃黑名单，失败键如实列出）。变更回滚/批量恢复。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "description": "快照文本（sysctl_snapshot 输出）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_create",
+      "description": "创建 AI 定时任务：systemd-run transient timer（OnCalendar），命令经 /bin/sh -c 执行；重启不保留（长期任务写 unit）。替代出厂已移除的 cron 断链。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务名（[A-Za-z0-9_.@-]，生成 aik-<name>.timer）"
+          },
+          "calendar": {
+            "type": "string",
+            "description": "OnCalendar 表达式（如 hourly / 'Mon *-*-* 03:00:00'）"
+          },
+          "command": {
+            "type": "string",
+            "description": "定时执行的命令（/bin/sh -c）"
+          }
+        },
+        "required": [
+          "name",
+          "calendar",
+          "command"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "schedule_remove",
+      "description": "停止并移除 aik-<name>.timer 计划任务（transient，stop 即除）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务名"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ip_ban_verified",
+      "description": "封禁 IP 并复查：插入 nft 运行时规则 inet filter input (ip|ip6) saddr <ip> drop，然后数 conntrack 残留（老化即消）。运行时规则重启即清；持久化走 config_write_nftables。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ip": {
+            "type": "string",
+            "description": "IPv4/IPv6 字面量"
+          }
+        },
+        "required": [
+          "ip"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "process_quarantine",
+      "description": "可疑进程隔离三连：sched.nice=19 → proc.freeze=1 → 读 /proc/<pid>/status 验证 State=F。比 kill 温和，可逆（proc.freeze=0 解冻）。W2：逐次确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "目标 pid（>1）",
+            "minimum": 2,
+            "maximum": 4194304
+          }
+        },
+        "required": [
+          "pid"
+        ]
+      },
+      "sub": [
+        "res",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "model_verify",
+      "description": "内核模型装载-推理-卸载闭环验证：model_load(path)→model_in(固定探针)→读 model_out→unload。输出各步结果与输出内容（AIKernel 内核上）。combo-7 的固化。W1。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "AIKWMDL 模型文件绝对路径"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "aicore",
+        "model"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_iface",
+      "description": "rtnetlink 网卡启停（RTM_NEWLINK 只动 IFF_UP 位）：state=up|down。写前 RTM_GETLINK 读旧 flags 落输出（回滚凭据），写后回读验证 UP 位。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。回滚=state 反向再调一次。组合：net_monitor 感知接口起落→本工具处置→回读复核。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "description": "目标状态"
+          }
+        },
+        "required": [
+          "iface",
+          "state"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_addr_add",
+      "description": "rtnetlink 加地址（RTM_NEWADDR+IFA_LOCAL，NLM_F_EXCL：已存在如实报 EEXIST 不重复加）。写前 dump 该接口全部现地址（回滚凭据），写后回读验证在位。回滚=net_addr_del 同参数。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：net_link 场景先本工具再 net_route_add。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "addr": {
+            "type": "string",
+            "description": "CIDR 地址（如 192.168.5.9/24 或 fd00::9/64，前缀必填；inet_pton 双栈校验）"
+          }
+        },
+        "required": [
+          "iface",
+          "addr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_addr_del",
+      "description": "rtnetlink 删地址（RTM_DELADDR，按 IFA_LOCAL+前缀精确匹配）。写前 dump 该接口全部现地址（回滚凭据），写后回读验证已移除；地址本就不存在时报 EADDRNOTAVAIL。回滚=net_addr_add 同参数。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          },
+          "addr": {
+            "type": "string",
+            "description": "CIDR 地址（同 net_addr_add）"
+          }
+        },
+        "required": [
+          "iface",
+          "addr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_route_add",
+      "description": "rtnetlink 加路由（RTM_NEWROUTE+RTA_DST/GATEWAY/OIF，table 默认 main；NLM_F_EXCL：同目标已存在如实报 EEXIST 不覆盖）。写前 dump 目标路由表相关路由（回滚凭据），写后回读验证。回滚=net_route_del 同参数。改默认路由可致断网/流量劫持：断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：net_addr_add 配地址→本工具加路由→net_monitor 复核。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dst": {
+            "type": "string",
+            "description": "目的网段 CIDR（如 192.168.99.0/24、fd00::/64；默认路由 0.0.0.0/0）"
+          },
+          "gateway": {
+            "type": "string",
+            "description": "网关裸地址（可选；须与 dst 同栈，不带前缀）"
+          },
+          "iface": {
+            "type": "string",
+            "description": "出接口名（可选）"
+          },
+          "table": {
+            "type": "string",
+            "default": "main",
+            "description": "路由表（main/local/default 或数字，默认 main）"
+          }
+        },
+        "required": [
+          "dst"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_route_del",
+      "description": "rtnetlink 删路由（RTM_DELROUTE，按 dst 前缀+table 匹配，gateway/iface 给出时一并参与匹配）。写前 dump 目标路由表相关路由（回滚凭据），写后回读验证已移除；路由本就不存在时报 ESRCH。回滚=net_route_add 同参数。误删默认路由即断网：断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dst": {
+            "type": "string",
+            "description": "目的网段 CIDR（同 net_route_add）"
+          },
+          "gateway": {
+            "type": "string",
+            "description": "网关裸地址（可选，匹配用）"
+          },
+          "iface": {
+            "type": "string",
+            "description": "出接口名（可选，匹配用）"
+          },
+          "table": {
+            "type": "string",
+            "default": "main",
+            "description": "路由表（默认 main）"
+          }
+        },
+        "required": [
+          "dst"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_link_del",
+      "description": "rtnetlink 删接口（RTM_DELLINK）。内核只允许删虚拟接口（dummy/veth/vlan/bridge/wireguard 等 rtnl 创建的设备；物理网卡一律 EOPNOTSUPP 拒绝——安全边界由内核保证）。写前读旧 flags+kind 落输出（重建凭据），写后回读验证已消失。回滚=按 kind 用 exec 「ip link add <name> type <kind>」重建，地址/路由需另行恢复。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸。组合：诊断用 dummy 接口生命周期收尾（配 net_addr_*/net_route_* 演练）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "iface": {
+            "type": "string",
+            "description": "接口名（[A-Za-z0-9._-]{1,15}）"
+          }
+        },
+        "required": [
+          "iface"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_txn",
+      "description": "nftables 规则级事务：ops 每条一个 nft 片段（如「add rule inet filter input ip saddr 1.2.3.4 drop」），逐条内容校验（禁分号/换行/反引号/$()）后写 0600 临时文件，先 nft -c -f 全量语法预检（不生效，失败即拒绝并回显 nft 错误），dry_run=true 到此为止输出「预检通过未应用」；否则 nft -f 正式应用（单文件单批次提交）后 nft list ruleset 抽查关键串验证落位，输出每步结果；含 delete/flush 的 op 显式标注警告。运行时规则重启即清，持久化另走 config_write_nftables。断网卡/锁死风险场景：AI 识别→暂停→授权者确认，SSH 放行规则是硬闸（出厂 SSH 放行规则严禁删除）。组合：netlink_sense/conntrack 发现异常源→本工具加 drop 规则→nflog_dump 取证→撤规则。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ops": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "nft 命令片段数组（每条一行，1-32 条，单条 ≤512 字节；禁分号/换行/反引号/$()）"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "只做 nft -c 语法预检不应用"
+          }
+        },
+        "required": [
+          "ops"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "procfs_read_net_nf_conntrack",
       "description": "读取 /proc/net/nf_conntrack（只读）：内核连接跟踪表（nf_conntrack：每条连接的源/目的地址与端口、协议、状态与超时；查「当前有哪些网络连接/谁连着我/连接数多少」用它；补充手段：exec ss 查套接字级连接",
       "parameters": {
@@ -1479,7 +2140,7 @@
     "type": "function",
     "function": {
       "name": "exec_run",
-      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。核心能力：python3 执行 .py 脚本（W2 高危写，逐次红色确认；先 tee 落盘 /root /tmp 再以 python3 <script.py> 执行，禁止 -c/-m 与一切选项）、tee 写文件（input 配方）、只读诊断。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]（写目标限 /root /tmp /var/ai）。未给 input 时 stdin 接 /dev/null（无参 cat 不会挂起）；python3 每次执行逐次弹红色确认面板，审计全量落盘",
+      "description": "执行白名单 shell 命令（fork+execv 不经 shell）。核心能力：tee 写文件（input 配方）、gcc/cc 受控编译（「写代码→编译→运行」闭环，W1 落点限 /tmp）、只读诊断。白名单/可执行路径/超时/风险分级单源于本工具内嵌的 exec.commands（R 只读诊断 / W1 低危写（目标限 /root /tmp /var/ai）/ W2 高危写）；参数含 shell 元字符或超长整条拒绝；默认 30 秒超时后 SIGKILL。写文件配方：command=\"tee\"、args=[\"/tmp/t.txt\"]、input=文件内容；追加写 args=[\"-a\", \"/tmp/t.txt\"]（写目标限 /root /tmp /var/ai）。未给 input 时 stdin 接 /dev/null（无参 cat 不会挂起）；W2 命令每次执行逐次弹红色确认面板，审计全量落盘。T7d 起系统镜像不携带 python3，白名单不再含解释器条目",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1529,6 +2190,10 @@
               "ethtool",
               "conntrack",
               "hostnamectl",
+              "sshd",
+              "networkctl",
+              "loginctl",
+              "udevadm",
               "resolvectl",
               "findmnt",
               "blkid",
@@ -1561,7 +2226,6 @@
               "apt",
               "dpkg",
               "passwd",
-              "python3",
               "mount",
               "umount",
               "fstrim",
@@ -1582,8 +2246,7 @@
               "aa-disable",
               "aik-backup",
               "aik-reset",
-              "aik-upgrade",
-              "crontab"
+              "aik-upgrade"
             ]
           },
           "args": {
@@ -3734,6 +4397,2120 @@
         ]
       },
       "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_create",
+      "description": "创建工作区（W1）：在 /var/lib/aikernel/ws/<name>.img 建稀疏镜像，losetup 挂 loop、mkfs.ext4、预置可启动根骨架；一个文件就是一个盘，数据跨 workspace_run 持久。backing=disk（默认）走镜像；backing=tmpfs 为临时盘（run 结束即失，不持久）。ro_paths/rw_paths 为显式共享的宿主绝对路径（工作区内同路径 ro/rw bind）；net 支持 none（默认）|veth|host：veth = 独立 netns + 一对 veth + 专用网桥 aikbr0，netns 内 nft 表缺省拒出站（只放行 lo/已建立连接/allow 白名单），不设 NAT、不做转发；cpu_max/mem_max/pids_max 落 cgroup v2 限额；label 仅登记展示。已存在则幂等返回，绝不重新格式化。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "size_mb": {
+            "type": "integer",
+            "description": "镜像容量 MB（16-8192；默认 256）",
+            "minimum": 16,
+            "maximum": 8192,
+            "default": 256
+          },
+          "backing": {
+            "type": "string",
+            "description": "disk=持久镜像（默认）；tmpfs=临时盘（不持久）",
+            "enum": [
+              "disk",
+              "tmpfs"
+            ],
+            "default": "disk"
+          },
+          "ro_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "只读共享的宿主绝对路径（最多 16 条）"
+          },
+          "rw_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "读写共享的宿主绝对路径（最多 16 条；慎用）"
+          },
+          "net": {
+            "type": "string",
+            "description": "none=新 netns 仅 lo（默认）；veth=独立 netns+veth+aikbr0，缺省拒出站；host=宿主网络",
+            "enum": [
+              "none",
+              "host",
+              "veth"
+            ],
+            "default": "none"
+          },
+          "allow": {
+            "type": "array",
+            "description": "net=veth 的出站白名单（最多 32 条；缺省策略仍是拒出站）",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dst": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "proto": {
+                  "type": "string",
+                  "enum": [
+                    "tcp",
+                    "udp",
+                    "icmp",
+                    "any"
+                  ]
+                }
+              },
+              "required": [
+                "dst"
+              ]
+            }
+          },
+          "cpu_max": {
+            "type": "number",
+            "description": "CPU 核数上限（0=不限，0.01-64；映射 cgroup cpu.max）",
+            "minimum": 0,
+            "maximum": 64,
+            "default": 1
+          },
+          "mem_max": {
+            "type": "integer",
+            "description": "内存上限 MB（0=不限；默认 1024）",
+            "minimum": 0,
+            "maximum": 1048576,
+            "default": 1024
+          },
+          "pids_max": {
+            "type": "integer",
+            "description": "进程数上限（0=不限；默认 256）",
+            "minimum": 0,
+            "maximum": 4000000,
+            "default": 256
+          },
+          "label": {
+            "type": "string",
+            "description": "标签（≤64 字符，字母数字 ._- 与空格；仅登记展示）"
+          }
+        },
+        "required": [
+          "name",
+          "size_mb"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_list",
+      "description": "列出工作区（只读）：名称/后端/容量/已用/创建时间/状态（running|ready）/标签",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_inspect",
+      "description": "工作区详情（只读）：镜像路径与是否存在、loop 设备、宿主挂载点、cgroup 路径与 cpu/mem/pids 限额、网络、标签、ro/rw 路径与运行状态",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_run",
+      "description": "在工作区里执行命令（W2 高危写，逐次确认）：新 mount/pid/uts namespace，根 = 该工作区镜像的 ext4，/usr /etc /dev 只读白名单挂入，宿主 /root /home /var 不可见（除显式 ro/rw_paths），cgroup 限额生效；命令以 /bin/sh -c 执行，超时 SIGKILL 全组。写入镜像的数据跨调用持久（tmpfs 工作区除外）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "command": {
+            "type": "string",
+            "description": "在工作区内执行的 shell 命令（如 'echo hello > /data.txt'）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "description": "超时秒数（默认 120，上限 900）",
+            "minimum": 1,
+            "maximum": 900,
+            "default": 120
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_destroy",
+      "description": "销毁工作区（W1，幂等）：杀进程/收 cgroup/卸挂载 → 解除 loop → 删除镜像与元数据。不存在时返回成功（本就干净），不报错。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_quota",
+      "description": "查看/扩容工作区容量（W1）：不带 mb 只查看；带 mb 对镜像 truncate + LOOP_SET_CAPACITY + resize2fs。v0 只扩不缩（16-8192MB）；tmpfs 工作区不支持。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "mb": {
+            "type": "integer",
+            "description": "目标容量 MB（16-8192；省略=只查看）",
+            "minimum": 16,
+            "maximum": 8192
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_net_allow",
+      "description": "工作区网络白名单增删（W2/D2，仅 net=veth）：在 netns 内的 inet aik_ws_<name> 表里维护显式放行条目；缺省策略始终是拒出站（只放行 lo、已建立连接与白名单）。action=add|del|list|clear|rebuild。dst 为 IPv4/IPv6 地址或 CIDR（10.231.0.1、192.168.1.0/24）；port 0-65535（0/省略=任意）；proto=tcp|udp|icmp|any（省略时：有 port 视为 tcp，无 port 视为 any）。rebuild 用于重启后重建 netns/veth/规则。不提供 NAT/转发语义。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          },
+          "action": {
+            "type": "string",
+            "description": "add=加（默认）；del=删（省略 port/proto 即按 dst 全删）；list=只看；clear=清空；rebuild=重建运行时拓扑",
+            "enum": [
+              "add",
+              "del",
+              "list",
+              "clear",
+              "rebuild"
+            ],
+            "default": "add"
+          },
+          "dst": {
+            "type": "string",
+            "description": "目标 IPv4/IPv6 地址或 CIDR（add/del 必填）"
+          },
+          "port": {
+            "type": "integer",
+            "description": "目标端口（0-65535；0/省略=任意）",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "proto": {
+            "type": "string",
+            "description": "协议 tcp|udp|icmp|any（省略时按 port 推导）",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "any"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workspace_net_status",
+      "description": "工作区网络状态（只读）：net 模式、netns 是否存在、veth 两侧接口、地址、aikbr0 成员、inet aik_ws_<name> 表与规则原文（含 counter 包/字节计数）、白名单条目。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "工作区名（[A-Za-z0-9_.-]{1,32}，首字符不能是 . 或 -；如 ws-test）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_status",
+      "description": "双调度台状态总览（只读，全部真读文件）：当前 mode（static|ml|off）、cgroup 限额（cpu.weight/cpu.max/cpu.max.burst/io.weight/io.max 的当前值）、PSI（/proc/pressure/cpu|memory|io 的 some/full 三档均值）、NETLINK_AI 是否可用、10 个可写旋钮清单与值域、最近快照列表；带 pid 时额外读该进程 nice/affinity/oom_score 当前值。所有值来自内核接口，不由配置回显。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "description": "可选：读取该进程的任务级旋钮当前值",
+            "minimum": 1
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_knob_set",
+      "description": "写单个调度旋钮（W1）：范围校验 -> 写 -> 读回验证，返回期望值与实际值；读回不一致会回滚并报失败（绝不写成功了事）。任务级旋钮 nice(-20..19)、affinity(0..nproc-1)、oom_score(-1000..1000)、timeslice(1..1000，0.1ms，全局 base_slice) 走 NETLINK_AI ACT，需 pid；cgroup 级旋钮 cpu.weight(1..10000)、cpu.max(max 100000 或 quota period)、cpu.max.burst(0..1000000)、io.weight(default N 或 MAJ:MIN N)、io.max(MAJ:MIN rbps=/wbps=/riops=/wiops=) 写 /sys/fs/cgroup/aikernel-sched；sched.mode 等价于 sched_mode_set。内核/设备不支持时诚实报 N/A。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "knob": {
+            "type": "string",
+            "description": "旋钮名（sched_status 可查全部清单）",
+            "enum": [
+              "nice",
+              "affinity",
+              "oom_score",
+              "timeslice",
+              "cpu.weight",
+              "cpu.max",
+              "cpu.max.burst",
+              "io.weight",
+              "io.max",
+              "sched.mode"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "description": "目标值（整数或字符串；cpu.max 形如 50000 100000，io.max 形如 8:0 rbps=16777216）"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "任务级旋钮必填：目标进程 pid",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "knob",
+          "value"
+        ]
+      },
+      "sub": [
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_mode_set",
+      "description": "切换台子模式（W2 高危写，逐次确认）：static|ml|off。static=规则/固定参数台（cpu.max=50000 100000、cpu.weight=100、cpu.max.burst=0、io.max=16MiB/s）；off=撤销 AI 施加的全部调度参数回到内核默认（cpu.max=max 100000、io.max 清空等）。切换前自动快照当前参数集到 /var/lib/aikernel/sched/snap-<ts>.json（0600），切换后逐项读回校验，失败自动回滚。ml 台未就绪（W83）时明确拒绝，绝不假成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "目标模式：static（规则台）| ml（未就绪，会被拒绝）| off（回内核默认）",
+            "enum": [
+              "static",
+              "ml",
+              "off"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_snapshot",
+      "description": "参数集快照（W1）：save 把当前 mode + cgroup 限额 + 全局 timeslice 存为 /var/lib/aikernel/sched/snap-<ts>.json（0600）；list 列快照（时间倒序）；restore 按 id 或 latest 恢复快照并逐项读回校验（失败项明确列出）。任务级 per-pid 参数（nice/affinity/oom_score）不入快照。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "save | list | restore",
+            "enum": [
+              "save",
+              "list",
+              "restore"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "restore 用：快照 id（如 1761...）或 latest；缺省=最新"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_ab_run",
+      "description": "双调度台 A/B 对照实验（W2 高危写，逐次确认）：2 个参数集 x 3 档内置负载（cpu 自旋 / io pwrite+fdatasync / mix），测 4 个指标——吞吐（单元/秒）、p99 单元延迟（单工作单元墙钟耗时 99 分位，单元级近似）、公平性（各进程完成量变异系数 CV）、能耗代理（RAPL 包能量，不可读则 N/A）。总时长硬上限 180 秒；报告写 /var/lib/aikernel/sched/ab-<ts>.md。实验前自动快照，无论成败都恢复实验前参数集并逐项读回（C6）。ml 臂未就绪（W83），传 ml 会被明确拒绝。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "arm_a": {
+            "type": "string",
+            "description": "参数集 A（默认 static）",
+            "enum": [
+              "static",
+              "baseline",
+              "ml",
+              "off"
+            ],
+            "default": "static"
+          },
+          "arm_b": {
+            "type": "string",
+            "description": "参数集 B（默认 baseline=内核默认）",
+            "enum": [
+              "static",
+              "baseline",
+              "ml",
+              "off"
+            ],
+            "default": "baseline"
+          },
+          "loads": {
+            "type": "string",
+            "description": "负载档（逗号组合）：cpu,io,mix；缺省三档全跑",
+            "default": "cpu,io,mix"
+          },
+          "duration_s": {
+            "type": "integer",
+            "description": "每档时长秒（2-20；总预算超 180s 时自动缩短并写明）",
+            "minimum": 2,
+            "maximum": 20,
+            "default": 6
+          },
+          "workers": {
+            "type": "integer",
+            "description": "每档并发进程数（1-8，默认 4）",
+            "minimum": 1,
+            "maximum": 8,
+            "default": 4
+          },
+          "inject_fail_after": {
+            "type": "integer",
+            "description": "仅回滚演练用：在第 N 次 run 后强制失败以验证恢复路径（0=关闭）",
+            "minimum": 0,
+            "maximum": 6,
+            "default": 0
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "res",
+        "aicore"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bpf_prog_load",
+      "description": "加载一个 BPF 程序（W2，不引 libbpf：直接 bpf() 系统调用）。sample=minimal 为最小 TRACEPOINT 程序（r0=0;exit，验证 loader 链路）；sample=deny_path 为手写 LSM file_open 程序：路径前缀命中返回 -EPERM，attach_btf_id 从 /sys/kernel/btf/vmlinux 解析 bpf_lsm_file_open、struct file.f_path 偏移同样来自 BTF（不硬编码）。file=... 读取自定义 AIKBPF01 格式（8B magic + 头 + raw 指令；不解析 ELF）。attach=true 时 LSM 走 BPF_LINK_CREATE(BPF_LSM_MAC)，TRACEPOINT 走 perf_event + BPF_LINK_CREATE(BPF_PERF_EVENT)；附着失败会自动卸载，零残留。 输出带真实能力探测（unprivileged_bpf_disabled / vmlinux BTF / CONFIG_BPF_LSM / 活动 LSM）；当前 #60 内核 CONFIG_BPF_LSM=n 时加载如实失败并说明需 #61，绝不伪造成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sample": {
+            "type": "string",
+            "description": "内置样例：minimal=最小 TRACEPOINT；deny_path=LSM file_open 路径前缀拒绝（-EPERM）",
+            "enum": [
+              "minimal",
+              "deny_path"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "自定义 .bpf 文件绝对路径（AIKBPF01 格式：magic+头+raw 指令；本 loader 不解析 ELF）"
+          },
+          "prog_type": {
+            "type": "string",
+            "description": "文件加载时校验/覆盖程序类型（头里的 prog_type 为准，不一致直接报错）",
+            "enum": [
+              "lsm",
+              "tracepoint"
+            ]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "deny_path 命中路径前缀（1..32 字节，默认 /tmp/aikbpf）"
+          },
+          "tracepoint": {
+            "type": "string",
+            "description": "minimal 附着点 group/name（默认自动选 syscalls/sys_enter_openat 等）"
+          },
+          "attach": {
+            "type": "boolean",
+            "description": "加载后立即附着（默认 true）；失败会自动卸载并如实报错",
+            "default": true
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bpf_prog_list",
+      "description": "列出已加载的 BPF 程序（R）：BPF_PROG_GET_NEXT_ID → BPF_PROG_GET_FD_BY_ID → BPF_OBJ_GET_INFO_BY_FD，返回 id/type/name/tag/created_by_uid 与 mine（是否本进程持有）；同时回报 unprivileged_bpf_disabled、vmlinux BTF 是否存在、CONFIG_BPF_LSM 与活动 LSM。非 root 在 unprivileged_bpf_disabled=2 时枚举会 EPERM，如实报错并给出 sudo ai 指引。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bpf_prog_unload",
+      "description": "卸载本进程加载的 BPF 程序（W1）：先解 link，再关闭 prog fd，最后用 BPF_PROG_GET_FD_BY_ID 复验 ENOENT（仍被他方引用时如实报'未完全卸载'）。只能卸载 mine=yes 的程序；他方程序拒绝并说明原因（关闭别人的 fd 既无权限也做不到）。进程退出时 fd 自动关闭，同样零残留。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "程序 id（bpf_prog_load 的 prog_id 或 bpf_prog_list 的 prog_id）",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nfqueue_pump",
+      "description": "绑定 NFQUEUE 并消费数据包（W2，不引 libnetfilter_queue：NETLINK_NETFILTER=12 原始 NFQNL_MSG_CONFIG/PACKET/VERDICT）。queue 0..65535、timeout_ms 100..60000、max_packets 1..1000 为硬上限（防挂死）；收到包打印五元组（IPv4/IPv6 + TCP/UDP 端口）并按 policy=accept|drop 回 verdict；超时或达上限即 UNBIND 并关闭 socket（零残留）。注意：本工具不安装 nft/iptables 规则，没有规则引流的队列会等到超时（预期）；#60 内核未编 CONFIG_NETFILTER_NETLINK_QUEUE 时绑定失败并明确报'需 #61'。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "queue": {
+            "type": "integer",
+            "description": "NFQUEUE 队列号（0..65535，默认 0）",
+            "minimum": 0,
+            "maximum": 65535,
+            "default": 0
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "硬超时毫秒（100..60000，默认 3000）",
+            "minimum": 100,
+            "maximum": 60000,
+            "default": 3000
+          },
+          "max_packets": {
+            "type": "integer",
+            "description": "最多处理包数（1..1000，默认 10）",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10
+          },
+          "policy": {
+            "type": "string",
+            "description": "收到包后的 verdict：accept（放行）| drop（丢弃）",
+            "enum": [
+              "accept",
+              "drop"
+            ],
+            "default": "accept"
+          },
+          "family": {
+            "type": "string",
+            "description": "绑定/解析的地址族：ipv4 | ipv6",
+            "enum": [
+              "ipv4",
+              "ipv6"
+            ],
+            "default": "ipv4"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_intent_compile",
+      "description": "网络意图 → nft 规则集编译（只读 R/D0，绝不写内核）：把一句话（「只允许 22 端口进来，其他全拒」）解析成封闭语法（允许/拒绝 + 端口/区间 + tcp/udp/icmp + 进/出 + 默认策略），格式化成只作用于 inet <table> 单链的规则集，与现网同表做行级 diff 预览（- 现网 / + 目标），再用 nft -c -f 做语法预检（不生效）。输出含 digest，可传 nft_intent_apply 的 expect_digest 防预览被掉包。默认拒绝且未放行 22/tcp 时输出锁死警告（apply 会拒绝，除非 allow_lockout=true）。组合：本工具→人工核对→nft_intent_apply。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "description": "自然语言意图，如「只允许 22 端口进来，其他全拒」「放行 80,443 拒绝 8080」「allow 53/udp default deny」。封闭语法：允许/放行/拒绝/禁止 + 端口或区间 + tcp/udp/icmp + 进来/出去 + 默认拒绝/默认放行；不允许原生 nft 片段"
+          },
+          "allow_ports": {
+            "type": "string",
+            "description": "结构化放行端口（可选），逗号/空格分隔，支持区间与 /tcp /udp 后缀，如 \"22,443,8080-8090,53/udp\""
+          },
+          "deny_ports": {
+            "type": "string",
+            "description": "结构化拒绝端口（可选），格式同 allow_ports"
+          },
+          "default_policy": {
+            "type": "string",
+            "enum": [
+              "drop",
+              "accept"
+            ],
+            "description": "默认策略（可选）：drop=未匹配一律丢弃（白名单），accept=未匹配一律放行（黑名单）。省略时按意图语义推导"
+          },
+          "proto": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "both"
+            ],
+            "description": "无后缀端口的默认协议（默认 tcp）"
+          },
+          "dir": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ],
+            "description": "方向（默认 in 入站：hook input）"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选，默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只操作这一张表，绝不 flush ruleset"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_intent_apply",
+      "description": "网络意图下发（W2/D3 需显式授权）：重编译同一意图 → 读现网同表存快照（回滚凭据）→ nft -c -f 语法校验（失败零副作用）→ nft -f 单批次应用（delete+add 原子）→ nft list 抽查 → fork setsid 看门狗：arm_seconds（默认 60，下限 10）内没有 nft_intent_confirm 的 confirm 决定就自动回滚（防止把操作者关在门外）。只动 inet <table> 一张表，绝不 flush ruleset、不碰其他表。默认拒绝且未放行 22/tcp 一律拒发（除非 allow_lockout=true）。同名表已有 armed 会话时拒发（避免覆盖回滚凭据）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "description": "自然语言意图，如「只允许 22 端口进来，其他全拒」「放行 80,443 拒绝 8080」「allow 53/udp default deny」。封闭语法：允许/放行/拒绝/禁止 + 端口或区间 + tcp/udp/icmp + 进来/出去 + 默认拒绝/默认放行；不允许原生 nft 片段"
+          },
+          "allow_ports": {
+            "type": "string",
+            "description": "结构化放行端口（可选），逗号/空格分隔，支持区间与 /tcp /udp 后缀，如 \"22,443,8080-8090,53/udp\""
+          },
+          "deny_ports": {
+            "type": "string",
+            "description": "结构化拒绝端口（可选），格式同 allow_ports"
+          },
+          "default_policy": {
+            "type": "string",
+            "enum": [
+              "drop",
+              "accept"
+            ],
+            "description": "默认策略（可选）：drop=未匹配一律丢弃（白名单），accept=未匹配一律放行（黑名单）。省略时按意图语义推导"
+          },
+          "proto": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "both"
+            ],
+            "description": "无后缀端口的默认协议（默认 tcp）"
+          },
+          "dir": {
+            "type": "string",
+            "enum": [
+              "in",
+              "out"
+            ],
+            "description": "方向（默认 in 入站：hook input）"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选，默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只操作这一张表，绝不 flush ruleset"
+          },
+          "arm_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 60,
+            "description": "自动回滚窗口秒数（默认 60，下限 10；不允许关闭保护窗）"
+          },
+          "expect_digest": {
+            "type": "string",
+            "description": "可选：compile 输出的 digest；不一致即拒发（防参数漂移/预览掉包）"
+          },
+          "allow_lockout": {
+            "type": "boolean",
+            "default": false,
+            "description": "显式认账「默认拒绝且不放行 22/tcp」的锁死风险；不传则拒绝下发"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_intent_confirm",
+      "description": "确认或立即回滚已下发规则（W2/D3 需显式授权）：action=confirm 在保护窗内保留规则（取消自动回滚）；action=rollback 立即按快照回滚（delete 本表 + 恢复快照，幂等）。table 省略时若只有一个 armed 会话自动选中，多个必须显式指定。与看门狗用 O_EXCL 决定文件抢占，任何一方先落定即唯一生效。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "confirm",
+              "rollback"
+            ],
+            "description": "confirm=保留并取消自动回滚；rollback=立即回滚"
+          },
+          "table": {
+            "type": "string",
+            "description": "目标表名（可选；省略则选唯一 armed 会话）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "nft_ruleset_summarize",
+      "description": "现网 nft 规则 → 人话摘要（只读 R/D0）：读 nft -j list ruleset，按「默认策略 / 允许 / 拒绝 / 其他」分段渲染（连接状态、入/出接口、源/目的地址与端口、前缀/区间/集合、计数、跳转、NAT 等），并给表/链/规则计数小结。空规则集、畸形或截断 JSON、非对象数组元素一律明说，不崩。table 参数可只摘要某一张表。组合：apply 后用它复核，或安全审计时先读后改。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "string",
+            "description": "只摘要该表（可选；[a-z_][a-z0-9_]{0,14}）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_hit_watch",
+      "description": "规则命中观测闭环（start/stop/status 合一，后台采样器）：按 interval（默认 5s）读 nft -j list ruleset，提取每条规则 counter 与上一拍比较，按滑动窗口（默认 60s）累计；某条 drop 规则命中 ≥ threshold（默认 10 包）即触发。三档响应：alert（D1，只写 audit.log/events.jsonl + 快照，绝不动规则）；escalate（D3，向命中规则所在链追加 ip saddr <escalate_src> counter drop 临时规则，comment=aikhit-esc-*，TTL 到期自动撤）；degrade（D3，把命中 drop/reject 规则换成 counter+log 只记日志规则，stop/清理时按原动作恢复）。start 不阻塞会话（setsid 后台进程 + flock 单例 + 握手后立刻返回）；status 显示运行态/升级规则剩余 TTL/降级规则/审计尾；stop 停进程 + 撤升级规则 + 恢复降级规则；进程被杀后 status 标 orphan，下一次 start/stop 先按持久化记录清残。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "description": "start=启动采样器（alert=D1；escalate/degrade=D3）；stop=停止并清理；status=只读查看运行态"
+          },
+          "table": {
+            "type": "string",
+            "description": "观测表（默认 aik_intent；[a-z_][a-z0-9_]{0,14}）。只读该表计数器/规则文本"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "alert",
+              "escalate",
+              "degrade"
+            ],
+            "default": "alert",
+            "description": "响应档位（start 时显式给出，不从策略文件继承）：alert=D1 只审计；escalate/degrade=D3 需租约确认"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 5,
+            "description": "采样周期秒数（默认 5）"
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000,
+            "default": 10,
+            "description": "窗口内命中包数阈值（默认 10）"
+          },
+          "window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "判定窗口秒数（默认 60；window/interval 不得超过 256 拍）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同一规则再次触发的最小间隔秒数（默认 60）"
+          },
+          "chain": {
+            "type": "string",
+            "description": "只观测该链（可选；空=任意链）"
+          },
+          "handle": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "只观测该规则 handle（可选；0=任意）"
+          },
+          "escalate_src": {
+            "type": "string",
+            "description": "escalate 隔离源（IPv4/IPv6 地址或前缀，如 10.0.0.0/8）；level=escalate 时必填"
+          },
+          "escalate_ttl": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600,
+            "default": 60,
+            "description": "escalate 临时规则 TTL 秒数（默认 60，到期自动撤）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_hit_policy",
+      "description": "命中观测阈值配置（get/set，D1）：设置 threshold/window/interval/cooldown/chain/handle/escalate_src/escalate_ttl。set 只改检测参数与下一次 start 的升级参数；运行中的采样器每拍重读检测参数（≤interval 秒生效），level/escalate_src/escalate_ttl 固定在 start 时。level 不放进策略——每次 start 显式给出（alert=D1；escalate/degrade=D3 必须租约确认），避免 D1 配置悄悄放开规则写权限。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "default": "get",
+            "description": "get=查看当前策略；set=修改（校验后写 policy.json）"
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000,
+            "description": "窗口内命中包数阈值"
+          },
+          "window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "description": "判定窗口秒数"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "description": "采样周期秒数"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "description": "同一规则再次触发的最小间隔秒数"
+          },
+          "chain": {
+            "type": "string",
+            "description": "只观测该链（空=任意）"
+          },
+          "handle": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "只观测该规则 handle（0=任意）"
+          },
+          "escalate_src": {
+            "type": "string",
+            "description": "escalate 隔离源（IPv4/IPv6 地址或前缀）"
+          },
+          "escalate_ttl": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600,
+            "description": "escalate 临时规则 TTL 秒数"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_static",
+      "description": "应用静态画像（只读 R/D0，绝不执行目标）：把本机可执行文件「要什么」一次说清——ELF 头（类型/架构/PIE/NX/RELRO/解释器，自解析程序头，不依赖 readelf 也能出结论）、readelf -d 动态依赖（NEEDED/SONAME/RPATH/RUNPATH/BIND_NOW/TEXTREL，绝不用会执行加载器的 ldd）、动态符号概要、getcap 与 security.capability xattr（含原始十六进制解码）、setuid/setgid 位、.desktop 匹配（Exec/TryExec/autostart/sandbox 字段）、dpkg -S 包来源与版本。缺 readelf/dpkg/getcap、非 ELF、权限不足、文件不存在一律降级明说并给出 warnings；输出含 declared 静态声明清单，可直接喂 app_profile_diff。组合：本工具→app_profile_dynamic→app_profile_diff。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件路径（绝对路径；也接受裸命令名按 PATH 解析）。目录、脚本、非 ELF 一律如实标注，不崩"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "输出格式（json 的 declared 清单可直接喂 app_profile_diff）"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_dynamic",
+      "description": "应用动态画像（W2/D2，只在现有 workspace 沙盒里跑一次）：目标程序在 aik-sandbox（独立 mount/pid/uts namespace、no_new_privs、能力清空）内执行，程序与参数双重白名单（仅 ls/cat/head/tail/grep/tar -t/curl --version/readelf 等无害形态；tar 解包/创建、curl URL/-o、sort -o、date -s 一律拒绝），超时 SIGKILL 进程组。文件访问优先用沙盒内 strace（execve/open/openat/openat2/connect/bind/rename/unlink/mkdir/chmod/chown 全量，区分读写与失败打开）；strace 不可用退化为 /proc/<pid> 采样（fd+fdinfo 方向+maps+子进程树+/proc/net/{tcp,tcp6,udp,udp6} 按 socket inode 归属）。输出 JSON 事件流（file_read/file_write/file_mmap/proc_exec/net_connect/net_listen/net_unix）+ 统计 + warnings/degraded（fanotify 未实现、短命 fd 可能漏采等如实标注）。工作区不存在时需要 root + loop/mkfs；失败给明确原因。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件（必须是系统 bin 目录下的白名单无害程序：ls/cat/head/tail/wc/sort/grep/tar/curl/readelf 等）"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "目标参数（最多 16 项，每项 ≤255 字节；参数级闸门：tar 只列表 -t、curl 只 --version/--help、sort 禁 -o、date 禁 -s）"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "工作区名（默认 appprofile；不存在则以 tmpfs 后端创建，存在则复用，不覆盖）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 10,
+            "description": "目标执行超时秒数（到点 SIGKILL 进程组）"
+          },
+          "sample_ms": {
+            "type": "integer",
+            "minimum": 20,
+            "maximum": 1000,
+            "default": 50,
+            "description": "退化到 /proc 采样时的采样间隔（毫秒）"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "strace",
+              "proc"
+            ],
+            "default": "auto",
+            "description": "文件访问来源：auto=沙盒内有 strace 就用、否则/proc 采样；strace=强制 ptrace；proc=强制 /proc 采样"
+          },
+          "net": {
+            "type": "string",
+            "enum": [
+              "none",
+              "host"
+            ],
+            "default": "none",
+            "description": "新建工作区的网络模式（none=无外连能力，默认；host=共享宿主网络，会在结果里标注）"
+          },
+          "cleanup": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=本次新建的工作区在跑完后销毁（复用的既有工作区永不销毁）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 事件流给 app_profile_diff）"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_profile_diff",
+      "description": "静态 vs 动态差集风险报告（W1/D1，只读分析，不自动执行策略）：输入目标路径 + app_profile_dynamic 的 JSON 事件流，重新采集静态画像，输出三栏——要的（ELF/依赖/RUNPATH/能力/setuid/包来源）、用的（实际文件读/写/映射、子进程 exec、网络连接）、偷偷碰的（动态出现但静态没声明的路径/连接/子进程，逐项给权重与理由），汇总 0-100 风险分（低/中/高/严重）与放行条件建议（网络走 nft_intent_compile 白名单、写路径走 workspace rw 或 W1 租约、敏感路径/setuid/能力走 D3、无包归属要签名）。只读：不写 nft、不改权限、不执行任何策略。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标可执行文件（与静态/动态画像同一路径）"
+          },
+          "dynamic": {
+            "type": "string",
+            "description": "app_profile_dynamic 的 JSON 输出（format=json，≤512KB；缺 events 数组或拿静态画像充当会诚实报错）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "输出格式"
+          }
+        },
+        "required": [
+          "path",
+          "dynamic"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_chain_watch",
+      "description": "连接事件流 + 攻击链关联采样器（start/stop/status 合一，后台，只观测）：按 interval（默认 2s）轮询 conntrack——第一优先 /proc/net/nf_conntrack（解析五元组/状态/包数/字节）；装了 conntrack 命令则用 conntrack -L 快照（不强制依赖）；两者都不可用时用内置 ctnetlink dump（NETLINK_NETFILTER，无需外部库，需 root/CAP_NET_ADMIN）。维护滑动窗口并按三条可配规则关联：scan（同一源窗口内访问 ≥ scan_ports 个不同目的端口）、lateral（同一源窗口内连 ≥ lateral_hosts 个不同目的主机的同一端口）、burst（同一源→目的连接数从前窗低位跃变到当前高位，current≥burst_min 且 ≥burst_ratio×前窗）。命中写一条攻击链事件 JSON（type/src/dsts/ports/window/evidence_count）到 events.jsonl + audit.log。绝不写 nft、不封禁、不改网络配置。start 不阻塞会话（setsid 后台 + flock 单例 + 握手后返回）；status 逐档显示事件源可用性（不可用原因/权限/空表如实标注）；stop 停采样器（无规则需撤回）。事件源全部不可用时 start 明确失败并列出三档原因，绝不静默成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "description": "start=启动后台采样器（只观测）；stop=停止；status=只读查看运行态、事件源可用性与审计尾"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 2,
+            "description": "采样周期秒数（默认 2）"
+          },
+          "scan_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "端口扫描判定窗口秒数（默认 60）"
+          },
+          "scan_ports": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1024,
+            "default": 15,
+            "description": "窗口内同一源访问的不同目的端口数阈值（默认 15）"
+          },
+          "lateral_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "横向移动判定窗口秒数（默认 60）"
+          },
+          "lateral_hosts": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 256,
+            "default": 3,
+            "description": "窗口内同一源在同一目的端口上连接的不同目的主机数阈值（默认 3）"
+          },
+          "burst_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 30,
+            "description": "突增规则的当前/前一窗口秒数（默认 30）"
+          },
+          "burst_ratio": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000,
+            "default": 4,
+            "description": "当前窗口连接数相对前一窗口的倍数下限（默认 4）"
+          },
+          "burst_min": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000000,
+            "default": 8,
+            "description": "当前窗口连接数下限（默认 8，必须大于 burst_low）"
+          },
+          "burst_low": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 3,
+            "description": "前一窗口连接数上限（默认 3，即低位）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同类同键事件再次触发的最小间隔秒数（默认 60）"
+          },
+          "netns": {
+            "type": "string",
+            "description": "可选命名空间标注（[A-Za-z0-9._-]），只进事件/审计文本，不切换命名空间"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "net_chain_rules",
+      "description": "攻击链关联阈值配置（get/set，D1）：interval/scan_window/scan_ports/lateral_window/lateral_hosts/burst_window/burst_ratio/burst_min/burst_low/cooldown/netns 全部可配。set 校验范围与窗口/采样周期上限后写 rules.json（0600）；运行中的采样器每拍重读（≤interval 秒生效）。只改检测参数，不写 nft、不封禁；get 只读。默认 scan 15 端口/60s、lateral 3 主机同端口/60s、burst 30s 内 current≥8 且 ≥4× 前窗（前窗≤3 且≥1）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "default": "get",
+            "description": "get=查看当前阈值；set=修改并写 rules.json"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 2,
+            "description": "采样周期秒数（默认 2）"
+          },
+          "scan_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "端口扫描判定窗口秒数（默认 60）"
+          },
+          "scan_ports": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1024,
+            "default": 15,
+            "description": "窗口内同一源访问的不同目的端口数阈值（默认 15）"
+          },
+          "lateral_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 60,
+            "description": "横向移动判定窗口秒数（默认 60）"
+          },
+          "lateral_hosts": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 256,
+            "default": 3,
+            "description": "窗口内同一源在同一目的端口上连接的不同目的主机数阈值（默认 3）"
+          },
+          "burst_window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 30,
+            "description": "突增规则的当前/前一窗口秒数（默认 30）"
+          },
+          "burst_ratio": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000,
+            "default": 4,
+            "description": "当前窗口连接数相对前一窗口的倍数下限（默认 4）"
+          },
+          "burst_min": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000000,
+            "default": 8,
+            "description": "当前窗口连接数下限（默认 8，必须大于 burst_low）"
+          },
+          "burst_low": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 3,
+            "description": "前一窗口连接数上限（默认 3，即低位）"
+          },
+          "cooldown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 60,
+            "description": "同类同键事件再次触发的最小间隔秒数（默认 60）"
+          },
+          "netns": {
+            "type": "string",
+            "description": "可选命名空间标注（[A-Za-z0-9._-]），只进事件/审计文本，不切换命名空间"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_status",
+      "description": "靶场状态（只读 D0）：是否启用、声明 CIDR、剩余 TTL、累计动作数、LSM socket hook 用户态接线状态、审计路径。未启用时返回「未启用 + 如何启用」原文（工具已注册，不是缺失也不是桩）；启用后显示 enabled=1/remaining_seconds/actions。只读：不发包、不改网络。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_enable",
+      "description": "启用靶场通道（D3，需授权者确认）：cidr 必须在硬编码允许清单内（10.231.0.0/16 / 10.99.0.0/16 / 127.0.0.0/8），ttl_minutes 1..60（默认 30）。写 state.json（0600）+ 起后台 watchdog；到期自动关闭（watchdog + 惰性 expires_at 双重检查）。已有启用状态时拒绝，须先 range_disable。启用时尝试给当前进程打 sec.ws_label=226（NETLINK_AI ACT）作内核 socket hook 第二道闸门；宿主无该 hook 时如实记录「待 #61 环境验证」，不静默假装成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cidr": {
+            "type": "string",
+            "enum": [
+              "10.231.0.0/16",
+              "10.99.0.0/16",
+              "127.0.0.0/8"
+            ],
+            "description": "启用时声明的靶场 CIDR；必须在硬编码允许清单内（10.231.0.0/16=D 棒工作区，10.99.0.0/16=A 棒 netns，127.0.0.0/8 仅限 netns 内）。其它值（含 192.168.245.0/24、10.0.0.0/8、公网）一律拒绝。"
+          },
+          "ttl_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 30,
+            "description": "启用时长（分钟），默认 30，上限 60；到期由 watchdog 与每次调用的惰性检查自动关闭。"
+          }
+        },
+        "required": [
+          "cidr"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_disable",
+      "description": "立即关闭靶场通道（D1）：停 watchdog、删 state.json、尝试清零 sec.ws_label。关闭后 scan/inject 立即拒绝，重新使用需 range_enable（D3）。未启用时返回「未启用 + 如何启用」原文。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_scan",
+      "description": "靶场端口扫描（D3）：目标必须在启用时声明的 CIDR 内且在硬编码允许清单内（代码硬校验，越界在发包前拒绝并审计）。TCP=非阻塞 connect 探测；UDP=connect + 1 字节探测（ICMP port unreachable=closed，超时=open|filtered，如实标注不确定性）。timeout_ms 默认 200（上限 1000），端口上限 1024。只探测声明 CIDR 内的单个目标，不扫描宿主 LAN、不做 DoS。逐端口全量审计（目标/端口/协议/rc）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "数字 IPv4 目标（拒绝主机名/IPv6）。必须在启用时声明的 CIDR 内，且必须在硬编码允许清单内；192.168.245.0/24 显式拒绝。"
+          },
+          "ports": {
+            "type": "string",
+            "description": "端口列表，如 22,80,8000-8010（单次上限 1024 个，端口 1..65535）"
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "tcp",
+              "udp"
+            ],
+            "default": "tcp",
+            "description": "tcp=connect 探测；udp=connect+1 字节探测（open|filtered 表示不确定）"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 200,
+            "description": "每端口探测超时毫秒（默认 200）"
+          }
+        },
+        "required": [
+          "target",
+          "ports"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "range_inject",
+      "description": "构造并发送单个报文（D3）：UDP / TCP SYN / ICMP，payload 自定义（payload_hex，≤4096 字节）。目标必须先通过启用 CIDR + 硬编码清单双重校验；越界目标在构造报文前拒绝并审计。UDP 用 SOCK_DGRAM（普通用户可发）；TCP SYN/ICMP 用raw socket（需 root/CAP_NET_RAW，缺权如实报 EPERM）。发送前先写 attempt 审计（payload 十六进制全文），发送后写 rc 与字节数；审计写失败则拒绝发送（fail-closed）。不做漏洞利用、不打真实服务、不做 DoS。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "数字 IPv4 目标（拒绝主机名/IPv6）。必须在启用时声明的 CIDR 内，且必须在硬编码允许清单内；192.168.245.0/24 显式拒绝。"
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "udp",
+              "tcp_syn",
+              "icmp"
+            ],
+            "default": "udp",
+            "description": "udp=SOCK_DGRAM；tcp_syn=raw TCP SYN；icmp=raw echo request（后两者需 root）"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "目的端口；udp/tcp_syn 必填，icmp 忽略"
+          },
+          "payload_hex": {
+            "type": "string",
+            "maxLength": 8192,
+            "description": "payload 十六进制全文（偶数长度，≤4096 字节）；空/省略=空 payload。审计按实际发送字节记录。"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sub": [
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_ctl_probe",
+      "description": "应用控制面探测（R/D0，只探测不动作）：对一个 APP 回答「怎么驱动它」——CLI 是否存在且 --help 可解析（只跑 --help/-h，绝不执行业务参数）、HTTP 是否有本地回环控制面（显式 http_ports/http_urls，或从常见静态服务进程参数推断端口；只连 127.0.0.1/localhost/::1）、dbus 是否可查（session bus + dbus-send NameHasOwner）、AT-SPI 环境是否存在（只探测，implemented=false，不实现可访问性树操作）。输出 backends 列表（cli/http/dbus）+ 每档证据/降级原因 + warnings。不做端口扫描、不碰外网。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "可执行文件名（PATH 查找）或绝对路径"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "仅用于推断 HTTP 服务端口（如 [\"-m\",\"http.server\",\"8000\"]）；CLI 探测只跑 --help/-h，绝不执行这些业务参数"
+          },
+          "http_ports": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "要探测的本地回环端口（最多 8 个，1..65535）"
+          },
+          "http_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "HTTP 探测路径（默认 /，最多 8 个）"
+          },
+          "http_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "完整回环 URL（最多 8 个，仅 http://127.0.0.1|localhost|::1）"
+          },
+          "dbus_name": {
+            "type": "string",
+            "description": "要查询归属的 D-Bus 名字（如 org.example.App；不填只报告 session bus 是否存在）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30,
+            "default": 5,
+            "description": "单项探测超时秒数"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式"
+          }
+        },
+        "required": [
+          "app"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_ctl_call",
+      "description": "应用控制面单动作调用（W2/D2）：backend=cli 时 fork+execv(argv) 逐项传参（无 shell 字符串，超时/取消 SIGKILL 进程组）；backend=http 时只允许 http://127.0.0.1|localhost|::1 的 method/url/body。返回 stdout/stderr/rc/耗时（HTTP 返回 status_code/body），参数中 password/token/secret 等敏感值在审计里打码；每次调用写全量审计。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "backend": {
+            "type": "string",
+            "enum": [
+              "cli",
+              "http"
+            ],
+            "description": "控制面类型"
+          },
+          "program": {
+            "type": "string",
+            "description": "backend=cli 必填：可执行文件名或绝对路径"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "backend=cli：参数数组（最多 64 项，逐项 execv，不经 shell）"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "工作目录（绝对路径；默认 appctl work 目录）"
+          },
+          "stdin": {
+            "type": "string",
+            "description": "可选 stdin 内容（≤60000 字节）"
+          },
+          "method": {
+            "type": "string",
+            "default": "GET",
+            "description": "backend=http：HTTP 方法（大写字母）"
+          },
+          "url": {
+            "type": "string",
+            "description": "backend=http：仅 http://127.0.0.1|localhost|::1"
+          },
+          "body": {
+            "type": "string",
+            "description": "backend=http：请求体"
+          },
+          "content_type": {
+            "type": "string",
+            "description": "backend=http：Content-Type（有 body 时默认 application/json）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "default": 30,
+            "description": "单次调用超时秒数（到点 SIGKILL 进程组）"
+          }
+        },
+        "required": [
+          "backend"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_policy_generate",
+      "description": "画像结论 → 自动策略（R/D1，只生成不落盘、不下发）：输入一个 APP 的静态+动态画像（JSON 或 @文件），或直接给可执行路径（内部依次跑 app_profile_static / app_profile_dynamic）。输出声明式策略 schema=aik-app-policy/1：LSM 规则（kind=path/label、label_id、op 与内核 enum ai_lsm_op_type 同号、deny、path_prefix≤63 字节）+ 按 op 分组的路径白名单 + 每条规则的 because 与 fact{seq,type,path}（哪条画像事实推导出来的，绝不凭空生成）。默认最小权限：只对动态画像实际出现过的路径写 allow，未出现的路径不写规则（由 LSM 默认策略决定），永不生成 allow-all。命中 /etc/shadow、/proc/<pid>/mem、~/.ssh 等危险路径时该规则 DENY + sensitive=true + requires_confirm=true，策略级 requires_confirm 置位。网络目标因内核 socket_connect 只按 pid/label 匹配而不可表达，只进 allowlist.net 并标 enforceable=false。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "可执行文件绝对路径（如 /usr/bin/curl）；内部依次跑静态/动态画像。与 profile_static/profile_dynamic 至少给一个"
+          },
+          "profile_static": {
+            "type": "string",
+            "description": "静态画像：app_profile_static 的 JSON，或 @绝对路径读文件"
+          },
+          "profile_dynamic": {
+            "type": "string",
+            "description": "动态画像：app_profile_dynamic 的 JSON（含 events 数组），或 @绝对路径读文件；给了就不再内部跑动态画像"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "内部跑动态画像时目标程序的参数（如 [\"--version\"]；仍受 app_profile_dynamic 的参数白名单约束）"
+          },
+          "run_dynamic": {
+            "type": "boolean",
+            "default": true,
+            "description": "没给 profile_dynamic 时是否内部跑动态画像（需要 root + aik-sandbox 工作区；失败则降级为仅静态事实）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_policy_apply",
+      "description": "策略下发到 AI LSM（W2/D3，fail-closed）：先探测内核 LSM 列表里有没有 ai（/sys/kernel/security/lsm），没有就明确拒绝并原样报出实际 LSM 列表，不做任何改动；有 ai 再探测规则注入节点，没有同样拒绝（绝不伪造成功）。下发前存旧规则快照 → 逐条下发→ 读回校验 → 任一步失败恢复快照。策略含敏感路径命中时，除非 confirm_sensitive=true 否则先要求人工确认。拒绝时输出 refused/changed=false/error_code 与实际状态证据。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "type": "string",
+            "description": "策略 JSON（app_policy_generate 的整包或裸 policy 对象），或 @绝对路径读文件"
+          },
+          "confirm_sensitive": {
+            "type": "boolean",
+            "default": false,
+            "description": "策略含敏感路径命中（sensitive/requires_confirm）时的人工确认；不传则拒绝并要求先确认"
+          }
+        },
+        "required": [
+          "policy"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "netsec"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "app_ctl_task",
+      "description": "应用控制面声明式任务（W2/D2）：按 steps 顺序执行一串 call + 断言（rc/stdout/stderr/正则/文件存在与内容/HTTP 状态码），默认失败即停并回报哪一步失败与原始 stderr；进度写 <task_id>.progress.jsonl；支持 action=cancel 从另一进程取消（SIGKILL 进程组 + 取消标记，清理 pid/cancel 标记）、action=status 查看进度。任务定义用 JSON（YAML 未实现）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "run",
+              "cancel",
+              "status"
+            ],
+            "default": "run",
+            "description": "run=执行；cancel=取消运行中的任务（写取消标记+SIGKILL 进程组）；status=查看进度"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "任务 ID（[A-Za-z0-9._-]，≤64；run 缺省自动生成；cancel/status 必填）"
+          },
+          "workdir": {
+            "type": "string",
+            "description": "任务工作目录（绝对路径且已存在；缺省 <state>/tasks/<task_id>"
+          },
+          "fail_fast": {
+            "type": "boolean",
+            "default": true,
+            "description": "失败即停（默认 true）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 300,
+            "description": "整个任务超时秒数"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "步骤数组（最多 32）：每步 {name, call:{backend,program,argv,cwd,method,url,body,timeout_s}, assert:{rc,status_code,stdout_contains,stdout_not_contains,stderr_contains,stderr_not_contains,stdout_matches,stderr_matches,body_contains,file_exists,file_absent,file_min_size,file_contains}, continue_on_fail}"
+          },
+          "task": {
+            "type": "object",
+            "description": "可选：把 {steps:[...]} 作为对象传入；本版只接受 JSON（YAML 未实现）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin",
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_list",
+      "description": "枚举 USB 设备与接口（R/D0，只读）：按 /sys/bus/usb/devices 列出全部节点（设备 + 接口），给出 idVendor:idProduct、modalias、bDeviceClass/bInterfaceClass、当前 driver、driver_override、是否 hub/根 hub、bNumInterfaces 与接口清单，并给出 bindable（非 hub 且单接口）判定。只读属性与软链，不写任何文件；认不出的字段如实置 null/unknown。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 为结构化契约，text 为人读摘要）"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_identify",
+      "description": "识别 USB 设备类别与人话名称（R/D0，只读）：类别推断 hub/hid/storage/net/audio/other（hub 优先：根 hub、bDeviceClass=9、任一接口 class=9 一律判 hub；多接口异类判 other），名称来自 sysfs product/manufacturer 真读 + 内置最小 vendor:product ids 表。认不出就报 confidence=unknown/vendor-only，绝不编造型号。同时给出 class_evidence 与 bindable/bindable_reason（hub/多接口不可绑定）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（如 1-1:1.0）；只接受 sysfs 节点名，不接受路径"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text"
+            ],
+            "default": "json",
+            "description": "输出格式（json 为结构化契约，text 为人读摘要）"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_bind",
+      "description": "USB 接口驱动绑定/解绑（W2/D3）：先校验目标是非 hub、单接口的叶子设备（根 hub/class=9/多接口一律拒绝），把快照（原驱动、driver_override、new_id）落盘后才允许写 /sys；mode=override 写 driver_override+bind，mode=new_id 写驱动 new_id（可选 bind），mode=bind 直接 bind；action=unbind 撤销当前接口驱动。每次写后读回 driver/override/设备节点/输入设备，失败自动回滚到原驱动并读回校验；回滚失败如实标 rollback.ok=false，绝不粉饰。真实 /sys 写要求 root。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）。传设备名时自动解析到唯一接口（绑定发生在接口上，绝不 unbind 设备级 usb 驱动）"
+          },
+          "driver": {
+            "type": "string",
+            "description": "目标驱动名（action=bind 必填，如 usbhid / usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "override",
+              "new_id",
+              "bind"
+            ],
+            "default": "override",
+            "description": "override=写 driver_override 后 bind；new_id=向驱动 new_id 写 idVendor:idProduct 触发匹配（可选再 bind）；bind=直接写驱动 bind（要求 modalias 匹配）"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "bind",
+              "unbind"
+            ],
+            "default": "bind",
+            "description": "bind=绑定到 driver；unbind=撤销当前接口驱动（同样先落快照）"
+          },
+          "bind": {
+            "type": "boolean",
+            "default": true,
+            "description": "mode=new_id 时：写完 new_id 后是否再显式写 bind（默认 true；false 只加动态 id 交给内核自动匹配）"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=只做安全检查与计划，不落快照、不写 /sys"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_restore",
+      "description": "按快照恢复 USB 接口绑定（W2/D2）：读取 dev_bind 落盘的快照（或显式 snapshot），撤掉当前错误驱动 → 撤 new_id → 还原 driver_override → 绑回原驱动，最后逐项读回校验；不一致时verified=false 并保留 error_code=restore_unverified，不假成功。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）；按状态目录里该设备最近一次快照恢复"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "可选：显式快照 JSON（内联文本，或 @绝对路径）；不填则读状态目录最近一次快照"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "true=只校验快照与当前状态，不写 /sys"
+          }
+        },
+        "required": [
+          "device"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_adapt",
+      "description": "对 USB 设备启动四级递进适配任务（W2/D3，异步）：L1 已在树驱动 new_id → L2 driver_override 强绑 → L3 通用类驱动（uinput/usb-storage/vfio）→ L4 目标驱动模块参数 quirk。每级都「尝试 → 读回验证 → 失败回滚 → 记结果 → 下一级」；只有读回 driver == 目标（HID 目标还要求 /proc/bus/input/devices 里有输入设备）才算该级成功。立刻返回 task_id（后台 daemon 执行，状态落 status.json / progress.jsonl / daemon.log）。四级全失败时任务 ok=false 并逐级给出 rc/errno/原因，设备回到任务开始前的驱动；任何单级回滚失败都会中止后续级别（不在未知状态上继续）。只允许非 hub 单接口叶子设备，真实 /sys 写要求 root。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "USB 设备节点名（如 1-1）或接口名（1-1:1.0）；设备名自动解析到唯一接口（绑定发生在接口上）"
+          },
+          "driver": {
+            "type": "string",
+            "description": "四级递进的目标驱动（如 usbhid / usb-storage）；hub/usb/usbfs 层级不对，一律拒绝"
+          }
+        },
+        "required": [
+          "device",
+          "driver"
+        ]
+      },
+      "sub": [
+        "sysadmin",
+        "res"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "dev_task",
+      "description": "查询/控制 USB 适配任务（W1/D1）：action=status 返回任务状态、当前级别、进程是否存活、progress.jsonl 与 daemon.log 的尾部；action=cancel 先 SIGTERM（5s 不退再 SIGKILL 兜底），然后按任务快照把设备回滚到任务开始前的驱动并读回校验，最后把任务标成 canceled；action=log 返回全量进度事件与后台日志。不传 task_id时取状态目录里最近的一个任务。已完成且成功的任务不会被 cancel回滚（避免毁掉成功结果）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "cancel",
+              "log"
+            ],
+            "default": "status",
+            "description": "status=任务状态/当前级别/进度与日志尾；cancel=SIGTERM（5s 不退再 SIGKILL）停止后台任务并把设备回滚到任务开始前的驱动；log=全量 progress.jsonl + daemon.log"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "可选：dev_adapt 返回的 task_id；不填则取状态目录里最近的一个适配任务"
+          },
+          "reason": {
+            "type": "string",
+            "description": "可选：取消原因，原样写进任务状态与审计"
+          }
+        },
+        "required": []
+      },
+      "sub": [
+        "sysadmin"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_probe",
+      "description": "探测一个目标在本机为什么跑不起来（D0 只读，静态判定，不执行目标）：ELF 头（e_machine/位宽/OSABI/PT_INTERP）、DT_NEEDED 逐个在 LD_LIBRARY_PATH/RUNPATH/多架构目录里解析、脚本 shebang 链（含 #!/usr/bin/env 风格与解释器本身是脚本的下钻）、同族解释器候选（/usr/bin 等按前缀扫描）、执行位/可读性。每条 fatal 原因给 code/layer/fatal/adaptable/detail/evidence[]；缺解释器/缺库 → layer=L0 可适配；架构不同/32 位缺 loader → layer=L1 明确标注不可适配（v0 不做 ABI 翻译）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "宿主绝对路径（可执行/脚本；目录只诊断不自动挑入口）"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_generate",
+      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。interpreter_map/lib_sources 可显式指定来源；探测到缺解释器/缺库但给不出来源时诚实失败，不猜。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名（[A-Za-z0-9_.-]{1,32}，首字符非 . / -）"
+          },
+          "target": {
+            "type": "string",
+            "description": "宿主绝对路径（可执行/脚本文件）"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "可选：L2 workspace 名（默认 cmp-<name>）"
+          },
+          "interpreter_map": {
+            "type": "object",
+            "description": "可选：{解释器路径或名字: 替代解释器绝对路径}"
+          },
+          "lib_sources": {
+            "type": "object",
+            "description": "可选：{soname: 宿主库文件绝对路径}"
+          },
+          "env": {
+            "type": "object",
+            "description": "可选：{KEY: VALUE} 注入变量"
+          },
+          "expect": {
+            "type": "object",
+            "description": "可选：{exit_code, stdout_contains:[...], stderr_not_contains:[...], max_ms}"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选：传给目标的参数（不含 argv[0]）"
+          },
+          "timeout_s": {
+            "type": "integer",
+            "description": "试跑超时秒（1-600，默认 10）",
+            "minimum": 1,
+            "maximum": 600,
+            "default": 10
+          },
+          "write": {
+            "type": "boolean",
+            "description": "是否落盘（默认 true；false=只回显）",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "target"
+        ]
+      },
+      "sub": [
+        "sandbox",
+        "fs"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_apply",
+      "description": "在 workspace 内落地适配器并试跑一次（D2 高危写）：workspace 不存在则按 disk backend 新建（记 created 以便回滚）；目标复制进 stage、库复制进 stage/lib、shim 写进 /.aik-compat/usr-upper（overlay upper，落在 workspace 镜像内）；随后带 L0 env + L2 /usr overlay 试跑 contract.argv。试跑未过非轨迹断言 → 立即回滚（删 stage/shim，本次新建的 workspace 一并销毁）并报失败，绝不留半成品。目标原件、宿主 /usr、/etc 零写入。rollback=true 时执行回滚（幂等）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "可选：覆盖适配器声明的 workspace"
+          },
+          "rollback": {
+            "type": "boolean",
+            "description": "true=只做回滚（删 stage/shim，本次 apply 新建的 workspace 销毁）",
+            "default": false
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox"
+      ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compat_verify",
+      "description": "跑行为契约（D1，必须已 apply）：正例跑一次并逐条判定退出码/stdout 非空/stdout 含/stderr 不含/耗时上限/syscall 轨迹（strace 在宿主侧包 aik-sandbox，轨迹在 workspace 内产生）；再跑三类负向自检——stdout 丢空（stdout 断言必须判负）、强制 exit 97（退出码断言必须判负）、不带任何适配跑同一目标（契约必须判负）。任一不过、或负向自检被放过 → ok=false 并给逐条 diff。strace 不可用时判『不可验证』而不是靜默放过。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "适配器名"
+          },
+          "trace": {
+            "type": "boolean",
+            "description": "是否采集 syscall 轨迹（默认 true；false 时含轨迹断言的契约判不可验证）",
+            "default": true
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sub": [
+        "sandbox",
         "sysadmin"
       ]
     }

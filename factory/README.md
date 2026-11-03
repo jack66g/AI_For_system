@@ -34,7 +34,7 @@
 
 ## 桌面
 
-`desktop/` 是 Web demo 源码；安装到 `/opt/aikdesktop`，unit 为 `factory/etc/systemd/system/aik-desktop.service`。运行时 `data/` 由服务生成，不入库。
+`desktop/` 是 Web demo 源码；安装到 `/opt/aikdesktop`，unit 为 `factory/etc/systemd/system/aik-desktop.service`。apps-catalog.json 等四件（apps-catalog/desktop/notifs/pin.json）为静态种子数据，随仓库 `desktop/data/` 收编（T7e 起）；运行时可写态由服务在 StateDirectory 生成。
 
 ## 秘密与安全
 

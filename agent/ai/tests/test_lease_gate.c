@@ -510,10 +510,10 @@ static void test_ephemeral(void)
 	out = run_tool("exec_run",
 		       "{\"command\":\"python3\",\"args\":[\"-c\",\"print(1)\"]}",
 		       NULL);
-	expect(is_denied(out) && contains(out, "CONFIRM_REQUIRED") &&
-	       confirm_field(out, "danger", danger, sizeof(danger)) == 0 &&
-	       strcmp(danger, "D3") == 0,
-	       "-y: exec_run python3 归 D3 → CONFIRM_REQUIRED（不是 ALLOW）");
+	expect(contains(out, "UNKNOWN_COMMAND") &&
+	       contains(out, "不在 exec 白名单"),
+	       "-y: exec_run python3 已摘除（T7d）→ UNKNOWN_COMMAND 参数错"
+	       "拒绝（白名单外，无风险级，不进租约闸门）");
 	free(out);
 
 	out = run_tool("exec_run",

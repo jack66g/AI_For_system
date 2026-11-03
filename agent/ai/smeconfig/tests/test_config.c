@@ -17,12 +17,12 @@
  *      embedding.hash_seed、storage.autosave —— 这四个键只校验存在，并在
  *      结构检查里逐一断言其 Python 默认值。运行配置保留的是
  *      config_template 的手写键序（不是 to_dict() 键序），所以这里只比
- *      存在性与值；26 section / 137 键的完整键序由内置 Python 默认 JSON
+ *      存在性与值；26 section / 133 键的完整键序由内置 Python 默认 JSON
  *      与全键覆盖用例验证。
  *   2) 内置默认 JSON（config_default.h，Python 真值）的结构：26 section /
- *      137 键 / 每节键名顺序 / 非 ASCII 字符串。
+ *      133 键 / 每节键名顺序 / 非 ASCII 字符串。
  *   3) 全键覆盖：用 Python 默认 JSON 的每个键构造覆盖值跑
- *      aik_config_from_json，要求 DOM 与输入逐键逐序逐类型相等、137 个键
+ *      aik_config_from_json，要求 DOM 与输入逐键逐序逐类型相等、133 个键
  *      全部 is_explicit（seed 除外）、get_* 读回覆盖值、默认对象不被污染。
  *   4) config_template：<TMP> 替换为 /tmp/x 后覆盖生效、未覆盖键保持
  *      默认、键序不变、is_explicit 只标记文件里写了的键。
@@ -349,16 +349,16 @@ fail:
 }
 
 /* ------------------------------------------------------------------ */
-/* 1) 默认配置结构（Python 真值：26 section / 137 键）                 */
+/* 1) 默认配置结构（Python 真值：26 section / 133 键）                 */
 /* ------------------------------------------------------------------ */
 static const struct {
 	const char *name;
 	size_t nkeys;	/* 顶层 seed 记 1 */
 } EXPECT_SECTIONS[] = {
 	{ "seed", 1 },
-	{ "embedding", 14 },
+	{ "embedding", 13 },
 	{ "region", 10 },
-	{ "retrieval", 14 },
+	{ "retrieval", 11 },
 	{ "ranking", 8 },
 	{ "policy", 3 },
 	{ "reinforcement", 7 },
@@ -425,9 +425,9 @@ static void test_structure(const aik_config *cdef)
 			total += aik_json_count(sec);
 		}
 	}
-	check(total == 137, "defaults: %zu keys != 137", total);
+	check(total == 133, "defaults: %zu keys != 133", total);
 
-	/* 默认 DOM 必须与 Python 真值 JSON 逐键逐序逐值一致（137 键） */
+	/* 默认 DOM 必须与 Python 真值 JSON 逐键逐序逐值一致（133 键） */
 	{
 		char perr[256];
 		aik_json *py = aik_json_parse(
@@ -442,8 +442,8 @@ static void test_structure(const aik_config *cdef)
 	}
 
 	/* 生成文件本身：长度 + 非 ASCII 字符串（八进制转义正确性） */
-	check(strlen(AIK_CONFIG_DEFAULT_JSON) == 3427,
-	      "config_default.h: JSON length %zu != 3427",
+	check(strlen(AIK_CONFIG_DEFAULT_JSON) == 3333,
+	      "config_default.h: JSON length %zu != 3333",
 	      strlen(AIK_CONFIG_DEFAULT_JSON));
 	v = aik_json_get(aik_json_get(dom, "factversion"), "correct_markers");
 	check(v && aik_json_typeof(v) == AIK_JSON_ARR &&
@@ -610,7 +610,7 @@ static void test_reference(const aik_config *cdef)
 }
 
 /* ------------------------------------------------------------------ */
-/* 3) 全键覆盖：Python 默认 JSON 的 137 个键全部改写                  */
+/* 3) 全键覆盖：Python 默认 JSON 的 133 个键全部改写                  */
 /* ------------------------------------------------------------------ */
 static aik_json *perturb(const aik_json *v)
 {
@@ -709,7 +709,7 @@ static void test_override_all(const aik_config *cdef)
 		aik_json_free(pydef);
 		return;
 	}
-	/* 137 键逐键逐序逐类型（含数组/对象/null 覆盖） */
+	/* 133 键逐键逐序逐类型（含数组/对象/null 覆盖） */
 	check(json_eq(aik_config_dom(ov), input),
 	      "override: DOM != input（值/类型/键序有偏差）");
 
@@ -943,8 +943,8 @@ static void test_types(const aik_config *cdef)
 	expect_num("type: region.min_join_cosine", cdef,
 		   "region.min_join_cosine", 0.7);
 	expect_num("type: ranking.semantic", cdef, "ranking.semantic", 0.4);
-	expect_num("type: retrieval.query_cache_size (INT 桥)", cdef,
-		   "retrieval.query_cache_size", 128.0);
+	expect_num("type: retrieval.top_k (INT 桥)", cdef,
+		   "retrieval.top_k", 10.0);
 
 	/* bool：2 正例 + 反例 */
 	expect_bool("type: embedding.normalize", cdef, "embedding.normalize",

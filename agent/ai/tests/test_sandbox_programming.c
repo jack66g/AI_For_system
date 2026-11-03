@@ -2,17 +2,20 @@
 /*
  * test_sandbox_programming.c - W72：沙箱受限表编程能力冒烟
  *
- * 背景：W70 T13 子智能体在沙箱内无法执行 python3（受限表不含，W2
+ * 背景：W70 T13 子智能体在沙箱内无法执行编程工具（受限表不含，W2
  * fail-closed）、which 二进制在沙盒 root 不可用（/usr/bin/which →
  * /etc/alternatives/which，沙盒 /etc 不含 alternatives）。
  *
+ * T7d：python3 子配方摘除（镜像不再携带解释器），在环编程收敛到
+ * gcc/cc 受控编译。
+ *
  * W72 受限表：
- *   - 新增 python3/gcc/cc（沙箱内 W1；主表 python3 仍 W2）；
+ *   - 新增 gcc/cc（沙箱内 W1）；T7d 摘除 python3；
  *   - which 保持 R，执行器在 AIKERNEL_SANDBOX 下用内建 PATH 查找；
  *   - 受限表仍 0 个 W2（fail-closed 不变）。
  *
  * 本测试以 AIKERNEL_SANDBOX 身份加载 tools-sandbox.json，真实执行
- * tee 写脚本 → python3 计算 → gcc/cc 编译 → which 探测。
+ * tee 写源码 → gcc/cc 编译 → which 探测；并验证 python3 已摘除。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -55,14 +58,14 @@ int main(void)
 	char *out = NULL;
 	int ok = 0;
 	int i;
-	int have_py = 0, have_gcc = 0, have_cc = 0, have_which = 0;
+	int have_gcc = 0, have_cc = 0, have_which = 0, no_py = 1;
 	int cmd_w2 = 0;
 
 	printf("==== test_sandbox_programming: W72 sandbox exec ====\n");
 	{
 		char lerr[AI_LEASE_ERR_MAX] = "";
 
-		/* worker：D2+ 仍拒绝；W1 受限表命令（python3 沙箱内 W1）放行 */
+		/* worker：D2+ 仍拒绝；W1 受限表命令（gcc/cc 沙箱内 W1）放行 */
 		ai_lease_ctx_init(NULL, 1, getuid(), lerr, sizeof(lerr));
 	}
 	setenv("AIKERNEL_POLICY", "/dev/null", 1);
@@ -79,15 +82,15 @@ int main(void)
 	CHECK(t != NULL, "受限表含 exec_run");
 	if (!t)
 		return 1;
-	CHECK(t->exec_cmd_count == 57,
-	      "受限表 exec 命令 57 条（54 + python3/gcc/cc）");
+	CHECK(t->exec_cmd_count == 56,
+	      "受限表 exec 命令 56 条（54 + gcc/cc；T7d 摘 python3）");
 	for (i = 0; i < t->exec_cmd_count; i++) {
 		const struct tool_exec_cmd *c = &t->exec_cmds[i];
 
 		if (c->risk && strcmp(c->risk, "W2") == 0)
 			cmd_w2 = 1;
 		if (strcmp(c->command, "python3") == 0)
-			have_py = c->risk && strcmp(c->risk, "W1") == 0;
+			no_py = 0;
 		if (strcmp(c->command, "gcc") == 0)
 			have_gcc = c->risk && strcmp(c->risk, "W1") == 0;
 		if (strcmp(c->command, "cc") == 0)
@@ -96,29 +99,20 @@ int main(void)
 			have_which = c->risk && strcmp(c->risk, "R") == 0;
 	}
 	CHECK(!cmd_w2, "受限表 exec 命令 0 个 W2（fail-closed 保持）");
-	CHECK(have_py, "python3 在沙箱表内为 W1");
+	CHECK(no_py, "python3 已摘除（T7d，沙箱表不含）");
 	CHECK(have_gcc && have_cc, "gcc/cc 在沙箱表内为 W1");
 	CHECK(have_which, "which 在沙箱表内为 R");
 
-	unlink("/tmp/w72_hello.py");
 	unlink("/tmp/w72_hello.c");
 	unlink("/tmp/w72_hello_bin");
 	unlink("/tmp/w72_hello_cc");
 
-	/* 1) tee 写 python 脚本 → python3 计算 sum(range(10)) = 45 */
-	CHECK(run_exec(t, "{\"command\":\"tee\",\"args\":"
-		      "[\"/tmp/w72_hello.py\"],\"input\":"
-		      "\"print(sum(range(10)))\\n\"}",
-		      &out, &ok) == AI_OK && ok,
-	      "沙箱内 tee 写 /tmp/w72_hello.py");
-	free(out);
-	out = NULL;
+	/* 1) T7d：python3 已摘除——沙箱内调用必须被拒绝（UNKNOWN_COMMAND） */
 	CHECK(run_exec(t, "{\"command\":\"python3\",\"args\":"
-		      "[\"/tmp/w72_hello.py\"]}", &out, &ok) == AI_OK && ok,
-	      "沙箱内 python3 执行脚本成功（W1）");
-	CHECK(out && strstr(out, "45") != NULL,
-	      "python3 输出 45");
-	printf("  python3 out: %.120s\n", out ? out : "(null)");
+		      "[\"/tmp/w72_hello.py\"]}", &out, &ok) == AI_OK && !ok,
+	      "沙箱内 python3 调用被拒绝（白名单外，ok=0）");
+	CHECK(out && strstr(out, "不在 exec 白名单") != NULL,
+	      "python3 拒绝文案=白名单外");
 	free(out);
 	out = NULL;
 
@@ -157,17 +151,14 @@ int main(void)
 
 	/* 3) which：沙盒内建实现（不依赖 /etc/alternatives） */
 	CHECK(run_exec(t, "{\"command\":\"which\",\"args\":"
-		      "[\"python3\",\"gcc\"]}", &out, &ok) == AI_OK && ok,
-	      "沙箱内 which python3 gcc 成功");
-	CHECK(out && strstr(out, "/python3") != NULL,
-	      "which 找到 python3 路径");
+		      "[\"gcc\",\"cc\"]}", &out, &ok) == AI_OK && ok,
+	      "沙箱内 which gcc cc 成功");
 	CHECK(out && strstr(out, "/gcc") != NULL,
 	      "which 找到 gcc 路径");
 	printf("  which out: %.160s\n", out ? out : "(null)");
 	free(out);
 	out = NULL;
 
-	unlink("/tmp/w72_hello.py");
 	unlink("/tmp/w72_hello.c");
 	unlink("/tmp/w72_hello_bin");
 	unlink("/tmp/w72_hello_cc");

@@ -57,8 +57,34 @@ netlink_act_ai_decision_oom OOM 受害者评分偏
 netlink_act_ai_decision_sched 调度决策注入使能
 netlink_act_ai_decision_mm 内存决策注入使能
 netlink_sense 按 CPU 读取遥测记
+event_listen 先 REG 登记 portid（
+proc_watch 实时捕获 fork/exec/e
+taskstats_sample CPU/阻塞IO/换入/缺
+nflog_dump 需要 nftables 规则
+net_monitor 实时感知网络拓扑
+udev_monitor 设备 add/remove/change
+psi_snapshot /proc/pressure/{cpu,memo
+kernel_ai_healthcheck /proc/ai 的 status/cont
+disk_hogs /proc/mounts 里 ext4/ex
+service_doctor 一次拿 is-active + st
+baseline_diff sysctl_snapshot 存基
+sysctl_snapshot 按前缀递归快照 /p
+schedule_list 列出 aik-* 计划任
+sysctl_restore 逐次确认
+schedule_create systemd-run transient ti
+schedule_remove 停止并移除 aik-<nam
+ip_ban_verified 插入 nft 运行时规
+process_quarantine sched.nice=19 → proc.f
+model_verify model_load(path)→model
+net_iface state=up|down
+net_addr_add 已存在如实报 EEXIS
+net_addr_del AI 识别→暂停→授
+net_route_add 同目标已存在如实
+net_route_del 断网卡/锁死风险
+net_link_del AI 识别→暂停→授
+nft_txn ops 每条一个 nft 片
 procfs_read_net_nf_conntrack 内核连接跟踪表（
-exec_run python3 执行 .py 脚
+exec_run tee 写文件（input 
 memory_search 凡涉及 AIKernel 系
 memory_search_advanced 在普通检索上叠加
 memory_add 写入一条记忆到 SM
@@ -154,3 +180,51 @@ model_install 多 GB 下载+写盘，
 model_remove 删除多 GB 权重，
 model_benchmark N=3 条固定提示实
 clarify 一次只问一个问题
+workspace_create 在 /var/lib/aikernel/ws
+workspace_list 名称/后端/容量/已
+workspace_inspect 镜像路径与是否存
+workspace_run 新 mount/pid/uts namesp
+workspace_destroy 杀进程/收 cgroup/卸
+workspace_quota 不带 mb 只查看
+workspace_net_allow 在 netns 内的 inet ai
+workspace_net_status net 模式、netns 是
+sched_status 当前 mode（static|ml|
+sched_knob_set 范围校验 -> 写 -> 
+sched_mode_set static|ml|off
+sched_snapshot save 把当前 mode + cg
+sched_ab_run 2 个参数集 x 3 档
+bpf_prog_load 直接 bpf() 系统调
+bpf_prog_list BPF_PROG_GET_NEXT_ID →
+bpf_prog_unload 先解 link，再关闭 
+nfqueue_pump NETLINK_NETFILTER=12 原
+nft_intent_compile 把一句话（「只允
+nft_intent_apply 重编译同一意图 
+nft_intent_confirm action=confirm 在保护
+nft_ruleset_summarize 读 nft -j list ruleset
+net_hit_watch 按 interval（默认 5s
+net_hit_policy 设置 threshold/window/
+app_profile_static 把本机可执行文件
+app_profile_dynamic 目标程序在 aik-sand
+app_profile_diff 输入目标路径 + app
+net_chain_watch 按 interval（默认 2s
+net_chain_rules interval/scan_window/sca
+range_status 是否启用、声明 CI
+range_enable cidr 必须在硬编码
+range_disable 停 watchdog、删 state
+range_scan 目标必须在启用时
+range_inject UDP / TCP SYN / ICMP，p
+app_ctl_probe 对一个 APP 回答「
+app_ctl_call backend=cli 时 fork+exe
+app_policy_generate 输入一个 APP 的静
+app_policy_apply 先探测内核 LSM 列
+app_ctl_task 按 steps 顺序执行
+dev_list 按 /sys/bus/usb/devices
+dev_identify 类别推断 hub/hid/sto
+dev_bind 先校验目标是非 hu
+dev_restore 读取 dev_bind 落盘
+dev_adapt L1 已在树驱动 new_i
+dev_task action=status 返回任
+compat_probe ELF 头（e_machine/位
+compat_generate 先跑同一套 probe，
+compat_apply workspace 不存在则
+compat_verify 正例跑一次并逐条
