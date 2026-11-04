@@ -539,7 +539,7 @@ static ssize_t ai_model_infer_store(struct kobject *kobj,
 	}
 	name[i] = '\0';
 	if (!name[0])
-		return -EINVAL;
+		goto err_free;   /* K2b（K1B-17）：4 条早退不再泄 4KB */
 
 	while (pos < count) {
 		int hi, lo;
@@ -550,15 +550,15 @@ static ssize_t ai_model_infer_store(struct kobject *kobj,
 		}
 		hi = hex_to_bin(buf[pos]);
 		if (hi < 0 || pos + 1 >= count)
-			return -EINVAL;
+			goto err_free;
 		lo = hex_to_bin(buf[pos + 1]);
 		if (lo < 0 || in_len >= AI_MODEL_INFER_MAX)
-			return -EINVAL;
+			goto err_free;
 		in[in_len++] = (u8)(hi << 4 | lo);
 		pos += 2;
 	}
 	if (!in_len)
-		return -EINVAL;
+		goto err_free;
 
 	mutex_lock(&ai_infer_lock);
 	rc = ai_runtime_model_infer_by_name(name, in, in_len,
@@ -572,6 +572,11 @@ static ssize_t ai_model_infer_store(struct kobject *kobj,
 	mutex_unlock(&ai_infer_lock);
 	kfree(in);
 	return rc == AI_OK ? (ssize_t)count : ai_error_to_errno(rc);
+
+err_free:
+	/* K2b 修复 K1B-17（Med-4）：4 条早退路径补释放（原每次失败泄 4KB） */
+	kfree(in);
+	return -EINVAL;
 }
 
 static ssize_t ai_model_out_show(struct kobject *kobj,
@@ -669,9 +674,12 @@ static ssize_t ai_dec_stats_show(struct kobject *kobj,
 				   "%-16s %3u %10llu %9llu %8llu %9llu %7llu %10d\n",
 				   ai_decision_hook_name((enum ai_hook_id)i),
 				   st.hook_en[i],
-				   st.hook[i].queries, st.hook[i].injected,
-				   st.hook[i].effects, st.hook[i].fallback,
-				   st.hook[i].ring, st.hook[i].last_bias);
+				   atomic64_read(&st.hook[i].queries),
+				   atomic64_read(&st.hook[i].injected),
+				   atomic64_read(&st.hook[i].effects),
+				   atomic64_read(&st.hook[i].fallback),
+				   atomic64_read(&st.hook[i].ring),
+				   st.hook[i].last_bias);
 	}
 	return n;
 }

@@ -14,6 +14,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/atomic.h>
 #include <linux/export.h>
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
@@ -23,7 +24,7 @@
 
 static int ai_safety_enabled = AI_SAFETY_DEFAULT_ENABLE;
 static u32 ai_safety_max_impact = AI_SAFETY_DEFAULT_MAX_IMPACT;
-static u64 ai_safety_rejected;   /* 被限制/拒绝的决策累计 */
+static atomic64_t ai_safety_rejected;   /* 被限制/拒绝的决策累计（K2b K1B-06：原子化） */
 
 /* ---- 决策快照环（slot 序 = 插入序） ---- */
 
@@ -252,7 +253,7 @@ int ai_policy_safety_stats(u32 *snapshots, u64 *rejected)
 	if (snapshots)
 		*snapshots = ai_safety_snap_count;
 	if (rejected)
-		*rejected = ai_safety_rejected;
+		*rejected = atomic64_read(&ai_safety_rejected);
 	spin_unlock_irqrestore(&ai_safety_lock, flags);
 	return AI_OK;
 }
@@ -261,5 +262,5 @@ EXPORT_SYMBOL_GPL(ai_policy_safety_stats);
 /* 供 ai_control 应用路径累计被限制决策数（模块内符号，非公共接口） */
 void ai_policy_safety_note_rejected(void)
 {
-	WRITE_ONCE(ai_safety_rejected, READ_ONCE(ai_safety_rejected) + 1);
+	atomic64_inc(&ai_safety_rejected);
 }

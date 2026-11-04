@@ -978,7 +978,9 @@ void ai_sec_syscall_name(int nr, char *buf, size_t size)
 		return;
 	buf[0] = '\0';
 
-	if (nr < 0 || !IS_ENABLED(CONFIG_KALLSYMS))
+	/* K2b 修复 K1B-10：补 nr 上界（sys_call_table[nr] 越界读防御；
+	 * 现有调用方 nr 来自 syscall_get_nr/seccomp 值域安全，属纵深防御） */
+	if (nr < 0 || nr >= NR_syscalls || !IS_ENABLED(CONFIG_KALLSYMS))
 		goto fallback;
 
 	if (!kallsyms_lookup((unsigned long)sys_call_table[nr], NULL, NULL,

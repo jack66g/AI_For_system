@@ -22,6 +22,7 @@
 #include <linux/sched.h>
 #include <linux/pid.h>
 #include <linux/kstrtox.h>
+#include <linux/capability.h>
 #include "../core/ai_types.h"
 #include "ai_sched.h"
 
@@ -115,6 +116,12 @@ static ssize_t ai_sched_classify_write(struct file *file,
 	err = kstrtoul(buf, 10, &pid);
 	if (err || pid > INT_MAX)
 		return -EINVAL;
+
+	/* K2b 修复 K1B-19：全局查询选择器写口补 CAP_SYS_ADMIN 闸
+	 * （出厂 root 无行为变化；节点 0644 root 属主，非 root 本就被
+	 * VFS 拦在 open，此为对称性与纵深防御） */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	WRITE_ONCE(ai_sched_classify_pid_val, (int)pid);
 	return count;

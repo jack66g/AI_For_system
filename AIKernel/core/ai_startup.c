@@ -145,6 +145,21 @@ int ai_startup_load_model(const char *name)
 
 	if (!name || !name[0])
 		return AI_ERR_INVALID_ARG;
+	/* K2b 修复 K1B-25：模型名白名单 [A-Za-z0-9._-]——name 直接拼进
+	 * model_path，'/'（含 ".." 穿越分量）必须拒绝。CAP_SYS_ADMIN
+	 * 门槛 + AIKWMDL magic 校验双重兜底在场，本过滤为纵深防御，
+	 * 语义收紧仅对试图穿越的畸形名生效 */
+	{
+		const char *c;
+
+		for (c = name; *c; c++) {
+			if (!((*c >= 'a' && *c <= 'z') ||
+			      (*c >= 'A' && *c <= 'Z') ||
+			      (*c >= '0' && *c <= '9') ||
+			      *c == '.' || *c == '_' || *c == '-'))
+				return AI_ERR_INVALID_ARG;
+		}
+	}
 	if (!ai_startup_get_enabled())
 		return AI_ERR_DISABLED;
 

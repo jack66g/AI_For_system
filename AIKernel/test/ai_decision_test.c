@@ -157,10 +157,10 @@ static void decision_fallback_test(struct kunit *test)
 	ai_decision_stats_get(&st0);
 	KUNIT_EXPECT_EQ(test, ai_decision_query(AI_HOOK_OOM_BADNESS, &ctx), 0);
 	ai_decision_stats_get(&st1);
-	KUNIT_EXPECT_EQ(test, (int)(st1.hook[AI_HOOK_OOM_BADNESS].fallback -
-				    st0.hook[AI_HOOK_OOM_BADNESS].fallback), 1);
-	KUNIT_EXPECT_EQ(test, (int)(st1.hook[AI_HOOK_OOM_BADNESS].queries -
-				    st0.hook[AI_HOOK_OOM_BADNESS].queries), 1);
+	KUNIT_EXPECT_EQ(test, (int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].fallback) -
+				    atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].fallback)), 1);
+	KUNIT_EXPECT_EQ(test, (int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].queries) -
+				    atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].queries)), 1);
 
 	enable_all(0);
 }
@@ -209,12 +209,12 @@ static void decision_accounting_test(struct kunit *test)
 			AI_DEC_OOM_BIAS_MAX);
 	ai_decision_note_effect(AI_HOOK_OOM_BADNESS, 500, 700);
 	ai_decision_stats_get(&st1);
-	KUNIT_EXPECT_EQ(test, (int)(st1.hook[AI_HOOK_OOM_BADNESS].queries -
-				    st0.hook[AI_HOOK_OOM_BADNESS].queries), 1);
-	KUNIT_EXPECT_EQ(test, (int)(st1.hook[AI_HOOK_OOM_BADNESS].injected -
-				    st0.hook[AI_HOOK_OOM_BADNESS].injected), 1);
-	KUNIT_EXPECT_EQ(test, (int)(st1.hook[AI_HOOK_OOM_BADNESS].effects -
-				    st0.hook[AI_HOOK_OOM_BADNESS].effects), 1);
+	KUNIT_EXPECT_EQ(test, (int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].queries) -
+				    atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].queries)), 1);
+	KUNIT_EXPECT_EQ(test, (int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].injected) -
+				    atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].injected)), 1);
+	KUNIT_EXPECT_EQ(test, (int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].effects) -
+				    atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].effects)), 1);
 	KUNIT_EXPECT_EQ(test, st1.hook[AI_HOOK_OOM_BADNESS].last_bias,
 			AI_DEC_OOM_BIAS_MAX);
 	KUNIT_EXPECT_EQ(test, st1.hook[AI_HOOK_OOM_BADNESS].last_aux1, 700);
@@ -247,14 +247,14 @@ static void decision_single_hook_test(struct kunit *test)
 
 	/* 只有 OOM 挂点计数增长；其余挂点零查询（逐 hook 独立） */
 	KUNIT_EXPECT_EQ(test,
-			(int)(st1.hook[AI_HOOK_OOM_BADNESS].queries -
-			      st0.hook[AI_HOOK_OOM_BADNESS].queries), 1);
+			(int)(atomic64_read(&st1.hook[AI_HOOK_OOM_BADNESS].queries) -
+			      atomic64_read(&st0.hook[AI_HOOK_OOM_BADNESS].queries)), 1);
 	KUNIT_EXPECT_EQ(test,
-			(int)(st1.hook[AI_HOOK_SCHED_VRUNTIME].queries -
-			      st0.hook[AI_HOOK_SCHED_VRUNTIME].queries), 0);
+			(int)(atomic64_read(&st1.hook[AI_HOOK_SCHED_VRUNTIME].queries) -
+			      atomic64_read(&st0.hook[AI_HOOK_SCHED_VRUNTIME].queries)), 0);
 	KUNIT_EXPECT_EQ(test,
-			(int)(st1.hook[AI_HOOK_MM_READAHEAD].queries -
-			      st0.hook[AI_HOOK_MM_READAHEAD].queries), 0);
+			(int)(atomic64_read(&st1.hook[AI_HOOK_MM_READAHEAD].queries) -
+			      atomic64_read(&st0.hook[AI_HOOK_MM_READAHEAD].queries)), 0);
 	KUNIT_EXPECT_EQ(test, (int)ai_decision_get_hook_enable(AI_HOOK_SCHED_VRUNTIME),
 			0);
 	enable_all(0);

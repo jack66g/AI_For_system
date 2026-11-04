@@ -72,7 +72,7 @@ static s32 ai_dec_heuristic_v1(enum ai_hook_id hook,
 	if (cls < 0 || cls >= AI_PROC_CLASS_MAX) {
 		if (hook < AI_HOOK_NR) {
 			st = &ai_dec_stats.hook[hook];
-			WRITE_ONCE(st->fallback, READ_ONCE(st->fallback) + 1);
+			atomic64_inc(&st->fallback);   /* K2b（K1B-06） */
 		}
 		return 0;
 	}
@@ -114,8 +114,7 @@ static s32 ai_dec_heuristic_v1(enum ai_hook_id hook,
 		return 0;
 	default:
 		/* enum 之外值（理论不可达）→ 按无效回退 */
-		WRITE_ONCE(ai_dec_stats.fallback_pad,
-			   READ_ONCE(ai_dec_stats.fallback_pad) + 1);
+		atomic64_inc(&ai_dec_stats.fallback_pad);   /* K2b（K1B-06） */
 		return 0;
 	}
 }
@@ -143,7 +142,7 @@ s32 ai_decision_query(enum ai_hook_id hook, const struct ai_hook_ctx *ctx)
 		return 0;
 
 	st = &ai_dec_stats.hook[hook];
-	WRITE_ONCE(st->queries, READ_ONCE(st->queries) + 1);
+	atomic64_inc(&st->queries);   /* K2b（K1B-06） */
 
 	src = READ_ONCE(ai_dec_source);
 	bias = src ? src(hook, ctx) : 0;
@@ -156,7 +155,7 @@ s32 ai_decision_query(enum ai_hook_id hook, const struct ai_hook_ctx *ctx)
 		bias = -maxb;
 
 	if (bias)
-		WRITE_ONCE(st->injected, READ_ONCE(st->injected) + 1);
+		atomic64_inc(&st->injected);   /* K2b（K1B-06） */
 	WRITE_ONCE(st->last_bias, bias);
 	return bias;
 }
@@ -170,7 +169,7 @@ void ai_decision_note_effect(enum ai_hook_id hook, s64 aux0, s64 aux1)
 	if (unlikely((unsigned int)hook >= AI_HOOK_NR))
 		return;
 	st = &ai_dec_stats.hook[hook];
-	WRITE_ONCE(st->effects, READ_ONCE(st->effects) + 1);
+	atomic64_inc(&st->effects);   /* K2b（K1B-06） */
 	WRITE_ONCE(st->last_aux0, aux0);
 	WRITE_ONCE(st->last_aux1, aux1);
 
@@ -181,7 +180,7 @@ void ai_decision_note_effect(enum ai_hook_id hook, s64 aux0, s64 aux1)
 		u8 domain = AI_POLICY_DOMAIN_MM;
 
 		WRITE_ONCE(st->last_ring_j, now);
-		WRITE_ONCE(st->ring, READ_ONCE(st->ring) + 1);
+		atomic64_inc(&st->ring);   /* K2b（K1B-06） */
 		if (hook == AI_HOOK_SCHED_VRUNTIME || hook == AI_HOOK_SCHED_WAKEUP)
 			domain = AI_POLICY_DOMAIN_SCHED;
 		ai_policy_record_heuristic(domain, (u8)hook,

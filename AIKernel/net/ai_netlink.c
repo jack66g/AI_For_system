@@ -215,6 +215,13 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 		return -EINVAL;
 	if (!ai_startup_get_enabled())
 		return -EPERM;   /* AI_ERR_DISABLED */
+	/* K2b 修复 K1B-13（Med-3）：SENSE 遥测流含全系统进程行为原始数据
+	 * （syscall 参数/路径/网络地址，零脱敏），与 ACT/REG 同权——补
+	 * CAP_SYS_ADMIN 闸。出厂单用户 root 形态行为不变（root 恒过）；
+	 * 多用户/不可信容器形态下阻断未特权读取。遥测字段级脱敏代价高，
+	 * 登记"多用户形态上线前再议"。 */
+	if (!netlink_net_capable(skb, CAP_SYS_ADMIN))
+		return -EACCES;
 
 	max_records = req->max_records;
 	if (max_records == 0 || max_records > AI_NL_SENSE_MAX_RECORDS)
@@ -295,12 +302,24 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 					      rec->tgid, rec->cpu, rec->category,
 					      rec->event_type, rec->severity,
 					      rec->data_len);
-				for (k = 0; k < shown; k++)
-					ln += snprintf(line + ln, sizeof(line) - ln,
+				/* K2b 修复 K1B-14：snprintf 返回值钳制——
+				 * 返回值可超缓冲（截断时），不钳制则后续
+				 * sizeof(line) - ln 无符号下溢即 OOB 写。
+				 * 当前字段最大 ~169 < 192 不触发；新增字段
+				 * 即可能踩雷，防御先行（输出逐字节不变） */
+				if (ln >= sizeof(line))
+					ln = sizeof(line) - 1;
+				for (k = 0; k < shown && ln < sizeof(line) - 1;
+				     k++)
+					ln += snprintf(line + ln,
+						       sizeof(line) - ln,
 						       "%02x",
 						       *((u8 *)rec +
 							 AI_TELEMETRY_HEADER_LEN + k));
-				if (rec->data_len > shown)
+				if (ln >= sizeof(line))
+					ln = sizeof(line) - 1;
+				if (rec->data_len > shown &&
+				    ln < sizeof(line) - 1)
 					ln += snprintf(line + ln,
 						       sizeof(line) - ln, "...");
 				line[ln++] = '\n';

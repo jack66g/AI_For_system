@@ -110,6 +110,28 @@ int ai_control_get_value(const char *name, s64 *value)
 }
 EXPORT_SYMBOL_GPL(ai_control_get_value);
 
+int ai_control_set_read(const char *name,
+			int (*read)(struct ai_control_param *p, s32 pid,
+				    s64 *value))
+{
+	struct ai_control_param *p;
+	unsigned long flags_l;
+	int rc = AI_ERR_NOT_FOUND;
+
+	if (!name)
+		return AI_ERR_INVALID_ARG;
+
+	spin_lock_irqsave(&ai_ctrl_lock, flags_l);
+	p = ai_control_find_locked(name);
+	if (p) {
+		p->read = read;
+		rc = AI_OK;
+	}
+	spin_unlock_irqrestore(&ai_ctrl_lock, flags_l);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(ai_control_set_read);
+
 /* ---- 统一策略处理器（动作名 = 参数名，priority=100） ---- */
 
 static int ai_control_apply_param(struct ai_control_param *p, s32 pid,
@@ -132,7 +154,7 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 				     void *arg)
 {
 	struct ai_control_param *p = arg;
-	s64 requested, cur_val, pre;
+	s64 requested, cur_val, pre, task_cur;
 	u8 clamped = 0;
 	s32 pid = 0;
 	int rc;
@@ -164,6 +186,19 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 	/* 当前值：s64 对齐读原子（x86_64），快路径免锁 */
 	cur_val = READ_ONCE(p->cur);
 	pre = cur_val;
+
+	/* K2b 修复 K1B-02（Med-2）+ nice 回滚缺口：TASK 域参数的当前值
+	 * 按目标任务实际状态取（read 回调）——同值跳过与决策前值快照
+	 * pre 都不再拿参数表全局 cur 当基准。原实现：对 pid A 设值 V
+	 * 后（全局 cur=V），对 pid B 下发同值 V 被静默短路（B 实际未
+	 * 生效却记成功）；回滚恢复的也是全局表值而非该任务旧值。
+	 * 无 read 回调或读取失败（任务退出、多 CPU 亲和掩码等无法单值
+	 * 忠实表出的情形）→ 退回全局表 cur 语义（原行为不变）。 */
+	if ((p->flags & AI_CTRL_F_TASK) && p->read &&
+	    p->read(p, pid, &task_cur) == AI_OK) {
+		cur_val = task_cur;
+		pre = task_cur;
+	}
 
 	/* 安全边界限幅（硬范围 + 最大影响幅度；标识型参数只做硬范围） */
 	if (p->flags & AI_CTRL_F_IDENT) {
@@ -362,6 +397,67 @@ static int ai_ctl_sched_oom_apply(struct ai_control_param *p, s32 pid,
 	return AI_OK;
 }
 
+/* ---- K2b（K1B-02/nice）：TASK 域内置参数读回调 ---- */
+
+static int ai_ctl_sched_nice_read(struct ai_control_param *p, s32 pid,
+				  s64 *value)
+{
+	struct task_struct *task;
+	int rc;
+
+	rc = ai_ctl_task_get(p, pid, &task);
+	if (rc != AI_OK)
+		return rc;
+	*value = task_nice(task);
+	put_task_struct(task);
+	return AI_OK;
+}
+
+static int ai_ctl_sched_affinity_read(struct ai_control_param *p, s32 pid,
+				      s64 *value)
+{
+#ifndef CONFIG_SMP
+	return AI_ERR_NOT_FOUND;   /* UP 无亲和语义（掩码恒全 CPU） */
+#else
+	struct task_struct *task;
+	const struct cpumask *mask;
+	int rc;
+
+	rc = ai_ctl_task_get(p, pid, &task);
+	if (rc != AI_OK)
+		return rc;
+	/* 仅单 CPU 掩码可忠实表为单值参数；多 CPU 掩码返回失败
+	 * （handler 退回全局表 cur 语义，不做错误的同值跳过/快照） */
+	mask = task->cpus_ptr;
+	if (cpumask_weight(mask) != 1) {
+		put_task_struct(task);
+		return AI_ERR_NOT_FOUND;
+	}
+	*value = cpumask_first(mask);
+	put_task_struct(task);
+	return AI_OK;
+#endif
+}
+
+static int ai_ctl_sched_oom_read(struct ai_control_param *p, s32 pid,
+				 s64 *value)
+{
+	struct task_struct *task;
+	int rc, ret = AI_ERR_NOT_FOUND;
+
+	rc = ai_ctl_task_get(p, pid, &task);
+	if (rc != AI_OK)
+		return rc;
+	task_lock(task);
+	if (task->signal) {
+		*value = task->signal->oom_score_adj;
+		ret = AI_OK;
+	}
+	task_unlock(task);
+	put_task_struct(task);
+	return ret;
+}
+
 static int __init ai_control_init(void)
 {
 	ai_control_register("sched.nice", AI_POLICY_DOMAIN_SCHED,
@@ -373,6 +469,10 @@ static int __init ai_control_init(void)
 	ai_control_register("sched.oom_score", AI_POLICY_DOMAIN_SCHED,
 			    AI_CTRL_F_REAL | AI_CTRL_F_TASK,
 			    -1000, 1000, 0, ai_ctl_sched_oom_apply);
+	/* K2b（K1B-02/nice）：TASK 参数按任务读当前值 */
+	ai_control_set_read("sched.nice", ai_ctl_sched_nice_read);
+	ai_control_set_read("sched.affinity", ai_ctl_sched_affinity_read);
+	ai_control_set_read("sched.oom_score", ai_ctl_sched_oom_read);
 
 	pr_info("AIKernel: control table ready (core params)\n");
 	return 0;

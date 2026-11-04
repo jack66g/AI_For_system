@@ -554,6 +554,34 @@ static int ai_block_ioprio_apply(struct ai_control_param *p, s32 pid,
 		p ? p->cur : -1, value, pid);
 	return AI_OK;
 }
+
+/* K2b（K1B-02）：io.priority 的 TASK 读回调——只忠实读 BE 类（AI 管理
+ * 空间）；未设 io_context 或非 BE 类 → IOPRIO_NORM(4)（与默认同语义；
+ * 非 BE 时同值跳过 = 保持用户设置，不下覆写） */
+static int ai_block_ioprio_read(struct ai_control_param *p, s32 pid,
+				s64 *value)
+{
+	struct task_struct *task;
+	int ioprio;
+
+	if (pid <= 0)
+		return AI_ERR_INVALID_ARG;
+	task = find_get_task_by_vpid(pid);
+	if (!task)
+		return AI_ERR_NOT_FOUND;
+	task_lock(task);
+	if (task->io_context)
+		ioprio = task->io_context->ioprio;
+	else
+		ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, IOPRIO_NORM);
+	task_unlock(task);
+	if (IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_BE)
+		*value = IOPRIO_PRIO_DATA(ioprio);
+	else
+		*value = IOPRIO_NORM;
+	put_task_struct(task);
+	return AI_OK;
+}
 #endif /* CONFIG_BLOCK */
 
 static struct task_struct *ai_io_sampler_task;
@@ -602,6 +630,10 @@ static int __init ai_io_init(void)
 #else
 	ai_control_register("io.priority", AI_POLICY_DOMAIN_IO, 0,
 			    0, 7, 4, NULL);
+#endif
+#ifdef CONFIG_BLOCK
+	/* K2b（K1B-02）：TASK 参数按任务读当前值 */
+	ai_control_set_read("io.priority", ai_block_ioprio_read);
 #endif
 	ai_control_register("io.bandwidth", AI_POLICY_DOMAIN_IO,
 			    AI_CTRL_F_REAL, 0, 100, 100,

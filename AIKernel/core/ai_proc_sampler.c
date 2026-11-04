@@ -417,6 +417,22 @@ static int ai_proc_rlimit_apply_ex(struct ai_control_param *p, s32 pid,
 	return AI_OK;
 }
 
+/* K2b（K1B-02）：proc.freeze 的 TASK 读回调——SIGSTOP 冻结语义，
+ * TASK_STOPPED 态 = 1（job control 停止态同观测，语义等价） */
+static int ai_proc_freeze_read(struct ai_control_param *p, s32 pid,
+			       s64 *value)
+{
+	struct task_struct *task;
+	int rc;
+
+	rc = ai_proc_target_get(pid, &task);
+	if (rc != AI_OK)
+		return rc;
+	*value = (READ_ONCE(task->__state) & TASK_STOPPED) ? 1 : 0;
+	put_task_struct(task);
+	return AI_OK;
+}
+
 static int __init ai_proc_init(void)
 {
 #ifdef CONFIG_AIKERNEL_TELEMETRY
@@ -457,6 +473,9 @@ static int __init ai_proc_init(void)
 	ai_control_register_ex("proc.rlimit", AI_POLICY_DOMAIN_PROC,
 			       AI_CTRL_F_REAL | AI_CTRL_F_TASK,
 			       0, 1000000, 0, NULL, ai_proc_rlimit_apply_ex);
+	/* K2b（K1B-02）：TASK 参数按任务读当前值（proc.signal 事件型
+	 * 无同值跳过、proc.rlimit 需 data[2] 资源号无法单值读——均不登记） */
+	ai_control_set_read("proc.freeze", ai_proc_freeze_read);
 #endif
 	pr_info("AIKernel: proc/user-sense ready\n");
 	return 0;

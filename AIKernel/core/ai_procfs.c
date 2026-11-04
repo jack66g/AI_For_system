@@ -166,7 +166,9 @@ static int ai_proc_decisions_show(struct seq_file *m, void *v)
 	size_t bytes = 0;
 	u32 count = 0;
 
-	buf = kmalloc(AI_POLICY_DECISION_RING_SIZE * sizeof(*buf), GFP_KERNEL);
+	/* K2b 修复 K1B-20：557KB 高阶 kmalloc 碎片下可 ENOMEM，改
+	 * kvmalloc（优先连续页，失败退 vmalloc） */
+	buf = kvmalloc(AI_POLICY_DECISION_RING_SIZE * sizeof(*buf), GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -181,7 +183,7 @@ static int ai_proc_decisions_show(struct seq_file *m, void *v)
 		for (i = count; i > 0; i--)
 			ai_proc_dec_record(m, &buf[i - 1]);
 	}
-	kfree(buf);
+	kvfree(buf);
 	return 0;
 }
 
@@ -207,7 +209,7 @@ static int ai_proc_chains_show(struct seq_file *m, void *v)
 	size_t bytes = 0;
 	u32 count = 0;
 
-	buf = kmalloc(AI_CAUSAL_RING_SIZE * sizeof(*buf), GFP_KERNEL);
+	buf = kvmalloc(AI_CAUSAL_RING_SIZE * sizeof(*buf), GFP_KERNEL);   /* K2b（K1B-20） */
 	if (!buf)
 		return -ENOMEM;
 
@@ -221,7 +223,7 @@ static int ai_proc_chains_show(struct seq_file *m, void *v)
 		for (i = 0; i < count; i++)
 			ai_proc_dec_record(m, &buf[i]);
 	}
-	kfree(buf);
+	kvfree(buf);
 	return 0;
 }
 
@@ -463,6 +465,12 @@ static ssize_t ai_proc_telemetry_write(struct file *file,
 	while (n && (buf[n - 1] == '\n' || buf[n - 1] == ' '))
 		buf[--n] = '\0';
 
+	/* K2b 修复 K1B-18：格式切换全局生效（影响所有读者解析），与
+	 * rate=/reset= 同权补 CAP_SYS_ADMIN 闸（出厂 root 无行为变化；
+	 * 节点 0644 root 属主，非 root 本就被 VFS 拦在 open，此为对称性
+	 * 与纵深防御） */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 	if (strcmp(buf, "format=raw") == 0) {
 		ai_telemetry_fmt = AI_TELEMETRY_FMT_RAW;
 		return count;

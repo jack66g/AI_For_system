@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-04T21:25:47+08:00",
+  "created": "2026-11-05T04:54:16+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -16,7 +16,8 @@
     "T5: autocondense 全 C（acstate/acconfig/acsignals/acdigest/acsme/acserv/autocondensed/acmcp/achook）；REST 38/38 步 + 7 磁盘文件逐字节；MCP 10/10 行；hook 8/8 对拍；unit 185 checks；tag t5-autocondense",
     "T6: desktop 后端全 C（desktopd/dtcore/dtjson/dtstate/dttheme/dtapps/dtstatic/dthttp/dtchat/dtvm）；七套向量 TCP 重放 229 步 / 1455 文件逐字节全绿 + 负向检出；单测 150 断言；LLM 走自有 mbedTLS 客户端；vm enabled 真实现（sshpass+ssh）；tag t6-desktop",
     "T7: 镜像整合+去 python3（desktopd/aikd/aikerneld-api/aik-tls-gateway 全 C；aikapi 273 步重放、aikd e2e、tlsgw 差分 68/0、desktop 229 步、run_all 59/59；rootfs 无 python 实证+反向门（.py=0/ELF7/shebang=0）；qemu 四阶段全绿；ISO alpha.15.0 04117cdf 330,057,728B；factory tar 285MB（-59.6%）；tag t7-image",
-    "K2: 内核三条 High 修复入正典（F1 sched 遥测前置采集/F2 seccomp GFP_ATOMIC/K1B-23 回滚快照出锁）+ 正典 3 处树外编辑入册（MANIFEST 169→172）；A/B：#63-kasan 8 引导 F1=0/F2=0（A 侧 12/14 与 27 发），KUnit 57/57×2，回滚演练过；护城河口径定案（用户拍板）：语义等价+零 AI 机器码/符号/可调用面，UAPI 声明层豁免；tag k2-kernel-fixes"
+    "K2: 内核三条 High 修复入正典（F1 sched 遥测前置采集/F2 seccomp GFP_ATOMIC/K1B-23 回滚快照出锁）+ 正典 3 处树外编辑入册（MANIFEST 169→172）；A/B：#63-kasan 8 引导 F1=0/F2=0（A 侧 12/14 与 27 发），KUnit 57/57×2，回滚演练过；护城河口径定案（用户拍板）：语义等价+零 AI 机器码/符号/可调用面，UAPI 声明层豁免；tag k2-kernel-fixes",
+    "K2b: 内核 Med/Low 批量加固（16 文件）：nice 不恢复真根因（decision_id 后置致快照环恒空）+Med-2 按任务取 pre+Med-3 SENSE 凭据闸（root 无变化）+Med-4 infer 四处泄漏+Low 9 修 4 论证；A/B 决定性（nice sw2 35→60 全回/infer delta 1200→0/nobody EPERM）；#64 产物 KUnit 64/0×2、KASAN 3 引导F1=F2=0；K2C 同期出厂 alpha.15.1（#63，四阶段全绿+护城河门 M1-M5）；tag k2b-hardening"
   ],
   "overlay_count": 168,
   "registry": {
@@ -38,7 +39,7 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 60557334,
+    "bytes": 60567689,
     "regular_files": 1271,
     "source_files": 1271,
     "symlinks": 4,

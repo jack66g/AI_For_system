@@ -236,6 +236,7 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 	struct ai_policy *match[AI_POLICY_MAX_COUNT];
 	struct ai_decision_record rec;
 	struct ai_tp_decision tp;
+	struct ai_policy_ctx ctx_v;   /* K2b：handler 用可写副本（见下） */
 	unsigned int i, n = 0;
 	int executed = 0;
 	int failed = 0;
@@ -248,6 +249,19 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 	/* 安全边界闸门：全局关闭 → 单分支拒绝（零记录零执行） */
 	if (!ai_policy_safety_get_enabled())
 		return AI_ERR_DISABLED;
+
+	/* K2b 修复（nice 回滚立项，K2-LOG 登记）：decision_id 必须在
+	 * handler 运行前就绪。ai_control_policy_handler 用 ctx->decision_id
+	 * 落决策快照（ai_policy_safety_snapshot_save 拒绝 id=0），原实现
+	 * id 在全部 handler 之后才分配、且 ctx 为 const 无法回填 → 快照
+	 * 从未真正保存，rollback 恒空转（abnice A/B 实测：rollback all 后
+	 * sched.nice 停 5 不回 0、affinity 原样不动、rc=0）。此处先取
+	 * 副本并预分配 id 再传给 handler；接口签名与全部调用方不变，
+	 * id 序列仍与 ai_decision_seq 同源单调（每决策一次自增不变）。 */
+	ctx_v = *ctx;
+	if (!ctx_v.decision_id)
+		ctx_v.decision_id = ai_policy_next_decision_id();
+	ctx = &ctx_v;
 
 	t0 = ktime_get_ns();
 	mutex_lock(&ai_policy_lock);
@@ -321,8 +335,7 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 	rec.decision_type = ctx->decision_type;
 	memcpy(rec.decision_data, ctx->decision_data, sizeof(rec.decision_data));
 	rec.execute_ts = t1;
-	rec.decision_id = ctx->decision_id ? ctx->decision_id :
-					    ai_policy_next_decision_id();
+	rec.decision_id = ctx->decision_id;   /* K2b：handler 前已就绪 */
 	rec.domain = (u8)ctx->domain;
 	rec.source = ctx->source;
 	rec.executed = (u8)min_t(unsigned int, executed, U8_MAX);
@@ -519,12 +532,16 @@ EXPORT_SYMBOL_GPL(ai_policy_lookup);
 
 int ai_policy_stats_get(struct ai_policy_stats *st)
 {
+	unsigned long flags;
+
 	if (!st)
 		return AI_ERR_INVALID_ARG;
 
-	spin_lock(&ai_dec_lock);
+	/* K2b 修复 K1B-21：读侧锁型与写侧（spin_lock_irqsave）对齐，
+	 * 拆除"未来任何 hardirq 写者即死锁"的锁型不对称埋雷 */
+	spin_lock_irqsave(&ai_dec_lock, flags);
 	*st = ai_pstat;
-	spin_unlock(&ai_dec_lock);
+	spin_unlock_irqrestore(&ai_dec_lock, flags);
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_policy_stats_get);
@@ -533,13 +550,14 @@ int ai_policy_decision_read(void *buf, size_t cap,
 			    u32 *out_count, size_t *out_bytes)
 {
 	unsigned int start, n, i;
+	unsigned long flags;   /* K2b（K1B-21）：锁型与写侧对齐 */
 	size_t copied = 0;
 	u32 count = 0;
 
 	if (!buf || !out_count)
 		return AI_ERR_INVALID_ARG;
 
-	spin_lock(&ai_dec_lock);
+	spin_lock_irqsave(&ai_dec_lock, flags);
 	n = min_t(unsigned int, ai_dec_total, AI_POLICY_DECISION_RING_SIZE);
 	/* 最旧在前：start = head - n（回绕由数组线性化处理） */
 	start = ai_dec_head - n;
@@ -554,7 +572,7 @@ int ai_policy_decision_read(void *buf, size_t cap,
 		copied += sizeof(*e);
 		count++;
 	}
-	spin_unlock(&ai_dec_lock);
+	spin_unlock_irqrestore(&ai_dec_lock, flags);
 
 	*out_count = count;
 	if (out_bytes)

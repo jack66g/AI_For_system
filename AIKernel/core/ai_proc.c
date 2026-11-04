@@ -128,7 +128,7 @@ EXPORT_SYMBOL_GPL(ai_proc_class_peek);
 static u8 ai_slot_put(int pid, u8 cls, bool update_app, const char *path)
 {
 	unsigned long flags;
-	int i, idx, victim = -1;
+	int i, idx, victim = -1, target;
 	u32 best_gen = U32_MAX;
 	struct ai_proc_slot *s;
 	u64 now = ktime_get_ns();
@@ -148,6 +148,7 @@ static u8 ai_slot_put(int pid, u8 cls, bool update_app, const char *path)
 		s->alive = 1;
 		s->pid = pid;
 		ai_proc_stats_core.slot_update++;
+		target = idx;
 		goto out;
 	}
 
@@ -163,6 +164,8 @@ static u8 ai_slot_put(int pid, u8 cls, bool update_app, const char *path)
 			victim = (idx + i) & (AI_PROC_SLOT_NR - 1);
 		}
 	}
+	if (victim < 0)   /* 全槽存活且 gen 满（理论不可达）：退哈希桶位 */
+		victim = idx;
 	s = &ai_proc_slots[victim];
 	memset(s, 0, sizeof(*s));
 	s->pid = pid;
@@ -173,8 +176,12 @@ static u8 ai_slot_put(int pid, u8 cls, bool update_app, const char *path)
 	if (path)
 		strscpy(s->app_path, path, sizeof(s->app_path));
 	ai_proc_stats_core.slot_insert++;
+	target = victim;
 out:
-	s = &ai_proc_slots[(idx >= 0) ? idx : victim];
+	/* K2b 修复 K1B-24：gen 必须更新到实际写入槽（探测位移时
+	 * victim != 哈希桶位 idx，原恒取 idx → 新槽 gen 恒 0 永远
+	 * 优先被逐，LRU 语义反转） */
+	s = &ai_proc_slots[target];
 	s->gen = ++ai_proc_slot_gen;
 	spin_unlock_irqrestore(&ai_proc_slot_lock, flags);
 	return cls;

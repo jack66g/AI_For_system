@@ -54,6 +54,12 @@ struct ai_control_param {
 	 * 设置时优先于 apply 调用 */
 	int    (*apply_ex)(struct ai_control_param *p, s32 pid,
 			   s64 value, s64 *eff, const s64 *data);
+	/* K2b（K1B-02/nice 回滚）新增：TASK 域参数读目标任务当前实际值，
+	 * 供统一处理器做同值跳过判定与决策前值快照（pre）——均按任务
+	 * 取值而非全局表 cur。可 NULL（或读取失败，如任务已退出、多 CPU
+	 * 亲和掩码无法单值表出）→ 退回全局表 cur 语义（原行为）。
+	 * 经 ai_control_set_read() 登记后生效。 */
+	int    (*read)(struct ai_control_param *p, s32 pid, s64 *value);
 };
 
 /* ---- 接口（实现于 ai_control.c） ---- */
@@ -91,6 +97,18 @@ int ai_control_register_ex(const char *name, u8 domain, u32 flags,
 			   int (*apply_ex)(struct ai_control_param *p, s32 pid,
 					   s64 value, s64 *eff,
 					   const s64 *data));
+
+/**
+ * ai_control_set_read() - 登记 TASK 域参数"读目标任务当前值"回调
+ * @name: 参数名
+ * @read: 读回调（可 NULL = 清除，退回全局表 cur 语义）
+ *
+ * K2b（K1B-02/nice 回滚）：统一处理器对 TASK 域参数以该回调读目标
+ * 任务实际值，作为同值跳过与快照 pre 的基准。返回 AI_OK 或负错误码。
+ */
+int ai_control_set_read(const char *name,
+			int (*read)(struct ai_control_param *p, s32 pid,
+				    s64 *value));
 
 /**
  * ai_control_query() - 按索引读参数描述符
@@ -165,6 +183,12 @@ static inline int ai_control_restore_value(u32 param_index, s32 pid,
 					   s64 value)
 {
 	return AI_OK;
+}
+static inline int ai_control_set_read(const char *name,
+				      int (*read)(struct ai_control_param *p,
+						  s32 pid, s64 *value))
+{
+	return AI_ERR_NOT_FOUND;
 }
 
 #endif /* CONFIG_AIKERNEL_RUNTIME */

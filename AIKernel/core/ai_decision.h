@@ -34,6 +34,7 @@
 
 #include "ai_types.h"
 #include <linux/types.h>
+#include <linux/atomic.h>
 #include <linux/string.h>
 
 /* ---- 挂点 ID（决策源与消费侧的稳定契约；枚举只追加不重排） ---- */
@@ -74,11 +75,13 @@ struct ai_hook_ctx {
 /* ---- per-hook 决策记账（/sys/kernel/ai/decision/stats 数据源） ---- */
 
 struct ai_hook_stats {
-	u64 queries;      /* 查询次数（总开关开时才累计） */
-	u64 injected;     /* 偏置非零次数 */
-	u64 effects;      /* 消费侧确认实际生效次数（note_effect） */
-	u64 fallback;     /* 决策源错误/槽无效回退 0 次数 */
-	u64 ring;         /* decisions ring 采样写入次数 */
+	/* K2b 修复 K1B-06：计数器换 atomic64_t（原 READ_ONCE+WRITE_ONCE
+	 * 非原子自增，SMP 并发丢更新——仅观测面，字段尺寸/布局不变） */
+	atomic64_t queries;      /* 查询次数（总开关开时才累计） */
+	atomic64_t injected;     /* 偏置非零次数 */
+	atomic64_t effects;      /* 消费侧确认实际生效次数（note_effect） */
+	atomic64_t fallback;     /* 决策源错误/槽无效回退 0 次数 */
+	atomic64_t ring;         /* decisions ring 采样写入次数 */
 	s32 last_bias;    /* 最近一次偏置值 */
 	s64 last_aux0;    /* 最近生效前后观测（挂点自定义，如 points 前/后） */
 	s64 last_aux1;
@@ -88,7 +91,7 @@ struct ai_hook_stats {
 struct ai_decision_stats {
 	u8  master;                        /* 全局总开关当前值 */
 	u8  hook_en[AI_HOOK_NR];           /* 每挂点使能当前值 */
-	u64 fallback_pad;                  /* 枚举外 hook 记账（理论不可达） */
+	atomic64_t fallback_pad;           /* 枚举外 hook 记账（理论不可达） */
 	struct ai_hook_stats hook[AI_HOOK_NR];
 };
 
