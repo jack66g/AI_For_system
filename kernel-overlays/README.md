@@ -1,6 +1,6 @@
 # kernel-overlays — AIKernel 对干净 Linux 6.18.39 的全部改动
 
-本目录是内核侧的**完整侵入面**（alpha.11.0 建立；alpha.12.0 内核未变，仍 #59），不是旧的 10 文件清单。共 **168 个文件**，保持与内核源码树相同的相对路径：
+本目录是内核侧的**完整侵入面**（alpha.11.0 建立；alpha.12.0 内核未变，仍 #59），不是旧的 10 文件清单。共 **172 个文件**，保持与内核源码树相同的相对路径：
 
 | 目录 | 文件数 | 说明 |
 |---|---:|---|
@@ -8,16 +8,18 @@
 | `block/` | 8 | BIO、blk-mq、io-cost、throttle、wbt、elevator、genhd 遥测 |
 | `drivers/` | 12 | base、char/random、cpufreq、cpuidle、input、thermal、tty、vfio、virtio |
 | `fs/` | 20 | VFS、dcache、aio、epoll、exec、ext4、inotify、namespace、proc 等 |
-| `include/` | 6 | `ai_accessors.h`、`ai_netlink.h` 等 UAPI/内部头 |
+| `include/` | 8 | `ai_accessors.h`、`ai_netlink.h` 等 UAPI/内部头 + `cgroup_subsys.h`（SUBSYS(ai)） |
 | `init/` | 2 | 启动/initramfs 模型预加载 |
 | `kernel/` | 45 | sched、fork/exit/signal、time、irq、locking、bpf、trace、audit、seccomp、events 等 |
 | `lib/` | 1 | ubsan 钩子 |
 | `mm/` | 27 | 分配/回收/THP/compaction/slub/oom/readahead 等 |
 | `net/` | 23 | TCP、qdisc、netfilter、XDP、GRO/NAPI、conntrack 等 |
-| `samples/ai/` | 5 | 内核侧 AI 示例（Kconfig/Makefile/3 个 sample） |
+| `samples/` | 7 | `Kconfig`/`Makefile` 接线（source 行 + obj-$ 三行）+ `ai/` 5 个示例 |
 | `security/` | 4 | capability、keys、LSM 遥测 |
 | `virt/` | 1 | KVM 主路径 |
 | 顶层 | 3 | `Makefile`、`Kconfig`、`Kbuild` 接入 |
+
+另含 K2a（2026-11-04）正典入册的 3 处树外编辑：`include/linux/cgroup_subsys.h`（`SUBSYS(ai)` cgroup 控制器注册）、`samples/Kconfig`（`source "samples/ai/Kconfig"`）、`samples/Makefile`（3 行 `obj-$(CONFIG_SAMPLE_AI_*) += ai/`）——此前长期存在于 #62 树内但未入 MANIFEST（K1a/K1cd 发现，重建会静默缺 ai cgroup 控制器与 SAMPLE_AI 接线）。
 
 另含 W48 的死代码清理：`net/sched/sch_fq.c` 恢复 `static`/去掉无用导出，`sch_codel.c`、`sch_fq_codel.c` 的 ops 改为 `static`。
 

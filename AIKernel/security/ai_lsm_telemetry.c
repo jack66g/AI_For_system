@@ -137,8 +137,10 @@ void ai_telemetry_seccomp_filter(u32 insn_count, const unsigned long *insns,
 	if (emit_len > AI_TELEMETRY_MAX_DATA_LEN)
 		emit_len = AI_TELEMETRY_MAX_DATA_LEN;
 
-	/* 过滤器安装为进程上下文低频路径，允许一次性分配（失败则只记头部） */
-	p = kmalloc(emit_len, GFP_KERNEL);
+	/* K2a 修复 K1c-F2：调用点在 do_seccomp 持 sighand 自旋锁+关中断的
+	 * 原子上下文，GFP_KERNEL 可睡眠（KASAN 矩阵实锤 3 引导 27 发
+	 * sleeping function 报警）；改 GFP_ATOMIC，分配失败仅丢本条遥测样本。 */
+	p = kmalloc(emit_len, GFP_ATOMIC);
 	if (!p)
 		return;
 	p->type = AI_SEC_SECCOMP_FILTER;

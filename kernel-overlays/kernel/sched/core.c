@@ -7026,23 +7026,34 @@ keep_resched:
 
 		trace_sched_switch(preempt, prev, next, prev_state);
 
+#ifdef CONFIG_AIKERNEL_SCHED
+		/* AIKernel K2a (K1c-F1 fix, rev2): build the whole payload BEFORE
+		 * context_switch(). After switch_to() returns, this code executes
+		 * in the resumed task's stale frame: `prev` is rebound to `last`
+		 * (the task just switched away from), while `next`, `cpu` and
+		 * `prev_state` are that frame's own stale locals -- `next` may
+		 * point at a task_struct long since RCU-freed (KASAN
+		 * slab-use-after-free; rev1 kept the next_* reads after the
+		 * switch and still tripped on #63). Fill every prev/next field
+		 * here where both tasks are pinned; only the ring emit stays
+		 * after the switch, as before. */
+		struct ai_sched_switch_payload ai_sw;
+
+		ai_sw.type = AI_SCHED_CTX_SWITCH;
+		ai_sw.prev_pid = task_pid_nr(prev);
+		ai_sw.next_pid = task_pid_nr(next);
+		ai_sw.prev_prio = prev->prio;
+		ai_sw.next_prio = next->prio;
+		ai_sw.prev_state = (u32)prev_state;
+		ai_sw.cpu = cpu;
+		strscpy(ai_sw.prev_comm, prev->comm, TASK_COMM_LEN);
+		strscpy(ai_sw.next_comm, next->comm, TASK_COMM_LEN);
+#endif
+
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
 #ifdef CONFIG_AIKERNEL_SCHED
-		{
-			struct ai_sched_switch_payload sw;
-
-			sw.type = AI_SCHED_CTX_SWITCH;
-			sw.prev_pid = task_pid_nr(prev);
-			sw.next_pid = task_pid_nr(next);
-			sw.prev_prio = prev->prio;
-			sw.next_prio = next->prio;
-			sw.prev_state = (u32)prev_state;
-			sw.cpu = cpu;
-			strscpy(sw.prev_comm, prev->comm, TASK_COMM_LEN);
-			strscpy(sw.next_comm, next->comm, TASK_COMM_LEN);
-			ai_telemetry_sched_switch(AI_SEV_NORMAL, &sw, sizeof(sw));
-		}
+		ai_telemetry_sched_switch(AI_SEV_NORMAL, &ai_sw, sizeof(ai_sw));
 #endif
 	} else {
 		/* In case next was already curr but just got blocked_donor */

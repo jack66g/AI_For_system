@@ -169,6 +169,7 @@ int ai_policy_safety_rollback_decision(u64 decision_id,
 {
 	unsigned long flags;
 	struct ai_safety_snapshot *s = NULL;
+	struct ai_safety_snapshot snap;
 	unsigned int i;
 	u8 k;
 
@@ -187,14 +188,19 @@ int ai_policy_safety_rollback_decision(u64 decision_id,
 		return AI_OK;   /* 无快照 = 无可回滚 */
 	}
 
-	if (restore) {
-		for (k = 0; k < s->n; k++)
-			restore(s->params[k].param_index,
-				s->params[k].pid, s->params[k].pre_value);
-	}
+	/* K2a 修复 K1B-23：临界区内只拷贝快照，restore 回调移出
+	 * 临界区执行（原实现持自旋锁执行任意 apply，
+	 * sched.affinity 分支含 zalloc_cpumask_var(GFP_KERNEL) 可睡眠分配）。 */
+	snap = *s;
 	s->decision_id = 0;
 	ai_safety_snap_count--;
 	spin_unlock_irqrestore(&ai_safety_lock, flags);
+
+	if (restore) {
+		for (k = 0; k < snap.n; k++)
+			restore(snap.params[k].param_index,
+				snap.params[k].pid, snap.params[k].pre_value);
+	}
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_policy_safety_rollback_decision);
@@ -205,20 +211,28 @@ int ai_policy_safety_rollback_all(ai_safety_restore_t restore)
 	unsigned int i, n;
 
 	if (restore) {
-		/* 逆序恢复（最新决策先回滚：有效槽 [head-count, head-1]） */
+		unsigned int head;
+		struct ai_safety_snapshot snap;
+
+		/* K2a 修复 K1B-23：锁内只逐槽拷贝快照，restore 回调移出
+		 * 临界区再执行；逆序恢复（最新决策先回滚：有效槽
+		 * [head-count, head-1]）与环窗口一次性定界的语义保持不变。 */
 		spin_lock_irqsave(&ai_safety_lock, flags);
 		n = ai_safety_snap_count;
+		head = ai_safety_snap_head;
+		spin_unlock_irqrestore(&ai_safety_lock, flags);
+
 		for (i = 0; i < n; i++) {
-			struct ai_safety_snapshot *s =
-				ai_safety_slot(ai_safety_snap_head - 1 - i);
 			u8 k;
 
-			for (k = 0; k < s->n; k++)
-				restore(s->params[k].param_index,
-					s->params[k].pid,
-					s->params[k].pre_value);
+			spin_lock_irqsave(&ai_safety_lock, flags);
+			snap = *ai_safety_slot(head - 1 - i);
+			spin_unlock_irqrestore(&ai_safety_lock, flags);
+			for (k = 0; k < snap.n; k++)
+				restore(snap.params[k].param_index,
+					snap.params[k].pid,
+					snap.params[k].pre_value);
 		}
-		spin_unlock_irqrestore(&ai_safety_lock, flags);
 	}
 
 	spin_lock_irqsave(&ai_safety_lock, flags);
