@@ -29,7 +29,12 @@ echo "TRACESZ=$(du -sk /var/log/aikernel/trace 2>/dev/null | awk '{print $1}')"
 echo "DMESG=$(dmesg | grep -Eic 'BUG:|WARNING:|Oops|Out of memory|oom-kill|general protection' || true)"
 echo "JERR=$(journalctl -k -p err --since '-6 min' --no-pager 2>/dev/null | wc -l)"
 echo "LISTEN=$(ss -ltn 2>/dev/null | tail -n +2 | wc -l)"
-echo "STATS=$(tr '\n' '|' < /proc/ai/stats 2>/dev/null | head -c 600)"
+# K3b(I-12c)：/proc/ai/stats 从不存在；统计真实面是 /sys/kernel/ai/stats/
+# 目录属性（telemetry_emitted/decisions_total/... 每属性一个值文件，
+# AIKernel/core/ai_sysfs_stats.c）。逐属性拼 key=value|key=value，保持原
+# STATS= 字段与管道分隔风格；属性缺失→该键留空占位（key=|），整目录缺失
+# → STATS 空（占位保留），均不报错。
+echo "STATS=$(d=/sys/kernel/ai/stats; if [ -d "$d" ]; then out=; for f in "$d"/*; do [ -f "$f" ] || continue; k=${f##*/}; v=$(cat "$f" 2>/dev/null | tr '\n' ';'); out="$out$k=$v|"; done; printf '%s' "$out" | head -c 600; fi)"
 '''
 
 

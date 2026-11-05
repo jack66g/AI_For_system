@@ -289,10 +289,14 @@ static int m_kernel_ai_healthcheck(char **out)
 		{ "control", "/proc/ai/control" },
 		{ "hitrate", "/proc/ai/hitrate" },
 		{ "latency", "/proc/ai/latency" },
-		{ "decisions_total", "/proc/ai/stats_decisions_total" },
-		{ "decisions_hit", "/proc/ai/stats_decisions_hit" },
-		{ "telemetry_emitted", "/proc/ai/stats_telemetry_emitted" },
-		{ "telemetry_dropped", "/proc/ai/stats_telemetry_dropped" },
+		/* K3b(I-12a)：4 项统计真实位置在 sysfs（每属性一个 u64，
+		 * "%llu\n"，见 AIKernel/core/ai_sysfs_stats.c:61-124），
+		 * /proc/ai/stats_* 从不存在 → 原恒 "unavailable"。
+		 * chomp 去尾换行后仍是纯数字串，解析/输出形态不变。 */
+		{ "decisions_total", "/sys/kernel/ai/stats/decisions_total" },
+		{ "decisions_hit", "/sys/kernel/ai/stats/decisions_hit" },
+		{ "telemetry_emitted", "/sys/kernel/ai/stats/telemetry_emitted" },
+		{ "telemetry_dropped", "/sys/kernel/ai/stats/telemetry_dropped" },
 	};
 	FILE *f = open_memstream(out, &(size_t){0});
 
@@ -785,40 +789,120 @@ oom:
 	return -1;
 }
 
+/* K3b(I-12b) sysfs 0200 只写节点直写（value + '\n' 一次 write）。
+ * 不能走 exec_sysfs_dyn/sysfs_set：该通道为可回滚性写前读旧值，
+ * 而 model_load/model_infer/model_unload 均无 show（0200），读旧值
+ * 必失败 → 拒写。注册表 sysfs-write 通道（exec_sysfs_write，即
+ * sysfs_write_model_load/infer/unload 三件 W1 工具）对该类节点就是
+ * fopen("w")+value+'\n' 直写不回读——本函数照同机制实现（同
+ * ~/w1k-model/mlp_verify.sh 的 echo > node）。model_verify 自身 W1
+ * 过闸，节点面与 sysfs_write_model_*（W1）同级，无旁路。 */
+static int m_sysfs_wo_write(const char *node, const char *value,
+			    char *msg, size_t msgcap)
+{
+	char tmp[4208];
+	int n = snprintf(tmp, sizeof(tmp), "%s\n", value);
+	int fd;
+	ssize_t w;
+
+	if (n < 0 || (size_t)n >= sizeof(tmp)) {
+		snprintf(msg, msgcap, "ERROR: 值超长（%d >= %zu 字节）",
+			 n, sizeof(tmp));
+		return -1;
+	}
+	fd = open(node, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		snprintf(msg, msgcap, "ERROR: open %s: %s（未加载 AIKernel"
+			 " 时节点不存在）", node, strerror(errno));
+		return -1;
+	}
+	w = write(fd, tmp, (size_t)n);
+	close(fd);
+	if (w != n) {
+		snprintf(msg, msgcap, "ERROR: write %s: %s（0200 节点需"
+			 " root/CAP_SYS_ADMIN；值格式须符合节点契约）",
+			 node, strerror(errno));
+		return -1;
+	}
+	snprintf(msg, msgcap, "OK: 已写入 %s <- %.60s%s", node, value,
+		 strlen(value) > 60 ? "..." : "");
+	return 0;
+}
+
+/* K3b(I-12b)：按内核真实契约修调用侧（AIKernel/core/ai_sysfs.c）。
+ * 旧写法三处不符：a) 写 model_in（属性实际名 model_infer，值须
+ * "name hex..."，hex 为 float32 小端输入向量，触发真推理）；b) 写
+ * model_load 传绝对路径（内核只收模型名，白名单 [A-Za-z0-9._-]，按
+ * <ai.model_path>/<name>.bin 装载，见 ai_startup.c ai_startup_load_model）；
+ * c) 卸载写 model_load="0"（实际节点 model_unload 按名卸载）。
+ * 模型名取 path 的 basename 去 .bin 后缀；推理探针输入用 495 个
+ * float32 0.0（hex 00000000）：ai_mlp_infer 只要求字节数 >= in_dim*4
+ * （多余忽略），3960 hex + 名字控制在 sysfs 单次写 PAGE_SIZE 内。 */
 static int m_model_verify(const char *args, char **out)
 {
 	char path[256];
+	char name[128];
+	char val[4200];
+	char msg[512];
 	FILE *f;
 	static char buf[4096];
-	struct ai_tool t;
-	char ajson[512];
-	char *sub = NULL;
+	char *slash;
+	size_t nlen;
 	int rc;
+	int n;
+	int i;
 
 	if (jstr_get(args, "path", path, sizeof(path)) < 0 || path[0] != '/') {
-		*out = strdup("ERROR: 需要 path（AIKWMDL 模型文件绝对路径）");
+		*out = strdup("ERROR: 需要 path（AIKWMDL 模型文件绝对路径；"
+			      "内核按 basename 去 .bin 作模型名，从"
+			      " ai.model_path 目录装载）");
 		return -1;
+	}
+	/* 模型名 = basename 去 .bin；按内核白名单 [A-Za-z0-9._-] 校验
+	 *（同名 K2b K1B-25 过滤在内核侧，此处先行拒绝并给人话错误） */
+	slash = strrchr(path, '/');
+	slash = slash ? slash + 1 : path;
+	nlen = strlen(slash);
+	if (nlen >= sizeof(name)) {
+		*out = strdup("ERROR: 模型名超长（basename >= 128 字节）");
+		return -1;
+	}
+	memcpy(name, slash, nlen);
+	name[nlen] = '\0';
+	if (nlen > 4 && strcmp(name + nlen - 4, ".bin") == 0)
+		name[nlen - 4] = '\0';
+	if (!name[0]) {
+		*out = strdup("ERROR: path basename 为空或仅 .bin");
+		return -1;
+	}
+	for (i = 0; name[i]; i++) {
+		char c = name[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+		      c == '-')) {
+			*out = strdup("ERROR: 模型名含非法字符（内核白名单"
+				      " [A-Za-z0-9._-]）");
+			return -1;
+		}
 	}
 	f = open_memstream(out, &(size_t){0});
 	if (!f)
 		goto oom;
-	memset(&t, 0, sizeof(t));
-	t.name = "sysfs_set";
-	t.risk = "W1";
-	snprintf(ajson, sizeof(ajson),
-		 "{\"path\":\"/sys/kernel/ai/model_load\",\"value\":\"%s\"}",
-		 path);
-	rc = exec_sysfs_dyn(&t, ajson, &sub);
-	fprintf(f, "step1 model_load: %s\n", sub ? sub : "?");
-	free(sub);
-	sub = NULL;
-	snprintf(ajson, sizeof(ajson),
-		 "{\"path\":\"/sys/kernel/ai/model_in\","
-		 "\"value\":\"aik-w78-verify\"}");
-	exec_sysfs_dyn(&t, ajson, &sub);
-	fprintf(f, "step2 model_in: %s\n", sub ? sub : "?");
-	free(sub);
-	sub = NULL;
+	/* step1：model_load value=模型名（内核装载 <model_path>/<name>.bin） */
+	rc = m_sysfs_wo_write("/sys/kernel/ai/model_load", name,
+			      msg, sizeof(msg));
+	fprintf(f, "step1 model_load(%s): %s\n", name, msg);
+	/* step2：model_infer value="name hex..."（495×0.0f 探针输入） */
+	n = snprintf(val, sizeof(val), "%s ", name);
+	for (i = 0; i < 495 && (size_t)n + 8 < sizeof(val) - 1; i++) {
+		memcpy(val + n, "00000000", 8);
+		n += 8;
+	}
+	val[n] = '\0';
+	m_sysfs_wo_write("/sys/kernel/ai/model_infer", val, msg, sizeof(msg));
+	fprintf(f, "step2 model_infer: %s\n", msg);
+	/* step3：读最近一次推理结果 */
 	if (read_file_max("/sys/kernel/ai/model_out", buf, sizeof(buf)) >= 0) {
 		chomp(buf);
 		fprintf(f, "step3 model_out: ");
@@ -827,11 +911,10 @@ static int m_model_verify(const char *args, char **out)
 	} else {
 		fprintf(f, "step3 model_out: <unavailable>\n");
 	}
-	snprintf(ajson, sizeof(ajson),
-		 "{\"path\":\"/sys/kernel/ai/model_load\",\"value\":\"0\"}");
-	exec_sysfs_dyn(&t, ajson, &sub);
-	fprintf(f, "step4 unload: %s\n", sub ? sub : "?");
-	free(sub);
+	/* step4：model_unload value=模型名 */
+	m_sysfs_wo_write("/sys/kernel/ai/model_unload", name,
+			 msg, sizeof(msg));
+	fprintf(f, "step4 model_unload: %s\n", msg);
 	fclose(f);
 	return rc == 0 ? 0 : -1;
 oom:

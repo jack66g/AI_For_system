@@ -88,6 +88,20 @@ typedef struct {
 	long long dedup_threshold_int;
 } ac_sme_config;
 
+/*
+ * PSI 触发源配置（K3d-1，"psi" 配置段）。
+ *
+ * psi_present=0（默认）时 to_dict 不输出 "psi" 键——config.json / GET|PUT
+ * /config 与 T5 向量逐字节不变；仅当配置里出现 "psi" 段才置 1。
+ */
+typedef struct {
+	int enabled;		/* 默认 0（默认关=现状逐位一致，回滚保证）*/
+	long long period_s;	/* 采样周期秒，默认 5 */
+	double high_threshold;	/* memory some avg10 高阈 %，默认 50.0 */
+	double low_threshold;	/* 回落低阈 %，默认 20.0 */
+	long long window_s;	/* 抑制窗口秒，默认 120 */
+} ac_psi_config;
+
 typedef struct {
 	int port;
 	char *host;		/* 缺省 "127.0.0.1" */
@@ -108,6 +122,8 @@ typedef struct {
 	long long delta_merge_every;
 	long long idle_signal_rounds;
 	ac_sme_config sme;
+	int psi_present;	/* 配置出现 "psi" 段（to_dict 才输出）*/
+	ac_psi_config psi;
 } ac_config;
 
 /* 内置默认值（不含环境变量；结构可为全零，函数内部分配成员）*/
@@ -121,6 +137,9 @@ void ac_config_default_env(ac_config *c);
 void ac_sme_config_cleanup(ac_sme_config *c);
 void ac_config_cleanup(ac_config *c);
 
+/* PSI 段默认值：enabled=0 period_s=5 high=50 low=20 window_s=120（无堆成员）*/
+void ac_psi_config_default(ac_psi_config *c);
+
 /* to_dict：asdict 键序（Config 16 键 + sme 9 键），失败返回 NULL */
 aik_json *ac_sme_config_to_dict(const ac_sme_config *c);
 aik_json *ac_config_to_dict(const ac_config *c);
@@ -132,6 +151,14 @@ aik_json *ac_config_to_dict(const ac_config *c);
  */
 int ac_sme_config_apply_dict(ac_sme_config *c, const aik_json *d);
 int ac_config_apply_dict(ac_config *c, const aik_json *d);
+
+/*
+ * ac_psi_config_apply_dict - 就地应用 "psi" 段（仅认已知键，未知忽略）。
+ *
+ * float 字段接受 INT。psi_present 由 ac_config_apply_dict 在看到 "psi"
+ * 键时置 1。成功返回 0。
+ */
+int ac_psi_config_apply_dict(ac_psi_config *c, const aik_json *d);
 
 /* ------------------------------------------------------------------ */
 /* 校验 / 深合并 / 加载期净化                                          */

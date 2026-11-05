@@ -110,6 +110,14 @@ void ac_store_close(ac_store *st);
 /* 借引用读取（store 存续期内有效；操作需外部串行或依赖内部锁瞬间一致性）*/
 const ac_config *ac_store_config(const ac_store *st);
 
+/*
+ * ac_store_set_psi_state - 设置/清除 sessions-state.json 顶层 "psi" 段
+ *
+ * K3d-1：psi 为 NULL 时清除该段（文件回到旧格式，逐字节兼容）；否则深
+ * 拷贝后立即落盘。旧文件带 "psi" 键时加载器自然忽略（向后兼容）。
+ */
+int ac_store_set_psi_state(ac_store *st, const aik_json *psi);
+
 /* 会话操作（返回 0 成功；-1 会话不存在等）。Python 可选参数用 has 标志：
  * cwd/transcript_path 传 NULL 表示不设置（Python 空串同样跳过）。*/
 int ac_store_upsert(ac_store *st, const char *session_id, const char *cwd,

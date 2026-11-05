@@ -678,6 +678,7 @@ struct ac_store {
 	pthread_mutex_t lock;
 	ac_session **sess;
 	size_t n, cap;
+	aik_json *psi;		/* 顶层 "psi" 段（未设置=NULL；仅 psi 启用时）*/
 };
 
 static ac_session *find_session_locked(ac_store *st, const char *sid)
@@ -749,6 +750,15 @@ static int save_sessions_locked(ac_store *st)
 	if (aik_json_obj_put(payload, "sessions", sessions) != 0) {
 		aik_json_free(sessions);
 		goto fail;
+	}
+	/* K3d-1：psi 段仅在设置时输出（未设置=与旧格式逐字节一致）*/
+	if (st->psi) {
+		aik_json *psi = dom_copy(st->psi);
+
+		if (!psi || aik_json_obj_put(payload, "psi", psi) != 0) {
+			aik_json_free(psi);
+			goto fail;
+		}
 	}
 	char *text = ac_json_dump_indent(payload, 2);
 
@@ -879,11 +889,29 @@ void ac_store_close(ac_store *st)
 	for (size_t i = 0; i < st->n; i++)
 		ac_session_free(st->sess[i]);
 	free(st->sess);
+	aik_json_free(st->psi);
 	if (st->owns_cfg)
 		ac_config_cleanup(&st->cfg_storage);
 	pthread_mutex_destroy(&st->lock);
 	free(st->data_dir);
 	free(st);
+}
+
+int ac_store_set_psi_state(ac_store *st, const aik_json *psi)
+{
+	if (!st)
+		return -1;
+	aik_json *cp = psi ? dom_copy(psi) : NULL;
+
+	if (psi && !cp)
+		return -1;
+	pthread_mutex_lock(&st->lock);
+	aik_json_free(st->psi);
+	st->psi = cp;
+	int rc = save_sessions_locked(st);
+
+	pthread_mutex_unlock(&st->lock);
+	return rc;
 }
 
 const ac_config *ac_store_config(const ac_store *st)

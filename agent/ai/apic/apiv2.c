@@ -598,10 +598,15 @@ static const char *SENSE_WHAT[][2] = {
 	{ "telemetry", "/proc/ai/telemetry" },
 	{ "latency", "/proc/ai/latency" },
 	{ "hitrate", "/proc/ai/hitrate" },
-	{ "sched", "/proc/ai/sched" },
+	/* K3b(I-1) 有意修正：sched/vfs 原指目录 /proc/ai/{sched,vfs}，
+	 * api_read_file 拒绝非 regular 文件 → 真机恒 500 sense_unreadable
+	 * （Python 参考版同病，见 PARITY-REPORT「K3b 有意修正」）。真实
+	 * 0444 文件在 stats 子节点（AIKernel/sched/ai_sched_procfs.c:181、
+	 * vfs/ai_vfs_procfs.c:164）。响应 JSON schema 不变。 */
+	{ "sched", "/proc/ai/sched/stats" },
 	{ "chains", "/proc/ai/chains" },
 	{ "decisions", "/proc/ai/decisions" },
-	{ "vfs", "/proc/ai/vfs" },
+	{ "vfs", "/proc/ai/vfs/stats" },
 	{ "control", "/proc/ai/control" },
 };
 

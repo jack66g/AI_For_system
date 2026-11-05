@@ -675,6 +675,16 @@ void ac_sme_config_default(ac_sme_config *c)
 	c->dedup_threshold = 0.92;
 }
 
+void ac_psi_config_default(ac_psi_config *c)
+{
+	memset(c, 0, sizeof(*c));
+	c->enabled = 0;		/* 默认关：行为与现状逐位一致 */
+	c->period_s = 5;
+	c->high_threshold = 50.0;
+	c->low_threshold = 20.0;
+	c->window_s = 120;
+}
+
 void ac_config_default(ac_config *c)
 {
 	memset(c, 0, sizeof(*c));
@@ -695,6 +705,8 @@ void ac_config_default(ac_config *c)
 	c->delta_merge_every = 5;
 	c->idle_signal_rounds = 3;
 	ac_sme_config_default(&c->sme);
+	ac_psi_config_default(&c->psi);
+	c->psi_present = 0;	/* 配置无 "psi" 段：to_dict 不输出 */
 }
 
 void ac_config_default_env(ac_config *c)
@@ -803,6 +815,26 @@ aik_json *ac_config_to_dict(const ac_config *c)
 		aik_json_free(sme);
 		goto fail;
 	}
+	/* K3d-1：psi 段仅在配置里出现过才输出（默认关=字节不变）*/
+	if (c->psi_present) {
+		aik_json *psi = aik_json_new_obj();
+
+		if (!psi ||
+		    obj_own(psi, "enabled",
+			    aik_json_new_bool(c->psi.enabled)) != 0 ||
+		    obj_own(psi, "period_s",
+			    aik_json_new_int(c->psi.period_s)) != 0 ||
+		    obj_own(psi, "high_threshold",
+			    aik_json_new_num(c->psi.high_threshold)) != 0 ||
+		    obj_own(psi, "low_threshold",
+			    aik_json_new_num(c->psi.low_threshold)) != 0 ||
+		    obj_own(psi, "window_s",
+			    aik_json_new_int(c->psi.window_s)) != 0 ||
+		    aik_json_obj_put(o, "psi", psi) != 0) {
+			aik_json_free(psi);
+			goto fail;
+		}
+	}
 	return o;
 fail:
 	aik_json_free(o);
@@ -888,6 +920,30 @@ int ac_sme_config_apply_dict(ac_sme_config *c, const aik_json *d)
 	return 0;
 }
 
+int ac_psi_config_apply_dict(ac_psi_config *c, const aik_json *d)
+{
+	if (!c || aik_json_typeof(d) != AIK_JSON_OBJ)
+		return -1;
+	for (size_t i = 0; i < aik_json_count(d); i++) {
+		const char *k = aik_json_key_at(d, i);
+		const aik_json *v = aik_json_val_at(d, i);
+
+		if (strcmp(k, "enabled") == 0) {
+			c->enabled = aik_json_bool(v);
+		} else if (strcmp(k, "period_s") == 0) {
+			c->period_s = aik_json_int(v);
+		} else if (strcmp(k, "high_threshold") == 0) {
+			c->high_threshold = aik_json_num(v);
+		} else if (strcmp(k, "low_threshold") == 0) {
+			c->low_threshold = aik_json_num(v);
+		} else if (strcmp(k, "window_s") == 0) {
+			c->window_s = aik_json_int(v);
+		}
+		/* 未知键忽略（调用方应先 validate/sanitize）*/
+	}
+	return 0;
+}
+
 int ac_config_apply_dict(ac_config *c, const aik_json *d)
 {
 	if (!c || aik_json_typeof(d) != AIK_JSON_OBJ)
@@ -899,6 +955,13 @@ int ac_config_apply_dict(ac_config *c, const aik_json *d)
 		if (strcmp(k, "sme") == 0) {
 			if (aik_json_typeof(v) == AIK_JSON_OBJ)
 				ac_sme_config_apply_dict(&c->sme, v);
+			continue;
+		}
+		if (strcmp(k, "psi") == 0) {
+			if (aik_json_typeof(v) == AIK_JSON_OBJ) {
+				ac_psi_config_apply_dict(&c->psi, v);
+				c->psi_present = 1;
+			}
 			continue;
 		}
 		if (strcmp(k, "port") == 0) {
@@ -995,6 +1058,15 @@ static const struct rule SME_RULES[] = {
 	{ "dedup_threshold", RT_FLOAT },
 };
 
+/* K3d-1 PSI 段（范围/交叉校验见 validate_psi_dict）*/
+static const struct rule PSI_RULES[] = {
+	{ "enabled", RT_BOOL },
+	{ "period_s", RT_INT },
+	{ "high_threshold", RT_FLOAT },
+	{ "low_threshold", RT_FLOAT },
+	{ "window_s", RT_INT },
+};
+
 static const struct rule *find_rule(const struct rule *rules, size_t n,
 				    const char *key)
 {
@@ -1077,7 +1149,79 @@ aik_json *ac_validate_config_dict(const aik_json *data)
 		const char *k = aik_json_key_at(data, i);
 		const aik_json *v = aik_json_val_at(data, i);
 
-		if (strcmp(k, "sme") == 0) {
+		if (strcmp(k, "psi") == 0) {
+			/* K3d-1：psi 段类型 + 数值范围 + 低/高交叉校验 */
+			if (aik_json_typeof(v) != AIK_JSON_OBJ) {
+				if (push_err(errors, xstrdup("psi 应为对象")) != 0)
+					goto fail;
+				continue;
+			}
+			const aik_json *high = NULL;
+			const aik_json *low = NULL;
+
+			for (size_t j = 0; j < aik_json_count(v); j++) {
+				const char *sk = aik_json_key_at(v, j);
+				const aik_json *sv = aik_json_val_at(v, j);
+				const struct rule *r = find_rule(
+					PSI_RULES,
+					sizeof(PSI_RULES) / sizeof(PSI_RULES[0]), sk);
+
+				if (!r) {
+					if (push_err(errors,
+						     concat_msg("未知配置项：psi.", sk, "")) != 0)
+						goto fail;
+					continue;
+				}
+				const char *te = type_error(sv, r->type);
+
+				if (te) {
+					char *key = concat_msg("psi.", sk, "");
+					char *msg = key ? key_type_msg(key, te) : NULL;
+
+					free(key);
+					if (!msg || push_err(errors, msg) != 0)
+						goto fail;
+					continue;
+				}
+				if (strcmp(sk, "period_s") == 0) {
+					if (aik_json_int(sv) < 1 &&
+					    push_err(errors, xstrdup(
+						    "psi.period_s 应为不小于 1 的整数")) != 0)
+						goto fail;
+				} else if (strcmp(sk, "window_s") == 0) {
+					if (aik_json_int(sv) < 1 &&
+					    push_err(errors, xstrdup(
+						    "psi.window_s 应为不小于 1 的整数")) != 0)
+						goto fail;
+				} else if (strcmp(sk, "high_threshold") == 0) {
+					double h = aik_json_num(sv);
+
+					if (!(h > 0.0) || h > 100.0) {
+						if (push_err(errors, xstrdup(
+							    "psi.high_threshold 应在 0 到 100 之间")) != 0)
+							goto fail;
+					} else {
+						high = sv;
+					}
+				} else if (strcmp(sk, "low_threshold") == 0) {
+					double l = aik_json_num(sv);
+
+					if (!(l >= 0.0) || l >= 100.0) {
+						if (push_err(errors, xstrdup(
+							    "psi.low_threshold 应在 0 到 100 之间")) != 0)
+							goto fail;
+					} else {
+						low = sv;
+					}
+				}
+			}
+			/* 交叉：低阈必须低于高阈（两者同段出现时）*/
+			if (high && low &&
+			    aik_json_num(low) >= aik_json_num(high) &&
+			    push_err(errors, xstrdup(
+				    "psi.low_threshold 应小于 psi.high_threshold")) != 0)
+				goto fail;
+		} else if (strcmp(k, "sme") == 0) {
 			if (aik_json_typeof(v) != AIK_JSON_OBJ) {
 				if (push_err(errors, xstrdup("sme 应为对象")) != 0)
 					goto fail;
@@ -1179,7 +1323,55 @@ aik_json *ac_sanitize_config_dict(const aik_json *d)
 		const char *k = aik_json_key_at(d, i);
 		const aik_json *v = aik_json_val_at(d, i);
 
-		if (strcmp(k, "sme") == 0 && aik_json_typeof(v) == AIK_JSON_OBJ) {
+		if (strcmp(k, "psi") == 0 && aik_json_typeof(v) == AIK_JSON_OBJ) {
+			/* K3d-1：类型 + 范围 + 交叉均通过才保留（加载期容忍）*/
+			aik_json *psi = aik_json_new_obj();
+
+			if (!psi)
+				goto fail;
+			const aik_json *high = aik_json_get(v, "high_threshold");
+			const aik_json *low = aik_json_get(v, "low_threshold");
+			int cross_bad = high && low &&
+				aik_json_num(low) >= aik_json_num(high);
+
+			for (size_t j = 0; j < aik_json_count(v); j++) {
+				const char *sk = aik_json_key_at(v, j);
+				const aik_json *sv = aik_json_val_at(v, j);
+				const struct rule *r = find_rule(
+					PSI_RULES,
+					sizeof(PSI_RULES) / sizeof(PSI_RULES[0]), sk);
+
+				if (!r || type_error(sv, r->type))
+					continue;	/* 未知/类型不符丢弃 */
+				int ok = 1;
+
+				if (strcmp(sk, "period_s") == 0)
+					ok = aik_json_int(sv) >= 1;
+				else if (strcmp(sk, "window_s") == 0)
+					ok = aik_json_int(sv) >= 1;
+				else if (strcmp(sk, "high_threshold") == 0)
+					ok = aik_json_num(sv) > 0.0 &&
+					      aik_json_num(sv) <= 100.0;
+				else if (strcmp(sk, "low_threshold") == 0)
+					ok = aik_json_num(sv) >= 0.0 &&
+					      aik_json_num(sv) < 100.0;
+				if (!ok || (cross_bad &&
+					    (strcmp(sk, "high_threshold") == 0 ||
+					     strcmp(sk, "low_threshold") == 0)))
+					continue;
+				aik_json *cp = deep_copy(sv);
+
+				if (!cp || aik_json_obj_put(psi, sk, cp) != 0) {
+					aik_json_free(cp);
+					aik_json_free(psi);
+					goto fail;
+				}
+			}
+			if (aik_json_obj_put(out, "psi", psi) != 0) {
+				aik_json_free(psi);
+				goto fail;
+			}
+		} else if (strcmp(k, "sme") == 0 && aik_json_typeof(v) == AIK_JSON_OBJ) {
 			aik_json *sme = aik_json_new_obj();
 
 			if (!sme)

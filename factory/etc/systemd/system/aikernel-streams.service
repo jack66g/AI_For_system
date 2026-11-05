@@ -1,0 +1,19 @@
+[Unit]
+Description=AIKernel Resident Event Streams to SME Memory (K3c aistreamd)
+Documentation=file:/etc/aikernel/aistreamd.conf
+After=aikernel-memory.service
+Wants=aikernel-memory.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=LC_ALL=C
+ExecStart=/usr/local/sbin/aistreamd --conf /etc/aikernel/aistreamd.conf
+ExecStartPre=/usr/bin/test -f /etc/aikernel/aistreamd.conf
+Restart=on-failure
+RestartSec=5
+# 单实例由 daemon 自身 flock 保证（/run/aistreamd.lock）；Restart 仅在
+# 真崩溃时拉起。stdout/stderr → journald（desktopd 风格 "aistreamd: "）。
+
+[Install]
+WantedBy=multi-user.target

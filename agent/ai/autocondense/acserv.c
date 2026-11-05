@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "autocondense/acserv.h"
+#include "autocondense/acpsi.h"
 
 #include <errno.h>
 #include <math.h>
@@ -530,6 +531,10 @@ struct ac_http_server {
 	pthread_cond_t conn_cond;
 	int active_conns;
 	int closing;
+	/* K3d-1（I-7）PSI 触发源：状态机 + 周期采样线程 */
+	ac_psi_machine psi_m;
+	int psi_thread_started;
+	pthread_t psi_thread;
 };
 
 /* 停机标志（每进程一个服务实例；async-signal-safe）*/
@@ -538,6 +543,171 @@ static volatile sig_atomic_t g_acserv_stop = 0;
 void ac_http_server_request_stop(void)
 {
 	g_acserv_stop = 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* PSI 触发源（K3d-1）：日志 / 持久化 / 采样线程 / 启停                 */
+/* ------------------------------------------------------------------ */
+
+/* 一行审计日志（stderr；systemd 下进 journal），带本地时间戳 */
+__attribute__((format(printf, 1, 2)))
+static void psi_log(const char *fmt, ...)
+{
+	char iso[32];
+	char msg[512];
+	va_list ap;
+
+	iso[0] = '\0';
+	va_start(ap, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+	(void)ac_iso_now(iso, sizeof(iso));
+	fprintf(stderr, "autocondense psi: %s %s\n", iso, msg);
+}
+
+static void psi_log_event(const ac_psi_event *ev)
+{
+	char buf[512];
+
+	if (!ev)
+		return;
+	ac_psi_format_event(ev, buf, sizeof(buf));
+	psi_log("%s", buf);
+}
+
+/* psi 段写入 sessions-state.json（须持 s->lock；OFF 时清除段回旧格式）*/
+static void psi_persist(ac_http_server *s)
+{
+	if (!s->store)
+		return;
+	if (s->psi_m.state == AC_PSI_STATE_OFF) {
+		(void)ac_store_set_psi_state(s->store, NULL);
+		return;
+	}
+	aik_json *d = ac_psi_status_dict(&s->psi_m, &s->cfg.psi);
+
+	if (!d || ac_store_set_psi_state(s->store, d) != 0)
+		psi_log("状态文件 psi 段写入失败（sessions-state.json）");
+	aik_json_free(d);
+}
+
+static double psi_mono_now(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		return 0.0;
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/*
+ * psi_thread_main - 周期采样线程（psi 启用时存在，否则停放）
+ *
+ * 每周期持 s->lock 读 /proc/pressure、推进状态机、落盘 psi 段；
+ * 抑制开始/结束/降级各记一行日志。DEGRADED 后停止采样（无自动恢复，
+ * 重启服务或 PUT 重开恢复）；psi.enabled=0 时 1s 轮询等再启用。
+ */
+static void *psi_thread_main(void *arg)
+{
+	ac_http_server *s = arg;
+
+	while (!g_acserv_stop) {
+		double period = 1.0;
+
+		pthread_mutex_lock(&s->lock);
+		{
+			int active = s->cfg.psi_present && s->cfg.psi.enabled &&
+				s->psi_m.state != AC_PSI_STATE_OFF;
+
+			if (active && s->psi_m.state != AC_PSI_STATE_DEGRADED) {
+				ac_psi_values v;
+				double now = (double)ac_now();
+				int ok = ac_psi_read(AC_PSI_PROC_DIR, &v,
+						     now) == 0;
+				ac_psi_event ev;
+				int kind = ac_psi_step(&s->psi_m, ok ? &v : NULL,
+						       now, &ev);
+
+				if (kind != AC_PSI_EV_NONE)
+					psi_log_event(&ev);
+				psi_persist(s);
+			}
+			if (active)
+				period = s->psi_m.period_s;
+		}
+		pthread_mutex_unlock(&s->lock);
+		if (period < 1.0)
+			period = 1.0;
+		double deadline = psi_mono_now() + period;
+
+		while (!g_acserv_stop && psi_mono_now() < deadline) {
+			struct timespec sl = { 0, 200 * 1000 * 1000 };
+
+			nanosleep(&sl, NULL);
+		}
+	}
+	return NULL;
+}
+
+static int psi_ensure_thread_locked(ac_http_server *s)
+{
+	if (s->psi_thread_started)
+		return 0;
+	if (pthread_create(&s->psi_thread, NULL, psi_thread_main, s) != 0) {
+		psi_log("PSI 采样线程创建失败，PSI 状态将停止更新");
+		return -1;
+	}
+	s->psi_thread_started = 1;
+	return 0;
+}
+
+/*
+ * psi_apply_config_locked - 依当前配置启停 PSI 源（须持 s->lock）
+ *
+ * 构造与 PUT /config 共用：开启时探测 /proc/pressure（不可用 → 一行
+ * 日志 + 该源停用，其余触发源不受影响）；关闭时恢复纯轮次/水位触发。
+ */
+static void psi_apply_config_locked(ac_http_server *s)
+{
+	if (s->cfg.psi_present && s->cfg.psi.enabled) {
+		if (s->psi_m.state == AC_PSI_STATE_OFF) {
+			ac_psi_values probe;
+			double now = (double)ac_now();
+
+			ac_psi_machine_init(&s->psi_m, &s->cfg.psi);
+			if (ac_psi_read(AC_PSI_PROC_DIR, &probe, now) == 0) {
+				psi_log("PSI 触发源已启用：period=%.0fs "
+					"high=%.2f%% low=%.2f%% window=%.0fs"
+					"（读 %s）",
+					s->psi_m.period_s,
+					s->psi_m.high_threshold,
+					s->psi_m.low_threshold,
+					s->psi_m.window_s, AC_PSI_PROC_DIR);
+				ac_psi_event ev;
+				int kind = ac_psi_step(&s->psi_m, &probe, now,
+						       &ev);
+
+				if (kind != AC_PSI_EV_NONE)
+					psi_log_event(&ev);
+			} else {
+				ac_psi_machine_init(&s->psi_m, &s->cfg.psi);
+				ac_psi_degrade(&s->psi_m, now);
+				psi_log("PSI 触发源不可用（%s 读取失败），"
+					"已停用该触发源，其余触发源不受影响",
+					AC_PSI_PROC_DIR);
+			}
+			psi_persist(s);
+		} else if (s->psi_m.state != AC_PSI_STATE_DEGRADED) {
+			/* 已启用：阈值/周期热刷新（状态与计数保留）*/
+			ac_psi_machine_refresh(&s->psi_m, &s->cfg.psi);
+		}
+		(void)psi_ensure_thread_locked(s);
+	} else if (s->psi_m.state != AC_PSI_STATE_OFF) {
+		ac_psi_machine_off(&s->psi_m);
+		psi_log("PSI 触发源已关闭（psi.enabled=0），"
+			"恢复纯轮次/水位触发");
+		psi_persist(s);
+	}
 }
 
 static void set_err(char *err, size_t errlen, const char *fmt, ...)
@@ -710,6 +880,8 @@ ac_http_server *ac_http_server_new(const char *data_dir, const char *host,
 	else
 		s->port = port;
 	(void)signal(SIGPIPE, SIG_IGN);
+	/* K3d-1：psi.enabled=1 时启动 PSI 触发源（默认关=零行为差异）*/
+	psi_apply_config_locked(s);
 	return s;
 }
 
@@ -719,6 +891,12 @@ void ac_http_server_free(ac_http_server *s)
 		return;
 	if (s->fd >= 0)
 		close(s->fd);
+	if (s->psi_thread_started) {
+		/* 唤醒采样线程退出（分片睡眠 ≤250ms 察觉停机）*/
+		ac_http_server_request_stop();
+		pthread_join(s->psi_thread, NULL);
+		s->psi_thread_started = 0;
+	}
 	pthread_mutex_lock(&s->conn_lock);
 	s->closing = 1;
 	while (s->active_conns > 0)
@@ -1368,6 +1546,23 @@ static aik_json *run_pipeline(ac_http_server *s, const char *session_id,
 			if (!defer_sig)
 				goto oom;
 			return no_dict(why, urgency, defer_sig);
+		}
+		{
+			/* K3d-1：PSI 抑制窗口内延迟压缩触发（不丢弃：
+			 * 窗口结束或压力回落后的下一次评估照常出候选）*/
+			char psi_reason[256];
+
+			if (ac_psi_gate(&s->psi_m, (double)ac_now(), psi_reason,
+					sizeof(psi_reason))) {
+				aik_json *psig = json_copy(dsig);
+
+				aik_json_free(d);
+				if (!psig)
+					goto oom;
+				ac_psi_note_deferred(&s->psi_m);
+				psi_persist(s);
+				return no_dict(psi_reason, urgency, psig);
+			}
 		}
 		j = aik_json_new_obj();
 		if (!j ||
@@ -3265,6 +3460,11 @@ static void h_status(ac_http_server *s, ac_req *req, ac_resp *resp)
 	if (!bad)
 		bad = obj_put_json(o, "recent_events",
 				   ac_store_recent_events(s->store, 20, 0)) != 0;
+	/* K3d-1：psi 段仅在配置出现过 "psi" 键时输出（默认关=字节不变）*/
+	if (!bad && s->cfg.psi_present)
+		bad = obj_put_json(o, "psi",
+				   ac_psi_status_dict(&s->psi_m,
+						      &s->cfg.psi)) != 0;
 	aik_json_free(sessions);
 	if (bad) {
 		aik_json_free(o);
@@ -3327,7 +3527,25 @@ static void h_config_put(ac_http_server *s, ac_req *req, ac_resp *resp)
 		aik_json *merged = ac_deep_merge(cur, body);
 
 		aik_json_free(cur);
-		if (!merged || ac_config_apply_dict(&s->cfg, merged) != 0) {
+		if (!merged) {
+			resp_detail(resp, 500, "Internal Server Error");
+			return;
+		}
+		/* K3d-1：合并后整体再校验（psi 低/高交叉需要全量视角；
+		 * 非 psi 键在此不会产生新错误，响应与向量逐字节一致）*/
+		errs = ac_validate_config_dict(merged);
+		if (!errs) {
+			aik_json_free(merged);
+			resp_detail(resp, 500, "Internal Server Error");
+			return;
+		}
+		if (aik_json_count(errs) > 0) {
+			resp_errors(resp, 400, errs);
+			aik_json_free(merged);
+			return;
+		}
+		aik_json_free(errs);
+		if (ac_config_apply_dict(&s->cfg, merged) != 0) {
 			aik_json_free(merged);
 			resp_detail(resp, 500, "Internal Server Error");
 			return;
@@ -3336,6 +3554,8 @@ static void h_config_put(ac_http_server *s, ac_req *req, ac_resp *resp)
 	}
 	/* 保存失败仅告警（内存配置已生效）——service.py 同语义 */
 	(void)ac_save_config(s->data_dir, &s->cfg);
+	/* K3d-1：psi 启停/阈值热更即时生效（含采样线程启停）*/
+	psi_apply_config_locked(s);
 	resp_json_dom(resp, 200, ac_config_to_dict(&s->cfg));
 }
 

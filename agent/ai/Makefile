@@ -204,7 +204,7 @@ NC     := \033[0m
 
 .PHONY: all clean install help mbedtls
 
-all: mbedtls $(TARGET_AI) $(TARGET_SHELL)
+all: mbedtls $(TARGET_AI) $(TARGET_SHELL) aistreamd
 
 mbedtls:
 	@if [ ! -f $(MBEDTLS_DIR)/library/libmbedtls.a ]; then \
@@ -393,3 +393,44 @@ $(TARGET_SHELL): $(TRACE_EXTRA_OBJS)
 -include $(AI_OBJS:.o=.d) $(SHELL_OBJS:.o=.d) $(UI_EXTRA_OBJS:.o=.d) \
 	$(POLICY_EXTRA_OBJS:.o=.d) $(I18N_EXTRA_OBJS:.o=.d) \
 	$(W43_EXTRA_OBJS:.o=.d) $(TRACE_EXTRA_OBJS:.o=.d)
+# ============================================================================
+# K3c 常驻事件流守护（agent/ai/aistreamd/）：追加段，既有规则不修改
+#  - aistreamd：六路内核事件流常驻订阅（NETLINK_AI REG→EVENT / CN_PROC /
+#    RTNLGRP / KOBJECT_UEVENT / NFLOG / taskstats 周期采样）→ 配额筛选 →
+#    POST /memories 写 SME 记忆（I-5+I-4+I-6，K3-DESIGN §K3c）
+#  - 独立目标，不挂 all：K3b 并行智能体在 apic/tools 上跑 flock 构建，
+#    本目录文件集与之互斥；独立目标保证其 `make`/`make all` 不受本目录
+#    半成品影响（ISO 出厂整合在 K3 收口轮挂接）
+#  - 只读复用兄弟目录源码（memory/sme_client、local/local_http、
+#    runtime/ai_json_util、runtime/ai_types、runtime/netlink/
+#    ai_netlink_client——各自编译进 aistreamd/obj/reuse/，不改原文件）
+# ============================================================================
+AISTREAMD_DIR := aistreamd
+
+.PHONY: aistreamd aistreamd-test aistreamd-clean install-aistreamd
+
+# K3e 出厂挂接（2026-11-05）：install 追加 aistreamd 三件（二进制/service/conf）
+install: install-aistreamd
+
+aistreamd:
+	$(MAKE) -C $(AISTREAMD_DIR)
+
+aistreamd-test:
+	$(MAKE) -C $(AISTREAMD_DIR) test
+
+aistreamd-clean:
+	$(MAKE) -C $(AISTREAMD_DIR) clean
+
+install-aistreamd: aistreamd
+	@echo "$(GREEN)[INSTALL]$(NC) aistreamd -> /usr/local/sbin/"
+	install -m 755 $(AISTREAMD_DIR)/aistreamd /usr/local/sbin/
+	@if [ -f factory/etc/systemd/system/aikernel-streams.service ]; then \
+		install -d /etc/systemd/system; \
+		install -m 644 factory/etc/systemd/system/aikernel-streams.service /etc/systemd/system/; \
+		echo "$(GREEN)[INSTALL]$(NC) aikernel-streams.service -> /etc/systemd/system/"; \
+	fi
+	@if [ -f factory/etc/aikernel/aistreamd.conf ]; then \
+		install -d /etc/aikernel; \
+		install -m 644 factory/etc/aikernel/aistreamd.conf /etc/aikernel/aistreamd.conf; \
+		echo "$(GREEN)[INSTALL]$(NC) aistreamd.conf -> /etc/aikernel/"; \
+	fi

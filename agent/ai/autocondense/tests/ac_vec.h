@@ -91,7 +91,9 @@ static char *ac_slurp(const char *path, size_t *len)
 	return buf;
 }
 
-/* 读 <root>/<rel> 并解析；失败打印错误并返回 NULL */
+/* 读 <root>/<rel> 并解析；失败打印错误并返回 NULL。
+ * __attribute__((unused))：允许单个测试不用向量文件（K3d-1 test_acpsi）*/
+__attribute__((unused))
 static aik_json *ac_load_vector(const char *rel)
 {
 	static char path[1024];
