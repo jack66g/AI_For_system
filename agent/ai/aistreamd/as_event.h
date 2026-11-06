@@ -27,6 +27,9 @@
 struct as_event {
 	long long ts_real_ms;		/* 墙钟 epoch 毫秒 */
 	int stream_idx;			/* AS 流下标 */
+	int pid;			/* 事件主体 pid（T8 Parquet pid 列源；
+					 * proc 类构造器填，无主体=0；行文本
+					 * 格式不受影响——冻结不动） */
 	const char *stream;		/* 静态字面量 */
 	const char *category;		/* 静态字面量 */
 	const char *severity;		/* info/warn/error */
@@ -106,6 +109,7 @@ struct as_dedup_entry {
 	long long window_end_ms;
 	long long suppressed;	/* 窗口内被合并条数 */
 	int stream_idx;
+	int pid;		/* 首见事件主体 pid（聚合记录透传，T8） */
 	char category[24];
 	char severity[8];
 	char line[AS_LINE_MAX];

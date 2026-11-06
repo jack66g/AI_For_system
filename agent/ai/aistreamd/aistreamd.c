@@ -36,6 +36,7 @@
 #include "as_conf.h"
 #include "as_event.h"
 #include "as_hotplug.h"
+#include "as_pq_sink.h"
 #include "as_quota.h"
 #include "as_ring.h"
 #include "as_sme.h"
@@ -44,7 +45,7 @@
 #include "as_util.h"
 
 #define AISTREAMD_VERSION \
-	"aistreamd 1.1 (K3c I-5+I-4+I-6 + K3d-2 I-9 hotplug advisory)"
+	"aistreamd 1.2 (K3c I-5+I-4+I-6 + K3d-2 I-9 hotplug advisory + T8 parquet)"
 
 /* ---- 全局上下文（单线程，信号只置标志） ---- */
 
@@ -60,6 +61,7 @@ struct g_ctx {
 	struct as_sme sme;
 	struct as_streams streams;
 	struct as_hotplug hotplug;	/* K3d-2：advisory-only（C7 红线） */
+	struct as_pq_sink pq;		/* T8：事件→Parquet 落盘（默认关） */
 	int lock_fd;
 };
 
@@ -107,6 +109,7 @@ static void agg_emit(struct as_event *agg, void *u)
 {
 	struct g_ctx *g = u;
 
+	as_pq_sink_feed(&g->pq, agg);	/* T8：聚合记录同落 Parquet */
 	quota_then_deliver(g, agg);
 }
 
@@ -124,6 +127,9 @@ static void on_event(struct as_event *ev, void *u)
 		as_stats_dedup(&g->stats, ev->stream_idx);
 		return;
 	}
+	/* T8：Parquet 落盘采样在去重窗口之后（首条+聚合都落；与 SME 配额
+	 * 独立——磁盘增长由 PARQUET_MAX_GB 保留策略约束）。默认关=零操作。 */
+	as_pq_sink_feed(&g->pq, ev);
 	quota_then_deliver(g, ev);
 }
 
@@ -227,6 +233,9 @@ static void reload_scalars(struct g_ctx *g, const char *conf_path)
 	g->hotplug.quota.daily_max = g->conf.hotplug_daily_max;
 	g->hotplug.quota.stream_daily_max = g->conf.hotplug_daily_max;
 	g->dedup.window_ms = g->conf.dedup_window_ms;
+	/* T8：parquet 键不热更（目录/开关属路径面，同 stats/pid/lock 约定）；
+	 * flush 节流标量热更安全，但为收敛热更面（与 taskstats 采样口径
+	 * 一致性）此轮不更——改配置走 restart，journal 已含全部初值。 */
 	as_log("SIGHUP: scalar quota knobs reloaded (rate/min=%lld "
 	       "daily=%lld stream_daily=%lld window=%lldms hotplug_daily=%lld)",
 	       g->conf.rate_per_min, g->conf.daily_max,
@@ -291,6 +300,11 @@ int main(int argc, char **argv)
 		       G.conf.hotplug_model[0] ? G.conf.hotplug_model : "-",
 		       G.conf.hotplug_daily_max, G.conf.hotplug_infer_dim,
 		       G.conf.hotplug_infer_mock, G.conf.hotplug_log);
+		printf("parquet enabled=%d dir=%s max_gb=%lld flush=%llds/"
+		       "%lldrows (schema/layout 对齐 aikd_lib.py)\n",
+		       G.conf.parquet_enabled, G.conf.parquet_dir,
+		       G.conf.parquet_max_gb, G.conf.parquet_flush_sec,
+		       G.conf.parquet_flush_rows);
 		return 0;
 	}
 
@@ -318,6 +332,11 @@ int main(int argc, char **argv)
 		as_log("FATAL: hotplug quota init: %s", strerror(errno));
 		return 1;
 	}
+	if (as_pq_sink_init(&G.pq, &G.conf, &G.stats) != 0) {
+		/* 仅 enabled=1 且根目录建失败致命；默认关=零操作 */
+		as_log("FATAL: parquet sink init");
+		return 1;
+	}
 	if (as_streams_setup(&G.streams, &G.conf, &G.stats, on_event,
 			     &G) != 0) {
 		as_log("FATAL: streams setup");
@@ -342,8 +361,10 @@ int main(int argc, char **argv)
 	as_log("running (streams: see %s)", G.conf.stats_file);
 
 	long long next_stats = as_now_mono_ms() +
-			       G.conf.stats_interval_sec * 1000;
+				       G.conf.stats_interval_sec * 1000;
 	long long next_sme_retry = 0;
+	long long next_pq_flush = as_now_mono_ms() +
+				  G.conf.parquet_flush_sec * 1000;
 
 	while (!g_stop) {
 		long long now = as_now_mono_ms();
@@ -368,6 +389,14 @@ int main(int argc, char **argv)
 			as_sme_flush(&G.sme);
 			next_sme_retry = now + G.conf.sme_retry_sec * 1000;
 		}
+		/* T8：Parquet 批写节流——到时或行数满即 flush */
+		if (G.pq.enabled && as_pq_sink_pending(&G.pq) > 0 &&
+		    (now >= next_pq_flush ||
+		     (long long)as_pq_sink_pending(&G.pq) >=
+		     G.conf.parquet_flush_rows)) {
+			as_pq_sink_flush(&G.pq);
+			next_pq_flush = now + G.conf.parquet_flush_sec * 1000;
+		}
 		as_dedup_flush(&G.dedup, as_now_real_ms(), agg_emit, &G);
 		due = as_streams_taskstats_due_ms(&G.streams);
 		if (due <= 0) {
@@ -378,6 +407,9 @@ int main(int argc, char **argv)
 			timeout = due;
 		if (next_stats - now > 0 && next_stats - now < timeout)
 			timeout = next_stats - now;
+		if (G.pq.enabled && next_pq_flush - now > 0 &&
+		    next_pq_flush - now < timeout)
+			timeout = next_pq_flush - now;
 
 		{
 			int cnt = as_streams_fill_poll(&G.streams, pfds,
@@ -404,11 +436,12 @@ int main(int argc, char **argv)
 	}
 
 	/* 优雅退出：关 socket → 环形缓冲尽力补写一轮 → advisory 落盘 flush
-	 * → 终笔 stats */
+	 * → Parquet 缓冲 flush → 终笔 stats */
 	as_log("SIGTERM/INT: graceful shutdown");
 	as_streams_close_all(&G.streams);
 	as_sme_flush(&G.sme);
 	as_hotplug_close(&G.hotplug);	/* K3d-2：flush+close advisory JSONL */
+	as_pq_sink_close(&G.pq);	/* T8：缓冲行 flush 后释放 */
 	write_stats(&G, "final");
 	as_sme_free(&G.sme);
 	as_quota_free(&G.quota);

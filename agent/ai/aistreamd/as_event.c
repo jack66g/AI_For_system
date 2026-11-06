@@ -77,24 +77,28 @@ void as_event_proc_fork(struct as_event *ev, int ppid, int pid)
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), "fork", NULL,
 		    "parent=%d child=%d", ppid, pid);
+	ev->pid = pid;		/* 事件主体=子进程（T8 Parquet pid 列） */
 }
 
 void as_event_proc_exec(struct as_event *ev, int pid)
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), "exec", NULL,
 		    "pid=%d", pid);
+	ev->pid = pid;
 }
 
 void as_event_proc_exit(struct as_event *ev, int pid, unsigned code)
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), "exit", NULL,
 		    "pid=%d code=%u", pid, code);
+	ev->pid = pid;
 }
 
 void as_event_proc_comm(struct as_event *ev, int pid, const char *comm)
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), "comm", NULL,
 		    "pid=%d comm=%s", pid, comm ? comm : "?");
+	ev->pid = pid;
 }
 
 void as_event_proc_id(struct as_event *ev, const char *what, int pid,
@@ -102,12 +106,14 @@ void as_event_proc_id(struct as_event *ev, const char *what, int pid,
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), what, NULL,
 		    "pid=%d r%s=%u e%s=%u", pid, what, from, what, to);
+	ev->pid = pid;
 }
 
 void as_event_proc_other(struct as_event *ev, int what, int pid)
 {
 	as_event_mk(ev, as_stream_idx(AS_STREAM_PROC), "other", NULL,
 		    "what=%d pid=%d", what, pid);
+	ev->pid = pid;
 }
 
 /* ---- event（NETLINK_AI 异步推送） ---- */
@@ -294,6 +300,7 @@ enum as_dedup_verdict as_dedup_filter(struct as_dedup *d,
 	e->window_end_ms = now_real_ms + d->window_ms;
 	e->suppressed = 0;
 	e->stream_idx = ev->stream_idx;
+	e->pid = ev->pid;
 	snprintf(e->category, sizeof(e->category), "%s", ev->category);
 	snprintf(e->severity, sizeof(e->severity), "%s", ev->severity);
 	snprintf(e->line, sizeof(e->line), "%s", ev->line);
@@ -315,6 +322,7 @@ void as_dedup_flush(struct as_dedup *d, long long now_real_ms,
 			continue;
 		memset(&agg, 0, sizeof(agg));
 		agg.stream_idx = e->stream_idx;
+		agg.pid = e->pid;
 		agg.stream = as_stream_name(e->stream_idx);
 		agg.category = e->category;
 		agg.severity = e->severity;

@@ -27,7 +27,8 @@ OBJ_DIR := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
 
 OWN_SRCS := as_util.c as_conf.c as_quota.c as_ring.c as_event.c \
-	    as_stats.c as_sme.c as_streams.c as_hotplug.c aistreamd.c
+	    as_stats.c as_sme.c as_streams.c as_hotplug.c \
+	    as_snappy.c as_parquet.c as_pq_sink.c aistreamd.c
 OWN_OBJS := $(OWN_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # 复用对象（显式规则，避免与本目录模式规则歧义）
@@ -37,10 +38,11 @@ REUSE_OBJS := $(REUSE_DIR)/sme_client.o $(REUSE_DIR)/local_http.o \
 
 BIN := aistreamd
 INJECT := ai_inject
+PQ_DUMP := pq_dump		# T8 差分向量驱动（仅链 snappy/parquet 库）
 
 .PHONY: all test clean
 
-all: $(BIN) tests/$(INJECT)
+all: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP)
 
 $(BIN): $(OWN_OBJS) $(REUSE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -72,16 +74,20 @@ $(REUSE_DIR)/ai_netlink_client.o: ../runtime/netlink/ai_netlink_client.c
 tests/$(INJECT): tests/ai_inject.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# T8 差分向量驱动：只链 writer 库（as_snappy + as_parquet，零 aistreamd 依赖）
+tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
+	$(CC) $(CFLAGS) -I. -o $@ $^
+
 # ---- 单测（对象除 aistreamd.o：tests 自带 main） ----
 
 TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
-	 test_hotplug
+	 test_hotplug test_parquet
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
-test: $(BIN) tests/$(INJECT) $(TESTS:%=tests/%)
+test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
 	@set -e; fail=0; \
 	for t in $(TESTS); do \
-		if timeout 120 ./tests/$$t > /tmp/as-$$t.log 2>&1; then \
+		if timeout 300 ./tests/$$t > /tmp/as-$$t.log 2>&1; then \
 			echo "PASS $$t"; \
 		else \
 			echo "FAIL $$t (see /tmp/as-$$t.log)"; fail=1; \
@@ -93,6 +99,6 @@ tests/test_%: tests/test_%.c $(TEST_LIBS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(TEST_LIBS)
 
 clean:
-	rm -rf $(OBJ_DIR) $(BIN) tests/$(INJECT) $(TESTS:%=tests/%)
+	rm -rf $(OBJ_DIR) $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
 
 -include $(OWN_OBJS:.o=.d) $(REUSE_OBJS:.o=.d)

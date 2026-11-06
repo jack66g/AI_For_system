@@ -39,6 +39,12 @@ void as_conf_defaults(struct as_conf *c)
 	c->hotplug_infer_mock = 0;
 	snprintf(c->hotplug_log, sizeof(c->hotplug_log),
 		 "/var/log/aikernel/hotplug-advisories.jsonl");
+	/* T8：Parquet 落盘（默认关——本轮保守） */
+	c->parquet_enabled = 0;
+	snprintf(c->parquet_dir, sizeof(c->parquet_dir), "/var/lib/aikernel");
+	c->parquet_max_gb = 2;
+	c->parquet_flush_sec = 30;
+	c->parquet_flush_rows = 128;
 	c->stats_interval_sec = 10;
 	c->log_debug = 0;
 	snprintf(c->stats_file, sizeof(c->stats_file), "/run/aistreamd.stats");
@@ -106,6 +112,8 @@ enum key_id {
 	K_STATS_FILE, K_PID_FILE, K_LOCK_FILE,
 	K_HOTPLUG_ENABLED, K_HOTPLUG_MODEL, K_HOTPLUG_DAILY_MAX,
 	K_HOTPLUG_INFER_DIM, K_HOTPLUG_INFER_MOCK, K_HOTPLUG_LOG,
+	K_PARQUET_ENABLED, K_PARQUET_DIR, K_PARQUET_MAX_GB,
+	K_PARQUET_FLUSH_SEC, K_PARQUET_FLUSH_ROWS,
 	K_MAX
 };
 
@@ -120,6 +128,8 @@ static const char *const key_names[K_MAX] = {
 	"STATS_FILE", "PID_FILE", "LOCK_FILE",
 	"HOTPLUG_ENABLED", "HOTPLUG_MODEL", "HOTPLUG_DAILY_MAX",
 	"HOTPLUG_INFER_DIM", "HOTPLUG_INFER_MOCK", "HOTPLUG_LOG",
+	"PARQUET_ENABLED", "PARQUET_DIR", "PARQUET_MAX_GB",
+	"PARQUET_FLUSH_SEC", "PARQUET_FLUSH_ROWS",
 };
 
 static int key_lookup(const char *k)
@@ -209,7 +219,8 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_PID_FILE:
 		case K_LOCK_FILE:
 		case K_HOTPLUG_MODEL:
-		case K_HOTPLUG_LOG: {
+		case K_HOTPLUG_LOG:
+		case K_PARQUET_DIR: {
 			/* 三个字符串槽循环使用（校验即时完成，不持有引用） */
 			char *dst;
 			size_t dstcap;
@@ -249,6 +260,14 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 					   "bad HOTPLUG_LOG (need absolute "
 					   "path, no ..): ", v, NULL);
 			}
+			if (id == K_PARQUET_DIR &&
+			    (v[0] != '/' || strstr(v, "..") ||
+			     strpbrk(v, " \t"))) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad PARQUET_DIR (need absolute "
+					   "path, no ..): ", v, NULL);
+			}
 			if (id == K_SME_URL) {
 				dst = c->sme_url;
 				dstcap = sizeof(c->sme_url);
@@ -264,6 +283,9 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			} else if (id == K_HOTPLUG_LOG) {
 				dst = c->hotplug_log;
 				dstcap = sizeof(c->hotplug_log);
+			} else if (id == K_PARQUET_DIR) {
+				dst = c->parquet_dir;
+				dstcap = sizeof(c->parquet_dir);
 			} else {
 				dst = c->lock_file;
 				dstcap = sizeof(c->lock_file);
@@ -363,6 +385,20 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_HOTPLUG_INFER_MOCK:
 			NEED_LL("HOTPLUG_INFER_MOCK", 0, 1,
 				c->hotplug_infer_mock);
+			break;
+		case K_PARQUET_ENABLED:
+			NEED_LL("PARQUET_ENABLED", 0, 1, c->parquet_enabled);
+			break;
+		case K_PARQUET_MAX_GB:
+			NEED_LL("PARQUET_MAX_GB", 1, 1024, c->parquet_max_gb);
+			break;
+		case K_PARQUET_FLUSH_SEC:
+			NEED_LL("PARQUET_FLUSH_SEC", 1, 86400,
+				c->parquet_flush_sec);
+			break;
+		case K_PARQUET_FLUSH_ROWS:
+			NEED_LL("PARQUET_FLUSH_ROWS", 1, 65536,
+				c->parquet_flush_rows);
 			break;
 		default:
 			fclose(f);

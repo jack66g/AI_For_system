@@ -57,6 +57,20 @@ struct as_stats {
 		long long advisory_written;	/* JSONL 落盘成功条数 */
 		long long dropped_noquota;	/* 配额拒绝条数 */
 	} hp;
+	/* T8：Parquet 落盘计数（stats 文件追加 parquet.* 段，旧键零位移） */
+	struct {
+		int enabled;			/* conf PARQUET_ENABLED */
+		long long btime;		/* 启动读到的 btime（0=未知） */
+		long long fed;			/* 入缓冲行数（去重后事件数） */
+		long long buffered;		/* 当前待写行数（sink 回写） */
+		long long rows_written;		/* 落盘行数 */
+		long long files;		/* 落盘文件数 */
+		long long bytes;		/* 落盘字节（st_size 计） */
+		long long flushes;		/* flush 次数 */
+		long long errors;		/* 写失败丢弃行数 */
+		long long retained_files;	/* 保留策略删除文件数 */
+		long long retained_bytes;	/* 保留策略删除字节 */
+	} pq;
 	long long started_mono_ms;
 	long long started_real_ms;
 	int pid;

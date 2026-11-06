@@ -123,6 +123,21 @@ void as_stats_render(const struct as_stats *st, int ring_used,
 		st->hp.advisory_written);
 	fprintf(out, "hotplug.dropped_noquota=%lld\n",
 		st->hp.dropped_noquota);
+	/* T8：Parquet 落盘计数（追加段，旧键零位移；buffered 由 sink 在
+	 * feed/flush 时回写 st->pq.buffered） */
+	fprintf(out, "parquet.enabled=%d\n", st->pq.enabled);
+	fprintf(out, "parquet.btime=%lld\n", st->pq.btime);
+	fprintf(out, "parquet.fed=%lld\n", st->pq.fed);
+	fprintf(out, "parquet.buffered=%lld\n", st->pq.buffered);
+	fprintf(out, "parquet.rows_written=%lld\n", st->pq.rows_written);
+	fprintf(out, "parquet.files=%lld\n", st->pq.files);
+	fprintf(out, "parquet.bytes=%lld\n", st->pq.bytes);
+	fprintf(out, "parquet.flushes=%lld\n", st->pq.flushes);
+	fprintf(out, "parquet.errors=%lld\n", st->pq.errors);
+	fprintf(out, "parquet.retained_files=%lld\n",
+		st->pq.retained_files);
+	fprintf(out, "parquet.retained_bytes=%lld\n",
+		st->pq.retained_bytes);
 }
 
 int as_stats_write_file(const struct as_stats *st, const char *path,

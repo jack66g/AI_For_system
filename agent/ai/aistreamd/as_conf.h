@@ -66,6 +66,18 @@ struct as_conf {
 						 * ONLY）；0=skipped_noiface */
 	char hotplug_log[256];		/* advisory JSONL 落盘路径 */
 
+	/* ---- T8：Parquet 落盘链（aikd_lib.py C 化；宿主=aistreamd） ----
+	 * 布局/schema 对齐 REF（见 as_parquet.h）。事件→行映射见
+	 * as_pq_sink.h。默认关（本轮保守；出厂默认开留收口轮 ISO 拍板）。 */
+	int parquet_enabled;			/* 默认 0；1=写 Parquet */
+	char parquet_dir[256];			/* 数据根（默认
+						 * /var/lib/aikernel，同 REF） */
+	long long parquet_max_gb;		/* 保留上限（默认 2GB；超限删最老
+						 * UTC 天目录，当天永不删，删前
+						 * journal 列名，只删布局内文件） */
+	long long parquet_flush_sec;		/* 批写节流：秒（默认 30） */
+	long long parquet_flush_rows;		/* 批写节流：行（默认 128） */
+
 	/* 可观测 */
 	long long stats_interval_sec;	/* stats 文件周期写（默认 10） */
 	int log_debug;			/* 1=开 debug 日志 */
