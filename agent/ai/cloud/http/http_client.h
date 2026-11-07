@@ -77,6 +77,46 @@ int https_post_stream(const char *url,
 		      int *status_code,
 		      char **error_msg);
 
+/* ---- 自定义请求头（T9a2 纯增量；默认 NULL = 既有行为逐字节不变） ---- */
+
+/*
+ * extra_headers 规则（https_post_ex / https_post_stream_ex 共用）：
+ *   - NULL 结尾数组，每项为完整头行 "Name: value"（不含 CRLF；调用方
+ *     保证格式合法——不含 \r\n 与控制字符）
+ *   - 每项按数组序原样追加到默认头之后（Content-Length 之前）
+ *   - 若数组中存在以 "Authorization:"（大小写不敏感）开头的项，则不再
+ *     自动追加默认 "Authorization: Bearer <api_key>"（调用方自备认证，
+ *     如 Anthropic x-api-key）
+ *   - 否则：api_key 非 NULL 且非空串时追加默认 Bearer 行；api_key 为
+ *     NULL/空串时不发 Authorization（ex 版本容忍 NULL api_key）
+ *   - extra_headers == NULL：与 https_post / https_post_stream 完全
+ *     等价（含 api_key 空串时仍发 "Authorization: Bearer " 的既有行为）
+ */
+
+/*
+ * https_post_ex - https_post + 自定义请求头
+ * 返回: 0 成功，负值失败
+ */
+int https_post_ex(const char *url,
+		  const char *api_key,
+		  const char *json_body,
+		  const char *const *extra_headers,
+		  char **response,
+		  char **error_msg);
+
+/*
+ * https_post_stream_ex - https_post_stream + 自定义请求头
+ * 参数语义同 https_post_stream（status_code 可 NULL；error_msg 调用者
+ * 需 free），另见上方 extra_headers 规则。
+ */
+int https_post_stream_ex(const char *url,
+			 const char *api_key,
+			 const char *json_body,
+			 const char *const *extra_headers,
+			 http_data_cb on_data, void *ud,
+			 int *status_code,
+			 char **error_msg);
+
 /* ---- Timeout ---- */
 
 /*

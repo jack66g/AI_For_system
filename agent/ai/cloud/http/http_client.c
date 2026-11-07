@@ -189,23 +189,80 @@ static int write_all_plain(int sock, const unsigned char *buf, size_t len)
 	return (int)len;
 }
 
-static char *build_http_request(const char *host, const char *path,
-	const char *api_key, const char *json_body, size_t *req_len)
+static char *build_http_request_ex(const char *host, const char *path,
+	const char *api_key, const char *json_body,
+	const char *const *extra_headers, size_t *req_len)
 {
-	size_t cap = strlen(json_body) + strlen(api_key) + strlen(host)
-		+ strlen(path) + 1024;
-	char *req = malloc(cap);
-	if (!req) return NULL;
-	int n = snprintf(req, cap,
-		"POST %s HTTP/1.1\r\nHost: %s\r\n"
-		"Content-Type: application/json\r\n"
-		"Authorization: Bearer %s\r\n"
-		"Content-Length: %zu\r\n"
-		"Connection: close\r\n\r\n%s",
-		path, host, api_key, strlen(json_body), json_body);
-	if (n < 0 || (size_t)n >= cap) { free(req); return NULL; }
-	*req_len = n;
-	return req;
+	size_t cap = strlen(json_body) + (api_key ? strlen(api_key) : 0)
+		+ strlen(host) + strlen(path) + 1024;
+	char *req;
+	int n;
+
+	/* extra_headers == NULL：与历史 build_http_request 逐字节一致
+	 * （同一 snprintf 模板与 cap 公式——api_key 恒非 NULL 的旧语义） */
+	if (!extra_headers) {
+		req = malloc(cap);
+		if (!req) return NULL;
+		n = snprintf(req, cap,
+			"POST %s HTTP/1.1\r\nHost: %s\r\n"
+			"Content-Type: application/json\r\n"
+			"Authorization: Bearer %s\r\n"
+			"Content-Length: %zu\r\n"
+			"Connection: close\r\n\r\n%s",
+			path, host, api_key, strlen(json_body), json_body);
+		if (n < 0 || (size_t)n >= cap) { free(req); return NULL; }
+		*req_len = n;
+		return req;
+	}
+
+	/* extra_headers != NULL：默认头 + 数组项；Authorization 按
+	 * http_client.h 头注释规则（调用方自备认证时让位） */
+	{
+		size_t extra_len = 0, i;
+		int has_auth_override = 0, auth_default = 0;
+		size_t body_len = strlen(json_body), off;
+
+		for (i = 0; extra_headers[i]; i++) {
+			size_t l = strlen(extra_headers[i]);
+			if (l > 4096) return NULL;	/* 单头过长，拒发 */
+			extra_len += l + 2;
+			if (l >= 14 &&
+			    !strncasecmp(extra_headers[i], "Authorization:", 14))
+				has_auth_override = 1;
+		}
+		if (!has_auth_override && api_key && *api_key) {
+			auth_default = 1;
+			cap += strlen(api_key) + 32;
+		}
+		cap += extra_len + 1;	/* +1：末尾 NUL 终止保险 */
+		req = malloc(cap);
+		if (!req) return NULL;
+		off = 0;
+		off += (size_t)snprintf(req + off, cap - off,
+			"POST %s HTTP/1.1\r\nHost: %s\r\n"
+			"Content-Type: application/json\r\n",
+			path, host);
+		if (auth_default)
+			off += (size_t)snprintf(req + off, cap - off,
+				"Authorization: Bearer %s\r\n", api_key);
+		for (i = 0; extra_headers[i]; i++) {
+			off += (size_t)snprintf(req + off, cap - off,
+				"%s\r\n", extra_headers[i]);
+			if (off >= cap) { free(req); return NULL; }
+		}
+		off += (size_t)snprintf(req + off, cap - off,
+			"Content-Length: %zu\r\n"
+			"Connection: close\r\n\r\n",
+			body_len);
+		if (off >= cap || off + body_len + 1 > cap) {
+			free(req);
+			return NULL;
+		}
+		memcpy(req + off, json_body, body_len);
+		req[off + body_len] = '\0';
+		*req_len = off + body_len;
+		return req;
+	}
 }
 
 /* ---- Chunked Transfer Encoding 解码 ---- */
@@ -458,7 +515,8 @@ static int tls_handshake_verify(mbedtls_ssl_context *ssl, char **error_msg)
 
 /* ---- HTTPS POST 主函数 ---- */
 
-int https_post(const char *url, const char *api_key, const char *json_body,
+static int https_post_impl(const char *url, const char *api_key,
+	const char *json_body, const char *const *extra_headers,
 	char **response, char **error_msg)
 {
 	struct url_info uinfo;
@@ -502,8 +560,8 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 
 		/* 构建并发送请求 */
 		{ size_t req_len;
-		  char *req = build_http_request(uinfo.host, uinfo.path,
-			api_key, json_body, &req_len);
+		  char *req = build_http_request_ex(uinfo.host, uinfo.path,
+			api_key, json_body, extra_headers, &req_len);
 		  if (!req) {
 			if (error_msg) *error_msg = strdup("Failed to build HTTP request");
 			goto tls_cleanup;
@@ -553,8 +611,8 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 	} else {
 		/* HTTP 非加密 */
 		size_t req_len;
-		char *req = build_http_request(uinfo.host, uinfo.path,
-			api_key, json_body, &req_len);
+		char *req = build_http_request_ex(uinfo.host, uinfo.path,
+			api_key, json_body, extra_headers, &req_len);
 		if (req) {
 			if (write_all_plain(sock, (unsigned char *)req,
 					    req_len) < 0) {
@@ -600,6 +658,21 @@ int https_post(const char *url, const char *api_key, const char *json_body,
 
 	if (sock >= 0) close(sock);
 	return ret;
+}
+
+int https_post(const char *url, const char *api_key, const char *json_body,
+	char **response, char **error_msg)
+{
+	return https_post_impl(url, api_key, json_body, NULL, response,
+		error_msg);
+}
+
+int https_post_ex(const char *url, const char *api_key,
+	const char *json_body, const char *const *extra_headers,
+	char **response, char **error_msg)
+{
+	return https_post_impl(url, api_key, json_body, extra_headers,
+		response, error_msg);
 }
 
 /* ---- Timeout 设置 ---- */
@@ -937,8 +1010,9 @@ static int chunked_feed(struct chunk_decoder *d, const char **pdata,
 	return ret;
 }
 
-int https_post_stream(const char *url, const char *api_key,
+static int https_post_stream_impl(const char *url, const char *api_key,
 		      const char *json_body,
+		      const char *const *extra_headers,
 		      http_data_cb on_data, void *ud,
 		      int *status_code, char **error_msg)
 {
@@ -1005,8 +1079,8 @@ int https_post_stream(const char *url, const char *api_key,
 
 		/* 构建并发送请求 */
 		{ size_t req_len;
-		  char *req = build_http_request(uinfo.host, uinfo.path,
-			api_key, json_body, &req_len);
+		  char *req = build_http_request_ex(uinfo.host, uinfo.path,
+			api_key, json_body, extra_headers, &req_len);
 
 		  if (!req) {
 			if (error_msg)
@@ -1123,8 +1197,8 @@ ps_tls_cleanup:
 	} else {
 		/* 明文 HTTP */
 		size_t req_len;
-		char *req = build_http_request(uinfo.host, uinfo.path,
-			api_key, json_body, &req_len);
+		char *req = build_http_request_ex(uinfo.host, uinfo.path,
+			api_key, json_body, extra_headers, &req_len);
 		int done = 0;
 
 		if (!req) {
@@ -1253,6 +1327,25 @@ ps_tls_cleanup:
 	if (sock >= 0)
 		close(sock);
 	return ret;
+}
+
+int https_post_stream(const char *url, const char *api_key,
+		      const char *json_body,
+		      http_data_cb on_data, void *ud,
+		      int *status_code, char **error_msg)
+{
+	return https_post_stream_impl(url, api_key, json_body, NULL,
+		on_data, ud, status_code, error_msg);
+}
+
+int https_post_stream_ex(const char *url, const char *api_key,
+			 const char *json_body,
+			 const char *const *extra_headers,
+			 http_data_cb on_data, void *ud,
+			 int *status_code, char **error_msg)
+{
+	return https_post_stream_impl(url, api_key, json_body,
+		extra_headers, on_data, ud, status_code, error_msg);
 }
 
 #endif /* CONFIG_AI_STREAM_MODE */
