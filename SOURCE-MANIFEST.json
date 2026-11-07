@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-06T10:52:20+08:00",
+  "created": "2026-11-07T23:58:12+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -19,7 +19,8 @@
     "K2: 内核三条 High 修复入正典（F1 sched 遥测前置采集/F2 seccomp GFP_ATOMIC/K1B-23 回滚快照出锁）+ 正典 3 处树外编辑入册（MANIFEST 169→172）；A/B：#63-kasan 8 引导 F1=0/F2=0（A 侧 12/14 与 27 发），KUnit 57/57×2，回滚演练过；护城河口径定案（用户拍板）：语义等价+零 AI 机器码/符号/可调用面，UAPI 声明层豁免；tag k2-kernel-fixes",
     "K2b: 内核 Med/Low 批量加固（16 文件）：nice 不恢复真根因（decision_id 后置致快照环恒空）+Med-2 按任务取 pre+Med-3 SENSE 凭据闸（root 无变化）+Med-4 infer 四处泄漏+Low 9 修 4 论证；A/B 决定性（nice sw2 35→60 全回/infer delta 1200→0/nobody EPERM）；#64 产物 KUnit 64/0×2、KASAN 3 引导F1=F2=0；K2C 同期出厂 alpha.15.1（#63，四阶段全绿+护城河门 M1-M5）；tag k2b-hardening",
     "K3: AI 适配加深（I 轨登记册 14 条：接 7/否决 2/再议 5）。K3b 错线修复组（I-12 三处+I-1 sense 有意修正+向量重录 6 步）；K3c aistreamd常驻事件流→SME 记忆（lease/配额/审计/回滚，A/B 0↔20/20，soak 4h1m RSS+0.33%）；K3d-1 PSI 触发源（默认关=零影响，live A/B）；K3d-2 热插招建议式流水线（executed 恒 false，C7 三处红线）；K3e 出厂 ISO alpha.15.2 d20ad3bf（#64 内核换代零模块处置，四阶段 6/6+12/12+27/27+contentcheck 绿[环境崩溃重启定案+台架键名 bug 修正后]，live 五项真跑）；tag k3-ai-adapt",
-    "T8: aikd_lib.py Parquet 落盘链 C 化（方案 A=保留 Parquet 兼容，用户拍板）。as_snappy（299 行真压缩/解压）+as_parquet（1,789 行 thrift compact 手写+三 schema 逐字段对齐 REF+单 RG/PLAIN/snappy/DataPageV1）+as_pq_sink（497 行事件→行/批节流/保留策略）；aistreamd 集成 5 新 conf键（PARQUET_ENABLED 默认 0，出厂默认开留下轮 ISO）。差分 8 向量pyarrow 读回 schema/逐值/行数全等+负向 7/7；e2e v2 五分布轮（12/125/292/331/600）fed==rows==读回+脏注入检出；打回一轮：假重复实为两生命周期同目录（root 属主清场静默失败+硬编码 id 基数，时间戳取证 400s德尔塔定案），台架 v2 加 sudo 删除断言/唯一 run tag/manifest总数强校验；tag t8-parquet"
+    "T8: aikd_lib.py Parquet 落盘链 C 化（方案 A=保留 Parquet 兼容，用户拍板）。as_snappy（299 行真压缩/解压）+as_parquet（1,789 行 thrift compact 手写+三 schema 逐字段对齐 REF+单 RG/PLAIN/snappy/DataPageV1）+as_pq_sink（497 行事件→行/批节流/保留策略）；aistreamd 集成 5 新 conf键（PARQUET_ENABLED 默认 0，出厂默认开留下轮 ISO）。差分 8 向量pyarrow 读回 schema/逐值/行数全等+负向 7/7；e2e v2 五分布轮（12/125/292/331/600）fed==rows==读回+脏注入检出；打回一轮：假重复实为两生命周期同目录（root 属主清场静默失败+硬编码 id 基数，时间戳取证 400s德尔塔定案），台架 v2 加 sudo 删除断言/唯一 run tag/manifest总数强校验；tag t8-parquet",
+    "W153: ISO alpha.15.3 三件套——audit_capabilities 校准（7 项 n/a by-design 注出处 FS-06/07/09/10 MEM-07 DT-06 TIME-02；分母 90 口径注明）+ aistreamd.conf T8 出厂默认开（PARQUET_ENABLED=1）；ISO d187…→15.3 md5 17b2588d27bd8c59cb8e6d5dc68d64c7 双份；四阶段 6/6+12/12+41/41+87/87 全绿（verdict 144 True/0 False）；run_all 59/59 双跑互证；soak24 25.87h PASS（稳态 RSS +0.16%、零 fatal、日配额双触顶）；smartmontools 补件 DISK-03 真转绿"
   ],
   "overlay_count": 168,
   "registry": {
@@ -41,7 +42,7 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 60941915,
+    "bytes": 60955847,
     "regular_files": 1313,
     "source_files": 1313,
     "symlinks": 4,

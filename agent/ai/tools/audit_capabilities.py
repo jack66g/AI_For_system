@@ -72,6 +72,12 @@ EXPECTED_TOOL_NAMES_SHA256 = "924313961e12c9aced2648163dcc55256b3a3554bc4d6d454a
 # 原以 escape:python3 充当读路径的对象归零（94/97→90/97=92.8%）。
 # 旧 95.0 把 escape 逃逸计入 read_any，属虚高；新基线只含一等读路径。
 READ_TARGET = 92.0
+# W-153 校准（alpha.15.3）：FS-06/FS-07/FS-09/MEM-07（escape:python3 恒零）
+# + FS-10/DT-06（空读列表结构性永缺席）+ TIME-02（工厂无用户 cron：白名单
+# alpha.13 已摘、rootfs 无 spool）共 7 项标 status="n/a"（by-design，逐项
+# 出处=对象 notes 引 WRUNALL-REPORT.md §2）。n/a 不入分母、不算 absent 也
+# 不算 pass、单独计数（objects_na/na_ids）——分母 97→90。本校准不改任何
+# 真实检查项的行为（token 判定/活体探测/注册表断言原样）。
 SEMANTIC_TARGET = 50.0
 
 CHANNEL_CASE = {
@@ -415,11 +421,13 @@ OBJECTS = [
       ["escape:python3"],
       ["escape:sys_shell"], "raw", "D0/D2",
       "python3 已摘除（T7d）：读路径归零；getfacl 不在白名单",
-      gap="G-004"),
+      gap="G-004", status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #1（audit_capabilities.py:414（校准后现 :420））——escape:python3 自 T7d 摘除后白名单级恒 False，宿主/工厂两形态同败，与运行环境无关"),
     O("FS-07", "文件/目录/元数据/ACL/xattr", "扩展属性 xattr",
       ["escape:python3"],
       ["escape:python3"], "raw", "D0/D2",
-      "python3 已摘除（T7d）：读路径归零；getfattr/setfattr 缺失", gap="G-005"),
+      "python3 已摘除（T7d）：读路径归零；getfattr/setfattr 缺失", gap="G-005", status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #2（audit_capabilities.py:419（校准后现 :426））——同 FS-06，escape:python3 白名单级恒缺席"),
     O("FS-08", "文件/目录/元数据/ACL/xattr", "文件属性 chattr/lsattr",
       ["escape:sys_shell"],
       ["escape:sys_shell"], "raw", "D0/D2",
@@ -427,10 +435,12 @@ OBJECTS = [
     O("FS-09", "文件/目录/元数据/ACL/xattr", "文件完整性/校验和",
       ["escape:python3"],
       [], "raw", "D0", "python3 已摘除（T7d）：读路径归零；无 sha256sum 白名单命令",
-      gap="G-024", write_na=True),
+      gap="G-024", write_na=True, status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #3（audit_capabilities.py:427（校准后现 :435））——escape:python3 白名单级恒缺席，且无 sha256sum 白名单命令"),
     O("FS-10", "文件/目录/元数据/ACL/xattr", "磁盘配额",
       [], [], "none", "D0/D3",
-      "quota/repquota 在 L1/VM 均缺二进制；无 AI 读路径", gap="G-007"),
+      "quota/repquota 在 L1/VM 均缺二进制；无 AI 读路径", gap="G-007", status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #4（audit_capabilities.py:431（校准后现 :440））——读列表为空，any([])=False，结构性永缺席（目录无读路径可列）"),
 
     # ---------------- 磁盘/分区/文件系统/SMART ----------------
     O("DISK-01", "磁盘/分区/文件系统/SMART", "块设备/分区",
@@ -675,7 +685,8 @@ OBJECTS = [
       gap="G-003", write_na=True),
     O("MEM-07", "SME 记忆/trace/训练导出", "训练导出",
       ["escape:python3"], ["escape:python3"], "raw", "D0/D2",
-      "无 trace.export 工具；python3 已摘除（T7d），JSONL 重组路径归零", gap="G-003"),
+      "无 trace.export 工具；python3 已摘除（T7d），JSONL 重组路径归零", gap="G-003", status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #6（audit_capabilities.py:676（校准后现 :686））——T7d 摘 python3 后读路径恒零"),
     O("MEM-08", "SME 记忆/trace/训练导出", "会话历史",
       ["file:~/.aikernel/sessions", "file:/var/log/aikernel/sessions", "cmd:cat"],
       [], "structured", "D0", "cat ~/.aikernel/sessions/*.jsonl；无 session 工具",
@@ -726,7 +737,9 @@ OBJECTS = [
       "desktop_notifications_list/send；追加不覆盖历史（10-task 09）"),
     O("DT-06", "桌面", "输入注入（键鼠）",
       [], ["tool:desktop_input_type", "tool:desktop_input_key"], "none", "D2",
-      "desktop_input_type/key（D2）；读无“输入历史”对象，窗口文本经 desktop_windows_list 观察（10-task 07/08）"),
+      "desktop_input_type/key（D2）；读无“输入历史”对象，窗口文本经 desktop_windows_list 观察（10-task 07/08）",
+      status="n/a",
+      notes="W-153 校准 by-design n/a：出处 WRUNALL-REPORT.md §2 #7（audit_capabilities.py:727（校准后现 :738））——write-only 对象（输入注入无“输入历史”读对象），空读列表结构性永缺席"),
     O("DT-07", "桌面", "截图",
       ["tool:desktop_screenshot"], [], "structured", "D0",
       "desktop_screenshot；path/bytes/sha256/width/height，>30KB/colors 防白屏（10-task 06/07b）",
@@ -749,7 +762,8 @@ OBJECTS = [
     O("TIME-02", "时间/NTP/cron/timers/SSH", "用户 crontab",
       ["cmd:crontab", "file:/var/spool/cron/crontabs"],
       ["cmd:crontab"], "raw", "D0/D2",
-      "crontab -l（W2；VM 二进制缺失、spool 不存在）", gap="G-026"),
+      "crontab -l（W2；VM 二进制缺失、spool 不存在）", gap="G-026", status="n/a",
+      notes="W-153 校准 n/a（出厂设计）：出处 WRUNALL-REPORT.md §2 附行（audit_capabilities.py:749（校准后现 :762））——工厂本就无用户 cron：crontab 白名单 alpha.13 已摘（commit 02fa78c）、工厂 rootfs 无 /var/spool/cron/crontabs（qsmoke 固化断言 tools_no_crontab）；宿主形态通过仅因 L1 残留 Ubuntu cron spool 目录，属假依赖"),
     O("TIME-03", "时间/NTP/cron/timers/SSH", "系统 cron/timers",
       ["cmd:ls", "file:/etc/crontab", "file:/etc/cron.d", "cmd:systemctl"],
       [], "structured", "D0", "cat /etc/crontab; ls /etc/cron.d; systemctl list-timers",
@@ -1355,6 +1369,7 @@ def build_findings(reg, src, host_missing, vm_missing, vm_reachable, ev):
 # ---------------------------------------------------------------------------
 
 def compute_metrics(evald):
+    na_objs = [o for o in evald if o["status"] == "n/a"]
     applicable = [o for o in evald if o["status"] not in ("future", "n/a")]
     read_any = sum(1 for o in applicable if o["read_any"])
     read_live = sum(1 for o in applicable if o["read_live"])
@@ -1373,6 +1388,8 @@ def compute_metrics(evald):
     return {
         "objects_total": len(evald),
         "objects_applicable": total,
+        "objects_na": len(na_objs),
+        "na_ids": [o["id"] for o in na_objs],
         "read_any": read_any,
         "read_any_pct": pct(read_any, total),
         "read_live": read_live,
@@ -1446,12 +1463,17 @@ def render_matrix(meta, evald, metrics):
     lines.append("- **写路径**：已注册 W1/W2 工具、白名单 W1/W2 命令、或存在的 POST API；shell/脚本逃逸单独标注。")
     lines.append("- **Principal-only**：`/lease issue|revoke|confirm` 等 root+TTY 命令，存在但不是 Agent 工具；计入读/写语义但不计入 AI 写覆盖。")
     lines.append("- **风险**：D0 纯信息 / D1 可逆本地 / D2 不可逆本地 / D3 系统级 / D4 身份与启动链。")
+    lines.append("- **n/a（by-design）**：出厂设计即无读路径的对象（status=n/a，W-153 校准，7 项："
+                  "FS-06/FS-07/FS-09/FS-10/MEM-07/DT-06/TIME-02）。**不计入覆盖分母、不算 absent 也不算 "
+                  "pass、单独计数**；逐项出处见各对象 notes（引 WRUNALL-REPORT.md §2）与 --json 的 na_ids。")
     lines.append("")
     lines.append("## 2. 覆盖总览（脚本计算）")
     lines.append("")
     lines.append("| 指标 | 数值 |")
     lines.append("|---|---:|")
-    lines.append("| 对象总数（适用） | %d |" % metrics["objects_applicable"])
+    lines.append("| 对象总数（适用，分母=除 n/a 外） | %d |" % metrics["objects_applicable"])
+    lines.append("| n/a（by-design，单独计数，不入分母） | %d（%s） |"
+                 % (metrics["objects_na"], ",".join(metrics["na_ids"])))
     lines.append("| 读路径覆盖（含 W2/逃逸） | %d/%d = **%.1f%%** |"
                  % (metrics["read_any"], metrics["objects_applicable"], metrics["read_any_pct"]))
     lines.append("| 直连读覆盖（R 工具/命令/文件/API） | %d/%d = **%.1f%%** |"
@@ -1764,11 +1786,12 @@ def main(argv=None):
                 print(" - " + e)
             return 1
         print("W75 CHECK PASS")
-        print("objects=%d read_any=%d/%d (%.1f%%) direct=%d (%.1f%%) "
+        print("objects=%d na=%d(%s) read_any=%d/%d (%.1f%%) direct=%d (%.1f%%) "
               "semantic_structured=%d (%.1f%%) write=%d/%d (%.1f%%) "
               "gaps=%d (P0=%d P1=%d P2=%d P3=%d closed=%d) "
               "tools=%d domains=%d desktop=%d seed=%d"
-              % (metrics["objects_applicable"], metrics["read_any"],
+              % (metrics["objects_applicable"], metrics["objects_na"],
+                 ",".join(metrics["na_ids"]), metrics["read_any"],
                  metrics["objects_applicable"], metrics["read_any_pct"],
                  metrics["read_direct"], metrics["read_direct_pct"],
                  metrics["semantic_structured"], metrics["semantic_structured_pct"],
