@@ -50,14 +50,58 @@
 typedef int (*occ_llm_call_fn)(const occ_provider *p, const occ_llm_req *req,
 			       occ_event_cb cb, void *ud, char **err_out);
 
+/* ---- 输出 sink（T9c2）：loop 全部对外输出的统一出口 ----
+ *
+ * 双路合同：
+ *   - sink.fn == NULL（headless，缺省）→ 走「缺省 file sink」= 现行为
+ *     逐字节不变（TEXT→stream_out fputs+fflush；REASONING→reasoning_out；
+ *     NOTICE→stderr "occ: %s\n"；TOOL_*→不打印，进库）——回归铁门。
+ *   - sink.fn != NULL（TUI）→ 一律回调，file/stderr 路不再写（防
+ *     alt-screen 被 stdout/stderr 字节污染）。
+ *
+ * 线程合同：TUI 场景 sink 在 occ_loop_run 所在线程（worker）被调；
+ * text/arg 仅回调期间有效，留存必须拷贝。kind 见 occ_sink_kind。 */
+typedef enum {
+	OCC_SINK_TEXT = 0,		/* data=流式文本增量 */
+	OCC_SINK_REASONING,		/* data=思维链增量 */
+	OCC_SINK_TOOL_START,		/* data=工具名；arg=参数 JSON（TUI
+					 * 截断展示）；headless 不打印 */
+	OCC_SINK_TOOL_END,		/* data=工具名；arg=结果文本；rc=工具
+					 * 返回码（0=成功）；headless 不打印 */
+	OCC_SINK_NOTICE,		/* data=人话通告（重试/重放/落库失败
+					 * 等）；缺省 sink→stderr "occ: %s\n" */
+	OCC_SINK_RESET			/* data=重试通告；语义=上一尝试部分输出
+					 * 作废（TUI 清 live 文本；缺省 sink→
+					 * stderr "occ: %s\n" 同旧行为） */
+} occ_sink_kind;
+
+typedef struct occ_sink_ev {
+	int kind;			/* occ_sink_kind */
+	const char *text;		/* TEXT/REASONING 增量；TOOL 名；
+					 * NOTICE 正文 */
+	size_t len;			/* TEXT/REASONING 字节数（其余 0） */
+	const char *arg;		/* TOOL_*：参数/结果文本（可 NULL） */
+	int rc;				/* TOOL_END：0=成功 */
+} occ_sink_ev;
+
+typedef void (*occ_sink_fn)(void *ud, const occ_sink_ev *ev);
+
+typedef struct occ_sink {
+	occ_sink_fn fn;			/* NULL=缺省 file sink（headless） */
+	void *ud;
+} occ_sink;
+
 typedef struct occ_loop_opts {
 	const char *prompt;		/* 本轮用户输入；NULL=重放中断环 */
 	occ_llm_call_fn llm_call;	/* NULL=默认（含 forwarder→direct） */
 	void *llm_ud;			/* 透传注入传输 */
-	FILE *stream_out;		/* TEXT_DELTA 流式出口（NULL=静默） */
-	FILE *reasoning_out;		/* 思维链出口（NULL=不打印，仍落库） */
+	FILE *stream_out;		/* TEXT_DELTA 流式出口（NULL=静默；
+					 * sink.fn 非空时被 sink 接管） */
+	FILE *reasoning_out;		/* 思维链出口（NULL=不打印，仍落库；
+					 * 同上受 sink 接管） */
 	const char *workdir;		/* 工具工作目录（b1；NULL=getcwd）：
 					 * glob/grep/bash rw 挂载面 */
+	occ_sink sink;			/* T9c2：非空→输出走回调（见上） */
 } occ_loop_opts;
 
 typedef struct occ_loop_result {

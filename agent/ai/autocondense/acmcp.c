@@ -34,7 +34,7 @@
 #include <unistd.h>
 
 #define AC_VERSION "0.3.0"
-#define DEFAULT_PORT "8761"
+#define DEFAULT_PORT "8762"
 #define SERVICE_LOG "/tmp/autocondense_service.log"
 
 /* ------------------------------------------------------------------ */
@@ -193,10 +193,10 @@ static int get_port(void)
 	long v;
 
 	if (!env || !*env)
-		return 8761;
+		return 8762;		/* T9d 改号：8761 归 aikernel-api */
 	v = strtol(env, &end, 10);
 	if (end == env || *end != '\0' || v <= 0 || v > 65535)
-		return 8761;
+		return 8762;
 	return (int)v;
 }
 

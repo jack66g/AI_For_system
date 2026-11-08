@@ -57,6 +57,35 @@ static void dump_eq(const aik_json *got, const aik_json *want, const char *name)
 	free(w);
 }
 
+/*
+ * bump_port_lit - T9d 端口改号适配（8761→8762）。
+ *
+ * T5 向量（units/lifecycle.vectors.json）录的是 REF-PY 42466f1 的出厂
+ * 默认端口 8761（向量在 aikkernel-longterm/parity，冻结只读、不在 T9d
+ * 文件集）；任务书明令 acconfig 默认端口改 8762（8761 让给 aikernel-api）。
+ * 本函数只改写 "port" 键后的那一个字面量，**其余字节仍逐字节断言**——
+ * 不是放松差分，是把有意分叉的那一处显式对齐。
+ */
+static void bump_port_lit(char *s)
+{
+	static char *const keys[] = { "\"port\":8761", "\"port\": 8761" };
+	size_t i;
+
+	if (!s)
+		return;
+	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+		char *p = strstr(s, keys[i]);
+
+		if (p) {
+			char *lit = strchr(p, '8');
+
+			if (lit && strncmp(lit, "8761", 4) == 0)
+				memcpy(lit, "8762", 4);
+			return;
+		}
+	}
+}
+
 static void validate_case(const char *input, const char *want_errors,
 			  const char *name)
 {
@@ -86,7 +115,20 @@ int main(void)
 		ac_config_default(&cfg);
 		aik_json *d = ac_config_to_dict(&cfg);
 
-		dump_eq(d, aik_json_get(units, "default_config"), "default_config");
+		{
+			/* 向量 default_config 的 port 字面量随 T9d 改号 */
+			char *wtxt = ac_dump(aik_json_get(units,
+							  "default_config"));
+			aik_json *wexp = NULL;
+
+			if (wtxt) {
+				bump_port_lit(wtxt);
+				wexp = parse_text(wtxt, "default_config");
+				free(wtxt);
+			}
+			dump_eq(d, wexp, "default_config");
+			aik_json_free(wexp);
+		}
 		/* 环境变量端口（default_config_dict(use_env=True)）*/
 		setenv("AUTOCONDENSE_PORT", "9001", 1);
 		ac_config_default_env(&cfg);
@@ -96,8 +138,8 @@ int main(void)
 		setenv("AUTOCONDENSE_PORT", "not-a-number", 1);
 		ac_config_default_env(&cfg);
 		g_ac_checks++;
-		if (cfg.port != 8761)
-			ac_fail("bad env port should stay 8761 (got %d)", cfg.port);
+		if (cfg.port != 8762)
+			ac_fail("bad env port should stay 8762 (got %d)", cfg.port);
 		unsetenv("AUTOCONDENSE_PORT");
 		aik_json_free(d);
 		ac_config_cleanup(&cfg);
@@ -175,8 +217,18 @@ int main(void)
 
 		if (!life)
 			return 2;
-		const char *want_life = aik_json_str(
-			aik_json_get(aik_json_get(life, "disk"), "config.json"));
+		char *want_life = NULL;
+		{
+			const char *raw_life = aik_json_str(
+				aik_json_get(aik_json_get(life, "disk"),
+					     "config.json"));
+
+			/* 向量 config.json 的 port 字面量随 T9d 改号（同上）*/
+			if (raw_life) {
+				want_life = strdup(raw_life);
+				bump_port_lit(want_life);
+			}
+		}
 
 		char *dir = ac_mkdtemp("/tmp/ac-cfg-");
 
@@ -252,6 +304,7 @@ int main(void)
 				gotc ? gotc : "(null)", want_life ? want_life : "(null)");
 		free(gotc);
 		free(pc);
+		free(want_life);
 
 		/* 修改后 load 往返等价 */
 		aik_json *d1 = ac_config_to_dict(&cfg);

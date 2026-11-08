@@ -154,6 +154,15 @@ int occ_session_set_status(occ_db *db, const char *id, const char *status,
 int occ_session_set_workdir(occ_db *db, const char *id, const char *workdir,
 			    char *err, size_t errlen);
 
+/* T9d 换窗：token 账本重置为新基线（total=新基线，est=1 含估算成分） */
+int occ_session_set_tokens(occ_db *db, const char *id, long long total,
+			   int est, char *err, size_t errlen);
+
+/* T9d 换窗：occ_window.base_kind→'digest'（digest_id=摘要注记行 id） */
+int occ_session_set_window_digest(occ_db *db, const char *id,
+				  const char *digest_id, char *err,
+				  size_t errlen);
+
 /* ---- 消息（每条单事务） ---- */
 
 /*

@@ -37,6 +37,11 @@
 #include "occ_sysprompt.h"
 #include "occ_tools.h"
 
+/* T9d 外部绑定：SME 注入/写回 + ac transcript/轮询/换窗（§8/§9） */
+#include "occ_ac.h"
+#include "occ_sme.h"
+#include "occ_telemetry.h"
+
 /* 中断续传注记（OCD §7.1 runner 同语义；b2 headless 版） */
 #define OCC_CONT_NOTE \
 	"（上一轮回复被中断，请从中断处继续，不要重复已完成的内容。）\n"
@@ -97,6 +102,158 @@ static void db_append_str(dbuf *d, const char *s)
 		db_append(d, s, strlen(s));
 }
 
+/* ---- 输出 sink 分派（T9c2）：loop 全部对外输出的唯一出口 ----
+ *
+ * sink.fn 非空 → 回调（TUI，worker 线程调用，留存须拷贝）；
+ * 否则缺省 file sink = 现行为逐字节不变（回归铁门）：
+ *   TEXT→stream_out fputs+fflush / REASONING→reasoning_out /
+ *   NOTICE·RESET→stderr "occ: %s\n" / TOOL_*→不打印（进库）。
+ * headless（stream_out/reasoning_out）与 TUI（sink）互斥使用。 */
+static void sink_emit(const occ_loop_opts *o, int kind, const char *data,
+		      size_t len, const char *arg, int rc)
+{
+	if (o && o->sink.fn) {
+		occ_sink_ev ev;
+
+		ev.kind = kind;
+		ev.text = data;
+		ev.len = len;
+		ev.arg = arg;
+		ev.rc = rc;
+		o->sink.fn(o->sink.ud, &ev);
+		return;
+	}
+	switch (kind) {
+	case OCC_SINK_TEXT:
+		if (o && o->stream_out && data) {
+			fputs(data, o->stream_out);
+			fflush(o->stream_out);		/* headless 流式 */
+		}
+		break;
+	case OCC_SINK_REASONING:
+		if (o && o->reasoning_out && data) {
+			fputs(data, o->reasoning_out);
+			fflush(o->reasoning_out);
+		}
+		break;
+	case OCC_SINK_NOTICE:
+	case OCC_SINK_RESET:
+		if (data)
+			fprintf(stderr, "occ: %s\n", data);
+		break;
+	default:				/* TOOL_*：headless 不打印 */
+		break;
+	}
+}
+
+/* ---- T9d 外部绑定辅助（SME/ac） ---- */
+
+/*
+ * 状态通告可见性（契约见 occ_ac.h 文件头）：TUI 恒发；headless 只在
+ * stderr 是终端时发，或 OCC_STATE_NOTICE=1 强制开（=0 强制关）。
+ * 这样「headless occ -p 输出逐字节不变」的铁门在重定向/管道下成立，
+ * 人跑在终端上照样看得到 `✉sme:off` / `⊙ac:off` 的诚实降级。
+ */
+static int state_notice_ok(const occ_loop_opts *o)
+{
+	const char *e;
+
+	if (o && o->sink.fn)
+		return 1;
+	e = getenv("OCC_STATE_NOTICE");
+	if (e && *e)
+		return strcmp(e, "0") != 0;
+	return isatty(STDERR_FILENO) != 0;
+}
+
+/* 同一状态只通告一次（进程级；TUI 多轮不刷屏） */
+static void emit_state_once(const occ_loop_opts *o, const char *text,
+			    char *last, size_t lastcap)
+{
+	if (!text || !lastcap)
+		return;
+	if (!strcmp(last, text))
+		return;
+	snprintf(last, lastcap, "%s", text);
+	if (state_notice_ok(o))
+		sink_emit(o, OCC_SINK_NOTICE, text, 0, NULL, 0);
+}
+
+static char g_sme_seen[32];
+static char g_ac_seen[32];
+
+/* 里程碑判定（§8.2）：用户明确说「记住」/ AI 总结段 */
+static int sme_milestone(const char *user_text, const char *assistant,
+			 char *out, size_t cap)
+{
+	static const char *const keys[] = {
+		"记住", "记下", "别忘", "要记得", "remember"
+	};
+	int by_user = 0, by_summary = 0;
+	size_t i;
+
+	if (user_text && *user_text) {
+		for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+			const char *p = user_text;
+
+			for (; *p; p++) {
+				size_t klen = strlen(keys[i]);
+
+				if (!strncmp(p, keys[i], klen)) {
+					by_user = 1;
+					break;
+				}
+			}
+			if (by_user)
+				break;
+		}
+	}
+	if (assistant && strlen(assistant) >= 300 &&
+	    (strstr(assistant, "总结") || strstr(assistant, "综上") ||
+	     strstr(assistant, "结论") || strstr(assistant, "总之")))
+		by_summary = 1;
+	if (!by_user && !by_summary)
+		return 0;
+	if (assistant && *assistant)
+		snprintf(out, cap, "%s%s\n%s",
+			 by_user ? "用户要求记住：\n" : "",
+			 user_text ? user_text : "", assistant);
+	else
+		snprintf(out, cap, "%s%s",
+			 by_user ? "用户要求记住：" : "",
+			 user_text ? user_text : "");
+	return out[0] ? 1 : 0;
+}
+
+/* 检索查询：首条 user 消息 + 会话名（§8.1；本回合即首条时用本轮输入） */
+static void sme_build_query(occ_db *db, const char *sess_id,
+			    const char *fallback, const char *title,
+			    char *buf, size_t cap)
+{
+	occ_msg_row *rows = NULL;
+	size_t n = 0, i;
+	const char *first = NULL;
+	size_t used = 0;
+
+	buf[0] = '\0';
+	if (occ_msg_list(db, sess_id, &rows, &n, NULL, 0) == 0) {
+		for (i = 0; i < n; i++) {
+			if (rows[i].reverted || strcmp(rows[i].role, "user"))
+				continue;
+			first = rows[i].text;
+			break;
+		}
+		occ_msg_rows_free(rows, n);
+	}
+	if (!first || !*first)
+		first = fallback;
+	if (!first)
+		first = "";
+	used = (size_t)snprintf(buf, cap, "%.400s", first);
+	if (title && *title && used < cap)
+		snprintf(buf + used, cap - used, " %.120s", title);
+}
+
 /* ---- 事件收集器 ---- */
 
 typedef struct {
@@ -114,7 +271,7 @@ typedef struct {
 		dbuf args;
 	} calls[16];
 	int ncalls;
-	occ_loop_opts *opts;		/* stream_out / reasoning_out */
+	occ_loop_opts *opts;		/* sink / stream_out / reasoning_out */
 } loop_ev_ctx;
 
 static void ev_ctx_reset_keep_opts(loop_ev_ctx *c);
@@ -125,17 +282,15 @@ static void ev_cb(const occ_event *ev, void *ud)
 
 	switch (ev->type) {
 	case OCC_EV_TEXT_DELTA:
-		if (c->opts && c->opts->stream_out && ev->text) {
-			fputs(ev->text, c->opts->stream_out);
-			fflush(c->opts->stream_out);	/* headless 流式 */
-		}
+		if (ev->text)
+			sink_emit(c->opts, OCC_SINK_TEXT, ev->text,
+				  strlen(ev->text), NULL, 0);
 		db_append_str(&c->text, ev->text);
 		break;
 	case OCC_EV_REASONING_DELTA:
-		if (c->opts && c->opts->reasoning_out && ev->text) {
-			fputs(ev->text, c->opts->reasoning_out);
-			fflush(c->opts->reasoning_out);
-		}
+		if (ev->text)
+			sink_emit(c->opts, OCC_SINK_REASONING, ev->text,
+				  strlen(ev->text), NULL, 0);
 		db_append_str(&c->reasoning, ev->text);
 		break;
 	case OCC_EV_TOOL_START:
@@ -177,12 +332,14 @@ static void ev_cb(const occ_event *ev, void *ud)
 		/*
 		 * 传输层自动重试：上一尝试的部分输出作废（对齐 opencode
 		 * 重试即重置 UI）。清空已累积 text/reasoning/calls/usage/
-		 * finish；重试通告走 stderr（headless 的「UI 重置位」；
-		 * stdout 已流出的字节无法收回——如实差异在报告）。
+		 * finish；通告走 sink（headless 缺省 sink→stderr 同旧行为；
+		 * TUI→清 live 文本+提示行；stdout 已流出字节无法收回——
+		 * 如实差异在报告）。
 		 */
 		ev_ctx_reset_keep_opts(c);
 		if (ev->err)
-			fprintf(stderr, "occ: %s\n", ev->err);
+			sink_emit(c->opts, OCC_SINK_RESET, ev->err,
+				  strlen(ev->err), NULL, 0);
 		break;
 	default:
 		break;
@@ -427,15 +584,34 @@ static size_t exec_pending(occ_db *db, const char *sess_id,
 
 		if (i > 0 && !flag_at_start && occ_interrupt_flag)
 			break;			/* 安全点：当前工具完成后停 */
+		/* T9c2 sink：工具行渲染钩子（headless 缺省 sink 不打印） */
+		sink_emit(opts, OCC_SINK_TOOL_START,
+			  calls[i].tool ? calls[i].tool : "", 0,
+			  calls[i].arguments ? calls[i].arguments : "{}", 0);
 		occ_tool_exec(&tc, calls[i].tool ? calls[i].tool : "",
 			      calls[i].id ? calls[i].id : "",
 			      calls[i].arguments ?
 			      calls[i].arguments : "{}", &r);
+		sink_emit(opts, OCC_SINK_TOOL_END,
+			  calls[i].tool ? calls[i].tool : "", 0,
+			  r.text ? r.text : "", r.rc);
+		/* T9d ①：工具结果实时进 transcript（ac 兼容行流） */
+		if (occ_bind_active(opts))
+			occ_ac_transcript(sess_id, "tool",
+					  r.text ? r.text : "",
+					  calls[i].tool ? calls[i].tool : "",
+					  NULL);
 		/* 工具意外失败=错误文本已作为 tool 结果回灌模型（不崩） */
 		occ_tool_result_free(&r);
 	}
 	for (; i < ncalls; i++) {
 		/* 合成闭合（b2）：中断跳过的调用补 tool 应答 */
+		sink_emit(opts, OCC_SINK_TOOL_START,
+			  calls[i].tool ? calls[i].tool : "", 0,
+			  calls[i].arguments ? calls[i].arguments : "{}", 0);
+		sink_emit(opts, OCC_SINK_TOOL_END,
+			  calls[i].tool ? calls[i].tool : "", 0,
+			  "未执行（用户中断）——安全点停止跳过该调用", 1);
 		occ_tool_record(db, sess_id, asst_msg_id,
 				calls[i].tool ? calls[i].tool : "",
 				calls[i].arguments ? calls[i].arguments : "{}",
@@ -482,6 +658,12 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 	size_t i;
 	const occ_tool_def *tdefs;
 	size_t ntools = 0;
+	/* T9d 绑定：SME 注入块 + system prompt 合成 + ac 轮询门 */
+	char sysbuf[16384];
+	const char *sys_prompt = OCC_SYSTEM_PROMPT;
+	int bind = 0;
+	char *mem_blk = NULL;			/* SME 注入块（heap） */
+	static time_t g_ac_reported;
 
 	memset(&ctx, 0, sizeof(ctx));		/* goto out 清理路径安全 */
 	if (res)
@@ -494,6 +676,7 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 		memset(&def_opts, 0, sizeof(def_opts));
 		opts = &def_opts;
 	}
+	bind = occ_bind_active(opts);		/* T9d 外部绑定总闸 */
 	tdefs = occ_tool_defs(&ntools);
 
 	/* 1) 会话：新建或续接 */
@@ -518,9 +701,13 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 	/* b2：工具工作目录落库（undo 相对路径解析与执行时同口径） */
 	if (opts->workdir && opts->workdir[0]) {
 		if (occ_session_set_workdir(db, sess.id, opts->workdir,
-					    dbuf_err, sizeof(dbuf_err)))
-			fprintf(stderr, "occ: workdir 落库失败（%s）\n",
-				dbuf_err);
+					    dbuf_err, sizeof(dbuf_err))) {
+			char nbuf[224];
+
+			snprintf(nbuf, sizeof(nbuf), "workdir 落库失败（%s）",
+				 dbuf_err);
+			sink_emit(opts, OCC_SINK_NOTICE, nbuf, 0, NULL, 0);
+		}
 	}
 
 	/* 2) 输入消息落库（或重放/续跑判定） */
@@ -539,6 +726,43 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			rc = OCC_LOOP_EARGS;
 			goto out;
 		}
+		/*
+		 * T9d/§8：SME 检索注入——新会话首条消息后 search（首条
+		 * 消息 + 会话名，top_k=8，tag 过滤 occ/user），命中段落以
+		 * `〈记忆〉` 块并进 system prompt。每进程每会话至多一次
+		 * （成功才缓存；失败下轮重试——服务晚起可被接上）。
+		 */
+		if (bind && occ_sme_enabled()) {
+			static char cached[8192];
+			static char cached_sid[OCC_ID_LEN];
+
+			if (!cached[0] || strcmp(cached_sid, sess.id) != 0) {
+				char q[640];
+
+				sme_build_query(db, sess.id, utext, sess.title,
+						q, sizeof(q));
+				mem_blk = occ_sme_lookup(q);
+				if (mem_blk) {
+					snprintf(cached, sizeof(cached), "%s",
+						 mem_blk);
+					snprintf(cached_sid,
+						 sizeof(cached_sid), "%s",
+						 sess.id);
+					free(mem_blk);
+					mem_blk = NULL;
+				}
+			}
+			if (cached[0] && !strcmp(cached_sid, sess.id)) {
+				/* 定精度：避免 format-truncation 误报，且
+				 * 两段都不会被截（prompt <1k、块 <9k） */
+				snprintf(sysbuf, sizeof(sysbuf),
+					 "%.1000s\n\n%.15000s",
+					 OCC_SYSTEM_PROMPT, cached);
+				sys_prompt = sysbuf;
+			}
+			emit_state_once(opts, occ_sme_status(), g_sme_seen,
+					sizeof(g_sme_seen));
+		}
 		/* 用户重发即认（OCD §7.3 提交语义）：撤销落地，此后不可
 		 * 再 redo（stage 行与 _redo 段清除，注记已折叠留档）。 */
 		occ_revert_commit(db, sess.id, NULL);
@@ -551,13 +775,22 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			rc = OCC_LOOP_EARGS;
 			goto out;
 		}
+		/* T9d ①：user 实时进 transcript（ac 兼容行流） */
+		if (bind)
+			(void)occ_ac_transcript(sess.id, "user", utext, NULL,
+						NULL);
 		free(utext);
 		/* 注记已进 user 文本 → 删注记行（失败仅警告：下次再折） */
 		for (i = 0; i < nn; i++) {
 			if (occ_msg_delete(db, nids[i], dbuf_err,
-					   sizeof(dbuf_err)))
-				fprintf(stderr, "occ: 删注记失败（%s）\n",
-					dbuf_err);
+					   sizeof(dbuf_err))) {
+				char nbuf[224];
+
+				snprintf(nbuf, sizeof(nbuf),
+					 "删注记失败（%s）", dbuf_err);
+				sink_emit(opts, OCC_SINK_NOTICE, nbuf, 0,
+					  NULL, 0);
+			}
 			free(nids[i]);
 		}
 		free(nids);
@@ -609,7 +842,8 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 		}
 		occ_msg_row_free(&last);
 		replayed = 1;
-		fprintf(stderr, "occ: replaying interrupted turn from db\n");
+		sink_emit(opts, OCC_SINK_NOTICE,
+			  "replaying interrupted turn from db", 0, NULL, 0);
 	}
 
 	/* 3) 环（b1 激活：轮 A=LLM / 轮 B=工具执行，上下文每轮从库重读） */
@@ -618,6 +852,25 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 		occ_toolcall_part *pend = NULL;
 		size_t npend = 0;
 		char asst_id[OCC_ID_LEN];
+
+		/*
+		 * T9d ②：长回合中途上报 token 水位 + transcript 路径
+		 * （30s 门；只报不判——压缩只在回合收口做，避免半途换窗）。
+		 */
+		if (bind && occ_ac_enabled()) {
+			time_t now = time(NULL);
+
+			if (now - g_ac_reported >= 30) {
+				occ_session_row cur;
+
+				g_ac_reported = now;
+				if (occ_session_get(db, sess.id, &cur, NULL,
+						    0) == 1)
+					(void)occ_ac_report(sess.id,
+						opts->workdir,
+						cur.tokens_total);
+			}
+		}
 
 		if (rows) {
 			occ_msg_rows_free(rows, nmsgs);
@@ -706,7 +959,7 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			memset(&req, 0, sizeof(req));
 			req.proto = p->proto;
 			req.model = p->model;
-			req.system = OCC_SYSTEM_PROMPT;
+			req.system = sys_prompt;	/* T9d：可含〈记忆〉块 */
 			req.msgs = req_msgs;
 			req.nmsgs = nv;		/* b2：过滤被撤/注记后可见数 */
 			req.tools = tdefs;			/* b1：六件套 */
@@ -769,11 +1022,13 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			occ_tool_call tc[16];
 			size_t i;
 
-			if (!u.present) {
-				/* len/4 估算兜底（a3 口径；b2 起按可见
-				 * 消息——被撤/注记不计） */
-				long long in_est = occ_tokens_estimate_len(
-					OCC_SYSTEM_PROMPT);
+				if (!u.present) {
+					/* len/4 估算兜底（a3 口径；b2 起按可见
+					 * 消息——被撤/注记不计）。T9d：system 含
+					 * 注入块时按实际请求口径估算。 */
+					long long in_est = occ_tokens_estimate_len(
+						req.system ? req.system :
+						OCC_SYSTEM_PROMPT);
 				size_t j;
 
 				for (j = 0; j < req.nmsgs; j++)
@@ -804,15 +1059,22 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 				rc = OCC_LOOP_EARGS;
 				goto out;
 			}
-			if (res) {
-				res->usage = u;
-				occ_tokens_set_usage(&res->tokens, &u);
-				res->usage_est = est;
-				snprintf(res->assistant_msg_id,
-					 sizeof(res->assistant_msg_id),
-					 "%s", mid);
+				if (res) {
+					res->usage = u;
+					occ_tokens_set_usage(&res->tokens, &u);
+					res->usage_est = est;
+					snprintf(res->assistant_msg_id,
+						 sizeof(res->assistant_msg_id),
+						 "%s", mid);
+				}
+				/* T9d ①：assistant（含 interim 工具轮）进
+				 * transcript，带 usage 水位 */
+				if (bind)
+					(void)occ_ac_transcript(sess.id,
+						"assistant",
+						ctx.text.buf ? ctx.text.buf :
+						"", NULL, &u);
 			}
-		}
 
 		if (needs_continuation(&ctx)) {
 			steps++;
@@ -879,8 +1141,8 @@ llm_fail:
 	llm_err = NULL;
 	occ_session_set_status(db, sess.id, OCC_ST_ERROR, dbuf_err,
 			       sizeof(dbuf_err));
-	if (opts->stream_out && !ctx.llm_error)
-		fputc('\n', opts->stream_out);
+	if (!ctx.llm_error)
+		sink_emit(opts, OCC_SINK_TEXT, "\n", 1, NULL, 0);
 	rc = OCC_LOOP_ELLM;
 	goto out;
 fill_res:
@@ -906,7 +1168,70 @@ fill_res:
 		}
 	}
 	if (replayed && rc == OCC_LOOP_OK && !interrupted)
-		fprintf(stderr, "occ: recovered turn completed\n");
+		sink_emit(opts, OCC_SINK_NOTICE, "recovered turn completed",
+			  0, NULL, 0);
+	/*
+	 * T9d 绑定收口（只在正常收口；中断/失败轮不做外部副作用）：
+	 *   §8.2 里程碑写回 → §9.2 /check 轮询 → 判需压缩时 §9.3 换窗
+	 *   → 状态通告（`✉sme:*` / `⊙ac:*`，见 state_notice_ok 契约）。
+	 * ac 不可达 = 诚实降级（状态 ⊙ac:off，不阻塞对话）。
+	 */
+	if (bind && rc == OCC_LOOP_OK && !interrupted) {
+		int compacted = 0;
+		long long digest_chars = 0;
+
+		if (occ_sme_enabled()) {
+			char mtext[2048];
+
+			if (sme_milestone(opts->prompt,
+					  ctx.text.buf ? ctx.text.buf : "",
+					  mtext, sizeof(mtext)))
+				(void)occ_sme_remember(sess.id, sess.title,
+						       mtext);
+		}
+		emit_state_once(opts, occ_sme_status(), g_sme_seen,
+				sizeof(g_sme_seen));
+		if (occ_ac_enabled()) {
+			occ_ac_turn t;
+			char aerr[256];
+			occ_session_row cur;
+
+			memset(&t, 0, sizeof(t));
+			t.db = db;
+			t.p = p;
+			t.call_fn = opts->llm_call;
+			t.llm_ud = opts->llm_ud;
+			t.opts = opts;
+			t.session_id = sess.id;
+			t.cwd = opts->workdir;
+			t.context = ctx.text.buf;
+			t.tokens = 0;
+			if (occ_session_get(db, sess.id, &cur, NULL, 0) == 1)
+				t.tokens = cur.tokens_total;
+			(void)occ_ac_turn_end(&t, &compacted, aerr,
+					      sizeof(aerr));
+			digest_chars = t.digest_chars;
+			if (aerr[0] && !compacted && state_notice_ok(opts))
+				sink_emit(opts, OCC_SINK_NOTICE, aerr, 0,
+					  NULL, 0);
+		}
+		emit_state_once(opts, occ_ac_status(), g_ac_seen,
+				sizeof(g_ac_seen));
+		/*
+		 * T9d/§9.6：会话遥测落 T8 parquet 链（turn/token/压缩事件）。
+		 * 与 SME/ac 同一总闸（注入传输=回放路径，零外部副作用）。
+		 */
+		if (occ_telemetry_enabled()) {
+			occ_session_row cur;
+			long long tt = 0;
+
+			if (occ_session_get(db, sess.id, &cur, NULL, 0) == 1)
+				tt = cur.tokens_total;
+			(void)occ_telemetry_turn(sess.id, tt, steps,
+						 res ? res->finish : "",
+						 compacted, digest_chars);
+		}
+	}
 out:
 	free(req_msgs);
 	free(req_calls);
@@ -914,5 +1239,6 @@ out:
 		occ_msg_rows_free(rows, nmsgs);
 	ev_ctx_free(&ctx);
 	free(llm_err);
+	free(mem_blk);
 	return rc;
 }

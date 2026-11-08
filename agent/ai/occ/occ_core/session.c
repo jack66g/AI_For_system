@@ -797,6 +797,45 @@ int occ_session_set_workdir(occ_db *db, const char *id, const char *workdir,
 	return run_s1(db, sql, workdir ? workdir : "", err, errlen);
 }
 
+/* T9d 换窗：token 账本重置为新基线（摘要落定后；est=1 含估算成分） */
+int occ_session_set_tokens(occ_db *db, const char *id, long long total,
+			   int est, char *err, size_t errlen)
+{
+	char sql[224];
+
+	if (!db || !id) {
+		set_err(err, errlen, "occ_session_set_tokens: bad args");
+		return -1;
+	}
+	snprintf(sql, sizeof(sql),
+		 "UPDATE occ_session SET tokens_total=%lld, tokens_est=%d,"
+		 " updated=%lld WHERE id='%s'", total, est ? 1 : 0, now_ms(),
+		 id);
+	if (sqlite3_exec(db->h, sql, NULL, NULL, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "set_tokens: %s", sqlite3_errmsg(db->h));
+		return -1;
+	}
+	return 0;
+}
+
+/* T9d 换窗：occ_window 记 digest（base_kind native→digest） */
+int occ_session_set_window_digest(occ_db *db, const char *id,
+				  const char *digest_id, char *err,
+				  size_t errlen)
+{
+	char sql[224];
+
+	if (!db || !id || !digest_id) {
+		set_err(err, errlen,
+			"occ_session_set_window_digest: bad args");
+		return -1;
+	}
+	snprintf(sql, sizeof(sql),
+		 "UPDATE occ_window SET base_kind='digest', digest_id=?1"
+		 " WHERE session_id='%s'", id);
+	return run_s1(db, sql, digest_id, err, errlen);
+}
+
 /* ---- 消息（每条单事务；崩溃安全核心） ---- */
 
 static int msg_insert(occ_db *db, const char *msg_id, const char *session_id,

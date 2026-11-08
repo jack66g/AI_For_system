@@ -11,7 +11,8 @@
  *   - 服务不可达时拉起同级 `autocondensed`（POSIX setsid，日志追加
  *     /tmp/autocondense_service.log）。
  *
- * 服务地址：AUTOCONDENSE_PORT（默认 8761）+ 127.0.0.1；数据目录：
+ * 服务地址：AUTOCONDENSE_PORT（默认 8762——T9d 改号，8761 归
+ * aikernel-api）+ 127.0.0.1；数据目录：
  * AUTOCONDENSE_DATA_DIR（默认 ~/.autocondense）。
  */
 #ifndef _AIK_AUTOCONDENSE_ACMCP_H

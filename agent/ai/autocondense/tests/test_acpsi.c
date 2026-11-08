@@ -732,7 +732,7 @@ static void test_persist(const char *tmp)
 
 		snprintf(path, sizeof(path), "%s/config.json", dir);
 		write_file(path,
-			   "{\"port\":8761,\"psi\":{\"enabled\":true,"
+			   "{\"port\":8762,\"psi\":{\"enabled\":true,"
 			   "\"high_threshold\":500.0,\"low_threshold\":10.0,"
 			   "\"period_s\":3}}");
 	}

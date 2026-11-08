@@ -688,7 +688,7 @@ void ac_psi_config_default(ac_psi_config *c)
 void ac_config_default(ac_config *c)
 {
 	memset(c, 0, sizeof(*c));
-	c->port = 8761;
+	c->port = 8762;		/* T9d 改号：8761 让给 aikernel-api */
 	c->host = xstrdup("127.0.0.1");
 	c->enabled = 1;
 	c->cooldown_minutes = 30;

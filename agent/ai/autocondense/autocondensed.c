@@ -9,7 +9,8 @@
  *   --data-dir DIR   数据目录（缺省：环境变量 AC_DATA_DIR，再缺省
  *                    ~/.autocondense）
  *   --host H         监听地址（缺省取配置，初始 127.0.0.1）
- *   --port N         监听端口（0 = 内核分配；缺省取配置，初始 8761）
+ *   --port N         监听端口（0 = 内核分配；缺省取配置，初始 8762——T9d
+ *                    改号，8761 让给 aikernel-api）
  *   --frozen-now E   冻结时钟（差分重放：所有 ISO/文件名走该 epoch）
  *
  * 行为对齐 service.py main()：
@@ -146,6 +147,7 @@ int main(int argc, char **argv)
 	char errbuf[256];
 	char *data_dir = NULL;
 	ac_config cfg;
+	char host_buf[256];
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
@@ -222,20 +224,28 @@ int main(int argc, char **argv)
 	ac_config_cleanup(&cfg);
 
 	if (port_arg < 0 || host_arg) {
-		/* 端口/地址缺省取配置（初始 8761/127.0.0.1）*/
+		/* 端口/地址缺省取配置（初始 8762/127.0.0.1——T9d 改号）*/
 		ac_config cfg2;
 
 		if (ac_load_config(data_dir, &cfg2) == 0) {
 			if (port_arg < 0)
 				port_arg = (int)cfg2.port;
-			if (!host_arg)
-				host_arg = cfg2.host && *cfg2.host
-					? cfg2.host : NULL;
+			if (!host_arg && cfg2.host && *cfg2.host) {
+				/*
+				 * 先拷进栈缓冲再 cleanup：ac_config_cleanup
+				 * 会 free(cfg2.host)，原实现直接借指针是 UAF
+				 * （T9d 实测缺省启动即 "cannot resolve host
+				 * <垃圾字节>"，服务起不来）。
+				 */
+				snprintf(host_buf, sizeof(host_buf), "%s",
+					 cfg2.host);
+				host_arg = host_buf;
+			}
 			ac_config_cleanup(&cfg2);
 		}
 	}
 
-	srv = ac_http_server_new(data_dir, host_arg, port_arg < 0 ? 8761
+	srv = ac_http_server_new(data_dir, host_arg, port_arg < 0 ? 8762
 								  : port_arg,
 				 errbuf, sizeof(errbuf));
 	if (!srv) {

@@ -4,7 +4,8 @@
  *
  * 对齐 REF-PY 42466f1 `autocondense/hooks/ac_hook.py`：
  *   autocondense-hook <EventName>  < stdin(JSON) > stdout
- *   - 转发 POST {AUTOCONDENSE_BASE_URL}/events/hook（默认 8761，3s 超时）；
+ *   - 转发 POST {AUTOCONDENSE_BASE_URL}/events/hook（默认 8762——T9d 改号，
+ *     8761 归 aikernel-api；3s 超时）；
  *   - SessionStart：additional_context → {"additionalContext": "..."}（9000 字截断）；
  *   - Stop：should != NO 且带 instruction → {"decision": "block", "reason": ...}，
  *     15 分钟闩锁（data/hook-latch/<safe>.json）；
