@@ -81,14 +81,20 @@ else
 fi
 
 echo "== API / clarify contract tests =="
+# T9e 口径换代（aikernel-shell 出厂移除，OPENCODE-PLAN §0 裁定 #1）：
+#   退役 2 项——test_clarify_gate.py / test_api_clarify_e2e.py 依赖真
+#   `ai`（aikernel-shell）二进制走 ask→clarify→exec 闭环；该链已非出厂
+#   能力（镜像内 /usr/local/bin/ai 移除 → aikkernel-api /ask 502 人话报错），
+#   测试对象为已退役产品面。退役非因失败：repo 仍构建 shell 时两测技术上
+#   仍可过——按任务书裁定随移除退役，分母如实记账（59 −2 + 新增）。
+#   保留：test_api_clarify.py（AIKERNEL_AI_BIN=mock，不依赖真 shell）。
 cd "$agent" || exit 1
 for spec in \
     "tests/test_api_clarify.py" \
-    "tests/test_clarify_gate.py --agent-dir ." \
-    "tests/test_api_clarify_e2e.py --agent-dir ." \
     "tests/test_registry_manifest.py" \
     'tests/test_corpus_aliases.py' \
-    'tests/test_tls_gateway.py'
+    'tests/test_tls_gateway.py' \
+    'tests/test_t9e_entry.py'
 do
     # shellcheck disable=SC2086
     if timeout 300 python3 $spec > "/tmp/aik-$(basename "$spec" .py).log" 2>&1; then
@@ -100,6 +106,20 @@ do
         failed+=("$spec")
     fi
 done
+
+echo "== T9e factory gate (ac 三件出厂资产) =="
+# 门依赖 autocondense 构建产物；先构建（复核指引在 flock 下跑 run_all，
+# 此处不再嵌套 flock 防死锁）。构建失败 → 门因二进制缺失如实 FAIL。
+make -C "$agent/autocondense" all > /tmp/aik-ac-build.log 2>&1
+if timeout 120 bash "$agent/occ/tests/t9d_factory_gate.sh" \
+        > /tmp/aik-t9d_factory_gate.log 2>&1; then
+    echo "PASS t9d_factory_gate"
+    pass=$((pass + 1))
+else
+    echo "FAIL t9d_factory_gate (see /tmp/aik-t9d_factory_gate.log)"
+    fail=$((fail + 1))
+    failed+=("t9d_factory_gate")
+fi
 
 if timeout 60 python3 tools/audit_capabilities.py --check > /tmp/aik-audit.log 2>&1; then
     echo "PASS audit_capabilities --check"

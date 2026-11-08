@@ -434,3 +434,32 @@ install-aistreamd: aistreamd
 		install -m 644 factory/etc/aikernel/aistreamd.conf /etc/aikernel/aistreamd.conf; \
 		echo "$(GREEN)[INSTALL]$(NC) aistreamd.conf -> /etc/aikernel/"; \
 	fi
+
+# ============================================================================
+# T9e 出厂挂接（2026-11-09）：install 追加 autocondense 三件（同 aistreamd 手法）
+#  - autocondensed / autocondense-mcp / autocondense-hook：autocondense/ 源码出件
+#  - autocondense.service：ExecStart 显式 --port 8762（8761 归 aikernel-api，
+#    T9d 改号的清偿——单元内注释有据）
+#  - aik-ac-hook：宿主钩子转发入口（factory 树资产）
+#  - enable：multi-user.target.wants 绝对路径 symlink（镜像内既有手法）
+# 厂件刷入 rootfs 的正典链是 refresh（t9e 版 D 棒）；本目标供 chroot 内
+# make install 与宿主自装两用。
+# ============================================================================
+.PHONY: autocondense autocondense-test autocondense-clean install-autocondense
+
+install: install-autocondense
+
+autocondense:
+	$(MAKE) -C autocondense
+
+autocondense-test:
+	$(MAKE) -C autocondense test
+
+autocondense-clean:
+	$(MAKE) -C autocondense clean
+
+install-autocondense: autocondense
+	@echo "$(GREEN)[INSTALL]$(NC) autocondense trio -> /usr/local/sbin/"
+	install -m 755 autocondense/autocondensed autocondense/autocondense-mcp autocondense/autocondense-hook /usr/local/sbin/
+	@if [ -f factory/etc/systemd/system/autocondense.service ]; then 		install -d /etc/systemd/system /etc/systemd/system/multi-user.target.wants; 		install -m 644 factory/etc/systemd/system/autocondense.service /etc/systemd/system/; 		ln -sfn /etc/systemd/system/autocondense.service /etc/systemd/system/multi-user.target.wants/autocondense.service; 		echo "$(GREEN)[INSTALL]$(NC) autocondense.service -> /etc/systemd/system/ + enable"; 	fi
+	@if [ -f factory/usr/local/sbin/aik-ac-hook ]; then 		install -m 755 factory/usr/local/sbin/aik-ac-hook /usr/local/sbin/; 		echo "$(GREEN)[INSTALL]$(NC) aik-ac-hook -> /usr/local/sbin/"; 	fi

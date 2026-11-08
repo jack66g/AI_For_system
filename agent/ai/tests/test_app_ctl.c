@@ -911,7 +911,7 @@ static void test_registry(void)
 		free(err);
 		return;
 	}
-	CHECK(reg.tool_count == 230, "registry-230");
+	CHECK(reg.tool_count == 236, "registry-236");
 	t = tool_registry_find(&reg, "app_ctl_probe");
 	CHECK(t && t->channel == TOOL_CH_APPCTL && t->risk &&
 	      strcmp(t->risk, TOOL_RISK_R) == 0, "registry-probe-R");

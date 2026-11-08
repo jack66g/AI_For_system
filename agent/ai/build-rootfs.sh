@@ -97,9 +97,10 @@ ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,57600,3840
 A
 cat /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
-# ---- W4A: 登录面接管（TTY 分流）----
+# ---- T9e: 登录面接管（TTY 分流）----
 # 控制台(ttyS0/tty1) autologin 落 bash 后读 .profile，命中控制台 TTY 即
-# exec AI 控制台；SSH 会话为 /dev/pts/* 不匹配，保持 bash 运维通道。
+# exec occ（无参=全屏 TUI）；SSH 会话为 /dev/pts/* 不匹配，保持 bash 运维通道。
+# aikernel-shell 已出厂移除（T9e 用户裁定 #1：默认入口就是 occ）。
 cat > /root/.profile <<'PR'
 # ~/.profile: executed by Bourne-compatible login shells.
 
@@ -111,12 +112,12 @@ fi
 
 mesg n 2> /dev/null || true
 
-# W4A: console takeover -- 控制台登录面直进 AI 控制台
+# T9e: console takeover -- 控制台登录面直进 occ
 # .bashrc 已 source（AIKERNEL_TOOLS_JSON 环境就位）后再分流。
-if [ -t 0 ] && [ -x /usr/local/bin/aikernel-shell ]; then
+if [ -t 0 ] && [ -x /usr/local/bin/occ ]; then
     case "$(tty 2>/dev/null)" in
         /dev/ttyS0|/dev/tty1)
-            exec /usr/local/bin/aikernel-shell
+            exec /usr/local/bin/occ
             ;;
     esac
 fi
@@ -125,16 +126,15 @@ chown root:root /root/.profile && chmod 644 /root/.profile
 cat /root/.profile
 CHROOT
 
-echo "=== [5] 拷入 AI 三件套 (静态) ==="
+echo "=== [5] 拷入 AI 二进制 (strip 后进镜像) ==="
 # W4A: 二进制必须 strip 再进镜像 —— 未 strip 的特定 ELF 布局在
 # AIKernel 内核(#28 实测)上启动即 SIGSEGV（VM 宿主内核正常），strip
 # 改变布局后稳定（另使镜像更小 3.2M→2.2M）。
-strip "$SRC/agent/ai/ai" "$SRC/agent/ai/aikernel-shell" "$SRC/tools/ai/aikctl"
-install -D -m755 "$SRC/agent/ai/ai"             "$MNT/usr/local/bin/ai"
-install -D -m755 "$SRC/agent/ai/aikernel-shell" "$MNT/usr/local/bin/aikernel-shell"
-install -D -m755 "$SRC/tools/ai/aikctl"         "$MNT/usr/local/bin/aikctl"
-install -D -m644 "$SRC/agent/ai/tools/mock_ollama.py" "$MNT/usr/local/bin/mock_ollama.py"
-file "$MNT/usr/local/bin/ai" "$MNT/usr/local/bin/aikernel-shell" "$MNT/usr/local/bin/aikctl" | sed 's/, BuildID.*//'
+# T9e: aikernel-shell/ai 已出厂移除，控制台入口换 occ。
+strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl"
+install -D -m755 "$SRC/agent/ai/occ/occ"  "$MNT/usr/local/bin/occ"
+install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
+file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl" | sed 's/, BuildID.*//'
 ls -la "$MNT/usr/local/bin/"
 
 echo "=== [6] 拷入 SME (/opt/sme) + python 依赖 ==="

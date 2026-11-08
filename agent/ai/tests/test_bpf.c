@@ -3,7 +3,7 @@
  * test_bpf.c - W80 用户态 BPF loader + nfqueue（bpf 通道）回归
  *
  * 默认（非 root，零副作用）：
- *   - 注册表接线：230 件、bpf 通道 4 件、risk R/W2/W1/W2、sub=netsec、
+ *   - 注册表接线：236 件、bpf 通道 4 件、risk R/W2/W1/W2、sub=netsec、
  *     channel 字符串 bpf 映射、参数边界（unload.id / nfqueue queue/
  *     timeout_ms/max_packets）；
  *   - 系统探测：unprivileged_bpf_disabled / BTF / CONFIG_* 真读且取值合法；
@@ -390,7 +390,7 @@ static void test_registry(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "tools.json 加载（197 件口径）");
-	CHECK(reg.tool_count == 230, "注册表总数 230");
+	CHECK(reg.tool_count == 236, "注册表总数 236");
 	CHECK(tool_channel_from_str("bpf") == TOOL_CH_BPF,
 	      "channel 字符串 bpf 映射到 TOOL_CH_BPF");
 	for (i = 0; i < reg.tool_count; i++)

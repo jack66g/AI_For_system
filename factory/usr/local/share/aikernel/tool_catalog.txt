@@ -228,3 +228,9 @@ compat_probe ELF 头（e_machine/位
 compat_generate 先跑同一套 probe，
 compat_apply workspace 不存在则
 compat_verify 正例跑一次并逐条
+read 行窗 offset/limit 带
+write 父目录递归建
+edit oldString 必须唯一
+glob fnmatch 递归，** 跨
+grep 朴素字节子串匹配
+bash 经 aik-sandbox （mount

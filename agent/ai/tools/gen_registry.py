@@ -44,7 +44,7 @@ W46a 防呆（v2.1）：
      tools/ 目录）运行才就地生成；在其他目录运行一律拒绝并要求显式
      --out-dir——根除 W45 事故（在源树根误跑本脚本，默认输出把 75 件
      旧口径 tools.json 落在树根，遮蔽 tools/ 下 79 件正典表）。
-  2. 正典数目断言：主表工具数必须 == EXPECTED_TOOL_COUNT(151)、受限表
+  2. 正典数目断言：主表工具数必须 == EXPECTED_TOOL_COUNT(236)、受限表
      必须 == EXPECTED_SANDBOX_TOOL_COUNT(7)，写盘前断言，不符即报错
      退出 nonzero（错误信息含期望值与实际值）。静态表增删工具后必须
      有意识地同步锚点常量，杜绝静默漂移。
@@ -94,6 +94,7 @@ CH_RANGE = "range"          # W81 E2：V3.6 靶场攻击面（五件；默认关
 CH_APPCTL = "appctl"        # W82 V4.4/V4.5：控制面适配器三件 + 画像→策略两件
 CH_DEVICE = "device"        # W82 V5.1..V5.4：USB 设备身份 + 驱动绑定 + 四级适配（六件）
 CH_COMPAT = "compat"        # W82B V6：应用兼容（探测/适配器/落地/契约，四件）
+CH_OCC = "occ"              # T9e：occ 编码助手六件套（occ 自执行；executor 诚实拒绝）
 
 RISK_R = "R"        # 只读
 RISK_W1 = "W1"      # 低危写
@@ -181,6 +182,24 @@ SUB_DOMAIN_META = {
         "tool_when": "枚举或操作桌面应用/窗口、主题/壁纸、通知、输入、截图、剪贴板时",
         "neighbors": "sysadmin（真服务/会话）、res（桌面进程资源）、memory（操作历史沉淀）",
         "safety": "R/D0 读；W1/D1 主题/壁纸/通知/启动/聚焦；W2/D2 关窗、关应用、输入注入、剪贴板写；power 仅登记 D3 且后端 unavailable；D2 需确认或任务租约，worker 一律拒绝。",
+    },
+    # T9e：occ 六件套并入主表新增两域（仅 META——不进 SUB_DOMAIN_ORDER，
+    # seed 区头仍 9 条；inject_sub 硬闸要求 sub 域必须在 META）
+    "occ": {
+        "cn": "occ 编码助手",
+        "duty": "occ 编码助手六件套（read/write/edit/glob/grep/bash）：文件读写、精确替换、模式匹配、文本搜索与沙箱命令执行——由 occ 自执行，系统 executor 不路由。",
+        "when": "让 occ 读文件；改代码；搜文件内容；跑 shell 命令",
+        "tool_when": "occ 会话内读写文件、搜索或执行沙箱命令时",
+        "neighbors": "coding（编程场景归类）、sandbox（bash 经 aik-sandbox 隔离执行）、fs（文件读写语义相近但走不同执行面）",
+        "safety": "R：read/glob/grep；W1：write/edit（写前快照 ~/.occ/snapshots，目标限工作目录子树、/tmp、/var/ai）；W2：bash（aik-sandbox 隔离，沙箱不可用即拒绝，绝不降级裸跑）。",
+    },
+    "coding": {
+        "cn": "编程场景",
+        "duty": "编程类任务的归类域（occ 六件套的第二 sub）：读写源码、搜索代码、构建运行——与 occ 域成对出现，供路由按场景聚合。",
+        "when": "写个程序；改这段代码；在项目里搜用法",
+        "tool_when": "处理源码文件或执行构建/运行命令时",
+        "neighbors": "occ（六件套主域）、sandbox（子智能体写码跑测试）、fs（通用文件操作）",
+        "safety": "同 occ 域（工具本体风险级为准：R×3/W1×2/W2×1）。",
     },
 }
 
@@ -440,6 +459,13 @@ SUB_MAP = {
     "compat_generate": ["sandbox", "fs"],
     "compat_apply": ["sandbox"],
     "compat_verify": ["sandbox", "sysadmin"],
+    # ---- T9e：occ 编码助手六件套（主表并入；occ 自执行，executor 不路由）----
+    "read": ["occ", "coding"],
+    "write": ["occ", "coding"],
+    "edit": ["occ", "coding"],
+    "glob": ["occ", "coding"],
+    "grep": ["occ", "coding"],
+    "bash": ["occ", "coding"],
 }
 
 # ---------------------------------------------------------------------------
@@ -807,7 +833,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 230        # 主表 tools.json（W82B V6：226 + 4 应用兼容）
+EXPECTED_TOOL_COUNT = 236        # 主表 tools.json（T9e：230 + occ 六件套并入）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；W72 新增 python3/gcc/cc
 #（沙箱内 W1）后为 57；T7d 摘除 python3（镜像不再携带解释器）后为 56。
@@ -1045,8 +1071,15 @@ EXPECTED_TOOL_NAMES = [
     "compat_generate",
     "compat_apply",
     "compat_verify",
+    # T9e：occ 编码助手六件套（主表并入，段序追加——合并 sha 锚点前提）
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "bash",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "924313961e12c9aced2648163dcc55256b3a3554bc4d6d454a086ed55d80087d"
+EXPECTED_TOOL_NAMES_SHA256 = "3c6cb4bb7b91b03f09b5e54cdc9c07795933f68d7f14f5acce319d4515c5707b"
 
 
 def manifest_sha256(names):
@@ -3291,6 +3324,7 @@ CHANNEL_RETURN = {
     CH_APPCTL: "probe 返回 backends 列表 + CLI/HTTP/dbus/AT-SPI 逐档证据与 warnings；call 返回 backend/target/rc/stdout/stderr/耗时（HTTP 含 status_code/body）；task 返回 status/steps/失败步骤/断言结果/进度与审计路径（cancel/status 返回取消或进度快照）。",
     CH_NETCHAIN: "start 返回采样器 pid/事件源逐档可用性与规则；status 返回运行态、事件源探测（procfs/命令/ctnetlink，不可用/空表如实标注）、最近采样计数与审计尾；stop 返回停止结果。命中事件含 type/src/dsts/ports/window/evidence_count，写 events.jsonl + audit.log；只观测不封禁。",
     CH_DEVICE: "list 返回全部 USB 节点（设备+接口）与 bindable；identify 返回类别/人话名称/置信度；bind/restore 返回快照、逐笔写（path/value/rc/errno）、读回（driver/override/input）与回滚结论；adapt 立刻返回 task_id + 状态目录，后台 daemon 逐级写 status.json/progress.jsonl/daemon.log；task 返回任务状态/当前级别/进程存活/日志尾，cancel 返回信号、回滚读回与最终驱动。",
+    CH_OCC: "由 occ 自执行（系统 executor 不路由，调用返回诚实拒绝）：read 返回带行号文本；write/edit 返回写入/替换结果与快照路径；glob 返回匹配路径列表；grep 返回行号+内容（上限 100 行）；bash 返回命令输出与退出码（aik-sandbox 隔离，超时 SIGKILL）。",
 }
 
 
@@ -3567,7 +3601,13 @@ def inject_sub(tools):
 
 
 def write_corpus_seed(tools, out_dir):
-    """单源生成 sme-seed-w51.jsonl（区头 8 + 单件 151 + 配方 8）。"""
+    """单源生成 sme-seed-w51.jsonl（区头 9 + 单件 230 + 配方 8 = 247）。
+
+    T9e：channel=occ 六件套不入 seed——seed/目录页喂系统 ask 路由，
+    occ 工具由 occ 自执行、系统 executor 不路由（TOOL_CH_OCC 诚实拒绝），
+    入册反而误导路由。seed 条目数保持 247 不变量。
+    """
+    tools = [t for t in tools if t.get("channel") != CH_OCC]
     records = []
     for domain in SUB_DOMAIN_ORDER:
         records.append(_header_corpus_record(domain, tools))
@@ -5063,6 +5103,123 @@ def compat_tools():
     ]
 
 
+# ---------------------------------------------------------------------------
+# T9e：occ 编码助手六件套（主表并入；channel=occ，occ 自执行）
+#
+# 条目源自 T9b1 落地的 tools.json occ_tools 段（六件、sub=[occ,coding]、
+# risk R3/W1 2/W2 1）。并入后：
+#   - tool_registry 侧 TOOL_CH_OCC 已注册（from_str/channel_str/fields
+#     无必填），executor 对本通道诚实拒绝（occ 工具由 occ 自执行）；
+#   - write_corpus_seed 排除本通道——seed 喂系统 ask 路由，occ 六件套
+#     不经系统 executor，入册反而误导（区头仍 9、单件仍 230、总 247）；
+#   - 沙盒受限表（_sb_keep）不含本通道，tools-sandbox.json 不变。
+# ---------------------------------------------------------------------------
+def occ_tools():
+    def _obj(props, req):
+        return {"type": "object", "properties": props, "required": req}
+
+    return [
+        {
+            "name": "read",
+            "channel": CH_OCC,
+            "risk": RISK_R,
+            "description": "读取文件内容（occ 编码助手六件套）：行窗 "
+                           "offset/limit 带行号；二进制文件（含 NUL）拒绝读取",
+            "parameters": _obj({
+                "path": {"type": "string",
+                         "description": "文件路径（绝对或相对工作目录）"},
+                "offset": {"type": "integer", "minimum": 1,
+                           "description": "起始行号（1 起；缺省 1）"},
+                "limit": {"type": "integer", "minimum": 1,
+                          "description": "读取行数上限（缺省 500）"},
+            }, ["path"]),
+        },
+        {
+            "name": "write",
+            "channel": CH_OCC,
+            "risk": RISK_W1,
+            "description": "整文件写入（occ 编码助手六件套）：父目录递归建；"
+                           "写前把原文件快照到 ~/.occ/snapshots（/undo 地基）；"
+                           "目标限工作目录子树、/tmp、/var/ai（W1 惯例）",
+            "parameters": _obj({
+                "path": {"type": "string",
+                         "description": "目标文件路径"},
+                "content": {"type": "string",
+                            "description": "完整文件内容（整文件覆写）"},
+            }, ["path", "content"]),
+        },
+        {
+            "name": "edit",
+            "channel": CH_OCC,
+            "risk": RISK_W1,
+            "description": "精确字符串替换（occ 编码助手六件套，opencode "
+                           "同语义）：oldString 必须唯一命中或 "
+                           "replaceAll=true 全替换；未命中/多处不带 all=报错；"
+                           "二进制拒绝；写前快照",
+            "parameters": _obj({
+                "path": {"type": "string",
+                         "description": "目标文件路径"},
+                "oldString": {"type": "string",
+                              "description": "被替换的精确字符串"},
+                "newString": {"type": "string",
+                              "description": "替换后的字符串"},
+                "replaceAll": {"type": "boolean",
+                               "description": "true=替换全部出现；缺省 false"},
+            }, ["path", "oldString", "newString"]),
+        },
+        {
+            "name": "glob",
+            "channel": CH_OCC,
+            "risk": RISK_R,
+            "description": "文件模式匹配（occ 编码助手六件套）：fnmatch "
+                           "递归，** 跨任意层目录，* 不跨 /；点文件需模式"
+                           "显式以 . 开头；上限 200 项",
+            "parameters": _obj({
+                "pattern": {"type": "string",
+                            "description": "glob 模式（如 **/*.c）"},
+                "path": {"type": "string",
+                         "description": "搜索根目录（缺省工作目录）"},
+            }, ["pattern"]),
+        },
+        {
+            "name": "grep",
+            "channel": CH_OCC,
+            "risk": RISK_R,
+            "description": "文本搜索（occ 编码助手六件套）：朴素字节子串"
+                           "匹配+行号（中文可用，不引 PCRE）；可按文件名 "
+                           "glob 过滤；上限 100 行",
+            "parameters": _obj({
+                "pattern": {"type": "string",
+                            "description": "搜索文本（大小写敏感）"},
+                "path": {"type": "string",
+                         "description": "文件或目录（缺省工作目录，递归）"},
+                "glob": {"type": "string",
+                         "description": "仅搜文件名匹配该 glob 的文件"},
+            }, ["pattern"]),
+        },
+        {
+            "name": "bash",
+            "channel": CH_OCC,
+            "risk": RISK_W2,
+            "description": "沙箱命令执行（occ 编码助手六件套，W2）：经 "
+                           "aik-sandbox （mount/pid/uts namespace+能力裁剪，"
+                           "工作目录 rw 挂入，宿主其余路径不可见）运行 shell "
+                           "命令；每调用一临时隔离区，超时 SIGKILL 全进程组，"
+                           "destroy 回收，trace JSONL 审计；沙箱不可用即拒绝"
+                           "执行（绝不降级裸跑）",
+            "parameters": _obj({
+                "command": {"type": "string",
+                            "description": "shell 命令（沙箱内 /bin/sh -c）"},
+                "workdir": {"type": "string",
+                            "description": "工作目录（缺省 occ 启动目录；"
+                                           "rw 挂入沙箱）"},
+                "timeout": {"type": "integer", "minimum": 1,
+                            "description": "超时秒数（缺省 60）"},
+            }, ["command"]),
+        },
+    ]
+
+
 def build_tools(procfs_table, sysfs_table):
     tools = []
     tools.extend(tool_procfs(p, d) for p, _perm, d in procfs_table)
@@ -5137,6 +5294,8 @@ def build_tools(procfs_table, sysfs_table):
     tools.extend(device_tools())
     # W82B V6：应用兼容四件（追加在清单末尾；锚点同步）
     tools.extend(compat_tools())
+    # T9e：occ 编码助手六件套（追加在清单末尾；锚点按段序同步）
+    tools.extend(occ_tools())
     return tools
 
 
@@ -5458,7 +5617,7 @@ def main():
                CH_MEMORY, CH_SHELL, CH_SANDBOX, CH_SYSCTL, CH_SYSFS_DYN,
                CH_DESKTOP, CH_MODEL, CH_STREAM, CH_MACRO, CH_CLARIFY,
                CH_WORKSPACE, CH_SCHED, CH_BPF, CH_NETADMIN, CH_NETINTENT,
-               CH_APPPROFILE, CH_NETCHAIN, CH_RANGE, CH_APPCTL):
+               CH_APPPROFILE, CH_NETCHAIN, CH_RANGE, CH_APPCTL, CH_OCC):
         lines.append(f"  {ch:<14} {counts.get(ch, 0)}")
     lines.append("分风险级计数:")
     for rk in (RISK_R, RISK_W1, RISK_W2):
@@ -5482,10 +5641,13 @@ def main():
     for d in SUB_DOMAIN_ORDER:
         n_primary = sum(1 for t in tools if t["sub"][0] == d)
         lines.append(f"  {d:<10} {n_primary:>3} / {sub_counts.get(d, 0):>3}")
+    # T9e：seed 单件数 = 主表剔除 channel=occ（write_corpus_seed 同口径）
+    _seed_tools = [t for t in tools if t.get("channel") != CH_OCC]
     lines.append(
-        f"W51 语料: 区头 {len(SUB_DOMAIN_ORDER)} + 单件 {len(tools)} + "
+        f"W51 语料: 区头 {len(SUB_DOMAIN_ORDER)} + 单件 {len(_seed_tools)} + "
         f"配方 {len(COMBOS)} = "
-        f"{len(SUB_DOMAIN_ORDER) + len(tools) + len(COMBOS)} 条 -> {seed_path}")
+        f"{len(SUB_DOMAIN_ORDER) + len(_seed_tools) + len(COMBOS)} 条"
+        f"（occ 六件套不入 seed） -> {seed_path}")
     report = "\n".join(lines) + "\n"
 
     lines.append(f"目录页(tool_catalog): {len(catalog_lines)} 行, "

@@ -1,10 +1,10 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-03T23:46:24",
+  "generated_at": "2026-11-09T02:20:19",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 230,
-  "tool_names_sha256": "924313961e12c9aced2648163dcc55256b3a3554bc4d6d454a086ed55d80087d",
+  "tool_count": 236,
+  "tool_names_sha256": "3c6cb4bb7b91b03f09b5e54cdc9c07795933f68d7f14f5acce319d4515c5707b",
   "channel_counts": {
     "procfs-read": 36,
     "sysfs-write": 25,
@@ -31,12 +31,13 @@
     "range": 5,
     "appctl": 5,
     "device": 6,
-    "compat": 4
+    "compat": 4,
+    "occ": 6
   },
   "risk_counts": {
-    "R": 98,
-    "W1": 55,
-    "W2": 76,
+    "R": 101,
+    "W1": 57,
+    "W2": 77,
     "exec按命令": 1
   },
   "exec_command_tiers": {
@@ -7597,200 +7598,188 @@
         "sandbox",
         "sysadmin"
       ]
-    }
-  ],
-  "occ_tools": {
-    "note": "occ 工具环六件套（T9b1，agent/ai/occ/occ_tools/ 自执行；executor 不路由本段——tools/tool_registry.c 的 channel 表未含 occ，主表并入需 e 棒配套 executor 通道注册与 audit/qsmoke 期望换代）",
-    "tool_count": 6,
-    "tool_names_sha256": "d419b4907b5782e72de612a1bfeb3eb7d651a0e9f77cc724a344aa9965e1fb68",
-    "risk_counts": {
-      "R": 3,
-      "W1": 2,
-      "W2": 1
     },
-    "tools": [
-      {
-        "name": "read",
-        "channel": "occ",
-        "risk": "R",
-        "description": "读取文件内容（occ 编码助手六件套）：行窗 offset/limit 带行号；二进制文件（含 NUL）拒绝读取",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "文件路径（绝对或相对工作目录）"
-            },
-            "offset": {
-              "type": "integer",
-              "description": "起始行号（1 起；缺省 1）",
-              "minimum": 1
-            },
-            "limit": {
-              "type": "integer",
-              "description": "读取行数上限（缺省 500）",
-              "minimum": 1
-            }
+    {
+      "name": "read",
+      "channel": "occ",
+      "risk": "R",
+      "description": "读取文件内容（occ 编码助手六件套）：行窗 offset/limit 带行号；二进制文件（含 NUL）拒绝读取",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "文件路径（绝对或相对工作目录）"
           },
-          "required": [
-            "path"
-          ]
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "起始行号（1 起；缺省 1）"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "读取行数上限（缺省 500）"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "path"
         ]
       },
-      {
-        "name": "write",
-        "channel": "occ",
-        "risk": "W1",
-        "description": "整文件写入（occ 编码助手六件套）：父目录递归建；写前把原文件快照到 ~/.occ/snapshots（/undo 地基）；目标限工作目录子树、/tmp、/var/ai（W1 惯例）",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "目标文件路径"
-            },
-            "content": {
-              "type": "string",
-              "description": "完整文件内容（整文件覆写）"
-            }
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    },
+    {
+      "name": "write",
+      "channel": "occ",
+      "risk": "W1",
+      "description": "整文件写入（occ 编码助手六件套）：父目录递归建；写前把原文件快照到 ~/.occ/snapshots（/undo 地基）；目标限工作目录子树、/tmp、/var/ai（W1 惯例）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标文件路径"
           },
-          "required": [
-            "path",
-            "content"
-          ]
+          "content": {
+            "type": "string",
+            "description": "完整文件内容（整文件覆写）"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "path",
+          "content"
         ]
       },
-      {
-        "name": "edit",
-        "channel": "occ",
-        "risk": "W1",
-        "description": "精确字符串替换（occ 编码助手六件套，opencode 同语义）：oldString 必须唯一命中或 replaceAll=true 全替换；未命中/多处不带 all=报错；二进制拒绝；写前快照",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "目标文件路径"
-            },
-            "oldString": {
-              "type": "string",
-              "description": "被替换的精确字符串"
-            },
-            "newString": {
-              "type": "string",
-              "description": "替换后的字符串"
-            },
-            "replaceAll": {
-              "type": "boolean",
-              "description": "true=替换全部出现；缺省 false"
-            }
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    },
+    {
+      "name": "edit",
+      "channel": "occ",
+      "risk": "W1",
+      "description": "精确字符串替换（occ 编码助手六件套，opencode 同语义）：oldString 必须唯一命中或 replaceAll=true 全替换；未命中/多处不带 all=报错；二进制拒绝；写前快照",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标文件路径"
           },
-          "required": [
-            "path",
-            "oldString",
-            "newString"
-          ]
+          "oldString": {
+            "type": "string",
+            "description": "被替换的精确字符串"
+          },
+          "newString": {
+            "type": "string",
+            "description": "替换后的字符串"
+          },
+          "replaceAll": {
+            "type": "boolean",
+            "description": "true=替换全部出现；缺省 false"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "path",
+          "oldString",
+          "newString"
         ]
       },
-      {
-        "name": "glob",
-        "channel": "occ",
-        "risk": "R",
-        "description": "文件模式匹配（occ 编码助手六件套）：fnmatch 递归，** 跨任意层目录，* 不跨 /；点文件需模式显式以 . 开头；上限 200 项",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": {
-              "type": "string",
-              "description": "glob 模式（如 **/*.c）"
-            },
-            "path": {
-              "type": "string",
-              "description": "搜索根目录（缺省工作目录）"
-            }
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    },
+    {
+      "name": "glob",
+      "channel": "occ",
+      "risk": "R",
+      "description": "文件模式匹配（occ 编码助手六件套）：fnmatch 递归，** 跨任意层目录，* 不跨 /；点文件需模式显式以 . 开头；上限 200 项",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "glob 模式（如 **/*.c）"
           },
-          "required": [
-            "pattern"
-          ]
+          "path": {
+            "type": "string",
+            "description": "搜索根目录（缺省工作目录）"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "pattern"
         ]
       },
-      {
-        "name": "grep",
-        "channel": "occ",
-        "risk": "R",
-        "description": "文本搜索（occ 编码助手六件套）：朴素字节子串匹配+行号（中文可用，不引 PCRE）；可按文件名 glob 过滤；上限 100 行",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": {
-              "type": "string",
-              "description": "搜索文本（大小写敏感）"
-            },
-            "path": {
-              "type": "string",
-              "description": "文件或目录（缺省工作目录，递归）"
-            },
-            "glob": {
-              "type": "string",
-              "description": "仅搜文件名匹配该 glob 的文件"
-            }
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    },
+    {
+      "name": "grep",
+      "channel": "occ",
+      "risk": "R",
+      "description": "文本搜索（occ 编码助手六件套）：朴素字节子串匹配+行号（中文可用，不引 PCRE）；可按文件名 glob 过滤；上限 100 行",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "搜索文本（大小写敏感）"
           },
-          "required": [
-            "pattern"
-          ]
+          "path": {
+            "type": "string",
+            "description": "文件或目录（缺省工作目录，递归）"
+          },
+          "glob": {
+            "type": "string",
+            "description": "仅搜文件名匹配该 glob 的文件"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "pattern"
         ]
       },
-      {
-        "name": "bash",
-        "channel": "occ",
-        "risk": "W2",
-        "description": "沙箱命令执行（occ 编码助手六件套，W2）：经 aik-sandbox （mount/pid/uts namespace+能力裁剪，工作目录 rw 挂入，宿主其余路径不可见）运行 shell 命令；每调用一临时隔离区，超时 SIGKILL 全进程组，destroy 回收，trace JSONL 审计；沙箱不可用即拒绝执行（绝不降级裸跑）",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "command": {
-              "type": "string",
-              "description": "shell 命令（沙箱内 /bin/sh -c）"
-            },
-            "workdir": {
-              "type": "string",
-              "description": "工作目录（缺省 occ 启动目录；rw 挂入沙箱）"
-            },
-            "timeout": {
-              "type": "integer",
-              "description": "超时秒数（缺省 60）",
-              "minimum": 1
-            }
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    },
+    {
+      "name": "bash",
+      "channel": "occ",
+      "risk": "W2",
+      "description": "沙箱命令执行（occ 编码助手六件套，W2）：经 aik-sandbox （mount/pid/uts namespace+能力裁剪，工作目录 rw 挂入，宿主其余路径不可见）运行 shell 命令；每调用一临时隔离区，超时 SIGKILL 全进程组，destroy 回收，trace JSONL 审计；沙箱不可用即拒绝执行（绝不降级裸跑）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "shell 命令（沙箱内 /bin/sh -c）"
           },
-          "required": [
-            "command"
-          ]
+          "workdir": {
+            "type": "string",
+            "description": "工作目录（缺省 occ 启动目录；rw 挂入沙箱）"
+          },
+          "timeout": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "超时秒数（缺省 60）"
+          }
         },
-        "sub": [
-          "occ",
-          "coding"
+        "required": [
+          "command"
         ]
-      }
-    ]
-  }
+      },
+      "sub": [
+        "occ",
+        "coding"
+      ]
+    }
+  ]
 }

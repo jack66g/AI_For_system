@@ -5915,6 +5915,14 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 			      "（不创建租约、不执行动作）");
 		rc = AI_ERR_INVALID_ARG;
 		break;
+	case TOOL_CH_OCC:
+		/* T9e：occ 六件套（read/write/edit/glob/grep/bash）由 occ
+		 * 自执行（occ_tools/），系统 executor 不路由——被误调时诚实
+		 * 拒绝，绝不降级裸跑。 */
+		*out = strdup("ERROR: occ 工具由 occ 自执行"
+			      "（read/write/edit/glob/grep/bash 不走系统 executor）");
+		rc = AI_ERR_INVALID_ARG;
+		break;
 	default:
 		*out = strdup("ERROR: 未知通道（注册表数据异常）");
 		rc = AI_ERR_INVALID_ARG;

@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+#
+# aik-ac-hook - AIKernel 出厂 autocondense 钩子入口（T9d 三件套之一）
+#
+# 用法（宿主钩子协议与 autocondense-hook 完全一致）：
+#   aik-ac-hook <EventName> < hook-input.json > hook-output.json
+#   例：aik-ac-hook SessionStart < in.json
+#       aik-ac-hook Stop         < in.json
+#
+# 三件套（随 occ 首次进厂，T9d）：
+#   1. autocondensed     常驻 REST 服务（systemd 单元 autocondense.service，
+#                        127.0.0.1:8762——T9d 改号，8761 归 aikernel-api）
+#   2. autocondense-hook 事件钩子适配器（本脚本的转发目标）
+#   3. autocondense-mcp  MCP stdio 薄代理（7 个 condense_* 工具；stdio 进程，
+#                        由宿主按需拉起，无 systemd 单元）
+#
+# 契约：钩子绝不能拖垮宿主——任何异常（二进制缺失、服务不可达）一律
+# 静默 exit 0，只往 stderr 记一行；输出只在有内容时写出。
+
+set -u
+
+BIN=/usr/local/sbin/autocondense-hook
+LOG=/tmp/aik-ac-hook.log
+
+# 端口改号后的缺省基地址（与 acmcp.c get_port() 同值）
+: "${AUTOCONDENSE_BASE_URL:=http://127.0.0.1:8762}"
+export AUTOCONDENSE_BASE_URL
+
+if [ ! -x "$BIN" ]; then
+	printf '%s %s missing-binary\n' "$(date '+%F %T')" "${1:-?}" >>"$LOG" 2>/dev/null || true
+	exit 0
+fi
+
+if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+	printf '%s missing-event\n' "$(date '+%F %T')" >>"$LOG" 2>/dev/null || true
+	exit 0
+fi
+
+# 转发：stdin(JSON) → autocondense-hook <EventName> → stdout
+if ! out="$("$BIN" "$1" 2>>"$LOG")"; then
+	printf '%s %s hook-failed\n' "$(date '+%F %T')" "$1" >>"$LOG" 2>/dev/null || true
+	exit 0
+fi
+
+[ -n "$out" ] && printf '%s' "$out"
+exit 0

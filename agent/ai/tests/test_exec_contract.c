@@ -141,7 +141,7 @@ int main(void)
 		printf("FATAL: exec_run missing\n");
 		return 2;
 	}
-	CHECK(reg.tool_count == 230, "主表 230 件（W82B：226 + 4 兼容，manifest 未漂移）");
+	CHECK(reg.tool_count == 236, "主表 236 件（T9e：230 + occ 六件套，manifest 未漂移）");
 
 	/* ---- 1. 参数契约 ---- */
 	check_param_error(t, "{}", "MISSING", "command", "缺 command → 结构化拒绝");

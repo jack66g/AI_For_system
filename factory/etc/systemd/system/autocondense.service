@@ -1,0 +1,18 @@
+[Unit]
+Description=AIKernel autocondense Service (REST 127.0.0.1:8762, context compaction)
+Documentation=file:///usr/local/share/aikernel/README.md
+After=network.target aikernel-memory.service
+Wants=aikernel-memory.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+# T9d 改号：8761 已让给 aikernel-api（127.0.0.1:8761），ac 侧缺省 8762。
+# 显式传 --port 8762：即使旧 data-dir 里残留 8761 的 config.json 也照 8762
+# 监听，杜绝「服务起了却撞 API 端口」这一类静默降级。
+ExecStart=/usr/local/sbin/autocondensed --port 8762
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
