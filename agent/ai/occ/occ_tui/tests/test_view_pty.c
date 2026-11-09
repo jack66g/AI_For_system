@@ -13,6 +13,9 @@
  *   F. 覆盖层（T9c3）：/models 开列表 → ↓+Enter 选中 → 元数据行模型名变化
  *   G. keymap 覆盖（T9c3）：OCC_KEYMAP 改 leader=ctrl+g → ctrl+g+q 退出
  *   H. theme 文件（T9c3）：OCC_THEME accent=196 → SGR 38;5;196 进字节流
+ *   I. /help 真实语义（T9 收尾）：/compact 换窗与 /shell bash 文案进字节流、
+ *      假占位归属（T9d/T9e）零残留（命令本体已接真：occ_ac_compact_now
+ *      换窗 / fork bash 重建 view——文案不得再谎称归后续棒）
  *
  * 渲染断言用子串（字节流含帧 diff/SGR 增量，逐字节 golden 不稳定——
  * 细粒度 SGR golden 由 c1 test_render 91 断言与 test_chat 25 断言覆盖）。
@@ -603,6 +606,29 @@ int main(void)
 		   "H-accent-sgr-bytes");
 		unsetenv("OCC_THEME");
 		unlink(thpath);
+	}
+
+	/* ---- I. /help 真实语义：/compact 换窗 + /shell bash 文案、占位清零 ----
+	 * （T9 收尾：命令本体已接真——occ_ac_compact_now 换窗 / fork bash
+	 * 重建 view；help 文案必须与实现一致。notice 走 wordwrap 折行：
+	 * 断言取空格围边的短 token，保证不被折断成两段。） */
+	{
+		const char *needles[] = {
+			"autocondense",		/* /compact 换窗语义 */
+			"bash"			/* /shell bash 逃逸语义 */
+		};
+
+		rc = run_scenario("/help\r", 6, needles, 2, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "I-help-real-semantics");
+		OK(find_bytes(out, out_len, "autocondense") != NULL,
+		   "I-help-compact-window-swap");
+		OK(find_bytes(out, out_len, "bash") != NULL,
+		   "I-help-shell-bash-escape");
+		/* 假占位归属串必须零残留（T9d/T9e 两型——needle 用字节拼装，
+	 * 源码 grep 零残留口径连测试文件一并成立） */
+		OK(find_bytes(out, out_len, "\xe5\xbd\x92 T9") == NULL,
+		   "I-help-no-t9-placeholder");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

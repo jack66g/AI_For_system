@@ -267,7 +267,9 @@ static void tv_pull_sessions(tui_view *v)
 
 /* ---- 命令 ---- */
 
-/* /help 文本（动态：exit 绑定与 leader 取自 keymap——覆盖文件生效后不撒谎） */
+/* /help 文本（动态：exit 绑定与 leader 取自 keymap——覆盖文件生效后不撒谎；
+ * /compact//shell 语义与 occ.c 实现对齐：换窗=occ_ac_compact_now
+ * （前置门：OCC_AC=on、turn 空闲、已有会话）、/shell=退屏跑 bash 后重建 view） */
 static void tv_help_text(tui_view *v, char *buf, size_t cap)
 {
 	char exitb[96];
@@ -279,7 +281,10 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 	snprintf(buf, cap,
 		 "commands: /exit /clear /help (built-in) · /new /sessions"
 		 " /status /models /rename /tools /sandbox /trace /lease"
-		 " (live) · /compact (归 T9d) /shell (归 T9e)\n"
+		 " /compact /shell (live)\n"
+		 "/compact: 手动触发 autocondense 换窗——历史折叠为摘要、"
+		 "token 账本重置为新基线（需 OCC_AC=on、turn 空闲、已有会话）\n"
+		 "/shell: 临时退到 bash，exit 返回 occ（turn 运行中拒绝）\n"
 		 "keys: Enter=send · Tab=complete · Esc=interrupt ·"
 		 " PgUp/PgDn=scroll · exit=%s · leader=%s (2s timeout;"
 		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
@@ -341,7 +346,7 @@ static void tv_submit(tui_view *v)
 			return;
 		}
 		if (strcmp(text, "/help") == 0) {
-			char help[640];
+			char help[800];	/* 最坏 ~720B（exitb≤95 + leader≤47） */
 
 			tv_help_text(v, help, sizeof(help));
 			tui_chat_add_notice(v->chat, help);
