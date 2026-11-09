@@ -98,6 +98,38 @@ static const char SSE_FINAL_OK[] =
 	"\"completion_tokens\":5}}\n\n"
 	"data: [DONE]\n\n";
 
+/* ---- LT-BUG-001 fixtures（anthropic 智谱形态：thinking 块@0 + tool_use@1；
+ * 与 SSE_ANT_* 既有形态的差异即线上块序不从工具 0 起） ---- */
+
+static const char SSE_ANT_ZHIPU_TOOLCALL[] =
+	"data: {\"type\":\"message_start\",\"message\":{\"usage\":"
+	"{\"input_tokens\":30}}}\n\n"
+	"data: {\"type\":\"content_block_start\",\"index\":0,"
+	"\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\","
+	"\"signature\":\"\"}}\n\n"
+	"data: {\"type\":\"content_block_delta\",\"index\":0,"
+	"\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"先读文件\"}}\n\n"
+	"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+	"data: {\"type\":\"content_block_start\",\"index\":1,"
+	"\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_zp1\","
+	"\"name\":\"read\",\"input\":{}}}\n\n"
+	"data: {\"type\":\"content_block_delta\",\"index\":1,"
+	"\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":"
+	"\"{\\\"path\\\":\\\"ringtest.txt\\\"}\"}}\n\n"
+	"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+	"data: {\"type\":\"message_delta\",\"delta\":"
+	"{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n"
+	"data: {\"type\":\"message_stop\"}\n\n";
+
+static const char SSE_ANT_FINAL[] =
+	"data: {\"type\":\"content_block_start\",\"index\":0,"
+	"\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+	"data: {\"type\":\"content_block_delta\",\"index\":0,"
+	"\"delta\":{\"type\":\"text_delta\",\"text\":\"已读到\"}}\n\n"
+	"data: {\"type\":\"message_delta\",\"delta\":"
+	"{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+	"data: {\"type\":\"message_stop\"}\n\n";
+
 /* ---- 伪传输 ---- */
 
 static const char *g_seq[4];			/* 回放序列（末位循环） */
@@ -632,6 +664,34 @@ int main(void)
 				      " WHERE tool='no_such_tool' AND rc=1",
 				      NULL) == 1, "loop4b-toolcall-rc1");
 			occ_loop_result_free(&res);
+		}
+
+		/* ---- 用例 4z（LT-BUG-001 回归）：anthropic 智谱形态——
+		 *    thinking 块占线上 idx 0、tool_use 在 idx 1。收集器
+		 *    append-on-START 映射：恰 1 个真调用，零幻影空调用
+		 *    （修前按线上 idx 开槽→空名调用→未知工具→重试雪崩） */
+		{
+			char wd2[256];
+			char sid2[OCC_ID_LEN];
+
+			snprintf(wd2, sizeof(wd2), "%s/ring4", tmpdir);
+			opts.prompt = "读 ringtest.txt";
+			opts.workdir = wd2;
+			p.proto = OCC_PROTO_ANTHROPIC;
+			sse_set2(SSE_ANT_ZHIPU_TOOLCALL, SSE_ANT_FINAL);
+			rc = occ_loop_run(db, &p, NULL, &opts, &res, err,
+					  sizeof(err));
+			OK(rc == OCC_LOOP_OK, "loop4z-rc-ok");
+			snprintf(sid2, sizeof(sid2), "%s", res.session_id);
+			OK(msgs_of(sid2) == 4, "loop4z-msg-seq-4-new");
+			OK(count_rows("SELECT COUNT(*) FROM occ_toolcall"
+				      " WHERE tool='read' AND rc=0", NULL)
+			   == 1, "loop4z-one-real-call");
+			OK(count_rows("SELECT COUNT(*) FROM occ_toolcall"
+				      " WHERE tool=''", NULL) == 0,
+			   "loop4z-no-phantom-call");
+			occ_loop_result_free(&res);
+			p.proto = OCC_PROTO_OPENAI_COMPAT;
 		}
 
 		/* ---- 用例 5：坏流（负向）→ ELLM + status=error ---- */

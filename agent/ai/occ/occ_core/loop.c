@@ -264,12 +264,18 @@ typedef struct {
 	int have_finish;
 	int llm_error;
 	char last_error[256];		/* 最近 OCC_EV_ERROR 的 err 文本 */
-	/* tool_call 收集（b1：期望路径；按 idx 槽位累积 args 增量） */
+	/* tool_call 收集（b1：期望路径；按槽位累积 args 增量）。
+	 * LT-BUG-001：事件 idx 是协议侧标识（anthropic=线上 content-block
+	 * 序号——thinking/text 块在前时 tool 并不从 0 起；openai=工具
+	 * 序数）。idxmap[] 将事件 idx 映射为槽位（append-on-START），
+	 * 绝不按 idx 直接开槽：智谱 glm-4.6 实测 thinking@0+tool@1 曾每轮
+	 * 产幻影空调用（空名报未知工具→模型重试雪崩）。 */
 	struct {
 		char id[128];
 		char name[128];
 		dbuf args;
 	} calls[16];
+	int idxmap[64];			/* 事件 idx → 槽位；-1=未见 START */
 	int ncalls;
 	occ_loop_opts *opts;		/* sink / stream_out / reasoning_out */
 } loop_ev_ctx;
@@ -293,24 +299,31 @@ static void ev_cb(const occ_event *ev, void *ud)
 				  strlen(ev->text), NULL, 0);
 		db_append_str(&c->reasoning, ev->text);
 		break;
-	case OCC_EV_TOOL_START:
-		if (ev->idx >= 0 && ev->idx < (int)(sizeof(c->calls) /
-		    sizeof(c->calls[0]))) {
-			if (ev->idx + 1 > c->ncalls)
-				c->ncalls = ev->idx + 1;
-			if (ev->id)
-				snprintf(c->calls[ev->idx].id,
-					 sizeof(c->calls[ev->idx].id),
-					 "%s", ev->id);
-			if (ev->name)
-				snprintf(c->calls[ev->idx].name,
-					 sizeof(c->calls[ev->idx].name),
-					 "%s", ev->name);
-		}
+	case OCC_EV_TOOL_START: {
+		int slot;
+
+		if (ev->idx < 0 ||
+		    ev->idx >= (int)(sizeof(c->idxmap) / sizeof(c->idxmap[0])))
+			break;
+		if (c->ncalls >= (int)(sizeof(c->calls) / sizeof(c->calls[0])))
+			break;
+		if (c->idxmap[ev->idx] < 0)
+			c->idxmap[ev->idx] = c->ncalls++;
+		slot = c->idxmap[ev->idx];
+		if (ev->id)
+			snprintf(c->calls[slot].id,
+				 sizeof(c->calls[slot].id), "%s", ev->id);
+		if (ev->name)
+			snprintf(c->calls[slot].name,
+				 sizeof(c->calls[slot].name), "%s", ev->name);
 		break;
+	}
 	case OCC_EV_TOOL_ARGS:
-		if (ev->idx >= 0 && ev->idx < c->ncalls)
-			db_append_str(&c->calls[ev->idx].args, ev->args);
+		if (ev->idx >= 0 &&
+		    ev->idx < (int)(sizeof(c->idxmap) / sizeof(c->idxmap[0])) &&
+		    c->idxmap[ev->idx] >= 0)
+			db_append_str(&c->calls[c->idxmap[ev->idx]].args,
+				      ev->args);
 		break;
 	case OCC_EV_USAGE:
 		c->usage = ev->usage;	/* 流末最终值覆盖 */
@@ -393,6 +406,8 @@ static void ev_ctx_reset_keep_opts(loop_ev_ctx *c)
 	free(c->text.buf);
 	free(c->reasoning.buf);
 	memset(c, 0, sizeof(*c));
+	for (k = 0; k < (int)(sizeof(c->idxmap) / sizeof(c->idxmap[0])); k++)
+		c->idxmap[k] = -1;
 	c->opts = keep;
 }
 
