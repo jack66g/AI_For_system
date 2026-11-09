@@ -5,7 +5,7 @@
  * 断言构造帧 A→B 的输出 ANSI 字节逐位相等；SGR 最小化切换；双宽占位
  * 与截断不撕汉字；组合符合并；clear/resize 序列；滚动视口原语。
  */
-#include "../tui_core.h"
+#include "tui_core.h"
 
 #include <stdio.h>
 #include <string.h>

@@ -33,10 +33,10 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "../../include/space/space.h"
-#include "../../include/store/store_json.h"
-#include "../../include/store/store_npz.h"
-#include "../../include/store/store_snapshot.h"
+#include "space/space.h"
+#include "store/store_json.h"
+#include "store/store_npz.h"
+#include "store/store_snapshot.h"
 
 #include <math.h>
 #include <stdarg.h>

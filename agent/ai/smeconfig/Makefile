@@ -18,7 +18,8 @@
 
 CC ?= cc
 AR ?= ar
-CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include
+# CTOPO1 棒1: -I. 进白名单（tests/test_config.c 引模块根生成头 config_default.h 裸名形态）
+CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I. -I../include
 LDLIBS := -lz -lm
 
 STORE_LIB := ../store/libaikstore.a

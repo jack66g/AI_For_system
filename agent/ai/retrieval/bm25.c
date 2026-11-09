@@ -13,7 +13,7 @@
  * 内存分配失败时函数返回 -1；索引可能处于部分更新状态（调用方应视为
  * 致命错误，不要在失败后继续查询）。
  */
-#include "../include/retrieval/bm25.h"
+#include "retrieval/bm25.h"
 
 #include <math.h>
 #include <stdint.h>

@@ -15,7 +15,7 @@
  * 一致性：除 history_push 失败这种 OOM 情形外，所有函数在失败时尽量保持
  * 结构可继续使用；错误一律写 err（可为 NULL）。
  */
-#include "../include/space/space.h"
+#include "space/space.h"
 
 #include <math.h>
 #include <stdarg.h>

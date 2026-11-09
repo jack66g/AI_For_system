@@ -28,7 +28,7 @@
  */
 #include "space_internal.h"
 
-#include "../include/store/store_json.h"
+#include "store/store_json.h"
 
 #include <errno.h>
 #include <stdarg.h>

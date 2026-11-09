@@ -25,7 +25,7 @@
 #include <sqlite3.h>
 
 #include "occ_core/occ_session.h"
-#include "occ_tools.h"
+#include "occ_tools/occ_tools.h"
 
 static int n_fail;
 static int n_ok;

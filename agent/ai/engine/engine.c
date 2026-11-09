@@ -50,17 +50,17 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "../include/engine/engine.h"
+#include "engine/engine.h"
 
-#include "../include/memory/embed_hash.h"
-#include "../include/retrieval/ranker.h"
-#include "../include/retrieval/retriever.h"
-#include "../include/retrieval/text.h"
-#include "../include/space/space.h"
-#include "../include/store/store_npz.h"
-#include "../include/store/store_npz_write.h"
-#include "../include/store/store_snapshot.h"
-#include "../include/store/store_wal.h"
+#include "memory/embed_hash.h"
+#include "retrieval/ranker.h"
+#include "retrieval/retriever.h"
+#include "retrieval/text.h"
+#include "space/space.h"
+#include "store/store_npz.h"
+#include "store/store_npz_write.h"
+#include "store/store_snapshot.h"
+#include "store/store_wal.h"
 
 #include <dirent.h>
 #include <errno.h>

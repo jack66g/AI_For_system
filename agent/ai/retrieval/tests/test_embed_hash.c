@@ -10,9 +10,9 @@
  *
  * 输出：SUMMARY embed_hash checked=<n> mismatch=<m>；有失配 exit 1。
  */
-#include "../../include/memory/embed_hash.h"
-#include "../../include/store/store_json.h"
-#include "../../memory/unicode.h"
+#include "memory/embed_hash.h"
+#include "store/store_json.h"
+#include "unicode.h"
 
 #include <stdint.h>
 #include <stdio.h>

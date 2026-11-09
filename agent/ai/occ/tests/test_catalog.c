@@ -13,7 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "occ_catalog.h"
+#include "occ_llm/occ_catalog.h"
 
 static int fails;
 

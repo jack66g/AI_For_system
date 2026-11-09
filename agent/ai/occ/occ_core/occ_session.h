@@ -56,7 +56,7 @@
 
 #include <stddef.h>
 
-#include "../occ_llm/occ_llm.h"	/* occ_usage */
+#include "occ_llm/occ_llm.h"	/* occ_usage */
 
 #define OCC_ID_LEN 40			/* "ses_"/"msg_" + 32 hex + NUL */
 

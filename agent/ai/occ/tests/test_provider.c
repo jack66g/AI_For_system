@@ -13,7 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../occ_llm/occ_provider.h"
+#include "occ_llm/occ_provider.h"
 
 static int fails;
 

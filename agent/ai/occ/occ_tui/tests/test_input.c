@@ -7,9 +7,9 @@
  * kitty CSI-u 与探测回复、modifyOtherKeys、bracketed paste（含跨 feed
  * 终止符）、OSC/鼠标吞噬、keybind 字符串、kitty push/pop 序列。
  */
-#include "../tui_input.h"
+#include "tui_input.h"
 
-#include "../tui_utf8.h"
+#include "tui_utf8.h"
 
 #include <stdio.h>
 #include <string.h>

@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "occ_llm.h"
+#include "occ_llm/occ_llm.h"
 
 static int n_ok, n_fail;
 

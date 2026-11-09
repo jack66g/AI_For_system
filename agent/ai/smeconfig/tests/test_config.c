@@ -37,7 +37,7 @@
 #include "smeconfig/config.h"
 #include "store/store_json.h"
 
-#include "../config_default.h"
+#include "config_default.h"
 
 #include <stdarg.h>
 #include <stdio.h>

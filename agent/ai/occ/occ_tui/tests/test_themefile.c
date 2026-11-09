@@ -10,7 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../tui_theme.h"
+#include "tui_theme.h"
 
 static int n_ok, n_fail;
 

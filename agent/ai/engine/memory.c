@@ -11,7 +11,7 @@
  * aik_str_array_free）不属于 engine.h 的公开契约，由 engine.c 以 extern
  * 声明复用；它们不承诺 ABI 稳定。
  */
-#include "../include/engine/engine.h"
+#include "engine/engine.h"
 
 #include <stdint.h>
 #include <stdio.h>

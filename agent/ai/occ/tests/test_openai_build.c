@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../occ_llm/occ_llm.h"
+#include "occ_llm/occ_llm.h"
 #include "store/store_json.h"
 
 static int fails;

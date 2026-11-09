@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../tui_usage.h"
+#include "tui_usage.h"
 
 static int n_ok, n_fail;
 

@@ -6,7 +6,7 @@
  * sme/retrieval/ranking.py:80-132 与 sme/dynamics/decay.py:34-52 的
  * 运算顺序（左结合、先乘后加），使 final 与 Python 逐位一致。
  */
-#include "../include/retrieval/ranker.h"
+#include "retrieval/ranker.h"
 
 #include <math.h>
 #include <stdio.h>

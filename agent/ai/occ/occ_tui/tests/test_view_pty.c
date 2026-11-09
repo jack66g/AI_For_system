@@ -35,7 +35,7 @@
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE 1
 
-#include "../tui_view.h"
+#include "tui_view.h"
 
 #include <errno.h>
 #include <fcntl.h>

@@ -13,7 +13,7 @@
  * time(NULL)）；created_at 由 space 层创建时传入。未注入时钟时行为与
  * T3b 完全一致。
  */
-#include "../include/space/region.h"
+#include "space/region.h"
 
 #include <math.h>
 #include <stdio.h>

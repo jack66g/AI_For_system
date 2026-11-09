@@ -8,9 +8,9 @@
  *
  * 输出：SUMMARY bm25 checked=<n> mismatch=<m>；有失配 exit 1。
  */
-#include "../../include/retrieval/bm25.h"
-#include "../../include/retrieval/text.h"
-#include "../../include/store/store_json.h"
+#include "retrieval/bm25.h"
+#include "retrieval/text.h"
+#include "store/store_json.h"
 
 #include <math.h>
 #include <stdint.h>

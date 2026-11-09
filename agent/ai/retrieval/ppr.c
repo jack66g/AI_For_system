@@ -16,7 +16,7 @@
  * 与 Python 的差异仅为 numpy 的 pairwise 求和（误差 ~1e-16，远小于
  * 1e-9 门禁）；累加顺序本身严格一致。
  */
-#include "../include/retrieval/ppr.h"
+#include "retrieval/ppr.h"
 
 #include <math.h>
 #include <stdlib.h>

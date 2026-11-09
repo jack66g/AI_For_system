@@ -12,7 +12,7 @@
 #ifndef _OCC_NORM_H
 #define _OCC_NORM_H
 
-#include "occ_llm.h"
+#include "occ_llm/occ_llm.h"
 
 typedef struct occ_norm occ_norm;
 

@@ -16,7 +16,8 @@
 
 CC ?= cc
 AR ?= ar
-CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include
+# CTOPO1 棒1: -I../memory = text.c/test_embed_hash.c 的 memory/unicode.h 越界 -I 形态（例外登记：棒2 提升公共位后撤销）
+CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include -I../memory
 LDLIBS := -lz -lm
 
 STORE_LIB := ../store/libaikstore.a

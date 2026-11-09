@@ -5,7 +5,7 @@
  * 覆盖：中/英/日/emoji/非法序列/组合符六类；解码边界（截断/过长/
  * 代理区/越界）；编码回环；替换符策略。
  */
-#include "../tui_utf8.h"
+#include "tui_utf8.h"
 
 #include <stdio.h>
 #include <string.h>

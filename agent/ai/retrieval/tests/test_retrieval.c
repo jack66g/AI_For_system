@@ -28,11 +28,11 @@
  *
  * 输出：SUMMARY retrieval checks=N mismatches=M；有失配 exit 1。
  */
-#include "../../include/memory/embed_hash.h"
-#include "../../include/retrieval/ranker.h"
-#include "../../include/retrieval/retriever.h"
-#include "../../include/space/space.h"
-#include "../../include/store/store_json.h"
+#include "memory/embed_hash.h"
+#include "retrieval/ranker.h"
+#include "retrieval/retriever.h"
+#include "space/space.h"
+#include "store/store_json.h"
 
 #include <math.h>
 #include <stdarg.h>

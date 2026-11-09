@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../tui_inputbox.h"
+#include "tui_inputbox.h"
 
 static int n_ok, n_fail;
 

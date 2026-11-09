@@ -18,8 +18,8 @@
  *
  * 输出：SUMMARY ranker checks=<n> mismatches=<m>；有失配 exit 1。
  */
-#include "../../include/retrieval/ranker.h"
-#include "../../include/store/store_json.h"
+#include "retrieval/ranker.h"
+#include "store/store_json.h"
 
 #include <math.h>
 #include <stdio.h>

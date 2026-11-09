@@ -17,7 +17,7 @@
 #include <unistd.h>
 #include <utime.h>
 
-#include "../occ_tui/tui_data.h"
+#include "occ_tui/tui_data.h"
 
 static int n_ok, n_fail;
 

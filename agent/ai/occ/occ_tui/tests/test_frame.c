@@ -5,7 +5,7 @@
  * 时钟可注入（假时钟）断言节流边界；resize flag 只置/只消费一次；
  * check_resize 对坏 fd 返回 -1 且消费 flag。
  */
-#include "../tui_frame.h"
+#include "tui_frame.h"
 
 #include <signal.h>
 #include <stdio.h>

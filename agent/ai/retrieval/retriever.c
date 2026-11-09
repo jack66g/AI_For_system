@@ -19,11 +19,11 @@
  * 最终同分用 (score desc, memory_id asc) 作为 C 的稳定 tie-break
  * （允许差异见 T3B-DESIGN.md §5）。
  */
-#include "../include/retrieval/retriever.h"
+#include "retrieval/retriever.h"
 
-#include "../include/retrieval/bm25.h"
-#include "../include/retrieval/ppr.h"
-#include "../include/retrieval/text.h"
+#include "retrieval/bm25.h"
+#include "retrieval/ppr.h"
+#include "retrieval/text.h"
 
 #include <math.h>
 #include <stdio.h>

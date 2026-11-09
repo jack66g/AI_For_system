@@ -15,8 +15,8 @@
 #define _XOPEN_SOURCE 700	/* posix_openpt/grantpt/unlockpt/ptsname (XSI) */
 #define _DEFAULT_SOURCE 1
 
-#include "../tui_core.h"
-#include "../tui_frame.h"
+#include "tui_core.h"
+#include "tui_frame.h"
 
 #include <errno.h>
 #include <fcntl.h>

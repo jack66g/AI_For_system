@@ -12,7 +12,7 @@
 #include <strings.h>
 #include <string.h>
 
-#include "../occ_llm/occ_llm.h"
+#include "occ_llm/occ_llm.h"
 #include "store/store_json.h"
 
 static char *read_all(FILE *f, size_t *outlen)

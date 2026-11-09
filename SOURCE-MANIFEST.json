@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T04:00:54+08:00",
+  "created": "2026-11-10T05:00:38+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -34,7 +34,8 @@
     "A1 outcome §5.2 重设计：基线改 decisions 行尾 pre=（K66 §5 契约）——数值类意图与 match 基线弃 arm 时点后置读取；读回型 8 行新 AS_OC_F_READBACK（基线同取 pre=）；match 型状态映射（值域等价/freeze 布尔/signal 信号组）；pre=none→PARTIAL+outcome.pre_none（stats 键追加零位移，conf 零新增，出厂 OUTCOME_ENABLED=0 不变）；test_outcome 重写 post-execute 真实时序 mock（6/6 Tier-A 100%）+test_decisions pre= 容忍断言；qemu 真内核五门全绿（5.1=52/52、5.2=5 旋钮全 100%、5.3=10/10、5.5=52==52、5.7 回零；pre 诚实性33/33）——主会话独立复跑同绿；aistreamd 11 套、run_all 60、parquet parity ALL PASS",
     "T2 /act task 参数白名单补 sec.ws_label（K66 §1-T2 定位：缺名走[value,0] 装包，内核把 value 当 pid——F16 §2-3 data=7:0 实证）；test_api_units 123→126（正 1+负 2）；qemu E2E /act 决策行data=<pid>:<label>:… 且 pre= 在位；全量 aikapi 重放 271 步零 diff（语料无 ws_label /act 项；唯一红=desync_oversize 存量环境竞态wave3 在册同款）；io.priority 同构缺口登记移交（本棒严守拍板范围不动）",
     "波次 B 第一组（LLM/API 债+A7）：A7 io.priority /act 白名单同款一行修（130 checks；重放 271 步零 diff 语料核验）+B1 parallel_tool_calls env 接线（默认关请求体零变化门；真端点 1 次实证旗标末位发送服务端接受；Anthropic 面显式不支持有据；OutputLimit 续跑mock 全链+9 断言）+B3 direct_base_url 双层配置化+人话校验（deepseek 兜底改判形保留）+B4 Retry-After 全链透传（http 捕获通道纯增量/解析钳制/26+16 新例）+B2 多进程并发写库：压测暴露 3类真竞争（DDL 裸跑/单写语句/零字节首开）→ IMMEDIATE 化+开库重试环修复，三连全绿 integrity ok 零锁错（conc8≈6-8s 单写者 fsyncconvoy 如实入账；WAL 弃用理由在案）",
-    "波次 B 第二组（TUI/产品债）：B5 鼠标 API 桩转真（SGR 1006 主解析+X10 兼容回落=真降级链；推理折叠点击展开/收起+滚轮；TERM 无能力诚实 -1 零字节不假开；/help 如实 on/off；pty 字节级黄金含 leave前置关）+B6 kitty 联测可自动化部分（探测回复→push CSI > 1 u 仅开位 0/退出 pop 复位/CSI-u 增强键型两路解析；无回复零 push 不越权；手工清单 11 条移交用户侧如实不冒充）+B7 wcwidth 评估后小步实施（全表扩表否决有据；简化字素簇续接状态机：ZWJ/肤色/RI 对/VS16四类收敛；TUI_CELL_MAX 16→32 超长截断对齐优先；体积账 +6.4MB 最坏/+16KB 二进制）+B8 /rename 空题=AI 生成标题（私有 ctx worker+首条 user 消息 UTF-8 边界截断+sanitize 48B；busy 互斥/Esc 取消留步/失败诚实降级；新套 test_rename_ai 17 ok 四路径+mock_title_llm）。occ_tui 12→13 套全绿；真 API 0"
+    "波次 B 第二组（TUI/产品债）：B5 鼠标 API 桩转真（SGR 1006 主解析+X10 兼容回落=真降级链；推理折叠点击展开/收起+滚轮；TERM 无能力诚实 -1 零字节不假开；/help 如实 on/off；pty 字节级黄金含 leave前置关）+B6 kitty 联测可自动化部分（探测回复→push CSI > 1 u 仅开位 0/退出 pop 复位/CSI-u 增强键型两路解析；无回复零 push 不越权；手工清单 11 条移交用户侧如实不冒充）+B7 wcwidth 评估后小步实施（全表扩表否决有据；简化字素簇续接状态机：ZWJ/肤色/RI 对/VS16四类收敛；TUI_CELL_MAX 16→32 超长截断对齐优先；体积账 +6.4MB 最坏/+16KB 二进制）+B8 /rename 空题=AI 生成标题（私有 ctx worker+首条 user 消息 UTF-8 边界截断+sanitize 48B；busy 互斥/Esc 取消留步/失败诚实降级；新套 test_rename_ai 17 ok 四路径+mock_title_llm）。occ_tui 12→13 套全绿；真 API 0",
+    "CTOPO1: include 形态归一（波次 C 棒 1）：五模块 93 个 #include 行+3 Makefile 纯形态零语义——-g0 全 TU 111/111 逐位一致、-g 产物 82/132 逐位同+50/132 仅调试段差、0 真差分、双编基线完全可复现；行为门 occ/occ_tui13/p-smoke/差分62/run_all60 主会话亲跑；rel 残留 0；例外登记 -I../memory（unicode.h，棒 2 撤销）；预存红 test_retrieval 夹具陈旧裁定重录（棒 2 项 0）"
   ],
   "overlay_count": 168,
   "registry": {
@@ -56,7 +57,7 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65372370,
+    "bytes": 65371999,
     "regular_files": 1446,
     "source_files": 1446,
     "symlinks": 4,

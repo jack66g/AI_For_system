@@ -10,7 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../tui_keymap.h"
+#include "tui_keymap.h"
 
 static int n_ok, n_fail;
 

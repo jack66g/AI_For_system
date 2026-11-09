@@ -30,7 +30,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "occ_tools.h"			/* mangle/unmangle/snap_root/resolve */
+#include "occ_tools/occ_tools.h"			/* mangle/unmangle/snap_root/resolve */
 #include "store/store_json.h"
 
 static void set_err(char *err, size_t errlen, const char *fmt, ...)

@@ -16,8 +16,8 @@
  * 输出最后一行：checks=<N> mismatches=<M>；有失配 exit 1 并打印路径。
  * 读向量失败 / 字段缺失同样 exit 1 并说明。
  */
-#include "../../include/space/space.h"
-#include "../../include/store/store_json.h"
+#include "space/space.h"
+#include "store/store_json.h"
 
 #include <math.h>
 #include <stdarg.h>

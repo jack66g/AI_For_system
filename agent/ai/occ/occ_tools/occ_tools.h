@@ -39,8 +39,8 @@
 #include <stddef.h>
 #include <time.h>
 
-#include "../occ_llm/occ_llm.h"		/* occ_tool_def */
-#include "../occ_core/occ_session.h"	/* occ_db / OCC_ID_LEN */
+#include "occ_llm/occ_llm.h"		/* occ_tool_def */
+#include "occ_core/occ_session.h"	/* occ_db / OCC_ID_LEN */
 
 /* 工具名（LLM 面；与 tools.json 注册名一致） */
 #define OCC_T_READ  "read"

@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../occ_llm/occ_provider.h"
+#include "occ_llm/occ_provider.h"
 #include "occ_norm.h"
 
 static const char *loopback_hint(const char *url)

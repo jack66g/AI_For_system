@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../tui_overlay.h"
+#include "tui_overlay.h"
 
 static int n_ok, n_fail;
 

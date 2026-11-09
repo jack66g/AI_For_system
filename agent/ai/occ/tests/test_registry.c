@@ -15,7 +15,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include "occ_registry.h"
+#include "occ_llm/occ_registry.h"
 
 static int fails;
 

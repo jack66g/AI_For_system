@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../occ_llm/occ_llm.h"
+#include "occ_llm/occ_llm.h"
 #include "occ_norm.h"
 
 #define REPLAY_CHUNK 7		/* 固定小切片喂入：跨块切分路径同被台架覆盖 */

@@ -12,8 +12,8 @@
  *
  * 输出：SUMMARY ppr checks=<n> mismatches=<m>；有失配 exit 1。
  */
-#include "../../include/retrieval/ppr.h"
-#include "../../include/store/store_json.h"
+#include "retrieval/ppr.h"
+#include "store/store_json.h"
 
 #include <math.h>
 #include <stdio.h>

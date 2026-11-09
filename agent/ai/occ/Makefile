@@ -30,7 +30,8 @@
 CC      ?= cc
 CFLAGS  := -Wall -Wextra -Werror -std=c11 -O2 -g -MMD -MP
 
-INCLUDES := -Iocc_llm -Iocc_tools -I. -I.. -I../include -Itests
+# CTOPO1 棒1: 撤 -Iocc_llm/-Iocc_tools/-Itests（子目录头统一 子目录/名.h 形态经 -I.；occ_norm.h 等同目录裸名）
+INCLUDES := -I. -I.. -I../include
 
 OBJ_DIR  := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
@@ -205,7 +206,7 @@ $(REUSE_DIR)/as_snappy.o: ../aistreamd/as_snappy.c
 
 # ---- occ 主程序（T9a3+b1+c2+d1）：headless 一次对话 + 工具环 + 交互 TUI ----
 $(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -Iocc_tui -o $@ occ.c $(CORE_OBJS) \
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ occ.c $(CORE_OBJS) \
 		$(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) \
 		$(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
 
@@ -213,7 +214,7 @@ $(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_
 # +$(INCLUDES)：tui_data.c 需 store/store_json.h（-I../include）
 $(OBJ_DIR)/occ_tui/%.o: occ_tui/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INCLUDES) -D_DEFAULT_SOURCE -Iocc_tui -c -o $@ $<
+	$(CC) $(CFLAGS) $(INCLUDES) -D_DEFAULT_SOURCE -c -o $@ $<
 
 # 纯协议链接（无 http_client/mbedtls；aik_json 来自 STORE_LIB）
 tests/test_provider: tests/test_provider.c $(LLM_OBJS) $(STORE_LIB)
@@ -332,7 +333,7 @@ tests/test_replay: tests/test_replay.c $(OBJ_DIR)/occ_core/replay.o \
 # tui_data（T9c3）：tools.json/trace/lease 读取器夹具对拍（aik_json only）
 tests/test_tui_data: tests/test_tui_data.c $(OBJ_DIR)/occ_tui/tui_data.o \
 		     $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -Iocc_tui -o $@ tests/test_tui_data.c \
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_tui_data.c \
 		$(OBJ_DIR)/occ_tui/tui_data.o $(STORE_LIB) $(LDLIBS)
 
 $(STORE_LIB) $(SQLITE_LIB):

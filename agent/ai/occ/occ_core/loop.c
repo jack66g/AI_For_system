@@ -35,7 +35,7 @@
 
 #include "occ_revert.h"
 #include "occ_sysprompt.h"
-#include "occ_tools.h"
+#include "occ_tools/occ_tools.h"
 
 /* T9d 外部绑定：SME 注入/写回 + ac transcript/轮询/换窗（§8/§9） */
 #include "occ_ac.h"

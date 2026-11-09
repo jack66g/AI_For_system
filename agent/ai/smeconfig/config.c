@@ -15,7 +15,7 @@
  *
  * 本文件零第三方依赖，C11，构建串行（见 Makefile）。
  */
-#include "../include/smeconfig/config.h"
+#include "smeconfig/config.h"
 
 #include "config_default.h"
 

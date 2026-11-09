@@ -23,7 +23,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "../include/smeconfig/config_items.h"
+#include "smeconfig/config_items.h"
 
 #include "config_items_data.h"
 

@@ -13,7 +13,7 @@
 #ifndef _OCC_TOKENS_H
 #define _OCC_TOKENS_H
 
-#include "occ_llm.h"
+#include "occ_llm/occ_llm.h"
 
 typedef struct occ_tokens {
 	long long input;

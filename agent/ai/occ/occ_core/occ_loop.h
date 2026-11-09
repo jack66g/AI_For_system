@@ -34,8 +34,8 @@
 
 #include <stdio.h>
 
-#include "occ_llm.h"
-#include "occ_provider.h"
+#include "occ_llm/occ_llm.h"
+#include "occ_llm/occ_provider.h"
 #include "occ_session.h"
 #include "occ_tokens.h"
 

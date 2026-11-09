@@ -8,9 +8,9 @@
  *   - 混合 run（如 "abc中文123"）也按"长度>1 且含 CJK"走单字 + 二元组，
  *     所以 bigram 会跨 ASCII/CJK 边界（"c中"、"文1"）。
  */
-#include "../include/retrieval/text.h"
+#include "retrieval/text.h"
 
-#include "../memory/unicode.h"
+#include "unicode.h"
 
 #include <stdio.h>
 #include <stdlib.h>
