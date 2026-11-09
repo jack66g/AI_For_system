@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-09T12:20:31+08:00",
+  "created": "2026-11-09T12:20:33+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -23,7 +23,8 @@
     "W153: ISO alpha.15.3 三件套——audit_capabilities 校准（7 项 n/a by-design 注出处 FS-06/07/09/10 MEM-07 DT-06 TIME-02；分母 90 口径注明）+ aistreamd.conf T8 出厂默认开（PARQUET_ENABLED=1）；ISO d187…→15.3 md5 17b2588d27bd8c59cb8e6d5dc68d64c7 双份；四阶段 6/6+12/12+41/41+87/87 全绿（verdict 144 True/0 False）；run_all 59/59 双跑互证；soak24 25.87h PASS（稳态 RSS +0.16%、零 fatal、日配额双触顶）；smartmontools 补件 DISK-03 真转绿",
     "T9 产品面（c2+c3+d1）：交互主界面（视图五件+occ.c 入口+sink 抽象，headless 逐字节铁门 test_sink 对拍）+ overlays（/models 233 厂商过滤切换、密钥向导四步 1-token 实测、/tools 230→236 期五命令真现）+ token §3 公式（半数进位 69.5→70）+ theme.ini/keymap 数据化 + SME 注入/写回/20 配额/✉sme:off + ac transcript//check/换窗四证/occ_ac_compact_now + parquet footer 读回 + 8762 改号（aikernel-api 8761 未动）+ autocondensed 缺省启动 UAF 修复；occ_tui 12 套 649 断言、occ 全套 ALL GREEN、差分 62/62、run_all 59/59、真调用 3+2 预算内（主会话亲跑）",
     "T9e 出厂面：aikernel-shell/ai 出厂移除（备份 factory-pre-alpha16）+ .profile 默认入口 occ（tty 分流、SSH 保持 bash）+ 注册表 230→236 三件套五份同步（seed 247 不变、names_sha 3c6cb4bb、risk R101/W157/W277）+ ac 三件 strip 进 /usr/local/sbin（unit --port 8762+enable+hook+factory_gate 入 share）+ run_all 口径 59−2+2=59 + ISO alpha.16.0 md5 2156f635（四阶段 6/12/40/95 全 True，计数勘误在案；真 API 0）",
-    "T9tail：/help 与 notice 占位文案转真——/compact//shell 并入 (live) 组+两行真实语义（与 occ.c 实现逐条对齐）；view_pty 23→27（场景 I 真 pty 全链断言新文案+占位串字节级负向）；`归 T9` 全树零残留；occ 全套/occ_tui 12 套 653 断言/p-smoke/差分 62/62/run_all 59/59 主会话亲跑"
+    "T9tail：/help 与 notice 占位文案转真——/compact//shell 并入 (live) 组+两行真实语义（与 occ.c 实现逐条对齐）；view_pty 23→27（场景 I 真 pty 全链断言新文案+占位串字节级负向）；`归 T9` 全树零残留；occ 全套/occ_tui 12 套 653 断言/p-smoke/差分 62/62/run_all 59/59 主会话亲跑",
+    "I-10 决策闭环第 4 步回填器：as_outcome.c/h（28 旋钮指标全量+意图分类 SUCCESS/WORSE/PARTIAL+match 迁移+有界 pending 队+/sys/kernel/ai/policy/outcome 写口+审计行+合成事件走 SME/parquet 管道）；test_outcome.c 1445 行验收门（Tier-A 6 旋钮 100%、对照 PARTIAL 10/10、delta 48、降级三型）；C3 默认关（OUTCOME_ENABLED=0 出厂实证）；qemu 真内核轮待 K3C §9-1"
   ],
   "overlay_count": 168,
   "registry": {
@@ -45,11 +46,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 64922567,
-    "regular_files": 1424,
-    "source_files": 1424,
+    "bytes": 65023287,
+    "regular_files": 1427,
+    "source_files": 1427,
     "symlinks": 4,
-    "tracked_files": 1428
+    "tracked_files": 1431
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
