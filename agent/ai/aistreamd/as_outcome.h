@@ -9,9 +9,16 @@
  *      decision_id/executed/param 原样透传）。param 空（域广播）与
  *      executed=0 不回填（§4.4 skip_broadcast/skip_noexec）。
  *   2) 反查面：/proc/ai/decisions 尾条（最新在前）按 decision_id 反查
- *      domain/pid/data（EVENT 载荷不带 domain/pid——设计 §7.9）。
+ *      domain/pid/data/pre（EVENT 载荷不带 domain/pid——设计 §7.9）。
  *      扫描截断在 OUTCOME_DECISIONS_SCAN_MAX 行（557KB 全量读成本，
  *      设计 §7.6），截断漏查 → notfound 计数（如实）。
+ *      **U66/A1（F16 §2-1 根因修复）：决策前值基线改从行尾 `pre=`
+ *      字段取**（K66-REPORT §5 契约；内核 #66 起追加）。F16 实测
+ *      arm 时点读 /proc/ai/control current= 已是注入值（内核 execute
+ *      先于 arm）→ before==injected → noop-PARTIAL（8×sched.nice 全
+ *      落此路）；match 基线同病（post-execute 读回 → base==now →
+ *      PARTIAL）。pre= 生命周期随快照环（64 决策，rollback 即消费）
+ *      ——消费方应尽早读（arm 时反查即取，本模块照做）。
  *   3) 指标面：§3 表 C 化静态表 as_oc_rows（28 旋钮全量收录）。
  *      全部走既有只读面：/proc/pressure、/proc/vmstat、/proc/net/netstat、
  *      /sys/kernel/ai/stats/<键>、/proc/ai/control、/proc/<pid>/<file>、
@@ -21,11 +28,22 @@
  *      回填器只写 {SUCCESS=1, PARTIAL=2, WORSE=4}——FAILED(3) 保留给
  *      内核执行失败口径（arm 已滤 executed=0），避免「测量失败」被
  *      误读为「动作失败」（§4.3 分类语义约定）。
- *   5) 分类（§4.3）：按「注入前值 vs 注入值」推意图方向；delta 与意图
- *      同向且出噪声带 → SUCCESS；反向出带 → WORSE；带内 → PARTIAL；
- *      指标源读失败/需场景无负载 → PARTIAL + delta=0 + meas_fail。
- *      match 类（确定性读回旋钮）按 状态迁移 判：达成→SUCCESS、
- *      回退→WORSE、未变/无期望→PARTIAL（无操作对照天然 PARTIAL）。
+ *   5) 分类（§4.3，U66 pre= 基线口径）：方向一致 =（after−pre）与
+ *      （requested−pre）同向且出噪声带 → SUCCESS；反向出带 → WORSE；
+ *      带内 → PARTIAL；指标源读失败 → PARTIAL + delta=0 + meas_fail。
+ *      数值类意图 before=decisions 行 pre=（TASK 旋钮 pre 为决策前
+ *      per-task 真值——有 read 回调者；无回调者为全局表值，K66 §5
+ *      语义，见 AS_OC_F_READBACK 注）。读回型行（AS_OC_F_READBACK）
+ *      主指标基线也取 pre（after=窗口末读回，delta=读回−pre——execute
+ *      即落地型指标在 arm 时点已=注入值，T0 快照结构性恒零）。
+ *      match 类基线 base_ok = pre 状态映射（as_oc_match_base）：期望态
+ *      在决策前已成立 ⇔ pre 与 injected 映射到同一状态 → 无迁移 →
+ *      PARTIAL（无操作对照天然 PARTIAL）。
+ *      `pre=none`（恒等快路径未应用/无快照/rollback 已消费/环淘汰/
+ *      #65 前旧行）→ PARTIAL + pre_none 计数（I10 §4.4 降级纪律；
+ *      恒等决策 no-op→PARTIAL 本就是诚实判定，保留；消费者不可区分
+ *      none 的成因，统一按「基线不可得」如实降级——非 meas_fail，
+ *      指标源未失败）。
  *   6) metric_delta 单位逐行见 as_oc_rows.unit（内核不解释单位——
  *      ai_policy.h 注释，文档义务在本侧，设计 §1.1）。
  *   7) SME/Parquet 衔接：回填结果经 as_event_outcome 合成事件走既有
@@ -114,6 +132,19 @@ enum as_oc_kind {
 						 * 变化也如实 PARTIAL（§3
 						 * oom_score 行「无场景时只回
 						 * 读回=PARTIAL」） */
+#define AS_OC_F_READBACK	(1 << 2)	/* U66：读回型指标——主指标即
+						 * 旋钮自身读回（control
+						 * current/bdi/gauge/per-task
+						 * oom_adj/limits），execute
+						 * 即落地 → T0=arm 快照恒等
+						 * 注入值，delta 结构性=0。
+						 * 基线改取 decisions pre=
+						 * （after−pre 口径）。 */
+						 /* 注：proc.rlimit 无 read
+						  * 回调 → pre 为全局表值
+						  * （K66 §5 fallback 语义），
+						  * 基线可能失真——保守方向，
+						  * 详见 U66-REPORT §1 */
 
 /* pending 队硬上限（conf OUTCOME_MAX_PENDING 的解析上界） */
 #define AS_OC_MAX_PENDING_HARD	4096
@@ -148,6 +179,12 @@ struct as_oc_decision {
 	unsigned domain;
 	unsigned executed;
 	unsigned long long outcome_ts;	/* 自校验用：>0 ⇔ 已被回填 */
+	/* U66/A1：行尾 pre= 字段（K66-REPORT §5；#65 及之前无此字段）。
+	 * pre_n=0 ⇔ 无快照（none）/字段缺席/#65 旧行/解析失败（容忍：
+	 * 23 字段主解析已成功，pre 不构成坏行）。多参（广播）按 handler
+	 * 保存序 1..8 项；本模块只处理 v2 定向（param 非空）→ 取 pre[0]。 */
+	long long pre[8];
+	int pre_n;
 };
 
 /*
@@ -164,22 +201,30 @@ int as_oc_snapshot(const char *root, const struct as_oc_row *row, int32_t pid,
 		   unsigned long long injected, const unsigned long long data[8],
 		   long long out[2]);
 
-/* intent 计算（注入前值 vs 注入值；纯函数）：-1/0/+1 */
+/* intent 计算（注入前值 vs 注入值；纯函数）：-1/0/+1
+ * U66：before=decisions 行 pre= 值（决策前真值），非 control current */
 int as_oc_intent(long long injected, long long before);
 
-/* ---- 分类（纯函数；§4.3——单测冻结口径） ---- */
+/* ---- 分类（纯函数；§4.3——单测冻结口径；U66 pre= 基线版） ---- */
 struct as_oc_class {
 	int outcome;		/* AS_OC_SUCCESS/PARTIAL/WORSE */
 	long long delta;	/* 写入 metric_delta（量纲=row->unit） */
 	int meas_fail;		/* 指标源读失败（PARTIAL+delta=0 的理由） */
 	int noop;		/* 注入值==注入前值（无操作对照→PARTIAL） */
 	int no_expect;		/* match 类无期望态（qdisc=0 回滚/未知信号） */
+	int pre_none;		/* U66：pre= 基线不可得（none/缺席/环淘汰/
+				 * rollback 已消费）→ PARTIAL（非 meas_fail
+				 * ——指标源未失败，基线不可得如实降级） */
 };
 
 /*
  * as_oc_classify - 数值类分类。
- *   injected/before：意图；has_before=0 → meas_fail（无法推意图，如实）。
- *   base/now：主指标 T0/窗口末快照；window_sec 用于速率类换算。
+ *   injected/before：意图（U66：before=decisions pre= 值）；
+ *   has_before=0（pre=none/#65 旧行）→ PARTIAL+pre_none（delta 照算
+ *   ——base/now 可得时 delta 仍有意义；读回型行 base 即不可得由
+ *   调用侧走 meas/pre_none 分支）。
+ *   base/now：主指标 T0/窗口末快照（读回型行 base=pre——调用侧职责）；
+ *   window_sec 用于速率类换算。
  */
 struct as_oc_class as_oc_classify_num(const struct as_oc_row *row,
 				      long long injected, long long before,
@@ -187,15 +232,36 @@ struct as_oc_class as_oc_classify_num(const struct as_oc_row *row,
 				      long long now, int window_sec);
 
 /*
+ * as_oc_match_base - match 类决策前基线（U66 核心新增；纯函数）：
+ * 由 pre 值与注入值的状态映射推「期望态在决策前是否已成立」。
+ *   affinity/qdisc/ws_label：pre==injected（值域即状态域；
+ *     ws_label/signal 无 read 回调 → pre 为全局表值——K66 §5
+ *     fallback 语义，同值连发保守判「已成立」→PARTIAL，见报告 §1）
+ *   freeze：((pre!=0)==(injected!=0))（per-task 读回真值）
+ *   signal：信号组映射（19→stop；18→run；9/15→dead；他值组 0）
+ *     pre 与 injected 同组 → 已成立（保守）；
+ * 返回 0/1（base_ok）。
+ */
+int as_oc_match_base(enum as_oc_kind kind, long long injected,
+		     long long pre);
+
+/* proc.signal 信号→状态组（19→1 stop；18→2 run；9/15→3 dead；他→0） */
+int as_oc_sig_group(long long sig);
+
+/*
  * as_oc_classify_match - match 类分类（状态迁移）：
- *   base_ok/now_ok=期望态在 T0/窗口末是否成立；
+ *   base_known=0（pre=none/#65 旧行）→ PARTIAL+pre_none（迁移不可
+ *   判；freeze 的 aux delta 仍报——CPU 累计 tick 与基线无关）。
+ *   base_ok/now_ok=期望态在决策前/窗口末是否成立（U66：base_ok 由
+ *   as_oc_match_base(pre) 出，非 arm 时点读回）；
  *   aux_base/aux_now=辅助量（freeze 的 CPU 累计 tick→delta ms）。
  *   迁移：未成立→成立=SUCCESS；成立→未成立=WORSE；其余=PARTIAL
  *   （含 无操作：已成立→仍成立——对照注入天然 PARTIAL，§5.3）。
  *   no_expect（无期望态）=PARTIAL+delta=0。
  */
 struct as_oc_class as_oc_classify_match(const struct as_oc_row *row,
-					int no_expect, int base_ok, int now_ok,
+					int no_expect, int base_known,
+					int base_ok, int now_ok,
 					long long aux_base, long long aux_now);
 
 /* outcome 枚举名（journal/合成事件用；静态字面量） */
@@ -219,10 +285,14 @@ struct as_oc_job {
 	int32_t pid;		/* task 旋钮；全局 0 */
 	unsigned long long data[8];	/* decisions 反查原样（rlimit data[2] 等） */
 	long long injected;		/* data[1]（task）/data[0]（全局） */
-	long long before;		/* /proc/ai/control current（意图计算） */
-	int has_before;
-	long long base[2];	/* T0 快照（as_oc_snapshot 产物） */
-	int has_base;
+	long long before;		/* U66：decisions pre=[0]（意图计算；
+					 * TASK 真值或全局表值 fallback） */
+	int has_before;		/* pre_n>0 */
+	long long base[2];	/* 主指标 T0（环境型=arm 快照；读回型=
+				 * pre[0]——AS_OC_F_READBACK；match 型
+				 * base[0]=as_oc_match_base 产物，
+				 * base[1]=arm 快照 aux） */
+	int has_base;		/* 基线可得（读回/match 型=has_before） */
 	long long arm_mono_ms;
 	long long due_mono_ms;
 };

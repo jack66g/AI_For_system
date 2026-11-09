@@ -157,6 +157,7 @@ void as_stats_render(const struct as_stats *st, int ring_used,
 	fprintf(out, "outcome.meas_fail=%lld\n", st->oc.meas_fail);
 	fprintf(out, "outcome.dropped=%lld\n", st->oc.dropped);
 	fprintf(out, "outcome.noop=%lld\n", st->oc.noop);
+	fprintf(out, "outcome.pre_none=%lld\n", st->oc.pre_none);
 	fprintf(out, "outcome.verify_fail=%lld\n", st->oc.verify_fail);
 	/* T8 遗留接线：decisions 消费（追加段，旧键零位移） */
 	fprintf(out, "decisions.enabled=%d\n", st->dec.enabled);

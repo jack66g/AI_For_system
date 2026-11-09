@@ -58,7 +58,8 @@ const struct as_oc_row as_oc_rows[] = {
 	{ "sched.affinity", OC_K_MATCH_AFFINITY, NULL, 0, 0, 1,
 	  "match(-1..1)", AS_OC_F_TASK },
 	{ "sched.oom_score", OC_K_TASK_OOMADJ, NULL, 0, AS_OC_DIR_UP, 1,
-	  "oom_score_adj", AS_OC_F_TASK | AS_OC_F_SCENARIO },
+	  "oom_score_adj", AS_OC_F_TASK | AS_OC_F_SCENARIO |
+	  AS_OC_F_READBACK },
 	{ "sched.timeslice", OC_K_PSI_CPU, NULL, 1, AS_OC_DIR_INTENT, 200,
 	  "centi-percent-avg10", 0 },
 	{ "ai.decision_sched", OC_K_DECISIONS_TOTAL, NULL, 0, AS_OC_DIR_UP, 1,
@@ -67,20 +68,20 @@ const struct as_oc_row as_oc_rows[] = {
 	{ "mm.swappiness", OC_K_PSI_MEM, NULL, 1, AS_OC_DIR_UP, 200,
 	  "centi-percent-avg10", 0 },
 	{ "mm.readahead", OC_K_BDI_RA_PAGES, NULL, 0, AS_OC_DIR_UP, 1,
-	  "KB(ra_pages)", 0 },
+	  "KB(ra_pages)", AS_OC_F_READBACK },
 	{ "mm.thp", OC_K_VMSTAT_RATE, "thp_fault_alloc,thp_cow_fault", 1,
 	  AS_OC_DIR_UP, 1, "events/s", 0 },
 	{ "mm.reclaim_prio", OC_K_AI_ACT_GAUGE, "vfs_cache_pressure", 1,
-	  AS_OC_DIR_UP, 1, "vfs_cache_pressure", 0 },
+	  AS_OC_DIR_UP, 1, "vfs_cache_pressure", AS_OC_F_READBACK },
 	{ "ai.decision_oom", OC_K_DECISIONS_TOTAL, NULL, 0, AS_OC_DIR_UP, 1,
 	  "decisions", 0 },
 	{ "ai.decision_mm", OC_K_DECISIONS_TOTAL, NULL, 0, AS_OC_DIR_UP, 1,
 	  "decisions", 0 },
 	/* ---- IO（§3.3） ---- */
 	{ "io.priority", OC_K_CONTROL_CURRENT, NULL, 0, AS_OC_DIR_UP, 1,
-	  "ioprio", AS_OC_F_TASK },
+	  "ioprio", AS_OC_F_TASK | AS_OC_F_READBACK },
 	{ "io.bandwidth", OC_K_BDI_MAX_RATIO, NULL, 1, AS_OC_DIR_UP, 1,
-	  "percent(max_ratio)", 0 },
+	  "percent(max_ratio)", AS_OC_F_READBACK },
 	/* ---- NET（§3.4） ---- */
 	{ "net.cwnd", OC_K_TCPEXT_RATE, "TcpRetransSegs", 0,
 	  AS_OC_DIR_INTENT, 1, "segs/s", 0 },
@@ -92,10 +93,10 @@ const struct as_oc_row as_oc_rows[] = {
 	  AS_OC_DIR_UP, 1, "events/s", 0 },
 	/* ---- SECURITY（§3.5） ---- */
 	{ "sec.lsm_override", OC_K_AI_ACT_GAUGE, "lsm_enforce", 0,
-	  AS_OC_DIR_UP, 0, "lsm_enforce", 0 },
+	  AS_OC_DIR_UP, 0, "lsm_enforce", AS_OC_F_READBACK },
 	{ "sec.seccomp", OC_K_RESERVED, NULL, 0, 0, 0, "-", 0 },
 	{ "sec.audit", OC_K_AI_ACT_GAUGE, "audit_capture", 0,
-	  AS_OC_DIR_UP, 0, "audit_capture", 0 },
+	  AS_OC_DIR_UP, 0, "audit_capture", AS_OC_F_READBACK },
 	{ "sec.ws_label", OC_K_MATCH_WS_LABEL, NULL, 0, 0, 1,
 	  "match(-1..1)", AS_OC_F_TASK },
 	{ "ai.decision_inject", OC_K_DECISIONS_TOTAL, NULL, 0,
@@ -113,7 +114,7 @@ const struct as_oc_row as_oc_rows[] = {
 	{ "proc.freeze", OC_K_MATCH_FREEZE, NULL, 0, 0, 1,
 	  "cpu-ms", AS_OC_F_TASK },
 	{ "proc.rlimit", OC_K_TASK_LIMITS_SOFT, NULL, 0, AS_OC_DIR_UP, 1,
-	  "soft-limit", AS_OC_F_TASK },
+	  "soft-limit", AS_OC_F_TASK | AS_OC_F_READBACK },
 };
 
 const size_t as_oc_rows_n = sizeof(as_oc_rows) / sizeof(as_oc_rows[0]);
@@ -828,8 +829,13 @@ struct as_oc_class as_oc_classify_num(const struct as_oc_row *row,
 	c.delta = 0;
 
 	if (!has_before) {
-		/* 意图源（control current）读失败——如实 PARTIAL+meas_fail */
-		c.meas_fail = 1;
+		/* U66：意图基线 pre= 不可得（none/#65 旧行/环淘汰）——
+		 * 如实 PARTIAL+pre_none（非 meas_fail：指标源未失败；
+		 * delta 照算——base/now 可得时仍有意义）。恒等决策
+		 * no-op→PARTIAL 的诚实判定语义保留（成因不可分辨，
+		 * 统一按基线不可得降级，报告 §1 有述） */
+		c.pre_none = 1;
+		c.delta = oc_delta_of(row, base, now, window_sec);
 		return c;
 	}
 	delta = oc_delta_of(row, base, now, window_sec);
@@ -853,8 +859,50 @@ struct as_oc_class as_oc_classify_num(const struct as_oc_row *row,
 	return c;
 }
 
+int as_oc_sig_group(long long sig)
+{
+	switch (sig) {
+	case 19:
+		return 1;	/* stop（state T） */
+	case 18:
+		return 2;	/* cont（非 T） */
+	case 9:
+	case 15:
+		return 3;	/* dead（读失败即达成，rd_signal_match） */
+	default:
+		return 0;	/* 无组（未知信号→no_expect 路） */
+	}
+}
+
+int as_oc_match_base(enum as_oc_kind kind, long long injected, long long pre)
+{
+	switch (kind) {
+	case OC_K_MATCH_AFFINITY:
+	case OC_K_MATCH_QDISC:
+	case OC_K_MATCH_WS_LABEL:
+		/* 值域即状态域：pre==injected ⇔ 期望态决策前已成立。
+		 * ws_label 无 read 回调 → pre 为全局表值（K66 §5
+		 * fallback）：异 pid 同值连发保守判已成立→PARTIAL
+		 * （宁漏报 SUCCESS 不虚报——报告 §1） */
+		return pre == injected;
+	case OC_K_MATCH_SIGNAL: {
+		int gp = as_oc_sig_group(pre);
+
+		/* pre（全局表值=上次信号号）与 injected 同状态组 ⇔
+		 * 期望态大概率已成立（保守）；异组/无组=未成立 */
+		return gp != 0 && gp == as_oc_sig_group(injected);
+	}
+	case OC_K_MATCH_FREEZE:
+		/* pre=决策前 per-task 冻结位（read 回调真值） */
+		return (pre != 0) == (injected != 0);
+	default:
+		return 0;
+	}
+}
+
 struct as_oc_class as_oc_classify_match(const struct as_oc_row *row,
-					int no_expect, int base_ok, int now_ok,
+					int no_expect, int base_known,
+					int base_ok, int now_ok,
 					long long aux_base, long long aux_now)
 {
 	struct as_oc_class c;
@@ -867,8 +915,15 @@ struct as_oc_class as_oc_classify_match(const struct as_oc_row *row,
 		return c;
 	}
 	if (row->kind == OC_K_MATCH_FREEZE)
+		/* aux（CPU 累计 tick）与基线判定无关，恒可报 */
 		c.delta = rdiv((aux_now - aux_base) * 1000, clk_tck());
-	else
+	if (!base_known) {
+		/* U66：pre= 不可得 → 迁移不可判——如实 PARTIAL+pre_none
+		 * （freeze 的 aux delta 仍报） */
+		c.pre_none = 1;
+		return c;
+	}
+	if (row->kind != OC_K_MATCH_FREEZE)
 		c.delta = (long long)now_ok - (long long)base_ok;
 	if (now_ok && !base_ok)
 		c.outcome = AS_OC_SUCCESS;
@@ -892,8 +947,53 @@ const char *as_oc_outcome_name(int outcome)
 /* ====================================================================
  * /proc/ai/decisions 反查（ai_proc_dec_record 格式逐字段对齐：
  * id/trig_ts/trig_evid(0x%04x)/dec_ts/type/data=8 段冒号/exec_ts/
- * outcome_ts/outcome/delta/ver/conf/domain/src/executed/safety_clamped）
+ * outcome_ts/outcome/delta/ver/conf/domain/src/executed/safety_clamped
+ * [+U66/#66 行尾 append-only pre=<…>——K66-REPORT §5 契约]）
  * ==================================================================== */
+
+/*
+ * oc_parse_pre - 行尾 pre= 字段解析（K66 §5 精确语法，容忍降级）：
+ *   none → n=0；<s64>[:<s64>…]（1..8 项，handler 保存序）→ 逐项填；
+ *   字段缺席（#65 旧行）/畸形 → n=0。主 23 字段已解析成功 → 本函数
+ *   任何失败都不构成坏行（旧解析器兼容口径：行尾未知字段忽略）。
+ */
+static void oc_parse_pre(char *line, long long pre[8], int *n)
+{
+	char *p, *end;
+	int k = 0;
+
+	*n = 0;
+	p = strstr(line, " pre=");
+	if (!p)
+		return;			/* #65 及之前：无此字段 */
+	p += 5;
+	if (strncmp(p, "none", 4) == 0 &&
+	    (p[4] == '\0' || p[4] == '\n' || p[4] == '\r' || p[4] == ' '))
+		return;			/* 无快照：恒等快路径/淘汰/已消费 */
+	while (k < 8) {
+		long long v;
+		char sep;
+
+		errno = 0;
+		v = strtoll(p, &end, 10);
+		if (end == p || errno != 0)
+			return;		/* 畸形 → 按无基线（不坏行） */
+		pre[k++] = v;
+		sep = *end;
+		if (sep == ':') {
+			p = end + 1;
+			continue;
+		}
+		if (sep == '\0' || sep == '\n' || sep == '\r' ||
+		    sep == ' ') {
+			*n = k;		/* 正常收尾 */
+			return;
+		}
+		return;			/* 畸形尾随 → 按无基线 */
+	}
+	*n = k;				/* 8 项满（n=8 于容量截断，K66 §5） */
+}
+
 int as_oc_scan_decisions(const char *path, unsigned long long id, int scan_max,
 			 struct as_oc_decision *out)
 {
@@ -932,6 +1032,9 @@ int as_oc_scan_decisions(const char *path, unsigned long long id, int scan_max,
 			out->domain = dom;
 			out->executed = exec;
 			out->outcome_ts = ots;
+			/* U66：行尾 pre=（早读——快照环 64 决策/rollback
+			 * 即消费，K66 §5「消费方应尽早读」；arm 反查即取） */
+			oc_parse_pre(line, out->pre, &out->pre_n);
 		}
 		fclose(f);
 		return 0;
@@ -1137,12 +1240,46 @@ void as_outcome_tap(struct as_outcome *oc, const struct as_event *ev)
 	for (int i = 0; i < 8; i++)
 		job.data[i] = dec.data[i];
 
-	/* 意图基线：control current（数值类必需；match 类不用但照记可测） */
-	job.has_before = rd_control_current(oc->root, param, &job.before) == 0;
-	/* 指标基线快照（失败仍入队：fill 侧如实 PARTIAL+meas_fail，§4.4） */
-	job.has_base = as_oc_snapshot(oc->root, row, job.pid,
-				      (unsigned long long)job.injected, job.data,
-				      job.base) == 0;
+	/* U66/A1：意图基线改取 decisions 行 pre=（F16 §2-1 根因——
+	 * arm 时点 control current 已是注入值，before==injected 恒
+	 * noop-PARTIAL；pre= 为决策前真值，K66-REPORT §5 契约）。
+	 * pre=none/#65 旧行 → has_before=0 → fill 侧 PARTIAL+pre_none。 */
+	job.has_before = dec.pre_n > 0;
+	job.before = job.has_before ? dec.pre[0] : 0;
+
+	/* 指标基线（U66 按行类分道）：
+	 *  - 环境型（PSI/速率/延迟等）：arm 时点快照（execute 对其无
+	 *    即时影响，T0=窗口起点）——失败仍入队：fill 侧如实 PARTIAL
+	 *    +meas_fail，§4.4；
+	 *  - 读回型（AS_OC_F_READBACK）：execute 即落地 → arm 快照恒等
+	 *    注入值（结构性 delta=0）——基线取 pre（after−pre 口径），
+	 *    has_base=has_before；
+	 *  - match 型：base[0]=as_oc_match_base(pre)（pre 状态映射），
+	 *    has_base=has_before；aux（freeze CPU tick）取 arm 快照
+	 *    （累计计数器与 execute 无关，仍可用）。 */
+	{
+		long long sb[2] = { 0, 0 };
+		int has_sb = as_oc_snapshot(oc->root, row, job.pid,
+					    (unsigned long long)job.injected,
+					    job.data, sb) == 0;
+
+		if (row->kind >= OC_K_MATCH_AFFINITY &&
+		    row->kind <= OC_K_MATCH_FREEZE) {
+			job.has_base = job.has_before;
+			job.base[0] = job.has_before ?
+				as_oc_match_base(row->kind, job.injected,
+						 dec.pre[0]) : 0;
+			job.base[1] = sb[1];	/* aux 恒记（freeze delta） */
+		} else if (row->flags & AS_OC_F_READBACK) {
+			job.has_base = job.has_before;
+			job.base[0] = job.before;
+			job.base[1] = sb[1];
+		} else {
+			job.has_base = has_sb;
+			job.base[0] = sb[0];
+			job.base[1] = sb[1];
+		}
+	}
 	now = as_now_mono_ms();
 	job.arm_mono_ms = now;
 	job.due_mono_ms = now + (row->win_long ?
@@ -1152,9 +1289,10 @@ void as_outcome_tap(struct as_outcome *oc, const struct as_event *ev)
 	oc->stats->oc.armed++;
 	oc->armed_any = 1;
 	as_log_debug("outcome armed: id=%llu knob=%s pid=%d inj=%lld "
-		     "before=%lld(%d) base=%lld/%lld",
+		     "pre=%lld(%d) base=%lld/%lld(%d)",
 		     id, param, job.pid, job.injected, job.before,
-		     job.has_before, job.base[0], job.base[1]);
+		     job.has_before, job.base[0], job.base[1],
+		     job.has_base);
 }
 
 /* 写口："<id>,<outcome>,<delta>"（0200 root；-2=ENOENT→notfound） */
@@ -1213,11 +1351,11 @@ void as_outcome_tick(struct as_outcome *oc, long long now_mono_ms)
 
 		/* 窗口末快照 + 分类 */
 		has_now = as_oc_snapshot(oc->root, row, job.pid,
-					 (unsigned long long)job.injected, job.data,
-					 nowv) == 0;
-		if (!job.has_base || !has_now) {
-			/* 指标源读失败（pid 消亡/无内核面）→ PARTIAL+delta=0
-			 * +meas_fail（不装 FAILED，§4.4） */
+						 (unsigned long long)job.injected, job.data,
+						 nowv) == 0;
+		if (!has_now) {
+			/* 窗口末指标源读失败（pid 消亡/无内核面）→ PARTIAL
+			 * +delta=0+meas_fail（不装 FAILED，§4.4） */
 			memset(&cls, 0, sizeof(cls));
 			cls.outcome = AS_OC_PARTIAL;
 			cls.meas_fail = 1;
@@ -1226,9 +1364,21 @@ void as_outcome_tick(struct as_outcome *oc, long long now_mono_ms)
 			int no_expect = (nowv[0] < 0);
 
 			cls = as_oc_classify_match(row, no_expect,
+						   job.has_base,
 						   (int)job.base[0],
 						   (int)nowv[0], job.base[1],
 						   nowv[1]);
+		} else if (!job.has_base && (row->flags & AS_OC_F_READBACK)) {
+			/* U66：读回型基线即 pre → pre=none ⇒ delta 不可算
+			 * （after 可得、pre 缺席）→ PARTIAL+pre_none */
+			memset(&cls, 0, sizeof(cls));
+			cls.outcome = AS_OC_PARTIAL;
+			cls.pre_none = 1;
+		} else if (!job.has_base) {
+			/* 环境型 arm 快照失败 → PARTIAL+delta=0+meas_fail */
+			memset(&cls, 0, sizeof(cls));
+			cls.outcome = AS_OC_PARTIAL;
+			cls.meas_fail = 1;
 		} else {
 			cls = as_oc_classify_num(row, job.injected, job.before,
 						 job.has_before, job.base[0],
@@ -1238,6 +1388,8 @@ void as_outcome_tick(struct as_outcome *oc, long long now_mono_ms)
 			oc->stats->oc.meas_fail++;
 		if (cls.noop)
 			oc->stats->oc.noop++;
+		if (cls.pre_none)
+			oc->stats->oc.pre_none++;
 
 		/* 写口（每 job 恰一次——ENOENT/write_fail 不重试，§4.4） */
 		wrc = oc_write_outcome(oc, job.decision_id, cls.outcome,
@@ -1283,11 +1435,12 @@ void as_outcome_tick(struct as_outcome *oc, long long now_mono_ms)
 		}
 
 		/* journal 审计行（量纲=表行 unit）+ 合成事件（SME/parquet） */
-		as_log("outcome: id=%llu knob=%s outcome=%s delta=%lld %s%s%s",
+		as_log("outcome: id=%llu knob=%s outcome=%s delta=%lld %s%s%s%s",
 		       job.decision_id, job.param,
 		       as_oc_outcome_name(cls.outcome), cls.delta,
 		       row->unit, cls.meas_fail ? " meas_fail" : "",
-		       cls.noop ? " noop" : "");
+		       cls.noop ? " noop" : "",
+		       cls.pre_none ? " pre_none" : "");
 		oc_emit_event(oc, job.decision_id, cls.outcome, cls.delta,
 			      job.param);
 	}

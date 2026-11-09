@@ -92,6 +92,10 @@ struct as_stats {
 						 * delta=0 的理由） */
 		long long dropped;			/* pending 队满丢旧（洪泛） */
 		long long noop;			/* 注入值==注入前值（对照） */
+		long long pre_none;			/* U66/A1：pre= 基线不可得
+						 * （none/#65 旧行/环淘汰/
+						 * rollback 已消费）→
+						 * PARTIAL 降级计数 */
 		long long verify_fail;			/* 写后 decisions 自校验
 						 * outcome_ts 仍 0 */
 	} oc;

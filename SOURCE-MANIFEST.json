@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T01:21:45+08:00",
+  "created": "2026-11-10T01:21:47+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -30,7 +30,8 @@
     "K 轮内核 #65：affinity 限幅 span=1 整数截断修复（max_t(s64,1,…)，I8-DATA-REPORT 证据链，同盘 A/B 0/6→7/7=100%）+ KUnit span1 回归新增 + NETLINK EVENT glue（uapi 只追加 DEVICE=3/CPU_HOTPLUG=4/HW_ERROR=5；ai_telemetry.c 中心白名单桥 emit_common 单尾挂点+102 行；ai_netlink.c 零改动；订阅端实测 cat3/4 命中、aistreamd 零改动产出 advisory=K3D2 §9-1 达成）+ KUnit telemetry 套件 12→13；bzImage.plain65 v2 md5 f55b3a1a；linux-k2↔repo 正典 md5 对拍 MATCH",
     "UE 用户态两件：T8 decisions 接线（as_decisions ~600 行——/proc/ai/decisions 周期轮询+decision_id 游标去重+坏行回绕计数+T8 parquet decisions 行 23 列 schema 零改动+合成事件既有管道；DECISIONS_ENABLED 默认 0；pyarrow 读回 5/5 对账）+ I-2 采样率写口工具面（telemetry_rate：cat:ev 枚举+默认率表内置引 REVIEW3 实测、读回校验、越界人话报错；注册表 236→237/seed 247→248/names 45ad9099 三方一致门 PASS）；aistreamd 11 套、run_all 新口径 60/60（+test_telemetry_rate）、差分 62/62、audit PASS",
     "F16: ISO alpha.16.1（#65 v2 内核 f55b3a1a+全部新面进厂：occ 产品债/I-10/SENSE/decisions/telemetry_rate 237；conf 三键 OUTCOME=0/SENSE=off/DECISIONS=0 出厂默认关；seed 248 双份补齐）四阶段 7/12/52/101 全 True（verdict 解析器计数）；K3C §9-1 闭环 4/5 门（§5.2 方向一致真设计缺陷登记 K 轨重设计）；I-8 出厂复测 9/9=100%；ISO md5 9381f4ef",
-    "内核轮 #66：①affinity 恒等快路径修（ai_control per-task 读失败禁用同值快路径——F16 §2-2 处方；A/B 同盘 #65 miss→#66 真迁移；退出任务 apply 如实 NOT_FOUND）②decisions/chains 行尾 append-only pre= 决策前值（ai_policy_safety_snapshot_lookup 新 API；none/单值/多参语法=K66-REPORT §5 契约；快照环 64、rollback 即消费）③ai_netlink/uapi 陈旧注释对齐（SENSE CAP 闸系 K2b #65 已落地）④KUnit 59→62（policy+2/control+1）+qemu 电池 64/64（主会话独立复跑对账一致）；正典两树 md5 8/8 MATCH；bzImage.plain66 c4498329"
+    "内核轮 #66：①affinity 恒等快路径修（ai_control per-task 读失败禁用同值快路径——F16 §2-2 处方；A/B 同盘 #65 miss→#66 真迁移；退出任务 apply 如实 NOT_FOUND）②decisions/chains 行尾 append-only pre= 决策前值（ai_policy_safety_snapshot_lookup 新 API；none/单值/多参语法=K66-REPORT §5 契约；快照环 64、rollback 即消费）③ai_netlink/uapi 陈旧注释对齐（SENSE CAP 闸系 K2b #65 已落地）④KUnit 59→62（policy+2/control+1）+qemu 电池 64/64（主会话独立复跑对账一致）；正典两树 md5 8/8 MATCH；bzImage.plain66 c4498329",
+    "A1 outcome §5.2 重设计：基线改 decisions 行尾 pre=（K66 §5 契约）——数值类意图与 match 基线弃 arm 时点后置读取；读回型 8 行新 AS_OC_F_READBACK（基线同取 pre=）；match 型状态映射（值域等价/freeze 布尔/signal 信号组）；pre=none→PARTIAL+outcome.pre_none（stats 键追加零位移，conf 零新增，出厂 OUTCOME_ENABLED=0 不变）；test_outcome 重写 post-execute 真实时序 mock（6/6 Tier-A 100%）+test_decisions pre= 容忍断言；qemu 真内核五门全绿（5.1=52/52、5.2=5 旋钮全 100%、5.3=10/10、5.5=52==52、5.7 回零；pre 诚实性33/33）——主会话独立复跑同绿；aistreamd 11 套、run_all 60、parquet parity ALL PASS"
   ],
   "overlay_count": 168,
   "registry": {

@@ -173,6 +173,38 @@ int main(void)
 			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
 			      "executed=0 safety_clamped=0", &r) == 0,
 		      "parse line without trailing NL");
+		/* U66（K66 §5 兼容契约）：#66 起 decisions 行尾 append-only
+		 * 追加 pre=<…>——旧解析器按行尾未知字段忽略，23 列 schema
+		 * 零改动；坏行计数不得因新字段递增（下方 §3 摄取共证）。
+		 * 新旧混合夹具：none/单 s64（可负）/多参/畸形尾随四种形态
+		 * 全部按好行解析（23 字段全中）。 */
+		CHECK(as_dec_parse_line(
+			      "id=11 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=1 delta=-7 ver=1 conf=2 domain=3 src=4 "
+			      "executed=2 safety_clamped=0 pre=-12\n", &r) == 0 &&
+		      r.id == 11 && r.delta == -7 && r.executed == 2,
+		      "U66 pre=<s64> tolerated (negative s64)");
+		CHECK(as_dec_parse_line(
+			      "id=12 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=none\n", &r) == 0 &&
+		      r.id == 12 && r.executed == 1,
+		      "U66 pre=none tolerated");
+		CHECK(as_dec_parse_line(
+			      "id=13 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=5:-3:7\n", &r) == 0 &&
+		      r.id == 13,
+		      "U66 multi-param pre tolerated");
+		CHECK(as_dec_parse_line(
+			      "id=14 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=garbage\n", &r) == 0,
+		      "U66 malformed pre tail still 23-field good line");
 	}
 
 	/* ---- 1) 首轮摄取：ring 最新在前 → 升序入批 + 事件 + 落盘 ---- */
@@ -223,6 +255,15 @@ int main(void)
 
 	/* ---- 3) 追加新决策（含坏行 + 空洞） ---- */
 	mkline(buf, sizeof(buf), 9, (unsigned long long)ts_now_ns, 1, 1, -30);
+	/* U66：id=9 行尾追加 #66 pre= 字段（新旧行混合夹具）——摄取照常
+	 * （坏行计数仍只数真坏行，pre= 不递增 bad_lines） */
+	{
+		size_t l = strlen(buf);
+
+		if (l && buf[l - 1] == '\n')
+			buf[l - 1] = '\0';
+		strncat(buf, " pre=-30\n", sizeof(buf) - strlen(buf) - 1);
+	}
 	snprintf(lines, sizeof(lines), "%s", buf);
 	mkline(buf, sizeof(buf), 8, (unsigned long long)ts_now_ns, 1, 0, 0);
 	strcat(lines, buf);

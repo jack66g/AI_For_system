@@ -1,21 +1,34 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * test_outcome.c - I-10 outcome 回填器单测（mock 标准文件 + mock sysfs 树）
+ * test_outcome.c - I-10 outcome 回填器单测（U66/A1 pre= 基线重设计版）
  *
- * 验收门（设计 §5 原文，在单测/模拟层验证逻辑正确性；真内核 qemu 轮
- * 移交 K3C §9-1 同源依赖）：
- *   1) 回填率 ≥90%（§5.1：executed>0 且 param 非空的应处理集中，
- *      写口成功占比——mock 层以写口文件行数计）
+ * U66 重设计要点（F16 §2-1 根因修复的 mock 证法）：mock 层模拟**真实
+ * 时序**——内核 execute 先于 arm（EVENT 到达），故 arm 时点的 mock 树
+ * 必须 已是 post-execute 状态：
+ *   - /proc/ai/control current= 已=注入值（旧测试预置 current=前值
+ *     正是 F16 §2-1 揭穿的假象：生产时序下 arm 读到的 before 恒=注入
+ *     值 → noop-PARTIAL；mock 层 §5 100% 系预置基线的产物）；
+ *   - match 源已=迁移后状态（freeze 已 T、affinity 已钉、ws_labels
+ *     行已在）——基线只能来自 decisions 行尾 pre= 字段（K66 §5）；
+ *   - 决策前真值（pre=）由 decisions 行携带；pre=none 行=内核恒等
+ *     快路径/快照淘汰形态。
+ * 验收门（设计 §5 原文；真内核 qemu 轮见 ~/aik-k2a/u66-data/）：
+ *   1) 回填率 ≥90%（§5.1）
  *   2) Tier-A 方向一致性 ≥5 旋钮 × 每旋钮 ≥8 次已知方向注入、独立重算
- *      （测试自读原始指标源重推方向，不经回填器代码）一致率 ≥90%
- *   3) 无操作对照 PARTIAL ≥80%（§5.3 反假阳性）
+ *      （测试自读原始指标源 + decisions pre= 重推方向，不经回填器代码）
+ *      一致率 ≥90%（**本棒主目标**）
+ *   3) 无操作对照 PARTIAL ≥80%（§5.3——恒等决策 → 内核快路径 →
+ *      pre=none → PARTIAL+pre_none）
  *   4) delta 一致性 ≥10 条（§5.4：独立重算差值一致，含单位约定）
  *   5) hitrate 对账（§5.5：armed+skip_*+notfound == 注入事件总数）
- *   6) 健壮性（§5.6：洪泛丢旧/写不存在 id ENOENT/指标源失败 PARTIAL）
- *   7) 兼容性：T8 decision 23 列 schema 的 outcome/outcome_ts 列直接可写
+ *   6) 健壮性（§5.6：洪泛丢旧/写不存在 id ENOENT/指标源失败 PARTIAL/
+ *      pre=none 降级四路）
+ *   7) 兼容性：T8 decision 23 列 schema 的 outcome/outcome_ts 列直接
+ *      可写；decisions 行尾 pre= 字段不构成坏行（test_decisions 共证）
  *
- * mock 树 = <root>/{proc,sys}/…（格式逐字段对齐内核 ai_proc_dec_record /
- * ai_stats_ai_actions_show_fn / ai_proc_control_show 等实读源）。
+ * mock 树 = <root>/{proc,sys}/…（格式逐字段对齐内核 ai_proc_dec_record
+ * （#66 起含行尾 pre=）/ ai_stats_ai_actions_show_fn / ai_proc_control_show
+ * 等实读源）。
  */
 #define _GNU_SOURCE
 
@@ -92,106 +105,171 @@ static void wfile_mkdir(const char *path, const char *content)
 	wfile(path, content);
 }
 
-/* decisions 记录（ai_proc_dec_record 逐字段对齐；最新在前由调用方保证） */
+/* decisions 记录（ai_proc_dec_record 逐字段对齐；最新在前由调用方保证；
+ * U66：pre=NULL → #65 旧格式（无 pre= 字段）；pre="none"/"<s64>" →
+ * #66 起行尾 append-only 形态，K66-REPORT §5 契约） */
 static void dec_line(char *buf, size_t cap, unsigned long long id,
 		     unsigned domain, unsigned long long d0,
 		     unsigned long long d1, unsigned long long d2,
-		     unsigned long long outcome_ts)
+		     unsigned long long outcome_ts, const char *pre)
 {
-	snprintf(buf, cap,
-		 "id=%llu trig_ts=1000 trig_evid=0x%04x dec_ts=1100 "
-		 "type=1 data=%llu:%llu:%llu:0:0:0:0:0 exec_ts=1200 "
-		 "outcome_ts=%llu outcome=%u delta=0 ver=1 conf=80 "
-		 "domain=%u src=1 executed=1 safety_clamped=0\n",
-		 id, (unsigned)(id & 0xffff), d0, d1, d2, outcome_ts,
-		 outcome_ts ? 1u : 0u, domain);
+	int n;
+
+	n = snprintf(buf, cap,
+		     "id=%llu trig_ts=1000 trig_evid=0x%04x dec_ts=1100 "
+		     "type=1 data=%llu:%llu:%llu:0:0:0:0:0 exec_ts=1200 "
+		     "outcome_ts=%llu outcome=%u delta=0 ver=1 conf=80 "
+		     "domain=%u src=1 executed=1 safety_clamped=0",
+		     id, (unsigned)(id & 0xffff), d0, d1, d2, outcome_ts,
+		     outcome_ts ? 1u : 0u, domain);
+	if (pre)
+		snprintf(buf + n, cap - (size_t)n, " pre=%s\n", pre);
+	else
+		snprintf(buf + n, cap - (size_t)n, "\n");
 }
 
-/* 基线 decisions：每旋钮一条（id 段规划见各测试） */
+/* 行辅助（dec_line 直调别名，pre 固定传参） */
+static void dec_row(char *l, size_t cap, unsigned long long id,
+		    unsigned dom, unsigned long long d0, unsigned long long d1,
+		    unsigned long long d2, unsigned long long ots,
+		    const char *pre)
+{
+	dec_line(l, cap, id, dom, d0, d1, d2, ots, pre);
+}
+
+/* 基线 decisions：每旋钮一条（id 段规划见各测试；pre= 决策前真值——
+ * read 回调者（nice/aff/oom/freeze/ioprio）为 per-task 真值，无回调者
+ * （signal/wsl/rlimit）为全局表值——K66 §5 语义） */
 static void write_decisions(const char *root, unsigned long long ots)
 {
-	char all[32768];	/* 77 行×~210B——8K 会静默截断（strncat 有界） */
+	char all[32768];	/* ~89 行×~220B */
+	char l[512];
 
 	all[0] = '\0';
-	/* id 规划（task 旋钮 data=pid:value[:res]，全局 data=value） */
 	{
-		char l[512];
 		static const struct {
 			unsigned long long id;
 			unsigned dom;
 			unsigned long long d0, d1, d2;
+			const char *pre;
 		} rows[] = {
-			{ 1001, 1, 4242, 10, 0 },	/* sched.nice */
-			{ 1002, 1, 4242, 2, 0 },	/* sched.affinity */
-			{ 1003, 1, 4242, 500, 0 },	/* sched.oom_score */
-			{ 1004, 1, 12, 0, 0 },		/* sched.timeslice */
-			{ 1005, 2, 2, 0, 0 },		/* mm.thp */
-			{ 1006, 2, 10, 0, 0 },		/* mm.swappiness */
-			{ 1007, 2, 256, 0, 0 },		/* mm.readahead */
-			{ 1008, 2, 50, 0, 0 },		/* mm.reclaim_prio */
-			{ 1009, 3, 4242, 1, 0 },	/* io.priority */
-			{ 1010, 3, 50, 0, 0 },		/* io.bandwidth */
-			{ 1011, 4, 500, 0, 0 },		/* net.cwnd */
-			{ 1012, 4, 400, 0, 0 },		/* net.rto */
-			{ 1013, 4, 3, 0, 0 },		/* net.qdisc */
-			{ 1014, 4, 1, 0, 0 },		/* net.nftables */
-			{ 1015, 5, 1, 0, 0 },		/* sec.lsm_override */
-			{ 1016, 5, 4242, 7, 0 },	/* sec.ws_label */
-			{ 1017, 5, 0, 0, 0 },		/* sec.audit */
-			{ 1018, 1, 1, 0, 0 },		/* ai.decision_inject */
-			{ 1019, 6, 5000, 0, 0 },	/* power.freq */
-			{ 1020, 6, 0, 0, 0 },		/* power.cstate */
-			{ 1021, 6, 1, 0, 0 },		/* power.wakeup */
-			{ 1022, 12, 4242, 1, 0 },	/* proc.signal(19) */
-			{ 1023, 12, 4242, 1, 0 },	/* proc.freeze */
-			{ 1024, 12, 4242, 100, 6 },	/* proc.rlimit */
-			/* 方向一致性轮次（各旋钮 8 轮：id 基 + r） */
-			{ 2001, 12, 4242, 1, 0 },	/* freeze r1 */
-			{ 2011, 1, 4242, 10, 0 },	/* nice r1 */
-			{ 2021, 2, 2, 0, 0 },		/* thp r1 */
-			{ 2031, 4, 1, 0, 0 },		/* nftables r1 */
-			{ 2041, 6, 1, 0, 0 },		/* wakeup r1 */
-			{ 2051, 12, 4242, 19, 0 },	/* signal r1 */
-			/* 对照组 */
-			{ 3001, 1, 4242, 0, 0 },
-			{ 3002, 2, 60, 0, 0 },
-			{ 3003, 6, 0, 0, 0 },
-			{ 3004, 5, 1, 0, 0 },
-			{ 3005, 4, 0, 0, 0 },
-			{ 3006, 2, 1, 0, 0 },
-			{ 3007, 12, 4242, 1, 0 },
-			{ 3008, 12, 4242, 19, 0 },
-			{ 3009, 1, 4242, 2, 0 },
-			{ 3010, 3, 4242, 4, 0 },
+			{ 1001, 1, 4242, 10, 0, "0" },	/* sched.nice */
+			{ 1002, 1, 4242, 2, 0, "0" },	/* sched.affinity */
+			{ 1003, 1, 4242, 500, 0, "0" },/* sched.oom_score */
+			{ 1004, 1, 12, 0, 0, "6" },	/* sched.timeslice */
+			{ 1005, 2, 2, 0, 0, "1" },	/* mm.thp */
+			{ 1006, 2, 10, 0, 0, "60" },	/* mm.swappiness */
+			{ 1007, 2, 256, 0, 0, "128" },	/* mm.readahead */
+			{ 1008, 2, 50, 0, 0, "100" },	/* mm.reclaim_prio */
+			{ 1009, 3, 4242, 1, 0, "4" },	/* io.priority */
+			{ 1010, 3, 50, 0, 0, "100" },	/* io.bandwidth */
+			{ 1011, 4, 500, 0, 0, "100" },	/* net.cwnd */
+			{ 1012, 4, 400, 0, 0, "200" },	/* net.rto */
+			{ 1013, 4, 3, 0, 0, "1" },	/* net.qdisc */
+			{ 1014, 4, 1, 0, 0, "0" },	/* net.nftables */
+			{ 1015, 5, 1, 0, 0, "0" },	/* sec.lsm_override */
+			{ 1016, 5, 4242, 7, 0, "0" },	/* sec.ws_label */
+			{ 1017, 5, 0, 0, 0, "1" },	/* sec.audit */
+			{ 1018, 5, 1, 0, 0, "0" },	/* ai.decision_inject */
+			{ 1019, 6, 5000, 0, 0, "10000" },/* power.freq */
+			{ 1020, 6, 0, 0, 0, "2" },	/* power.cstate */
+			{ 1021, 6, 1, 0, 0, "0" },	/* power.wakeup */
+			{ 1022, 12, 4242, 19, 0, "0" },	/* proc.signal */
+			{ 1023, 12, 4242, 1, 0, "0" },	/* proc.freeze */
+			{ 1024, 12, 4242, 100, 6, "1000000" },/* proc.rlimit */
+			/* 方向一致性轮次（6 旋钮 × 8：id 基 + r，r1 在此，
+			 * r2..r8 由下方循环生成） */
+			{ 2001, 12, 4242, 1, 0, "0" },	/* freeze r1 */
+			{ 2011, 1, 4242, 19, 0, "0" },	/* nice r1（0→19） */
+			{ 2021, 2, 2, 0, 0, "1" },	/* thp r1 */
+			{ 2031, 4, 1, 0, 0, "0" },	/* nftables r1 */
+			{ 2041, 5, 4242, 7, 0, "0" },	/* ws_label r1 */
+			{ 2051, 12, 4242, 19, 0, "0" },	/* signal r1 */
+			/* 对照组（恒等快路径 → pre=none；3008 事件型例外） */
+			{ 3001, 1, 4242, 0, 0, "none" },
+			{ 3002, 2, 60, 0, 0, "none" },
+			{ 3003, 6, 0, 0, 0, "none" },
+			{ 3004, 5, 1, 0, 0, "none" },
+			{ 3005, 4, 0, 0, 0, "none" },
+			{ 3006, 2, 1, 0, 0, "none" },
+			{ 3007, 12, 4242, 1, 0, "none" },
+			{ 3008, 12, 4242, 19, 0, "19" },/* EVENT 无快路径 */
+			{ 3009, 1, 4242, 2, 0, "none" },
+			{ 3010, 3, 4242, 4, 0, "none" },
 			/* 降级 */
-			{ 4001, 12, 4242, 1, 0 },	/* ENOENT 路 */
-			{ 4002, 12, 99999, 1, 0 },	/* pid 消亡 meas_fail */
-			{ 4003, 2, 2, 0, 0 },		/* verify_fail 路 */
+			{ 4001, 12, 4242, 1, 0, "1" },	/* ENOENT 路 */
+			{ 4002, 12, 99999, 1, 0, "1" },	/* pid 消亡 meas_fail */
+			{ 4003, 2, 2, 0, 0, "1" },	/* verify_fail 路 */
+			/* U66 pre=none 降级四路 */
+			{ 5001, 2, 2, 0, 0, "none" },	/* 数值环境型 */
+			{ 5002, 3, 4242, 1, 0, "none" },	/* 读回型 */
+			{ 5003, 12, 4242, 1, 0, "none" },	/* match 型 */
+			{ 5004, 2, 2, 0, 0, NULL },	/* #65 旧行无字段 */
 		};
 
 		for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-			dec_line(l, sizeof(l), rows[i].id, rows[i].dom,
-				 rows[i].d0, rows[i].d1, rows[i].d2, ots);
+			dec_row(l, sizeof(l), rows[i].id, rows[i].dom,
+				rows[i].d0, rows[i].d1, rows[i].d2, ots,
+				rows[i].pre);
 			strncat(all, l, sizeof(all) - strlen(all) - 1);
 		}
 		/* 方向一致性轮次 r2..r8（r1 已在上方 rows[]）：
-		 * freeze(2001+)/signal(2051+)=task 4242:1 / 4242:19；
-		 * nice(2011+)=task 4242:10；thp(2021+)=全局 2；
-		 * nftables(2031+)/wakeup(2041+)=全局 1 */
-		for (int r = 2; r <= 8; r++) {
-			static const unsigned long long base_id[6] = { 2001, 2011,
-				2021, 2031, 2041, 2051 };
-			static const unsigned doms[6] = { 12, 1, 2, 4, 6, 12 };
-			static const unsigned long long d0v[6] = { 4242, 4242, 2, 1,
-				1, 4242 };
-			static const unsigned long long d1v[6] = { 1, 10, 0, 0, 0, 19 };
-			char l[512];
+		 * freeze(2001+)=4242:1 pre=0；nice(2011+)=偶轮 19/pre=0、
+		 * 奇轮 0/pre=19（交替真迁移——轮序 r1=inj19/pre0、r2=inj0/
+		 * pre19、…）；thp(2021+)=全局 2 pre=1；nft(2031+)=全局 1
+		 * pre=0；wsl(2041+)=偶轮 7（r1 pre=0、余 pre=8）、奇轮 8/
+		 * pre=7（同 pid 交替标签）；signal(2051+)=偶轮 19（r1
+		 * pre=0、余 pre=18）、奇轮 18/pre=19（同 pid 交替 stop/
+		 * cont）——真实迁移电池形态（§5.2 主目标） */
+		for (int r = 1; r <= 7; r++) {
+			unsigned long long d0, d1;
+			char pre[16];
+			int even = (r % 2 == 0);	/* r=轮序（0 基）：偶轮序
+							 * inj=19/7/19 */
 
-			for (int k = 0; k < 6; k++) {
-				dec_line(l, sizeof(l), base_id[k] + r - 1, doms[k],
-					 d0v[k], d1v[k], 0, ots);
-				strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* freeze：恒 4242:1 pre=0 */
+			dec_row(l, sizeof(l), 2001 + r, 12, 4242, 1, 0, ots,
+				"0");
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* nice：偶轮序 inj 19/pre 0；奇轮序 inj 0/pre 19 */
+			if (even) {
+				d0 = 4242; d1 = 19;
+				snprintf(pre, sizeof(pre), "0");
+			} else {
+				d0 = 4242; d1 = 0;
+				snprintf(pre, sizeof(pre), "19");
 			}
+			dec_row(l, sizeof(l), 2011 + r, 1, d0, d1, 0, ots,
+				pre);
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* thp */
+			dec_row(l, sizeof(l), 2021 + r, 2, 2, 0, 0, ots, "1");
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* nft */
+			dec_row(l, sizeof(l), 2031 + r, 4, 1, 0, 0, ots, "0");
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* wsl：偶轮序 7/pre=8（r1 pre=0 已在 rows）；奇 8/7 */
+			if (even) {
+				d0 = 4242; d1 = 7;
+				snprintf(pre, sizeof(pre), "8");
+			} else {
+				d0 = 4242; d1 = 8;
+				snprintf(pre, sizeof(pre), "7");
+			}
+			dec_row(l, sizeof(l), 2041 + r, 5, d0, d1, 0, ots,
+				pre);
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
+			/* signal：偶轮序 19/pre=18（r1 pre=0 已在 rows） */
+			if (even) {
+				d0 = 4242; d1 = 19;
+				snprintf(pre, sizeof(pre), "18");
+			} else {
+				d0 = 4242; d1 = 18;
+				snprintf(pre, sizeof(pre), "19");
+			}
+			dec_row(l, sizeof(l), 2051 + r, 12, d0, d1, 0, ots,
+				pre);
+			strncat(all, l, sizeof(all) - strlen(all) - 1);
 		}
 	}
 	{
@@ -332,7 +410,7 @@ static void write_metric_sources(const char *root)
 			 "Max locked memory         65536    65536    KB\n"
 			 "Max address space         unlimitedunlimited KB\n"
 			 "Max file locks            unlimitedunlimited locks\n"
-			 "Max pending signals       2341     2341     signals\n"
+			 "Max pending signals       2341     2341      signals\n"
 			 "Max msgqueue size         819200   819200   bytes\n"
 			 "Max nice priority         0        0        \n"
 			 "Max realtime priority     0        0        \n"
@@ -367,6 +445,34 @@ static void set_pid_stat(const char *root, char state, long long ut,
 	wfile(p, buf);
 }
 
+static void set_schedstat(const char *root, long long delay_ns)
+{
+	char p[512], buf[128];
+
+	snprintf(p, sizeof(p), "%s/proc/4242/schedstat", root);
+	snprintf(buf, sizeof(buf), "123456789 %lld 42\n", delay_ns);
+	wfile(p, buf);
+}
+
+static void set_ws_labels(const char *root, const char *content)
+{
+	char p[512];
+
+	snprintf(p, sizeof(p), "%s/proc/ai/ws_labels", root);
+	wfile(p, content);
+}
+
+static void set_status_aff(const char *root, const char *aff)
+{
+	char p[512], buf[256];
+
+	snprintf(p, sizeof(p), "%s/proc/4242/status", root);
+	snprintf(buf, sizeof(buf),
+		 "Name:\tburn\nState:\tR (running)\nCpus_allowed_list:\t%s\n",
+		 aff);
+	wfile(p, buf);
+}
+
 /* ====================================================================
  * 驱动小工具
  * ==================================================================== */
@@ -378,7 +484,7 @@ static void conf_oc(struct as_conf *c, int pending)
 	c->outcome_window_short_sec = 30;
 	c->outcome_window_long_sec = 300;
 	c->outcome_max_pending = pending;
-	c->outcome_decisions_scan_max = 128;	/* mock decisions 77 行：覆盖全表 */
+	c->outcome_decisions_scan_max = 128;	/* mock decisions 89 行：覆盖全表 */
 }
 
 static void arm(struct as_outcome *oc, unsigned long long id, int executed,
@@ -442,14 +548,20 @@ static void test_table_conf(void)
 {
 	struct as_conf c;
 	char err[256];
+	int n_readback = 0;
 
 	CHECK(as_oc_rows_n == 28, "table: 28 rows (§2 全量)");
-	for (size_t i = 0; i < as_oc_rows_n; i++)
+	for (size_t i = 0; i < as_oc_rows_n; i++) {
 		for (size_t j = i + 1; j < as_oc_rows_n; j++)
 			if (strcmp(as_oc_rows[i].param, as_oc_rows[j].param) == 0) {
 				CHECK(0, "table: dup param");
 				break;
 			}
+		if (as_oc_rows[i].flags & AS_OC_F_READBACK)
+			n_readback++;
+	}
+	CHECK(n_readback == 8, "U66: 8 readback rows flagged (ioprio/bw/ra/"
+	      "reclaim/lsm/audit/oom/rlimit)");
 	CHECK(as_oc_row_lookup("proc.freeze") >= 0, "table: freeze found");
 	CHECK(as_oc_row_lookup("warp.drive") < 0, "table: unknown -1");
 	CHECK(as_oc_rows[as_oc_row_lookup("sec.seccomp")].kind ==
@@ -516,7 +628,7 @@ static void test_table_conf(void)
 }
 
 /* ====================================================================
- * 2) decisions 反查解析
+ * 2) decisions 反查解析（U66：pre= 三形态 + #65 旧行混合夹具）
  * ==================================================================== */
 
 static void test_decisions_scan(void)
@@ -530,31 +642,87 @@ static void test_decisions_scan(void)
 	      "id=30 trig_ts=1 trig_evid=0x001e dec_ts=2 type=1 "
 	      "data=4242:10:0:0:0:0:0:0 exec_ts=3 outcome_ts=0 outcome=0 "
 	      "delta=0 ver=1 conf=80 domain=1 src=1 executed=1 "
-	      "safety_clamped=0\n"
+	      "safety_clamped=0 pre=10\n"
 	      "id=20 trig_ts=1 trig_evid=0x0014 dec_ts=2 type=1 "
 	      "data=60:0:0:0:0:0:0:0 exec_ts=3 outcome_ts=999 outcome=1 "
 	      "delta=-5 ver=1 conf=80 domain=2 src=1 executed=2 "
-	      "safety_clamped=1\n"
+	      "safety_clamped=1 pre=none\n"
 	      "id=10 trig_ts=1 trig_evid=0x000a dec_ts=2 type=1 "
 	      "data=1:0:0:0:0:0:0:0 exec_ts=3 outcome_ts=0 outcome=0 "
 	      "delta=0 ver=1 conf=80 domain=4 src=1 executed=1 "
-	      "safety_clamped=0\n");
+	      "safety_clamped=0\n"
+	      "id=40 trig_ts=1 trig_evid=0x0028 dec_ts=2 type=1 "
+	      "data=1:2:3:0:0:0:0:0 exec_ts=3 outcome_ts=0 outcome=0 "
+	      "delta=0 ver=1 conf=80 domain=4 src=1 executed=1 "
+	      "safety_clamped=0 pre=5:-3:7\n"
+	      "id=50 trig_ts=1 trig_evid=0x0032 dec_ts=2 type=1 "
+	      "data=4242:5:0:0:0:0:0:0 exec_ts=3 outcome_ts=0 outcome=0 "
+	      "delta=0 ver=1 conf=80 domain=1 src=1 executed=1 "
+	      "safety_clamped=0 pre=-12\n"
+	      "id=60 trig_ts=1 trig_evid=0x003c dec_ts=2 type=1 "
+	      "data=4242:5:0:0:0:0:0:0 exec_ts=3 outcome_ts=0 outcome=0 "
+	      "delta=0 ver=1 conf=80 domain=1 src=1 executed=1 "
+	      "safety_clamped=0 pre=abc\n");
 	CHECK(as_oc_scan_decisions(p, 30, 64, &d) == 0 && d.id == 30 &&
 	      d.data[0] == 4242 && d.data[1] == 10 && d.domain == 1 &&
-	      d.executed == 1 && d.outcome_ts == 0,
-	      "scan: newest record parsed");
+	      d.executed == 1 && d.outcome_ts == 0 &&
+	      d.pre_n == 1 && d.pre[0] == 10,
+	      "scan: newest + pre=<s64> parsed");
 	CHECK(as_oc_scan_decisions(p, 20, 64, &d) == 0 && d.domain == 2 &&
-	      d.outcome_ts == 999 && d.executed == 2,
-	      "scan: mid record parsed");
+	      d.outcome_ts == 999 && d.executed == 2 && d.pre_n == 0,
+	      "scan: mid + pre=none → pre_n=0");
 	CHECK(as_oc_scan_decisions(p, 10, 2, &d) == 1,
 	      "scan: scan_max truncation misses");
-	CHECK(as_oc_scan_decisions(p, 10, 64, &d) == 0,
-	      "scan: full scan finds");
+	CHECK(as_oc_scan_decisions(p, 10, 64, &d) == 0 && d.pre_n == 0,
+	      "scan: full scan finds (#65 old line: no pre field)");
+	CHECK(as_oc_scan_decisions(p, 40, 64, &d) == 0 && d.pre_n == 3 &&
+	      d.pre[0] == 5 && d.pre[1] == -3 && d.pre[2] == 7,
+	      "scan: multi-param pre 1..8 items");
+	CHECK(as_oc_scan_decisions(p, 50, 64, &d) == 0 && d.pre_n == 1 &&
+	      d.pre[0] == -12,
+	      "scan: negative s64 pre");
+	CHECK(as_oc_scan_decisions(p, 60, 64, &d) == 0 && d.pre_n == 0,
+	      "scan: malformed pre → tolerated (pre_n=0, not bad line)");
 	CHECK(as_oc_scan_decisions("/tmp/as-oc-scan/nope", 10, 64, &d) == -1,
 	      "scan: missing file -1");
 	CHECK(as_oc_scan_decisions(p, 777, 64, &d) == 1,
 	      "scan: absent id miss");
 	printf("  decisions-scan: OK\n");
+}
+
+/* ====================================================================
+ * 2b) U66 纯函数单元：intent / sig_group / match_base
+ * ==================================================================== */
+
+static void test_pure_units(void)
+{
+	CHECK(as_oc_intent(5, 0) == 1 && as_oc_intent(0, 5) == -1 &&
+	      as_oc_intent(5, 5) == 0, "intent: sign of (inj-pre)");
+	CHECK(as_oc_sig_group(19) == 1 && as_oc_sig_group(18) == 2 &&
+	      as_oc_sig_group(9) == 3 && as_oc_sig_group(15) == 3 &&
+	      as_oc_sig_group(0) == 0 && as_oc_sig_group(5) == 0,
+	      "sig_group: 19/18/9,15/other mapping");
+	CHECK(as_oc_match_base(OC_K_MATCH_AFFINITY, 2, 2) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_AFFINITY, 2, 0) == 0,
+	      "match_base: affinity pre==inj");
+	CHECK(as_oc_match_base(OC_K_MATCH_QDISC, 3, 3) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_QDISC, 3, 1) == 0,
+	      "match_base: qdisc mode equality");
+	CHECK(as_oc_match_base(OC_K_MATCH_WS_LABEL, 7, 7) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_WS_LABEL, 7, 0) == 0,
+	      "match_base: ws_label global-cur fallback semantics");
+	CHECK(as_oc_match_base(OC_K_MATCH_SIGNAL, 19, 19) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_SIGNAL, 18, 19) == 0 &&
+	      as_oc_match_base(OC_K_MATCH_SIGNAL, 19, 18) == 0 &&
+	      as_oc_match_base(OC_K_MATCH_SIGNAL, 15, 9) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_SIGNAL, 19, 0) == 0,
+	      "match_base: signal state-group mapping");
+	CHECK(as_oc_match_base(OC_K_MATCH_FREEZE, 1, 0) == 0 &&
+	      as_oc_match_base(OC_K_MATCH_FREEZE, 1, 1) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_FREEZE, 0, 0) == 1 &&
+	      as_oc_match_base(OC_K_MATCH_FREEZE, 0, 1) == 0,
+	      "match_base: freeze stopped-bit mapping");
+	printf("  pure-units: OK\n");
 }
 
 /* ====================================================================
@@ -632,7 +800,9 @@ static void test_tap_paths(void)
 
 /* ====================================================================
  * 4) 验收门主战场：方向一致性（6 旋钮×8）+ 回填率 + delta 一致性
- *    独立重算：测试自读原始指标源，测试本地规则推期望（不经模块代码）
+ *    U66 真实时序：arm 时点 mock 树= post-execute（match 源已迁移/
+ *    环境指标 T0），决策前真值只在 decisions pre=。
+ *    独立重算：测试自读原始指标源 + pre= 重推期望（不经模块代码）。
  * ==================================================================== */
 
 struct knob_result {
@@ -641,16 +811,15 @@ struct knob_result {
 	int delta_checked;	/* delta 精确一致数 */
 };
 
-/* 测试本地期望计算（独立于 as_oc_classify_*）：
- * intent=注入-前值；期望=带内 PARTIAL；反向出带 WORSE；同向出带 SUCCESS */
-static int expect_num(long long before_ctrl, long long injected,
+/* 测试本地期望计算（独立于 as_oc_classify_*；pre=decisions 行 pre=）：
+ * intent=注入−pre；期望=带内 PARTIAL；反向出带 WORSE；同向出带 SUCCESS */
+static int expect_num(long long pre, long long injected,
 		      long long metric_before, long long metric_after,
 		      int dir, int thr, int is_rate, int window_sec,
 		      long long *delta_out)
 {
 	long long delta = metric_after - metric_before;
-	long long intent = injected > before_ctrl ? 1 :
-			   injected < before_ctrl ? -1 : 0;
+	long long intent = injected > pre ? 1 : injected < pre ? -1 : 0;
 	long long ad;
 
 	if (is_rate) {
@@ -688,24 +857,28 @@ static void test_fill_gates(void)
 	as_outcome_set_root(&oc, TREE);
 	memset(kr, 0, sizeof(kr));
 
-	/* ---- 旋钮 1：proc.freeze（match；R→T 已知方向） ---- */
+	/* ---- 旋钮 1：proc.freeze（match；真实时序回归证明——arm 时
+	 *    stat 已 T（post-execute），基线只能来自 pre=0 → base_ok=0
+	 *    → SUCCESS。旧代码（arm 时点读回）恒 base==now → PARTIAL） */
 	for (int r = 0; r < 8; r++) {
 		unsigned long long id = 2001 + r;
 		int got = 0;
 		long long dl = 0, exp_dl;
 		int exp_oc;
 
-		set_pid_stat(TREE, 'R', 50, 20);	/* before */
+		/* post-execute：SIGSTOP 已应用（T 态，CPU 累计 140 tick） */
+		set_pid_stat(TREE, 'T', 100, 40);
 		arm(&oc, id, 2, "proc.freeze");
 		if (r < 7)
-			set_pid_stat(TREE, 'T', 100, 40);	/* after */
-		/* r=7：保持 R（未达成） */
+			set_pid_stat(TREE, 'T', 100, 40);	/* 保持冻结 */
+		else
+			set_pid_stat(TREE, 'R', 150, 60);	/* 外部解冻 */
 		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
 		CHECK(read_written(TREE, id, &got, &dl) > 0, "freeze: written");
-		/* 独立重算：state 迁移 R→T=SUCCESS；未迁移=PARTIAL；
-		 * delta=(ut+st 差)*1000/100 */
+		/* 独立重算：pre=0（未冻结）→ T（已冻结）=SUCCESS（迁移）；
+		 * r7：→ R=未达成=PARTIAL；delta=冻结期 CPU 增量 ms */
 		exp_oc = r < 7 ? AS_OC_SUCCESS : AS_OC_PARTIAL;
-		exp_dl = r < 7 ? (140 - 70) * 10 : 0;
+		exp_dl = r < 7 ? 0 : (150 + 60 - 140) * 10;
 		kr[0].samples++;
 		if (got == exp_oc)
 			kr[0].consistent++;
@@ -717,27 +890,26 @@ static void test_fill_gates(void)
 		}
 	}
 
-	/* ---- 旋钮 2：sched.nice（schedstat 延迟 ms；dir +） ---- */
+	/* ---- 旋钮 2：sched.nice（schedstat 延迟 ms；dir +；交替
+	 *    0→19 / 19→0 真迁移——连续同值在内核走恒等快路径=对照域） */
 	for (int r = 0; r < 8; r++) {
 		unsigned long long id = 2011 + r;
-		char p[512], buf[128];
 		int got = 0, exp_oc;
 		long long dl = 0, exp_dl;
-		long long after_ns = r == 6 ? 10000000LL :
-				     r == 7 ? 300000000LL : 500000000LL;
+		long long pre = (r % 2 == 0) ? 0 : 19;
+		long long inj = (r % 2 == 0) ? 19 : 0;
+		long long after_ns = (r == 6) ? 10000000LL :
+				     (r == 7) ? 300000000LL :
+				     (r % 2 == 0) ? 500000000LL : 10000000LL;
 
-		/* r=0..5：+400ms（SUCCESS）；r=6：-90ms（WORSE）；
-		 * r=7：+200ms（SUCCESS） */
-		snprintf(p, sizeof(p), "%s/proc/4242/schedstat", TREE);
-		strcpy(buf, "123456789 100000000 42\n");
-		wfile(p, buf);			/* before=100ms */
+		/* arm 时点（post-execute）：schedstat=T0 环境基线 100ms */
+		set_schedstat(TREE, 100000000LL);
 		arm(&oc, id, 2, "sched.nice");
-		snprintf(buf, sizeof(buf), "123456789 %lld 42\n", after_ns);
-		wfile(p, buf);			/* after */
+		set_schedstat(TREE, after_ns);		/* after */
 		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
 		CHECK(read_written(TREE, id, &got, &dl) > 0, "nice: written");
-		exp_oc = expect_num(0, 10, 100, after_ns / 1000000, 1, 1, 0,
-				    30, &exp_dl);
+		exp_oc = expect_num(pre, inj, 100, after_ns / 1000000, 1, 1,
+				    0, 30, &exp_dl);
 		kr[1].samples++;
 		if (got == exp_oc)
 			kr[1].consistent++;
@@ -763,12 +935,12 @@ static void test_fill_gates(void)
 		snprintf(buf, sizeof(buf),
 			 "nr_free_pages 1\nthp_fault_alloc %lld\n"
 			 "thp_cow_fault 0\n", sum_before);
-		wfile(p, buf);
+		wfile(p, buf);			/* before=T0 */
 		arm(&oc, id, 2, "mm.thp");
 		snprintf(buf, sizeof(buf),
 			 "nr_free_pages 1\nthp_fault_alloc %lld\n"
 			 "thp_cow_fault 0\n", sum_after);
-		wfile(p, buf);
+		wfile(p, buf);			/* after */
 		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
 		CHECK(read_written(TREE, id, &got, &dl) > 0, "thp: written");
 		exp_oc = expect_num(1, 2, sum_before, sum_after, 1, 1, 1, 300,
@@ -784,92 +956,117 @@ static void test_fill_gates(void)
 		}
 	}
 
-	/* ---- 旋钮 4/5：net.nftables + power.wakeup（ai_actions 速率；dir +）
-	 *    每轮：基线文件 → arm → after 文件 → tick；期望独立重算 ---- */
+	/* ---- 旋钮 4：net.nftables（ai_actions 速率；dir +） ---- */
 	for (int r = 0; r < 8; r++) {
-		static const char *knobs[2] = { "net.nftables",
-					       "power.wakeup" };
-		static const unsigned long long base_id[2] = { 2031, 2041 };
-		static const long long base_v[2] = { 100000, 500 };
-		static const long long ctrl_v[2] = { 0, 0 };
-		static const long long inj_v[2] = { 1, 1 };
+		unsigned long long id = 2031 + r;
 		char p[512];
+		long long base_v = 100000;
+		long long after = r == 6 ? base_v - 3000 :
+				  r == 7 ? base_v + 15 :
+				  base_v + 30000;
+		char b[1024];
+		int got = 0, exp_oc;
+		long long dl = 0, exp_dl;
 
 		snprintf(p, sizeof(p), "%s/sys/kernel/ai/stats/ai_actions", TREE);
-		for (int k = 0; k < 2; k++) {
-			unsigned long long id = base_id[k] + r;
-			long long after = r == 6 ? base_v[k] - 3000 :
-					  r == 7 ? base_v[k] + 15 :
-					  base_v[k] + 3000;
-			char b[1024];
-			int got = 0, exp_oc;
-			long long dl = 0, exp_dl;
-
-			/* 基线（两键都回基线值，互不污染） */
-			snprintf(b, sizeof(b),
-				 "cwnd_clamp_hits: 0\nwakeup_capture: 0\n"
-				 "wakeup_events: %lld\nnetfilter_hook: 0\n"
-				 "netfilter_pkts: %lld\nnetfilter_bytes: 1\n"
-				 "audit_capture: 1\naudit_gate_drops: 3\n"
-				 "lsm_enforce: 0\nlsm_rules: 2\n"
-				 "sched_base_slice_ns: 1\nvfs_cache_pressure: 100\n",
-				 base_v[1], base_v[0]);
-			wfile(p, b);
-			arm(&oc, id, 2, knobs[k]);
-			/* after：本键动、他键保持基线 */
-			snprintf(b, sizeof(b),
-				 "cwnd_clamp_hits: 0\nwakeup_capture: 0\n"
-				 "wakeup_events: %lld\nnetfilter_hook: 0\n"
-				 "netfilter_pkts: %lld\nnetfilter_bytes: 1\n"
-				 "audit_capture: 1\naudit_gate_drops: 3\n"
-				 "lsm_enforce: 0\nlsm_rules: 2\n"
-				 "sched_base_slice_ns: 1\nvfs_cache_pressure: 100\n",
-				 k == 1 ? after : base_v[1],
-				 k == 0 ? after : base_v[0]);
-			wfile(p, b);
-			as_outcome_tick(&oc, as_now_mono_ms() + 400000);
-			CHECK(read_written(TREE, id, &got, &dl) > 0,
-			      "actrate: written");
-			exp_oc = expect_num(ctrl_v[k], inj_v[k], base_v[k], after,
-					     1, 1, 1, 30, &exp_dl);
-			kr[3 + k].samples++;
-			if (got == exp_oc)
-				kr[3 + k].consistent++;
-			if (dl == exp_dl) {
-				kr[3 + k].delta_checked++;
-			} else {
-				printf("    %s r%d delta=%lld exp=%lld\n",
-					knobs[k], r, dl, exp_dl);
-			}
+		snprintf(b, sizeof(b),
+			 "netfilter_hook: 0\nnetfilter_pkts: %lld\n",
+			 base_v);
+		wfile(p, b);			/* before=T0 */
+		arm(&oc, id, 2, "net.nftables");
+		snprintf(b, sizeof(b),
+			 "netfilter_hook: 0\nnetfilter_pkts: %lld\n", after);
+		wfile(p, b);			/* after */
+		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
+		CHECK(read_written(TREE, id, &got, &dl) > 0, "nft: written");
+		exp_oc = expect_num(0, 1, base_v, after, 1, 1, 1, 30, &exp_dl);
+		kr[3].samples++;
+		if (got == exp_oc)
+			kr[3].consistent++;
+		if (dl == exp_dl) {
+			kr[3].delta_checked++;
+		} else {
+			printf("    nft r%d delta=%lld exp=%lld\n", r, dl,
+			       exp_dl);
 		}
 	}
 
-	/* ---- 旋钮 6：proc.signal（match；S→T 已知方向） ---- */
+	/* ---- 旋钮 5：sec.ws_label（match；U66 主目标旋钮——pre 为全局
+	 *    表值 fallback（无 read 回调），交替标签 7/8 → pre≠inj →
+	 *    迁移 SUCCESS；arm 时点行已在（post-execute）——旧代码读回
+	 *    base==now 恒 PARTIAL） ---- */
+	for (int r = 0; r < 8; r++) {
+		unsigned long long id = 2041 + r;
+		int got = 0, exp_oc;
+		long long dl = 0, exp_dl;
+		long long inj = (r % 2 == 0) ? 7 : 8;
+		char lbl[64];
+
+		/* post-execute：标签行已落 */
+		snprintf(lbl, sizeof(lbl), "4242 %lld burn\n", inj);
+		set_ws_labels(TREE, lbl);
+		arm(&oc, id, 2, "sec.ws_label");
+		if (r < 7)
+			set_ws_labels(TREE, lbl);	/* 保持 */
+		else
+			set_ws_labels(TREE, "");	/* 外部清除 */
+		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
+		CHECK(read_written(TREE, id, &got, &dl) > 0, "wsl: written");
+		/* 独立重算：pre（全局 cur）≠inj → 期望态决策前未成立；
+		 * 行在=SUCCESS（+1）；r7 行消失=PARTIAL——match delta=
+		 * now_ok−base_ok=0−0=0（pre 基线口径的诚实值：两时点
+		 * 期望态均未成立） */
+		exp_oc = r < 7 ? AS_OC_SUCCESS : AS_OC_PARTIAL;
+		exp_dl = r < 7 ? 1 : 0;
+		kr[4].samples++;
+		if (got == exp_oc)
+			kr[4].consistent++;
+		if (dl == exp_dl) {
+			kr[4].delta_checked++;
+		} else {
+			printf("    wsl r%d delta=%lld exp=%lld\n", r, dl,
+			       exp_dl);
+		}
+	}
+
+	/* ---- 旋钮 6：proc.signal（match；同 pid 交替 19/18 真迁移——
+	 *    信号组映射：19→T、18→非 T；pre=上一信号号（全局表值） ---- */
 	for (int r = 0; r < 8; r++) {
 		unsigned long long id = 2051 + r;
-		int got = 0;
-		long long dl = 0;
+		int got = 0, exp_oc;
+		long long dl = 0, exp_dl;
+		long long inj = (r % 2 == 0) ? 19 : 18;
+		char arm_state = (inj == 19) ? 'T' : 'S';
 
-		set_pid_stat(TREE, 'S', 50, 20);
+		/* post-execute：信号已投递（19→T / 18→S） */
+		set_pid_stat(TREE, arm_state, 50, 20);
 		arm(&oc, id, 2, "proc.signal");
 		if (r < 7)
-			set_pid_stat(TREE, 'T', 50, 20);
-		/* r=7：保持 S（未达成） */
+			set_pid_stat(TREE, arm_state, 50, 20);	/* 保持 */
+		else
+			set_pid_stat(TREE, 'T', 50, 20);	/* cont 未生效 */
 		as_outcome_tick(&oc, as_now_mono_ms() + 400000);
 		CHECK(read_written(TREE, id, &got, &dl) > 0, "signal: written");
-		/* 独立重算：期望态 T；S→T=SUCCESS（+1）；仍 S=PARTIAL */
+		/* 独立重算：pre 组≠inj 组（交替）→ 基线未成立；
+		 * 期望态达成=SUCCESS（+1）；r7 未达成=PARTIAL（0） */
+		exp_oc = r < 7 ? AS_OC_SUCCESS : AS_OC_PARTIAL;
+		exp_dl = r < 7 ? 1 : 0;
 		kr[5].samples++;
-		if (got == (r < 7 ? AS_OC_SUCCESS : AS_OC_PARTIAL))
+		if (got == exp_oc)
 			kr[5].consistent++;
-		if (dl == (r < 7 ? 1 : 0))
+		if (dl == exp_dl) {
 			kr[5].delta_checked++;
+		} else {
+			printf("    signal r%d delta=%lld exp=%lld\n", r, dl,
+			       exp_dl);
+		}
 	}
 
 	/* ---- 验收门输出 ---- */
 	{
 		static const char *names[6] = { "proc.freeze", "sched.nice",
 						"mm.thp", "net.nftables",
-						"power.wakeup",
+						"sec.ws_label",
 						"proc.signal" };
 		int dir_knobs = 0;
 
@@ -903,7 +1100,9 @@ static void test_fill_gates(void)
 }
 
 /* ====================================================================
- * 5) 全表行覆盖（其余每行 1 job：期望 outcome + 精确 delta）
+ * 5) 全表行覆盖（其余每行 1 job：期望 outcome + 精确 delta）——
+ *    U66：读回型行基线=pre（arm 时点 mock=注入后读回），环境型行
+ *    T0=arm 时点快照，match 型行 arm 时点=迁移后状态
  * ==================================================================== */
 
 struct row_case {
@@ -918,6 +1117,7 @@ static void test_misc_rows(void)
 	struct as_conf c;
 	struct as_stats st;
 	struct as_outcome oc;
+	char p[512];
 
 	build_tree(TREE, 999999);
 	conf_oc(&c, 256);
@@ -925,92 +1125,127 @@ static void test_misc_rows(void)
 	CHECK(as_outcome_init(&oc, &c, &st) == 0, "rows: init");
 	as_outcome_set_root(&oc, TREE);
 
-	/* sched.timeslice：PSI cpu 0.25→3.00（centi 25→300，INTENT 出带） */
+	/* 1004 sched.timeslice：pre=6 → 12（INTENT）；T0 psi cpu 0.25 */
 	arm(&oc, 1004, 2, "sched.timeslice");
+	/* 1006 mm.swappiness：pre=60 → 10；T0 psi mem 0.10 */
+	arm(&oc, 1006, 2, "mm.swappiness");
+	/* 1007 mm.readahead：读回型 pre=128 → 256（arm 已=256） */
+	snprintf(p, sizeof(p), "%s/sys/class/bdi/8:0/ra_pages", TREE);
+	wfile(p, "256\n");
+	arm(&oc, 1007, 2, "mm.readahead");
+	/* 1008 mm.reclaim_prio：读回型 gauge pre=100 → 50（arm 已=50，
+	 * 在窗口末统一 mutate 时写入——读回型 delta 只看 end−pre） */
+	arm(&oc, 1008, 2, "mm.reclaim_prio");
+	/* 1009 io.priority：读回型 control pre=4 → 1（arm control 已=1：
+	 * post-execute 表值——窗口末读回同值 → delta=1−4） */
 	{
-		char p[512];
+		/* control 全表重写：读回型/恒等旋钮 current=post-execute 值 */
+		wfile(TREE "/proc/ai/control",
+		      "sched.nice domain=1 [real] min=-20 max=19 current=0 default=0\n"
+		      "sched.affinity domain=1 [real] min=0 max=255 current=0 default=0\n"
+		      "sched.oom_score domain=1 [real] min=-1000 max=1000 current=0 default=0\n"
+		      "sched.timeslice domain=1 [real] min=1 max=1000 current=6 default=6\n"
+		      "ai.decision_sched domain=1 [real] min=0 max=1 current=0 default=0\n"
+		      "mm.swappiness domain=2 [real] min=0 max=100 current=60 default=60\n"
+		      "mm.readahead domain=2 [real] min=0 max=4096 current=256 default=128\n"
+		      "mm.thp domain=2 [real] min=0 max=2 current=1 default=1\n"
+		      "mm.reclaim_prio domain=2 [real] min=0 max=100 current=50 default=100\n"
+		      "ai.decision_oom domain=2 [real] min=0 max=1 current=0 default=0\n"
+		      "ai.decision_mm domain=2 [real] min=0 max=1 current=0 default=0\n"
+		      "io.priority domain=3 [real] min=0 max=7 current=1 default=4\n"
+		      "io.bandwidth domain=3 [real] min=0 max=100 current=50 default=100\n"
+		      "net.cwnd domain=4 [real] min=1 max=4096 current=100 default=100\n"
+		      "net.rto domain=4 [real] min=1 max=10000 current=200 default=200\n"
+		      "net.qdisc domain=4 [real] min=0 max=3 current=3 default=1\n"
+		      "net.nftables domain=4 [real] min=0 max=1 current=1 default=0\n"
+		      "sec.lsm_override domain=5 [real] min=0 max=1 current=1 default=0\n"
+		      "sec.seccomp domain=5 [reserved] min=0 max=1 current=0 default=0\n"
+		      "sec.audit domain=5 [real] min=0 max=1 current=0 default=1\n"
+		      "sec.ws_label domain=5 [real] min=0 max=255 current=7 default=0\n"
+		      "ai.decision_inject domain=5 [real] min=0 max=1 current=1 default=0\n"
+		      "power.freq domain=6 [real] min=0 max=10000 current=5000 default=10000\n"
+		      "power.cstate domain=6 [real] min=0 max=10 current=0 default=2\n"
+		      "power.wakeup domain=6 [real] min=0 max=1 current=1 default=0\n"
+		      "proc.signal domain=12 [real] min=0 max=64 current=19 default=0\n"
+		      "proc.freeze domain=12 [real] min=0 max=1 current=1 default=0\n"
+		      "proc.rlimit domain=12 [real] min=0 max=1000000 current=100 default=1000000\n");
+	}
+	arm(&oc, 1009, 2, "io.priority");
+	/* 1010 io.bandwidth：读回型 pre=100 → 50 */
+	snprintf(p, sizeof(p), "%s/sys/class/bdi/8:0/max_ratio", TREE);
+	wfile(p, "50\n");
+	arm(&oc, 1010, 2, "io.bandwidth");
+	/* 1011 net.cwnd：T0 retrans=1000（树默认） */
+	arm(&oc, 1011, 2, "net.cwnd");
+	/* 1012 net.rto：T0 timeouts=5（树默认） */
+	arm(&oc, 1012, 2, "net.rto");
+	/* 1013 net.qdisc：match pre=1（codel）→ 3（fq_codel，arm 已迁移） */
+	snprintf(p, sizeof(p), "%s/sys/class/net/eth0/qdisc", TREE);
+	wfile(p, "fq_codel\n");
+	arm(&oc, 1013, 2, "net.qdisc");
+	/* 1015 sec.lsm_override：读回型 pre=0 → 1（end 值在统一 mutate） */
+	/* 1017 sec.audit：读回型 pre=1 → 0 */
+	/* 1016 sec.ws_label：match pre=0 → 7（arm 行已落） */
+	set_ws_labels(TREE, "4242 7 burn\n");
+	arm(&oc, 1015, 2, "sec.lsm_override");
+	arm(&oc, 1017, 2, "sec.audit");
+	arm(&oc, 1016, 2, "sec.ws_label");
+	/* 1018 ai.decision_inject：T0 dec_total=42（树默认） */
+	arm(&oc, 1018, 2, "ai.decision_inject");
+	/* 1019 power.freq：T0 2.5G 均值（树默认） */
+	arm(&oc, 1019, 2, "power.freq");
+	/* 1020 power.cstate：T0 deep=500000×2（树默认） */
+	arm(&oc, 1020, 2, "power.cstate");
+	/* 1021 power.wakeup：T0 wakeup_events=500（树默认） */
+	arm(&oc, 1021, 2, "power.wakeup");
+	/* 1003 sched.oom_score：读回型 per-task pre=0 → 500（SCENARIO 帽） */
+	snprintf(p, sizeof(p), "%s/proc/4242/oom_score_adj", TREE);
+	wfile(p, "500\n");
+	arm(&oc, 1003, 2, "sched.oom_score");
+	/* 1002 sched.affinity：match pre=0 → 2（arm 已钉 2——多掩码
+	 * 起点在内核侧 read 失败 → pre=全局 cur=0，K66 §5 fallback） */
+	set_status_aff(TREE, "2");
+	arm(&oc, 1002, 2, "sched.affinity");
+	/* 1024 proc.rlimit：读回型 pre=1000000（全局表值 fallback——
+	 * 内核无 per-task 单值读）→ soft=100 */
+	{
+		char lim[2048];
 
+		snprintf(lim, sizeof(lim),
+			 "Limit                     Soft LimitHard Limit Units \n"
+			 "Max cpu time              unlimitedunlimited seconds\n"
+			 "Max file size             unlimitedunlimited bytes\n"
+			 "Max data size             unlimitedunlimited bytes\n"
+			 "Max stack size            8388608  unlimited KB\n"
+			 "Max core file size        0        unlimited bytes\n"
+			 "Max processes             100      12345    processes\n"
+			 "Max open files            1024     1048576  files\n"
+			 "Max locked memory         65536    65536    KB\n"
+			 "Max address space         unlimitedunlimited KB\n"
+			 "Max file locks            unlimitedunlimited locks\n"
+			 "Max pending signals       2341     2341      signals\n"
+			 "Max msgqueue size         819200   819200   bytes\n"
+			 "Max nice priority         0        0        \n"
+			 "Max realtime priority     0        0        \n"
+			 "Max realtime timeout      unlimitedunlimited us\n");
+		snprintf(p, sizeof(p), "%s/proc/4242/limits", TREE);
+		wfile(p, lim);
+	}
+	arm(&oc, 1024, 2, "proc.rlimit");
+
+	/* 窗口末统一 mutate（环境型推进；读回型保持=注入值） */
+	{
 		snprintf(p, sizeof(p), "%s/proc/pressure/cpu", TREE);
 		wfile(p, "some avg10=3.00 avg60=3.00 avg300=3.00 total=1\n"
 			 "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
-	}
-	/* mm.swappiness：psi mem 0.10→2.50（+240；intent -（60→10）→WORSE） */
-	arm(&oc, 1006, 2, "mm.swappiness");
-	{
-		char p[512];
-
 		snprintf(p, sizeof(p), "%s/proc/pressure/memory", TREE);
 		wfile(p, "some avg10=2.50 avg60=2.50 avg300=2.50 total=1\n");
-	}
-	/* mm.readahead：bdi ra 128→256（+128 SUCCESS） */
-	arm(&oc, 1007, 2, "mm.readahead");
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/sys/class/bdi/8:0/ra_pages", TREE);
-		wfile(p, "256\n");
-	}
-	/* mm.reclaim_prio：ai_actions vfs_cache_pressure 100→50（-50，
-	 * intent -（100→50），dir + → 符号匹配 SUCCESS） */
-	arm(&oc, 1008, 2, "mm.reclaim_prio");
-	/* io.priority：control 读回 4→1（TASK：data=4242:1；intent -） */
-	arm(&oc, 1009, 2, "io.priority");
-	/* io.bandwidth：bdi max_ratio 100→50 */
-	arm(&oc, 1010, 2, "io.bandwidth");
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/sys/class/bdi/8:0/max_ratio", TREE);
-		wfile(p, "50\n");
-	}
-	/* net.cwnd：TcpExt retrans 1000→4000（rate=100/s，INTENT SUCCESS） */
-	arm(&oc, 1011, 2, "net.cwnd");
-	/* net.rto：TCPTimeouts 5→6005（rate=200/s，INTENT SUCCESS） */
-	arm(&oc, 1012, 2, "net.rto");
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/proc/net/netstat", TREE);
-		wfile(p, "TcpExt: TcpRetransSegs TCPTimeouts\n"
-			 "TcpExt: 4000 6005\n");
-	}
-	/* net.qdisc：pfifo_fast→fq_codel（match +1 SUCCESS；注入 3） */
-	arm(&oc, 1013, 2, "net.qdisc");
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/sys/class/net/eth0/qdisc", TREE);
-		wfile(p, "fq_codel\n");
-	}
-	/* sec.lsm_override：lsm_enforce 0→1（flip，thr 0 → SUCCESS） */
-	arm(&oc, 1015, 2, "sec.lsm_override");
-	/* sec.audit：audit_capture 1→0（flip，intent - → SUCCESS） */
-	arm(&oc, 1017, 2, "sec.audit");
-	/* sec.ws_label：ws_labels 空 → 出现 "4242 7 burn"（match SUCCESS） */
-	arm(&oc, 1016, 2, "sec.ws_label");
-	/* ai.decision_inject：decisions_total 42→442（+400 SUCCESS） */
-	arm(&oc, 1018, 2, "ai.decision_inject");
-	/* power.freq：cpufreq 2.5G→1.5G 均值（-1000000，intent -） */
-	arm(&oc, 1019, 2, "power.freq");
-	/* power.cstate：cpuidle deep 1000000→0（-1000000，intent -） */
-	arm(&oc, 1020, 2, "power.cstate");
-	/* sched.oom_score：oom_adj 0→500（SCENARIO 帽 → PARTIAL，delta 报） */
-	arm(&oc, 1003, 2, "sched.oom_score");
-	/* sched.affinity：allowed 0-3→"2"（match SUCCESS） */
-	arm(&oc, 1002, 2, "sched.affinity");
-	/* proc.rlimit：limits soft(行6) 12345→100（-12245，intent -） */
-	arm(&oc, 1024, 2, "proc.rlimit");
-
-	/* 统一 mutate（arm 之后一次到位） */
-	{
-		char p[512];
-
 		snprintf(p, sizeof(p), "%s/sys/kernel/ai/stats/ai_actions",
 			 TREE);
 		wfile(p,
 		 "cwnd_clamp_hits: 0\naiguard_freq_requests: 5\n"
 		 "aiguard_freq_clamped: 1\naiguard_freq_cap_pct: 10000\n"
-		 "wakeup_capture: 0\nwakeup_events: 500\n"
+		 "wakeup_capture: 0\nwakeup_events: 6800\n"
 		 "netfilter_hook: 0\nnetfilter_pkts: 100000\n"
 		 "netfilter_bytes: 1000000\naudit_capture: 0\n"
 		 "audit_gate_drops: 3\nlsm_enforce: 1\nlsm_rules: 2\n"
@@ -1018,8 +1253,9 @@ static void test_misc_rows(void)
 		snprintf(p, sizeof(p),
 			 "%s/sys/kernel/ai/stats/decisions_total", TREE);
 		wfile(p, "442\n");
-		snprintf(p, sizeof(p), "%s/proc/ai/ws_labels", TREE);
-		wfile(p, "4242 7 burn\n");
+		snprintf(p, sizeof(p), "%s/proc/net/netstat", TREE);
+		wfile(p, "TcpExt: TcpRetransSegs TCPTimeouts\n"
+			 "TcpExt: 4000 6005\n");
 		for (int cpu = 0; cpu < 2; cpu++) {
 			snprintf(p, sizeof(p),
 				 "%s/sys/devices/system/cpu/cpu%d/cpufreq/"
@@ -1030,69 +1266,6 @@ static void test_misc_rows(void)
 				 "state1/time", TREE, cpu);
 			wfile(p, "0\n");
 		}
-		snprintf(p, sizeof(p), "%s/proc/4242/oom_score_adj", TREE);
-		wfile(p, "500\n");
-		snprintf(p, sizeof(p), "%s/proc/4242/status", TREE);
-		wfile(p, "Name:\tburn\nState:\tS (sleeping)\n"
-			 "Cpus_allowed_list:\t2\n");
-		{
-			char lim[2048];
-
-			snprintf(lim, sizeof(lim),
-				 "Limit                     Soft LimitHard Limit Units \n"
-				 "Max cpu time              unlimitedunlimited seconds\n"
-				 "Max file size             unlimitedunlimited bytes\n"
-				 "Max data size             unlimitedunlimited bytes\n"
-				 "Max stack size            8388608  unlimited KB\n"
-				 "Max core file size        0        unlimited bytes\n"
-				 "Max processes             100      12345    processes\n"
-				 "Max open files            1024     1048576  files\n"
-				 "Max locked memory         65536    65536    KB\n"
-				 "Max address space         unlimitedunlimited KB\n"
-				 "Max file locks            unlimitedunlimited locks\n"
-				 "Max pending signals       2341     2341     signals\n"
-				 "Max msgqueue size         819200   819200   bytes\n"
-				 "Max nice priority         0        0        \n"
-				 "Max realtime priority     0        0        \n"
-				 "Max realtime timeout      unlimitedunlimited us\n");
-			snprintf(p, sizeof(p), "%s/proc/4242/limits", TREE);
-			wfile(p, lim);
-		}
-	}
-	/* io.priority 的 control 读回 4→1：改 control 文件该行 */
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/proc/ai/control", TREE);
-		wfile(p,
-			"sched.nice domain=1 [real] min=-20 max=19 current=0 default=0\n"
-			"sched.affinity domain=1 [real] min=0 max=255 current=0 default=0\n"
-			"sched.oom_score domain=1 [real] min=-1000 max=1000 current=0 default=0\n"
-			"sched.timeslice domain=1 [real] min=1 max=1000 current=6 default=6\n"
-			"ai.decision_sched domain=1 [real] min=0 max=1 current=0 default=0\n"
-			"mm.swappiness domain=2 [real] min=0 max=100 current=60 default=60\n"
-			"mm.readahead domain=2 [real] min=0 max=4096 current=128 default=128\n"
-			"mm.thp domain=2 [real] min=0 max=2 current=1 default=1\n"
-			"mm.reclaim_prio domain=2 [real] min=0 max=100 current=100 default=100\n"
-			"ai.decision_oom domain=2 [real] min=0 max=1 current=0 default=0\n"
-			"ai.decision_mm domain=2 [real] min=0 max=1 current=0 default=0\n"
-			"io.priority domain=3 [real] min=0 max=7 current=1 default=4\n"
-			"io.bandwidth domain=3 [real] min=0 max=100 current=100 default=100\n"
-			"net.cwnd domain=4 [real] min=1 max=4096 current=100 default=100\n"
-			"net.rto domain=4 [real] min=1 max=10000 current=200 default=200\n"
-			"net.qdisc domain=4 [real] min=0 max=3 current=1 default=1\n"
-			"net.nftables domain=4 [real] min=0 max=1 current=0 default=0\n"
-			"sec.lsm_override domain=5 [real] min=0 max=1 current=0 default=0\n"
-			"sec.seccomp domain=5 [reserved] min=0 max=1 current=0 default=0\n"
-			"sec.audit domain=5 [real] min=0 max=1 current=1 default=1\n"
-			"sec.ws_label domain=5 [real] min=0 max=255 current=0 default=0\n"
-			"ai.decision_inject domain=5 [real] min=0 max=1 current=0 default=0\n"
-			"power.freq domain=6 [real] min=0 max=10000 current=10000 default=10000\n"
-			"power.cstate domain=6 [real] min=0 max=10 current=2 default=2\n"
-			"power.wakeup domain=6 [real] min=0 max=1 current=0 default=0\n"
-			"proc.signal domain=12 [real] min=0 max=64 current=0 default=0\n"
-			"proc.freeze domain=12 [real] min=0 max=1 current=0 default=0\n"
-			"proc.rlimit domain=12 [real] min=0 max=1000000 current=1000000 default=1000000\n");
 	}
 
 	as_outcome_tick(&oc, as_now_mono_ms() + 400000);
@@ -1114,9 +1287,10 @@ static void test_misc_rows(void)
 			{ 1018, "ai.decision_inject", AS_OC_SUCCESS, 400 },
 			{ 1019, "power.freq", AS_OC_SUCCESS, -1000000 },
 			{ 1020, "power.cstate", AS_OC_SUCCESS, -1000000 },
+			{ 1021, "power.wakeup", AS_OC_SUCCESS, 210 },
 			{ 1003, "sched.oom_score", AS_OC_PARTIAL, 500 },
 			{ 1002, "sched.affinity", AS_OC_SUCCESS, 1 },
-			{ 1024, "proc.rlimit", AS_OC_SUCCESS, -12245 },
+			{ 1024, "proc.rlimit", AS_OC_SUCCESS, -999900 },
 		};
 		size_t pass = 0;
 
@@ -1145,7 +1319,9 @@ static void test_misc_rows(void)
 }
 
 /* ====================================================================
- * 6) 无操作对照（§5.3：PARTIAL ≥80%）
+ * 6) 无操作对照（§5.3：PARTIAL ≥80%）——U66 真实形态：恒等决策在
+ *    内核走快路径 → pre=none → PARTIAL+pre_none（非 noop——基线
+ *    不可得）；3008 事件型例外（无快路径，pre=19 同组 → 迁移未发生）
  * ==================================================================== */
 
 static void test_control_group(void)
@@ -1169,18 +1345,13 @@ static void test_control_group(void)
 	memset(&st, 0, sizeof(st));
 	CHECK(as_outcome_init(&oc, &c, &st) == 0, "ctrl: init");
 	as_outcome_set_root(&oc, TREE);
-	/* 对照基线：freeze/signal 预置已成立态（T），affinity 预置 "2" */
+	/* post-execute（恒等）状态：freeze/signal 已 T、affinity 已钉 2
+	 * （control factory 默认即恒等态：io.priority current=4 等） */
 	set_pid_stat(TREE, 'T', 50, 20);
-	{
-		char p[512];
-
-		snprintf(p, sizeof(p), "%s/proc/4242/status", TREE);
-		wfile(p, "Name:\tburn\nState:\tT (stopped)\n"
-			 "Cpus_allowed_list:\t2\n");
-	}
+	set_status_aff(TREE, "2");
 	for (int i = 0; i < 10; i++)
 		arm(&oc, ids[i], 2, knobs[i]);
-	/* 不做任何 mutate（无操作） */
+	/* 不做任何 mutate（无操作窗口） */
 	as_outcome_tick(&oc, as_now_mono_ms() + 400000);
 	for (int i = 0; i < 10; i++) {
 		int got = 0;
@@ -1199,8 +1370,72 @@ static void test_control_group(void)
 	       100.0 * partial / total);
 	CHECK(total == 10 && partial >= 8,
 	      "gate3: no-op control PARTIAL >=80% (§5.3)");
+	/* U66：9×pre=none（恒等快路径）+1×signal 同组迁移未发生；
+	 * meas_fail 不应有（指标源全在） */
+	CHECK(st.oc.pre_none == 9, "ctrl: pre_none=9 (identity fast-path)");
+	CHECK(st.oc.meas_fail == 0, "ctrl: no meas_fail (sources present)");
+	CHECK(st.oc.noop == 0, "ctrl: noop=0 (pre=none 路不计 noop)");
 	as_outcome_close(&oc);
 	printf("  control-group: OK\n");
+}
+
+/* ====================================================================
+ * 6b) U66 pre=none / #65 旧行降级四路
+ * ==================================================================== */
+
+static void test_pre_none_paths(void)
+{
+	struct as_conf c;
+	struct as_stats st;
+	struct as_outcome oc;
+	char p[512];
+	int got;
+	long long dl;
+
+	build_tree(TREE, 999999);
+	conf_oc(&c, 256);
+	memset(&st, 0, sizeof(st));
+	CHECK(as_outcome_init(&oc, &c, &st) == 0, "pn: init");
+	as_outcome_set_root(&oc, TREE);
+
+	/* 数值环境型（mm.thp id=5001 pre=none）：PARTIAL，delta 照算
+	 * （1500 → 7500 → rdiv 6000/300=20） */
+	snprintf(p, sizeof(p), "%s/proc/vmstat", TREE);
+	wfile(p, "thp_fault_alloc 1000\nthp_cow_fault 500\n");
+	arm(&oc, 5001, 2, "mm.thp");
+	wfile(p, "thp_fault_alloc 7000\nthp_cow_fault 500\n");
+	/* 读回型（io.priority id=5002 pre=none）：PARTIAL delta=0
+	 * （基线即缺——after 可得也无 pre 可减） */
+	wfile(TREE "/proc/ai/control",
+	      "io.priority domain=3 [real] min=0 max=7 current=1 default=4\n");
+	arm(&oc, 5002, 2, "io.priority");
+	/* match 型（proc.freeze id=5003 pre=none）：PARTIAL（迁移不可判），
+	 * delta=aux CPU 增量仍报（0：冻结中无增量） */
+	set_pid_stat(TREE, 'T', 100, 40);
+	arm(&oc, 5003, 2, "proc.freeze");
+	set_pid_stat(TREE, 'T', 100, 40);
+	/* #65 旧行（id=5004 无 pre 字段）→ 同 pre=none 降级（arm 于
+	 * 7500、窗口末 7500 → delta 0） */
+	arm(&oc, 5004, 2, "mm.thp");
+
+	as_outcome_tick(&oc, as_now_mono_ms() + 400000);
+
+	got = 0; dl = 99;
+	CHECK(read_written(TREE, 5001, &got, &dl) > 0 && got == AS_OC_PARTIAL
+	      && dl == 20, "pn: numeric env PARTIAL delta=20 (rdiv 6000/300)");
+	got = 0; dl = 99;
+	CHECK(read_written(TREE, 5002, &got, &dl) > 0 && got == AS_OC_PARTIAL
+	      && dl == 0, "pn: readback PARTIAL delta=0 (no baseline)");
+	got = 0; dl = 99;
+	CHECK(read_written(TREE, 5003, &got, &dl) > 0 && got == AS_OC_PARTIAL
+	      && dl == 0, "pn: match PARTIAL delta=0 (transition unknown)");
+	got = 0; dl = 99;
+	CHECK(read_written(TREE, 5004, &got, &dl) > 0 && got == AS_OC_PARTIAL
+	      && dl == 0, "pn: #65 old-line PARTIAL delta=0");
+	CHECK(st.oc.pre_none == 4, "pn: pre_none counter=4");
+	CHECK(st.oc.meas_fail == 0, "pn: no meas_fail (degraded≠failed)");
+	as_outcome_close(&oc);
+	printf("  pre-none-paths: OK\n");
 }
 
 /* ====================================================================
@@ -1317,7 +1552,7 @@ static void test_degrade(void)
 	}
 	as_outcome_close(&oc);
 
-	/* 7e. stats 渲染含 outcome.* 段 */
+	/* 7e. stats 渲染含 outcome.* 段（U66：pre_none 键在列） */
 	{
 		char *buf = NULL;
 		size_t len = 0;
@@ -1326,12 +1561,15 @@ static void test_degrade(void)
 		CHECK(m != NULL, "deg: memstream");
 		if (m) {
 			st.oc.armed = 5;
+			st.oc.pre_none = 2;
 			as_stats_render(&st, 0, 0, m);
 			fclose(m);
 			CHECK(strstr(buf, "outcome.enabled=1") != NULL,
 			      "deg: render outcome.enabled");
 			CHECK(strstr(buf, "outcome.armed=5") != NULL,
 			      "deg: render outcome.armed");
+			CHECK(strstr(buf, "outcome.pre_none=2") != NULL,
+			      "deg: render pre_none (U66)");
 			CHECK(strstr(buf, "outcome.verify_fail=") != NULL,
 			      "deg: render verify_fail");
 			free(buf);
@@ -1364,7 +1602,7 @@ static void test_parquet_link(void)
 
 	/* decision 23 列 schema：outcome/outcome_ts/metric_delta 已预留
 	 * （as_parquet.h pq_dec_row）——填充后写盘 + footer 统计可读
-	 * = 落盘侧零改动即兼容（设计 §0.5） */
+	 * = 落盘侧零改动即兼容（设计 §0.5；U66：pre= 非列——schema 不动） */
 	{
 		const char *root = "/tmp/as-oc-pq";
 		struct pq_dec_row row;
@@ -1430,10 +1668,12 @@ int main(void)
 
 	test_table_conf();
 	test_decisions_scan();
+	test_pure_units();
 	test_tap_paths();
 	test_fill_gates();
 	test_misc_rows();
 	test_control_group();
+	test_pre_none_paths();
 	test_degrade();
 	test_parquet_link();
 	if (fails) {
