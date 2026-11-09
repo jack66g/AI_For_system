@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "as_event.h"
+#include "as_redact.h"
 #include "as_stats.h"
 #include "as_util.h"
 
@@ -138,6 +139,38 @@ void as_stats_render(const struct as_stats *st, int ring_used,
 		st->pq.retained_files);
 	fprintf(out, "parquet.retained_bytes=%lld\n",
 		st->pq.retained_bytes);
+	/* I-10：outcome 回填器计数（追加段，旧键零位移——回填率口径：
+	 * 应处理集=EVENT policy 中 executed>0 且 param 非空者；回填率=
+	 * decisions 中 outcome_ts>0 占比；armed/filled/notfound 互为对账） */
+	fprintf(out, "outcome.enabled=%d\n", st->oc.enabled);
+	fprintf(out, "outcome.armed=%lld\n", st->oc.armed);
+	fprintf(out, "outcome.filled=%lld\n", st->oc.filled);
+	fprintf(out, "outcome.success=%lld\n", st->oc.success);
+	fprintf(out, "outcome.partial=%lld\n", st->oc.partial);
+	fprintf(out, "outcome.worse=%lld\n", st->oc.worse);
+	fprintf(out, "outcome.skip_broadcast=%lld\n", st->oc.skip_broadcast);
+	fprintf(out, "outcome.skip_noexec=%lld\n", st->oc.skip_noexec);
+	fprintf(out, "outcome.skip_reserved=%lld\n", st->oc.skip_reserved);
+	fprintf(out, "outcome.skip_unknown=%lld\n", st->oc.skip_unknown);
+	fprintf(out, "outcome.notfound=%lld\n", st->oc.notfound);
+	fprintf(out, "outcome.write_fail=%lld\n", st->oc.write_fail);
+	fprintf(out, "outcome.meas_fail=%lld\n", st->oc.meas_fail);
+	fprintf(out, "outcome.dropped=%lld\n", st->oc.dropped);
+	fprintf(out, "outcome.noop=%lld\n", st->oc.noop);
+	fprintf(out, "outcome.verify_fail=%lld\n", st->oc.verify_fail);
+	/* SENSE 脱敏（追加段，旧键零位移；计数源=as_redact 全局——render
+	 * 时快照；unknown_pass>0 提示字段表外有字段透传（设计 §3.5）） */
+	{
+		const struct as_redact_stats *rd = as_redact_stats();
+
+		fprintf(out, "sense_redact.applied=%lld\n", rd->applied);
+		fprintf(out, "sense_redact.hashed=%lld\n", rd->hashed);
+		fprintf(out, "sense_redact.truncated=%lld\n", rd->truncated);
+		fprintf(out, "sense_redact.masked=%lld\n", rd->masked);
+		fprintf(out, "sense_redact.dropped=%lld\n", rd->dropped);
+		fprintf(out, "sense_redact.unknown_pass=%lld\n",
+			rd->unknown_pass);
+	}
 }
 
 int as_stats_write_file(const struct as_stats *st, const char *path,

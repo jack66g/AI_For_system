@@ -6,7 +6,9 @@
 # 见 K3C-REPORT.md「构建集成」）：在 agent/ai 下 `make aistreamd`。
 #
 #   make              # 构建 aistreamd + 注入器（tests/ai_inject）
-#   make test         # 构建并运行单测（7 项：K3c 6 + K3d-2 test_hotplug）
+#   make test         # 构建并运行单测（10 项：K3c 6 + K3d-2 test_hotplug
+#                      #          + I-10 test_outcome + T8 test_parquet
+#                      #          + SENSE 脱敏 test_sense_redact）
 #   make clean
 #
 # 只读链接兄弟目录源码（不改它们，各自编译进本目录 obj/reuse/）：
@@ -27,8 +29,8 @@ OBJ_DIR := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
 
 OWN_SRCS := as_util.c as_conf.c as_quota.c as_ring.c as_event.c \
-	    as_stats.c as_sme.c as_streams.c as_hotplug.c \
-	    as_snappy.c as_parquet.c as_pq_sink.c aistreamd.c
+	    as_stats.c as_sme.c as_streams.c as_hotplug.c as_outcome.c \
+	    as_redact.c as_snappy.c as_parquet.c as_pq_sink.c aistreamd.c
 OWN_OBJS := $(OWN_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # 复用对象（显式规则，避免与本目录模式规则歧义）
@@ -81,7 +83,7 @@ tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
 # ---- 单测（对象除 aistreamd.o：tests 自带 main） ----
 
 TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
-	 test_hotplug test_parquet
+	 test_hotplug test_outcome test_parquet test_sense_redact
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
 test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)

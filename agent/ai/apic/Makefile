@@ -28,7 +28,7 @@ REUSE_OBJ := dtcore.o dtjson.o
 LIB := libaikapi.a
 BINS := aikerneld-api
 
-LIB_SRCS := aikapi.c apiask.c apihttp.c apinl.c apiv2.c
+LIB_SRCS := aikapi.c apiask.c apihttp.c apinl.c apiredact.c apiv2.c
 OBJS := $(LIB_SRCS:.c=.o)
 MAIN_OBJ := apimain.o
 TEST_SRCS := $(wildcard tests/test_*.c)

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "apic/api.h"
+#include "apiredact.h"
 #include "desktop/dtcore.h"
 #include "desktop/dtjson.h"
 
@@ -147,6 +148,18 @@ int main(int argc, char **argv)
 		       "（T7c aik-tls-gateway 承担,见 T7B-REPORT 已知限制）\n");
 		fflush(stdout);
 		return 1;
+	}
+	/* SENSE 脱敏档位启动行（设计 SENSE-REDACT-DESIGN §4.3）：off 静默
+	 * （stdout/listening 行与重放向量逐字节一致——off 零输出是红线）；
+	 * 非 off 一行 stderr 审计（含未知键透传提示口径） */
+	{
+		int rl = api_sense_redact_level(NULL, 0);
+
+		if (rl != API_REDACT_OFF)
+			fprintf(stderr,
+				"[aikernel-api] sense_redact=%s (exposure-side; "
+				"unknown keys passed+counted — see SENSE-REDACT-DESIGN)\n",
+				rl == API_REDACT_STRICT ? "strict" : "soft");
 	}
 	/* 先监听后打 listening 行(绑不上时无 LISTENING,与参考 OSError 同) */
 	if (api_http_listen(bind, (int)port) != 0) {

@@ -36,8 +36,10 @@
 #include "as_conf.h"
 #include "as_event.h"
 #include "as_hotplug.h"
+#include "as_outcome.h"
 #include "as_pq_sink.h"
 #include "as_quota.h"
+#include "as_redact.h"
 #include "as_ring.h"
 #include "as_sme.h"
 #include "as_stats.h"
@@ -45,7 +47,7 @@
 #include "as_util.h"
 
 #define AISTREAMD_VERSION \
-	"aistreamd 1.2 (K3c I-5+I-4+I-6 + K3d-2 I-9 hotplug advisory + T8 parquet)"
+	"aistreamd 1.4 (K3c + K3d-2 I-9 hotplug advisory + T8 parquet + I-10 outcome backfill + SENSE redact)"
 
 /* ---- 全局上下文（单线程，信号只置标志） ---- */
 
@@ -61,6 +63,7 @@ struct g_ctx {
 	struct as_sme sme;
 	struct as_streams streams;
 	struct as_hotplug hotplug;	/* K3d-2：advisory-only（C7 红线） */
+	struct as_outcome outcome;	/* I-10：决策 outcome 回填（C3 默认关） */
 	struct as_pq_sink pq;		/* T8：事件→Parquet 落盘（默认关） */
 	int lock_fd;
 };
@@ -122,6 +125,7 @@ static void on_event(struct as_event *ev, void *u)
 	 * uevent 由 hotplug 自身日限配额约束）；K3c 记忆路零改动。
 	 * C7 红线：该流水线只产建议（executed 恒 false），不执行任何动作。 */
 	as_hotplug_tap(&g->hotplug, ev);
+	as_outcome_tap(&g->outcome, ev);	/* I-10：arm（policy 事件） */
 	if (as_dedup_filter(&g->dedup, ev, ev->ts_real_ms) ==
 	    AS_DEDUP_SUPPRESS) {
 		as_stats_dedup(&g->stats, ev->stream_idx);
@@ -129,6 +133,17 @@ static void on_event(struct as_event *ev, void *u)
 	}
 	/* T8：Parquet 落盘采样在去重窗口之后（首条+聚合都落；与 SME 配额
 	 * 独立——磁盘增长由 PARQUET_MAX_GB 保留策略约束）。默认关=零操作。 */
+	as_pq_sink_feed(&g->pq, ev);
+	quota_then_deliver(g, ev);
+}
+
+/* I-10：outcome 回填合成事件出口——绕 hotplug/dedup（自产事件每条含
+ * 唯一 decision_id，无重复语义），直接 parquet 采样 + 配额 → SME
+ * （环形缓冲兜底——SME 不可达不阻塞 outcome 写，设计 §4.4） */
+static void outcome_emit(struct as_event *ev, void *u)
+{
+	struct g_ctx *g = u;
+
 	as_pq_sink_feed(&g->pq, ev);
 	quota_then_deliver(g, ev);
 }
@@ -305,15 +320,44 @@ int main(int argc, char **argv)
 		       G.conf.parquet_enabled, G.conf.parquet_dir,
 		       G.conf.parquet_max_gb, G.conf.parquet_flush_sec,
 		       G.conf.parquet_flush_rows);
+		printf("outcome enabled=%d windows=%llds/%llds grace=%llds "
+		       "max_pending=%lld scan_max=%lld write_sme=%d "
+		       "auto_rollback=%d (C3 annotation only; rollback C4 "
+		       "not implemented)\n",
+		       G.conf.outcome_enabled,
+		       G.conf.outcome_window_short_sec,
+		       G.conf.outcome_window_long_sec,
+		       G.conf.outcome_grace_sec,
+		       G.conf.outcome_max_pending,
+		       G.conf.outcome_decisions_scan_max,
+		       G.conf.outcome_write_sme,
+		       G.conf.outcome_auto_rollback);
+		printf("outcome_mock_root=%s%s\n",
+		       G.conf.outcome_mock_root,
+		       strcmp(G.conf.outcome_mock_root, "/") == 0 ?
+		       "" : " (TEST ONLY)");
+		printf("sense_redact=%s%s salt=%s\n",
+		       G.conf.sense_redact_level == 2 ? "strict" :
+		       G.conf.sense_redact_level == 1 ? "soft" : "off",
+		       G.conf.sense_redact_level ? "" :
+		       " (factory default; see SENSE-REDACT-DESIGN)",
+		       G.conf.sense_redact_salt[0] ? "set" : "-");
 		return 0;
 	}
 
 	as_set_debug(G.conf.log_debug);
+	/* SENSE 脱敏引擎初始化（产生侧；off=零开销恒等；journal 一行——
+	 * off 也打（审计初值，AS_OUTCOME 同款口径）） */
+	as_redact_set(G.conf.sense_redact_level, G.conf.sense_redact_salt);
 	if (acquire_lock(&G) != 0)
 		return 1;
 	as_log("%s starting (conf=%s)", AISTREAMD_VERSION, conf_path);
 	as_log("pid=%d lock=%s stats=%s", (int)getpid(), G.conf.lock_file,
 	       G.conf.stats_file);
+	as_log("sense_redact=%s%s (producing-side; design SENSE-REDACT-DESIGN)",
+	       G.conf.sense_redact_level == 2 ? "strict" :
+	       G.conf.sense_redact_level == 1 ? "soft" : "off",
+	       G.conf.sense_redact_salt[0] ? " salted" : "");
 
 	as_stats_init(&G.stats, &G.conf);
 	as_stats_set_conf_path(&G.stats, conf_path);
@@ -337,6 +381,12 @@ int main(int argc, char **argv)
 		as_log("FATAL: parquet sink init");
 		return 1;
 	}
+	if (as_outcome_init(&G.outcome, &G.conf, &G.stats) != 0) {
+		/* 仅 pending 队内存失败致命（enabled=0 时零分配零开销） */
+		as_log("FATAL: outcome backfill init");
+		return 1;
+	}
+	as_outcome_set_sink(&G.outcome, outcome_emit, &G);
 	if (as_streams_setup(&G.streams, &G.conf, &G.stats, on_event,
 			     &G) != 0) {
 		as_log("FATAL: streams setup");
@@ -398,6 +448,15 @@ int main(int argc, char **argv)
 			next_pq_flush = now + G.conf.parquet_flush_sec * 1000;
 		}
 		as_dedup_flush(&G.dedup, as_now_real_ms(), agg_emit, &G);
+		/* I-10：outcome 回填 tick（窗口到期；due 也纳入 poll 超时） */
+		{
+			long long odue = as_outcome_due_ms(&G.outcome, now);
+
+			if (odue == 0)
+				as_outcome_tick(&G.outcome, now);
+			if (odue > 0 && odue < timeout)
+				timeout = odue;
+		}
 		due = as_streams_taskstats_due_ms(&G.streams);
 		if (due <= 0) {
 			as_streams_taskstats_tick(&G.streams);
@@ -441,6 +500,9 @@ int main(int argc, char **argv)
 	as_streams_close_all(&G.streams);
 	as_sme_flush(&G.sme);
 	as_hotplug_close(&G.hotplug);	/* K3d-2：flush+close advisory JSONL */
+	as_outcome_close(&G.outcome);	/* I-10：pending 队释放（停守护=
+					 * decisions 回全量 outcome_ts=0，
+					 * §5.7 回滚语义） */	/* K3d-2：flush+close advisory JSONL */
 	as_pq_sink_close(&G.pq);	/* T8：缓冲行 flush 后释放 */
 	write_stats(&G, "final");
 	as_sme_free(&G.sme);

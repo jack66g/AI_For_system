@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "apic/api.h"
+#include "apiredact.h"
 #include "desktop/dtcore.h"
 #include "desktop/dtjson.h"
 
@@ -674,6 +675,19 @@ int api_do_sense(struct api_http_req *req, struct api_http_resp *resp,
 	}
 	api_utf8_decode_replace(text, n, &decoded, &declen);
 	free(text);
+	/* SENSE 脱敏（暴露侧，设计 SENSE-REDACT-DESIGN §4.3）：utf8 解码后、
+	 * limit 截断前；off 档 strdup 等价直通（零字节差——重放门前提）；
+	 * 脱敏失败（OOM）回退原文——脱敏失效宁可漏过也不吞 /sense */
+	{
+		char *rd = api_sense_redact_text(what, decoded, declen,
+						 NULL);
+
+		if (rd) {
+			free(decoded);
+			decoded = rd;
+			declen = strlen(rd);
+		}
+	}
 	total_cps = dt_utf8_cplen(decoded, declen);
 	if (total_cps <= (size_t)cap) {
 		kept = malloc(declen + 1);

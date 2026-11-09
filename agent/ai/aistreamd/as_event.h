@@ -54,7 +54,11 @@ void as_event_mk(struct as_event *ev, int stream_idx, const char *category,
 		 const char *severity, const char *kvfmt, ...)
 	__attribute__((format(printf, 5, 6)));
 
-/* ---- 各流规范化构造（纯函数；单测冻结 fixture 逐字节比对） ---- */
+/* ---- 各流规范化构造（SENSE_REDACT=off（出厂默认）下=纯函数，单测
+ * 冻结 fixture 逐字节比对；soft/strict 下身份/内容字段先过 as_redact
+ * 策略表（设计 SENSE-REDACT-DESIGN §2.2）再拼行——行格式（键名/键序）
+ * 不变，仅字段值变换；decision_id 恒原样（审计链例外）；ev->pid 列同
+ * 步脱敏（as_redact_pid_col）） ---- */
 
 void as_event_proc_fork(struct as_event *ev, int ppid, int pid);
 void as_event_proc_exec(struct as_event *ev, int pid);
@@ -74,6 +78,12 @@ void as_event_proc_other(struct as_event *ev, int what, int pid);
  *   category=5 mce（param="cpu,bank"，16.03 对齐） */
 void as_event_ai_policy(struct as_event *ev, unsigned long long decision_id,
 			int executed, const char *sev, const char *param);
+/* I-10：outcome 回填合成事件（as_outcome 写口成功后经既有管道走
+ * SME 记忆 + T8 parquet telemetry；行格式冻结：
+ * "[kern] event outcome decision_id=%llu outcome=%s delta=%lld knob=%s"） */
+void as_event_outcome(struct as_event *ev, unsigned long long decision_id,
+		      int outcome, long long delta, const char *knob);
+
 void as_event_ai_model(struct as_event *ev, unsigned long long model_id,
 		       int loaded, const char *name);
 void as_event_ai_device(struct as_event *ev, int removed, const char *dev);

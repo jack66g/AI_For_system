@@ -71,6 +71,30 @@ struct as_stats {
 		long long retained_files;	/* 保留策略删除文件数 */
 		long long retained_bytes;	/* 保留策略删除字节 */
 	} pq;
+	/* I-10：outcome 回填器计数（stats 文件追加 outcome.* 段，旧键零位移；
+	 * 计数是回填率验收的决定性口径——设计 §4.5/§5.1） */
+	struct {
+		int enabled;			/* conf OUTCOME_ENABLED */
+		long long armed;			/* 入 pending 队（含后因窗口
+						 * 到期处理的所有结局） */
+		long long filled;			/* 窗口到期已处理（写口尝试） */
+		long long success;			/* 写入 SUCCESS(1) 条数 */
+		long long partial;			/* 写入 PARTIAL(2) 条数 */
+		long long worse;			/* 写入 WORSE(4) 条数 */
+		long long skip_broadcast;		/* param 空（域广播）跳过 */
+		long long skip_noexec;			/* executed=0 跳过 */
+		long long skip_reserved;		/* sec.seccomp reserved */
+		long long skip_unknown;			/* 表未收录旋钮 */
+		long long notfound;			/* decisions 反查不到 / 写口
+						 * -ENOENT（不重试） */
+		long long write_fail;			/* 写口失败（非 ENOENT） */
+		long long meas_fail;			/* 指标源读失败（PARTIAL+
+						 * delta=0 的理由） */
+		long long dropped;			/* pending 队满丢旧（洪泛） */
+		long long noop;			/* 注入值==注入前值（对照） */
+		long long verify_fail;			/* 写后 decisions 自校验
+						 * outcome_ts 仍 0 */
+	} oc;
 	long long started_mono_ms;
 	long long started_real_ms;
 	int pid;

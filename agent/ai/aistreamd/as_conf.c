@@ -45,6 +45,21 @@ void as_conf_defaults(struct as_conf *c)
 	c->parquet_max_gb = 2;
 	c->parquet_flush_sec = 30;
 	c->parquet_flush_rows = 128;
+	/* I-10：outcome 回填器（C3 默认关——设计 §4.5 出厂默认值） */
+	c->outcome_enabled = 0;
+	c->outcome_window_short_sec = 30;
+	c->outcome_window_long_sec = 300;
+	c->outcome_grace_sec = 10;
+	c->outcome_max_pending = 256;
+	c->outcome_decisions_scan_max = 64;
+	c->outcome_write_sme = 1;
+	c->outcome_auto_rollback = 0;
+	/* TEST ONLY（L1 mock 冒烟；生产恒 "/"） */
+	snprintf(c->outcome_mock_root, sizeof(c->outcome_mock_root), "/");
+	/* SENSE 脱敏（多用户前提；默认 off=单用户现状零字节变化——
+	 * 设计 SENSE-REDACT-DESIGN §5 出厂默认建议） */
+	c->sense_redact_level = 0;	/* 0=off 1=soft 2=strict */
+	c->sense_redact_salt[0] = '\0';
 	c->stats_interval_sec = 10;
 	c->log_debug = 0;
 	snprintf(c->stats_file, sizeof(c->stats_file), "/run/aistreamd.stats");
@@ -114,6 +129,12 @@ enum key_id {
 	K_HOTPLUG_INFER_DIM, K_HOTPLUG_INFER_MOCK, K_HOTPLUG_LOG,
 	K_PARQUET_ENABLED, K_PARQUET_DIR, K_PARQUET_MAX_GB,
 	K_PARQUET_FLUSH_SEC, K_PARQUET_FLUSH_ROWS,
+	K_OUTCOME_ENABLED, K_OUTCOME_WINDOW_SHORT_SEC,
+	K_OUTCOME_WINDOW_LONG_SEC, K_OUTCOME_GRACE_SEC,
+	K_OUTCOME_MAX_PENDING, K_OUTCOME_DECISIONS_SCAN_MAX,
+	K_OUTCOME_WRITE_SME, K_OUTCOME_AUTO_ROLLBACK,
+	K_OUTCOME_MOCK_ROOT,
+	K_SENSE_REDACT, K_SENSE_REDACT_SALT,
 	K_MAX
 };
 
@@ -130,6 +151,12 @@ static const char *const key_names[K_MAX] = {
 	"HOTPLUG_INFER_DIM", "HOTPLUG_INFER_MOCK", "HOTPLUG_LOG",
 	"PARQUET_ENABLED", "PARQUET_DIR", "PARQUET_MAX_GB",
 	"PARQUET_FLUSH_SEC", "PARQUET_FLUSH_ROWS",
+	"OUTCOME_ENABLED", "OUTCOME_WINDOW_SHORT_SEC",
+	"OUTCOME_WINDOW_LONG_SEC", "OUTCOME_GRACE_SEC",
+	"OUTCOME_MAX_PENDING", "OUTCOME_DECISIONS_SCAN_MAX",
+	"OUTCOME_WRITE_SME", "OUTCOME_AUTO_ROLLBACK",
+	"OUTCOME_MOCK_ROOT",
+	"SENSE_REDACT", "SENSE_REDACT_SALT",
 };
 
 static int key_lookup(const char *k)
@@ -220,6 +247,7 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_LOCK_FILE:
 		case K_HOTPLUG_MODEL:
 		case K_HOTPLUG_LOG:
+		case K_OUTCOME_MOCK_ROOT:
 		case K_PARQUET_DIR: {
 			/* 三个字符串槽循环使用（校验即时完成，不持有引用） */
 			char *dst;
@@ -260,6 +288,14 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 					   "bad HOTPLUG_LOG (need absolute "
 					   "path, no ..): ", v, NULL);
 			}
+			if (id == K_OUTCOME_MOCK_ROOT &&
+			    (v[0] != '/' || strstr(v, "..") ||
+			     strpbrk(v, " 	"))) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad OUTCOME_MOCK_ROOT (need absolute "
+					   "path, no ..): ", v, NULL);
+			}
 			if (id == K_PARQUET_DIR &&
 			    (v[0] != '/' || strstr(v, "..") ||
 			     strpbrk(v, " \t"))) {
@@ -283,6 +319,9 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			} else if (id == K_HOTPLUG_LOG) {
 				dst = c->hotplug_log;
 				dstcap = sizeof(c->hotplug_log);
+			} else if (id == K_OUTCOME_MOCK_ROOT) {
+				dst = c->outcome_mock_root;
+				dstcap = sizeof(c->outcome_mock_root);
 			} else if (id == K_PARQUET_DIR) {
 				dst = c->parquet_dir;
 				dstcap = sizeof(c->parquet_dir);
@@ -399,6 +438,62 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_PARQUET_FLUSH_ROWS:
 			NEED_LL("PARQUET_FLUSH_ROWS", 1, 65536,
 				c->parquet_flush_rows);
+			break;
+		case K_OUTCOME_ENABLED:
+			NEED_LL("OUTCOME_ENABLED", 0, 1, c->outcome_enabled);
+			break;
+		case K_OUTCOME_WINDOW_SHORT_SEC:
+			NEED_LL("OUTCOME_WINDOW_SHORT_SEC", 5, 3600,
+				c->outcome_window_short_sec);
+			break;
+		case K_OUTCOME_WINDOW_LONG_SEC:
+			NEED_LL("OUTCOME_WINDOW_LONG_SEC", 30, 86400,
+				c->outcome_window_long_sec);
+			break;
+		case K_OUTCOME_GRACE_SEC:
+			NEED_LL("OUTCOME_GRACE_SEC", 0, 600,
+				c->outcome_grace_sec);
+			break;
+		case K_OUTCOME_MAX_PENDING:
+			NEED_LL("OUTCOME_MAX_PENDING", 8, 4096,
+				c->outcome_max_pending);
+			break;
+		case K_OUTCOME_DECISIONS_SCAN_MAX:
+			NEED_LL("OUTCOME_DECISIONS_SCAN_MAX", 8, 4096,
+				c->outcome_decisions_scan_max);
+			break;
+		case K_OUTCOME_WRITE_SME:
+			NEED_LL("OUTCOME_WRITE_SME", 0, 1,
+				c->outcome_write_sme);
+			break;
+		case K_OUTCOME_AUTO_ROLLBACK:
+			NEED_LL("OUTCOME_AUTO_ROLLBACK", 0, 1,
+				c->outcome_auto_rollback);
+			break;
+		case K_SENSE_REDACT:
+			if (strcmp(v, "off") == 0) {
+				c->sense_redact_level = 0;
+			} else if (strcmp(v, "soft") == 0) {
+				c->sense_redact_level = 1;
+			} else if (strcmp(v, "strict") == 0) {
+				c->sense_redact_level = 2;
+			} else {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad SENSE_REDACT (need off|soft|strict): ",
+					   v, NULL);
+			}
+			break;
+		case K_SENSE_REDACT_SALT:
+			/* 盐：≤64 字节可打印非空白（参与 FNV，不落遥测） */
+			if (strlen(v) > 64 || strpbrk(v, " \t")) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad SENSE_REDACT_SALT (<=64 chars, "
+					   "no whitespace): ", v, NULL);
+			}
+			snprintf(c->sense_redact_salt,
+				 sizeof(c->sense_redact_salt), "%s", v);
 			break;
 		default:
 			fclose(f);

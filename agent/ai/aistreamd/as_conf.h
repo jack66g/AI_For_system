@@ -78,6 +78,36 @@ struct as_conf {
 	long long parquet_flush_sec;		/* 批写节流：秒（默认 30） */
 	long long parquet_flush_rows;		/* 批写节流：行（默认 128） */
 
+	/* ---- I-10：决策闭环第 4 步 outcome 回填器（as_outcome.c；C3 纯注记
+	 * 面，出厂默认关——设计 I10-METRIC-DESIGN §4.5/§6.4） ---- */
+	int outcome_enabled;			/* 默认 0（出厂默认 off） */
+	long long outcome_window_short_sec;	/* S 类窗口（默认 30） */
+	long long outcome_window_long_sec;	/* L 类窗口（默认 300） */
+	long long outcome_grace_sec;		/* 窗口后宽容（读口确认用，
+						 * 默认 10——外部验收脚本
+						 * 口径，模块内自校验即时） */
+	long long outcome_max_pending;		/* pending 队容量（默认 256，
+						 * 满丢旧+计数） */
+	long long outcome_decisions_scan_max;	/* decisions 尾条反查最大行数
+						 * （默认 64——557KB 全量读
+						 * 成本截断，K1B-20 口径） */
+	int outcome_write_sme;			/* 回填结果走既有 SME/parquet
+						 * 管道（合成事件，默认 1） */
+	char outcome_mock_root[256];		/* TEST ONLY：指标/decisions 树前缀
+					 * （L1 无 AIKernel 内核的 mock 冒烟用；
+					 * 生产恒默认 "/"——journal 明示 TEST） */
+	int outcome_auto_rollback;		/* C4：WORSE 自动 rollback——
+						 * 默认 0，且写路径本轮不实现
+						 * （需单独拍板，置 1 仅 journal
+						 * 提示） */
+
+	/* ---- SENSE 遥测脱敏（产生侧；设计 SENSE-REDACT-DESIGN §2.2/§5；
+	 * 多用户前提，出厂默认 off=单用户现状零字节变化 ---- */
+	int sense_redact_level;			/* 0=off 1=soft 2=strict
+						 * （默认 0） */
+	char sense_redact_salt[65];		/* hash 盐（默认空=确定性格式；
+						 * ≤64B 非空白，不落遥测） */
+
 	/* 可观测 */
 	long long stats_interval_sec;	/* stats 文件周期写（默认 10） */
 	int log_debug;			/* 1=开 debug 日志 */
