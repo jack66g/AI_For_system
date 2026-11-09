@@ -356,6 +356,7 @@ b77c126031e2e82189c062b8b75bbea12d0413838fb66b87b37eaec61a5196dc  agent/ai/occ/o
 25ae7dbfd2dde5a10ce8a77b6ea7938ffcef519e5e82193fb37ee7772ce94574  agent/ai/occ/occ_tools/tools.c
 d56abb4e90071e3368b135429f45a06533096c08e110be23ab6f9594ca5e5e42  agent/ai/occ/occ_tools/trace.c
 08d63e677be1608748da28823e39b32424fd5ab4e5ee1a3f6d8b1ccdf180fff2  agent/ai/occ/occ_tui/Makefile
+64d634740b73da32d50c480147ebd0fd3c2ab35d7ae57f3f5afca42711eb85be  agent/ai/occ/occ_tui/tests/mock_title_llm.py
 1e4cbb442a891c2bfc05d7c905205b759aa3655f854222d30b52b1c3c7f9bd54  agent/ai/occ/occ_tui/tests/test_chat.c
 1ea089aec03912d68dceee28e4bd17044bf86e72e58b66ba245210ccc4cc5dd8  agent/ai/occ/occ_tui/tests/test_frame.c
 c59c1e2bbf38802e4aaca23a2f1848c93df0ce1161529886b88712ef2a732db0  agent/ai/occ/occ_tui/tests/test_input.c
@@ -363,6 +364,7 @@ c59c1e2bbf38802e4aaca23a2f1848c93df0ce1161529886b88712ef2a732db0  agent/ai/occ/o
 2578c5240f9495775518ccb990d0dbdd53a8ba7f6bec7993a07785123f4d94f2  agent/ai/occ/occ_tui/tests/test_keymap.c
 1fd841be1ae4e9dff9dc1a4af338585ba5357a558e13787f6569954adb01437e  agent/ai/occ/occ_tui/tests/test_overlay.c
 9d1ce9eec46e90dfbd8924c8684730d93f6772560ba3587c62bc71034d2cd35f  agent/ai/occ/occ_tui/tests/test_pty.c
+ae9cc372c9eb90b6c80c26f6e572a9ac07ebd344832002dcd77d7cc415d73373  agent/ai/occ/occ_tui/tests/test_rename_ai.c
 2e56b4da2877fba98ad708721a1e324aa28416e716aeb6633965629e7bcbbeb6  agent/ai/occ/occ_tui/tests/test_render.c
 6d393d157ae9ba48b47ba206453477c73ea214f429259fe6fc2e11e69e758eb9  agent/ai/occ/occ_tui/tests/test_themefile.c
 c659bcdddba26e2ce1aba4c9e13aa06b1363fd0902456aac459bcaeb7a70d2f0  agent/ai/occ/occ_tui/tests/test_usage.c

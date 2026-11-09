@@ -144,9 +144,12 @@ void tui_view_paint(tui_view *v);
  * OCC-DEBT：busy 态（异步验证中）：①主循环按运行中口径常刷（spinner
  * 动画）；②覆盖层状态行前缀 spinner（tui_overlay_busy）；③覆盖层
  * dialog.close（Esc）不再关面板——改派 on_overlay_key "overlay.cancel"
- * （返回 0=已处理留步；非 0=回落正常关闭）。
+ * （返回 0=已处理留步可重试；非 0=回落正常关闭）。
  */
 void tui_view_set_busy(tui_view *v, int on);
+
+/* B8：主线程拉会话侧栏快照并置脏（异步改名等改数据后的刷新口） */
+void tui_view_refresh_sessions(tui_view *v);
 
 #ifdef __cplusplus
 }

@@ -296,6 +296,57 @@ static int child_nontty(void)
 	return tui_term_enter(&t);	/* 期望 2 */
 }
 
+/* B5：鼠标开关字节黄金——enable/disable/幂等/leave 复位 */
+static int child_mouse_golden(void)
+{
+	tui_term t;
+
+	tui_term_init(&t, STDOUT_FILENO);
+	setenv("TERM", "xterm-256color", 1);
+	/* 未进屏：-1 不发字节 */
+	if (tui_mouse_enable(&t, 1) != -1)
+		return 20;
+	if (tui_mouse_active(&t))
+		return 21;
+	if (tui_term_enter(&t) != 0)
+		return 10;
+	if (write(1, "A", 1) != 1)
+		return 11;
+	if (tui_mouse_enable(&t, 1) != 0)	/* 开：CSI ? 1000;1006 h */
+		return 22;
+	if (!tui_mouse_active(&t))
+		return 23;
+	if (tui_mouse_enable(&t, 1) != 0)	/* 幂等：不再发字节 */
+		return 24;
+	if (write(1, "B", 1) != 1)
+		return 12;
+	if (tui_mouse_enable(&t, 0) != 0)	/* 关：CSI ? 1000;1006 l */
+		return 25;
+	if (tui_mouse_enable(&t, 1) != 0)	/* 再开（leave 前挂起） */
+		return 26;
+	tui_term_leave(&t);			/* mouse_on → 前置鼠标复位 */
+	return 0;
+}
+
+/* B5：TERM=dumb 诚实降级——enable 拒绝且零字节 */
+static int child_mouse_dumb(void)
+{
+	tui_term t;
+
+	setenv("TERM", "dumb", 1);
+	tui_term_init(&t, STDOUT_FILENO);
+	if (tui_term_enter(&t) != 0)
+		return 10;
+	if (tui_mouse_enable(&t, 1) != -1)
+		return 27;
+	if (tui_mouse_active(&t))
+		return 28;
+	if (write(1, "D", 1) != 1)
+		return 13;
+	tui_term_leave(&t);
+	return 0;
+}
+
 typedef int (*child_fn)(void);
 
 /* fork 一个 pty 子进程：完成 setsid+TIOCSCTTY+stdio 重定向后跑 fn */
@@ -531,6 +582,75 @@ static void test_get_size(void)
 	pty_close(&p);
 }
 
+/* B5：鼠标模式字节黄金（TERM=xterm-256color）
+ * 期望流 = ENTER + A + MON + B + MOFF + MON + MOFF(leave 前置) + LEAVE */
+static void test_mouse_mode_bytes(void)
+{
+	struct pty p;
+	char buf[4096];
+	char want[512];
+	int have = 0, wlen, st = 0;
+	pid_t pid;
+
+	memset(&p, -1, sizeof(p));
+	if (pty_open(&p) != 0) {
+		n_fail++;
+		printf("FAIL pty-open (line %d)\n", __LINE__);
+		return;
+	}
+	pid = spawn_pty_child(&p, child_mouse_golden);
+	OK(pid > 0, "mm-spawn");
+	if (pid > 0) {
+		int eof = read_until_eof(p.master, buf, sizeof(buf), &have,
+					 5000);
+
+		OK(eof == 1, "mm-eof");
+		waitpid(pid, &st, 0);
+		OK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "mm-child-exit0");
+		if (WIFEXITED(st) && WEXITSTATUS(st) != 0)
+			printf("  child rc=%d\n", WEXITSTATUS(st));
+		wlen = snprintf(want, sizeof(want),
+				"%sA\x1b[?1000;1006hB\x1b[?1000;1006l"
+				"\x1b[?1000;1006h\x1b[?1000;1006l%s",
+				ENTER_SEQ, LEAVE_SEQ);
+		ok_bytes("mm-bytes", buf, have, want, wlen);
+	}
+	pty_close(&p);
+}
+
+/* B5：TERM=dumb——enable 拒绝、零鼠标字节、leave 与黄金一致 */
+static void test_mouse_dumb_degrade(void)
+{
+	struct pty p;
+	char buf[4096];
+	char want[256];
+	int have = 0, wlen, st = 0;
+	pid_t pid;
+
+	memset(&p, -1, sizeof(p));
+	if (pty_open(&p) != 0) {
+		n_fail++;
+		printf("FAIL pty-open (line %d)\n", __LINE__);
+		return;
+	}
+	pid = spawn_pty_child(&p, child_mouse_dumb);
+	OK(pid > 0, "md-spawn");
+	if (pid > 0) {
+		int eof = read_until_eof(p.master, buf, sizeof(buf), &have,
+					 5000);
+
+		OK(eof == 1, "md-eof");
+		waitpid(pid, &st, 0);
+		OK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "md-child-exit0");
+		if (WIFEXITED(st) && WEXITSTATUS(st) != 0)
+			printf("  child rc=%d\n", WEXITSTATUS(st));
+		wlen = snprintf(want, sizeof(want), "%sD%s", ENTER_SEQ,
+				LEAVE_SEQ);
+		ok_bytes("md-bytes", buf, have, want, wlen);
+	}
+	pty_close(&p);
+}
+
 int main(void)
 {
 	signal(SIGPIPE, SIG_IGN);
@@ -540,6 +660,8 @@ int main(void)
 	test_winch_real_signal();
 	test_atexit_restore();
 	test_get_size();
+	test_mouse_mode_bytes();
+	test_mouse_dumb_degrade();
 	printf("test_pty: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

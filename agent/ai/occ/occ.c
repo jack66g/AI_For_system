@@ -514,6 +514,14 @@ struct tui_app {
 	int wiz_thread_created;		/* 仅主线程（create/join 配对） */
 	int wiz_cancel;			/* mu 保护 */
 
+	/* ---- B8：/rename 空题=AI 生成标题 worker（T9C3 取舍5 偿还） ----
+	 * 与向导验证同手法：线程私有 ctx（provider 深拷贝）；生成期间主循环
+	 * 自由渲染（busy spinner）；Esc=取消（SIGINT → EINTR → rc=2）。 */
+	pthread_t ren_thread;
+	int ren_thread_live;		/* mu 保护 */
+	int ren_thread_created;		/* 仅主线程（create/join 配对） */
+	int ren_cancel;			/* mu 保护 */
+
 	/* ---- OCC-DEBT：/models 非对话条目显隐（默认过滤；ctrl+t 切换） ---- */
 	int show_nonchat;
 
@@ -1287,9 +1295,10 @@ static void wiz_verify_save(struct tui_app *a)
 	int live;
 
 	/* 并发门：turn 运行中不验证——Esc 取消路径会置 occ_interrupt_flag
-	 *（SIGINT 处理器全局），会误伤在途 turn；诚实留步。 */
+	 *（SIGINT 处理器全局），会误伤在途 turn；诚实留步。B8：标题生成
+	 * 同入互斥门（SIGINT 全局旗标共享）。 */
 	pthread_mutex_lock(&a->mu);
-	live = a->worker_live || a->wiz_thread_live;
+	live = a->worker_live || a->wiz_thread_live || a->ren_thread_live;
 	pthread_mutex_unlock(&a->mu);
 	if (live) {
 		tui_view_overlay_status(a->view,
@@ -1334,11 +1343,274 @@ static void wiz_verify_save(struct tui_app *a)
 	tui_view_set_busy(a->view, 1);	/* spinner 常刷 + Esc 改派 cancel */
 }
 
-/* 异步结果回投（主循环 drain；TUI_VIEW_ASYNC_RESULT） */
+/* ---- B8：/rename 空题=AI 生成标题（T9C3 取舍5 偿还） ----
+ * 输入=会话首条 user 消息截断（≤512B UTF-8 边界）；调 occ_llm 既有接口
+ * （occ_llm_call，一次性小请求 max_tokens=48）；输出清洗（单行、去成对
+ * 包裹引号、≤48 字节 UTF-8 边界）后 occ_session_set_title 真改名。
+ * 失败/取消诚实降级：面板留步可重试、标题不变（空题旧语义=不改名的
+ * 安全侧）。busy 门：与 turn/向导验证互斥；生成期间主循环不阻塞
+ * （worker 线程跑调用，view busy spinner 常刷——向导同手法）。
+ * 线程安全：线程私有 ctx 深拷贝 provider+key，sid 快照；不改共享模块。 */
+
+#define REN_TITLE_MAX 48		/* 输出标题字节上限（任务口径） */
+#define REN_PROMPT_MAX 512		/* 首条 user 消息截断 */
+
+struct ren_ctx {
+	struct tui_app *a;
+	occ_provider vp;		/* api_key=heap 拷贝（线程私有） */
+	char sid[OCC_ID_LEN];
+};
+
+struct ren_acc {
+	char buf[256];
+	size_t len;
+};
+
+static void ren_collect_cb(const occ_event *ev, void *ud)
+{
+	struct ren_acc *acc = ud;
+	size_t n;
+
+	if (ev->type != OCC_EV_TEXT_DELTA || !ev->text)
+		return;
+	n = strlen(ev->text);
+	if (acc->len + n >= sizeof(acc->buf))
+		n = sizeof(acc->buf) - 1 - acc->len;
+	if (n) {
+		memcpy(acc->buf + acc->len, ev->text, n);
+		acc->len += n;
+		acc->buf[acc->len] = '\0';
+	}
+}
+
+/* 清洗：首行；去首尾空白与成对包裹引号（「」『』"'）；≤48B UTF-8 边界。
+ * 返回清洗后长度（0=空输出——调用方按失败降级）。 */
+static size_t ren_sanitize(char *out, size_t cap, const char *in)
+{
+	static const struct { const char *l, *r; } QP[] = {
+		{ "\xe3\x80\x8c", "\xe3\x80\x8d" },	/* 「」 */
+		{ "\xe3\x80\x8e", "\xe3\x80\x8f" },	/* 『』 */
+	};
+	const char *p = in;
+	size_t n, k;
+	int i;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+	n = strcspn(p, "\r\n");		/* 首行（无换行=全串） */
+	while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+		n--;
+	/* 成对包裹引号剥离（一层；ASCII 对 + CJK 对） */
+	if (n >= 2) {
+		char c0 = p[0], cl = p[n - 1];
+
+		if ((c0 == '"' && cl == '"') || (c0 == '\'' && cl == '\'')) {
+			p++;
+			n -= 2;
+		}
+	}
+	for (i = 0; i < (int)(sizeof(QP) / sizeof(QP[0])); i++) {
+		size_t ll = strlen(QP[i].l), rl = strlen(QP[i].r);
+
+		if (n > ll + rl && memcmp(p, QP[i].l, ll) == 0 &&
+		    memcmp(p + n - rl, QP[i].r, rl) == 0) {
+			p += ll;
+			n -= ll + rl;
+			break;
+		}
+	}
+	while (n > 0 && (p[0] == ' ' || p[0] == '\t')) {
+		p++;
+		n--;
+	}
+	if (n > REN_TITLE_MAX)
+		n = REN_TITLE_MAX;
+	while (n > 0 && ((unsigned char)p[n] & 0xC0) == 0x80)
+		n--;			/* 截断回退到码点边界 */
+	if (n >= cap)
+		n = cap - 1;
+	memcpy(out, p, n);
+	out[n] = '\0';
+	k = n;
+	return k;
+}
+
+static void *ren_thread_main(void *arg)
+{
+	struct ren_ctx *c = arg;
+	struct ren_acc acc;
+	occ_llm_req req;
+	occ_msg msg;
+	occ_msg_row *rows = NULL;
+	char first[REN_PROMPT_MAX + 8];
+	char title[REN_TITLE_MAX + 8];
+	char *err = NULL;
+	char e[160];
+	size_t n = 0, i;
+	int rc, cancel, found = 0;
+
+	memset(&acc, 0, sizeof(acc));
+	memset(&req, 0, sizeof(req));
+	memset(&msg, 0, sizeof(msg));
+	first[0] = '\0';
+	/* 首条 user 消息（升序首个非撤回；截断 UTF-8 边界） */
+	if (occ_msg_list(c->a->db, c->sid, &rows, &n, e, sizeof(e)) == 0) {
+		for (i = 0; i < n && !found; i++) {
+			if (!strcmp(rows[i].role, "user") && !rows[i].reverted &&
+			    rows[i].text && rows[i].text[0]) {
+				size_t tl = strlen(rows[i].text);
+
+				if (tl > REN_PROMPT_MAX) {
+					tl = REN_PROMPT_MAX;
+					while (tl > 0 &&
+					       ((unsigned char)rows[i].text[tl]
+						& 0xC0) == 0x80)
+						tl--;	/* UTF-8 边界 */
+				}
+				memcpy(first, rows[i].text, tl);
+				first[tl] = '\0';
+				found = 1;
+			}
+		}
+		occ_msg_rows_free(rows, n);
+	}
+	if (!found) {
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    "会话无 user 消息（无法生成标题）", 0,
+				    NULL, 1);
+		goto out;
+	}
+	req.proto = c->vp.proto;
+	req.model = c->vp.model;
+	req.system = "根据用户会话的首条消息生成一个简短的会话标题。"
+		     "只输出标题本身：单行纯文本，不超过 16 个字，"
+		     "不要引号、句号或任何前后缀说明。";
+	msg.role = OCC_ROLE_USER;
+	msg.text = first;
+	req.msgs = &msg;
+	req.nmsgs = 1;
+	req.gen.max_tokens = 48;
+	req.gen.has_max_tokens = 1;
+
+	rc = occ_llm_call(&c->vp, &req, ren_collect_cb, &acc, &err);
+	pthread_mutex_lock(&c->a->mu);
+	cancel = c->a->ren_cancel;
+	pthread_mutex_unlock(&c->a->mu);
+	if (rc != 0 && cancel) {
+		free(err);
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    "cancelled", 0, NULL, 2);
+	} else if (rc != 0) {
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    err ? err : "", 0, NULL, 1);
+		free(err);
+	} else if (ren_sanitize(title, sizeof(title), acc.buf) == 0) {
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    "模型未返回可用标题（空输出）", 0, NULL, 1);
+	} else {
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT, title,
+				    0, NULL, 0);
+	}
+out:
+	free(c->vp.api_key);
+	free(c);
+	return NULL;
+}
+
+static void ren_generate(struct tui_app *a)
+{
+	struct ren_ctx *c;
+	int live;
+
+	/* busy 门：turn/向导验证/生成中互斥（Esc 取消路径共用 SIGINT 全局
+	 * 旗标，并发会误伤在途调用——诚实留步） */
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live || a->wiz_thread_live || a->ren_thread_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		tui_view_overlay_status(a->view,
+					a->worker_live ?
+					"turn 运行中——收口后再生成标题" :
+					"另一异步操作进行中（Esc 取消后再试）",
+					1);
+		return;
+	}
+	if (!a->p.model[0]) {
+		tui_view_overlay_status(a->view,
+					"未配置模型——先 /models 或向导添加", 1);
+		return;
+	}
+	c = calloc(1, sizeof(*c));
+	if (!c) {
+		tui_view_overlay_status(a->view, "内存不足", 1);
+		return;
+	}
+	c->a = a;
+	snprintf(c->sid, sizeof(c->sid), "%s", a->session_id);
+	c->vp = a->p;				/* 字段拷贝（数组内联） */
+	c->vp.api_key = strdup(a->p.api_key ? a->p.api_key : "");
+	if (!c->vp.api_key) {
+		free(c);
+		tui_view_overlay_status(a->view, "内存不足", 1);
+		return;
+	}
+	/* 清上一轮遗留中断旗标（取消路径经 SIGINT 处理器置位——不清则
+	 * llm_call 尝试前即中止；向导验证同口径） */
+	occ_interrupt_flag = 0;
+	a->ren_cancel = 0;
+	if (pthread_create(&a->ren_thread, NULL, ren_thread_main, c) != 0) {
+		free(c->vp.api_key);
+		free(c);
+		tui_view_overlay_status(a->view,
+					"生成线程创建失败（稍后重试）", 1);
+		return;
+	}
+	pthread_mutex_lock(&a->mu);
+	a->ren_thread_live = 1;
+	pthread_mutex_unlock(&a->mu);
+	a->ren_thread_created = 1;
+	tui_view_overlay_status(a->view, "AI 生成标题中…（Esc 取消）", 0);
+	tui_view_set_busy(a->view, 1);
+}
+
+/* 异步结果回投（主循环 drain；TUI_VIEW_ASYNC_RESULT）——B8 起双工：
+ * ren_thread_created=标题生成收口；否则向导验证（互斥门保证不并发） */
 static void tui_app_on_async_result(void *ud, int rc, const char *text)
 {
 	struct tui_app *a = ud;
 
+	if (a->ren_thread_created) {	/* B8：/rename AI 生成标题收口 */
+		char e[160];
+		char nb[320];
+
+		pthread_join(a->ren_thread, NULL);
+		a->ren_thread_created = 0;
+		pthread_mutex_lock(&a->mu);
+		a->ren_thread_live = 0;
+		pthread_mutex_unlock(&a->mu);
+		tui_view_set_busy(a->view, 0);
+		if (rc == 0) {
+			if (occ_session_set_title(a->db, a->session_id, text,
+						  e, sizeof(e)) != 0) {
+				tui_view_overlay_status(a->view, e, 1);
+				return;
+			}
+			tui_view_close_overlay(a->view);
+			snprintf(nb, sizeof(nb), "renamed → %.200s", text);
+			tui_view_notice(a->view, nb);
+			tui_view_refresh_sessions(a->view);	/* 侧栏标题 */
+			return;
+		}
+		if (rc == 2) {
+			tui_view_overlay_status(a->view,
+						"已取消——可回车重试或 Esc 关闭", 0);
+			return;
+		}
+		snprintf(nb, sizeof(nb), "AI 生成标题失败：%.200s",
+			 text[0] ? text : "未知错误");
+		tui_view_overlay_status(a->view, nb, 1);
+		return;
+	}
 	if (a->wiz_thread_created) {	/* 线程已发完结果：join 瞬返收尸 */
 		pthread_join(a->wiz_thread, NULL);
 		a->wiz_thread_created = 0;
@@ -1810,7 +2082,7 @@ static int cmd_rename(struct tui_app *a, const char *args)
 		tui_view_notice(a->view, nb);
 		return 0;
 	}
-	/* 无参：输入覆盖层（预填现题） */
+	/* 无参：输入覆盖层（预填现题；B5/B8 起：空回车=AI 生成标题） */
 	{
 		char initial[128];
 
@@ -1824,8 +2096,7 @@ static int cmd_rename(struct tui_app *a, const char *args)
 					 r.title);
 		}
 		(void)tui_view_open_input(a->view, OV_RENAME, "rename",
-					  "新标题（Enter 提交；空=不支持，"
-					  "AI 生成标题归后续棒）",
+					  "新标题（Enter 提交；空=AI 生成）",
 					  initial[0] ? initial : NULL, 0);
 	}
 	return 0;
@@ -2190,9 +2461,15 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		char nb[320];
 
 		if (len == 0) {
-			tui_view_overlay_status(a->view,
-						 "空标题不支持（AI 生成标题"
-						 "归后续棒）", 1);
+			/* B8：空回车=AI 生成标题（T9C3 取舍5 偿还）；
+			 * 无会话/无 provider 诚实拒绝（ren_generate 内） */
+			if (!a->session_id[0]) {
+				tui_view_overlay_status(a->view,
+							"尚无会话（先发一条消息）",
+							1);
+				return 0;
+			}
+			ren_generate(a);
 			return 0;
 		}
 		if (!a->session_id[0]) {
@@ -2220,10 +2497,22 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 	struct tui_app *a = ud;
 
 	/* OCC-DEBT：busy 态 Esc → 取消在途验证（面板留步——与失败路径
-	 * 同语义；由 tui_view_set_busy(1) 期间的 dialog.close 改派而来） */
+	 * 同语义；由 tui_view_set_busy(1) 期间的 dialog.close 改派而来）；
+	 * B8：标题生成中同派（ren_cancel + SIGINT → EINTR → rc=2 收口） */
 	if (!strcmp(action, "overlay.cancel")) {
-		int live;
+		int live, rlive;
 
+		pthread_mutex_lock(&a->mu);
+		rlive = a->ren_thread_live;
+		if (rlive)
+			a->ren_cancel = 1;
+		pthread_mutex_unlock(&a->mu);
+		if (rlive) {
+			(void)pthread_kill(a->ren_thread, SIGINT);
+			tui_view_overlay_status(a->view,
+						"取消生成中…（收口后可重试）", 0);
+			return 0;
+		}
 		pthread_mutex_lock(&a->mu);
 		live = a->wiz_thread_live;
 		if (live)
@@ -2382,21 +2671,30 @@ static void tui_app_fill_sessions(void *ud, tui_sb_data *out)
 static void tui_app_on_shutdown(void *ud)
 {
 	struct tui_app *a = ud;
-	int live, wlive;
+	int live, wlive, rlive;
 
 	pthread_mutex_lock(&a->mu);
 	live = a->worker_live;
 	wlive = a->wiz_thread_live;
-	if (live || wlive)
+	rlive = a->ren_thread_live;
+	if (live || wlive || rlive)
 		occ_interrupt_flag = 1;
 	if (wlive)
 		a->wiz_cancel = 1;
+	if (rlive)
+		a->ren_cancel = 1;
 	pthread_mutex_unlock(&a->mu);
 	if (live)
 		(void)pthread_kill(a->worker, SIGINT);
 	if (a->worker_created) {	/* join：等 worker 安全收口 */
 		pthread_join(a->worker, NULL);
 		a->worker_created = 0;
+	}
+	if (rlive)
+		(void)pthread_kill(a->ren_thread, SIGINT);
+	if (a->ren_thread_created) {	/* B8：标题生成线程同理 */
+		pthread_join(a->ren_thread, NULL);
+		a->ren_thread_created = 0;
 	}
 	if (wlive)
 		(void)pthread_kill(a->wiz_thread, SIGINT);
@@ -2527,6 +2825,15 @@ static int run_interactive(occ_db *db, const char *model_toml,
 					a.wiz_thread_created = 0;
 					pthread_mutex_lock(&a.mu);
 					a.wiz_thread_live = 0;
+					pthread_mutex_unlock(&a.mu);
+				}
+				if (a.ren_thread_created) {	/* B8 同口径 */
+					occ_interrupt_flag = 1;
+					pthread_kill(a.ren_thread, SIGINT);
+					pthread_join(a.ren_thread, NULL);
+					a.ren_thread_created = 0;
+					pthread_mutex_lock(&a.mu);
+					a.ren_thread_live = 0;
 					pthread_mutex_unlock(&a.mu);
 				}
 				if (rc != 0 || !a.shell_req)

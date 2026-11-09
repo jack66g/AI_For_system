@@ -71,6 +71,15 @@ int tui_chat_at_bottom(const tui_chat *c);
 /* 终端尺寸变化：按新宽度全量重建 scrollback 并跳回底部 */
 void tui_chat_rewidth(tui_chat *c, int width);
 
+/* ---- B5：推理折叠区点击展开/收起 ----
+ * row=转写区域内相对行（0..h-1，tui_chat_render 的 y 偏移已扣除）。
+ * 命中 live 块或定稿消息的 ✻ 折叠行 → 切换展开态（定稿消息切换后
+ * 重建 scrollback，尽量保视口位置；底部 follow 保持贴底）。
+ * 返回 1=命中并切换；0=未命中。仅对带 reasoning 的 assistant 块有效。 */
+int tui_chat_click(tui_chat *c, int row);
+/* 上次 render 后 live 折叠行是否可见（诊断/测试断言）；-1=不可见 */
+int tui_chat_fold_row(const tui_chat *c);
+
 /* ---- 单测观察口（golden 断言用） ---- */
 
 /* 把消息文本（含 live）拼进 buf（调试/断言）；返回写入字节数 */

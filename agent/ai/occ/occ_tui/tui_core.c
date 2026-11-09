@@ -321,6 +321,7 @@ int tui_screen_put(tui_screen *s, int row, int col,
 	tui_cell *rc;
 	int c, last_base = -1, touched = 0;
 	size_t i = 0;
+	tui_gph_st gst = {0, 0, 0};
 
 	if (!s || row < 0 || row >= s->rows || col < 0 || !utf8)
 		return -1;
@@ -335,6 +336,7 @@ int tui_screen_put(tui_screen *s, int row, int col,
 		tui_u8stat st = tui_utf8_decode((const uint8_t *)utf8 + i,
 						len - i, &cp, &adv);
 		int w;
+		int act;
 
 		if (st == TUI_U8_NEEDMORE)
 			cp = TUI_REPLACEMENT;	/* 串尾截断 → 一个 FFFD */
@@ -343,12 +345,16 @@ int tui_screen_put(tui_screen *s, int row, int col,
 		i += adv;
 
 		w = tui_wcwidth(cp);
-		if (w == 0) {
-			/* 控制符（\n 等）跳过——分行归视图层 */
-			if (!tui_is_combining(cp))
-				continue;
-			/* 组合符：附着到前一基字符 */
+		if (w == 0 && !tui_is_combining(cp))
+			continue;		/* 控制符：跳过（分行归视图层） */
+
+		/* B7：ZWJ/肤色/RI/VS16 续接（头注见 tui_utf8.h） */
+		act = tui_graph_feed(&gst, cp, w);
+		if (act != TUI_GPH_START) {
+			/* 并入前一基字符（EXTEND/BUMP 同路；BUMP 追加宽提升） */
 			int tgt = last_base;
+			int bump = (act == TUI_GPH_BUMP);
+
 			if (tgt < 0 && c > 0) {
 				tgt = c - 1;
 				while (tgt > 0 && rc[tgt].width == 0)
@@ -359,6 +365,7 @@ int tui_screen_put(tui_screen *s, int row, int col,
 			if (tgt >= 0 && tgt < s->cols && rc[tgt].width > 0) {
 				uint8_t b[4];
 				size_t nb = tui_utf8_encode(cp, b);
+
 				if (nb > 0 &&
 				    rc[tgt].len + nb <= TUI_CELL_MAX) {
 					memcpy(rc[tgt].utf8 + rc[tgt].len,
@@ -366,10 +373,19 @@ int tui_screen_put(tui_screen *s, int row, int col,
 					rc[tgt].len =
 						(uint8_t)(rc[tgt].len + nb);
 					touched = 1;
+					/* VS16：前格 1→2 + 补续格（行末/
+					 * 前格宽 2 时降级普通并入——对齐优先） */
+					if (bump && rc[tgt].width == 1 &&
+					    c == tgt + 1 && c < s->cols) {
+						rc[tgt].width = 2;
+						cell_set_cont(&rc[c],
+							      rc[tgt].attr);
+						c += 1;
+					}
 				}
 				/* 放不下 → 丢弃（每 cell 有界） */
 			}
-			continue;	/* 零宽：不占列 */
+			continue;	/* 续接：不占新列（BUMP 补的续格除外） */
 		}
 		if (w == 2 && c + 1 >= s->cols)
 			break;		/* 不撕半个汉字 */
@@ -805,18 +821,39 @@ void tui_term_show_cursor(tui_term *t)
 
 int tui_mouse_enable(tui_term *t, int on)
 {
-	(void)t;
-	(void)on;
-	return TUI_ERR_UNSUPPORTED;	/* 本棒不做，留 API（c2/c3 后续接） */
+	static const char MON[] = "\x1b[?1000;1006h";
+	static const char MOFF[] = "\x1b[?1000;1006l";
+	const char *term;
+
+	if (!t || !t->entered || !isatty(t->fd))
+		return -1;
+	term = getenv("TERM");
+	if (!term || !term[0] || !strcmp(term, "dumb"))
+		return -1;		/* 无鼠标能力信号——诚实不开 */
+	if (!!on == !!t->mouse_on)
+		return 0;		/* 幂等 */
+	if (write_all(t->fd, on ? MON : MOFF,
+		      sizeof(MON) - 1) != 0)
+		return -1;
+	t->mouse_on = on ? 1 : 0;
+	return 0;
+}
+
+int tui_mouse_active(const tui_term *t)
+{
+	return t ? t->mouse_on : 0;
 }
 
 /* 恢复（幂等）：发恢复序列 + 还原 termios + 还原信号处理 */
 void tui_term_leave(tui_term *t)
 {
 	static const char seq[] = "\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l";
+	static const char moff[] = "\x1b[?1000;1006l";
 
 	if (!t || !t->entered)
 		return;
+	if (t->mouse_on)
+		(void)write_all(t->fd, moff, sizeof(moff) - 1);
 	(void)write_all(t->fd, seq, sizeof(seq) - 1);
 	(void)tcsetattr(t->fd, TCSAFLUSH, &t->saved);
 	if (t->sigs_saved) {

@@ -28,7 +28,8 @@ TEST_SRCS := tests/test_utf8.c tests/test_render.c tests/test_input.c \
 	     tests/test_frame.c tests/test_pty.c tests/test_chat.c \
 	     tests/test_inputbox.c tests/test_view_pty.c \
 	     tests/test_keymap.c tests/test_themefile.c \
-	     tests/test_overlay.c tests/test_usage.c
+	     tests/test_overlay.c tests/test_usage.c \
+	     tests/test_rename_ai.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
@@ -45,7 +46,9 @@ obj/%.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # 测试直接链库对象（无外部依赖；test_pty 用 POSIX pty 三件套，无需 -lutil；
-# tui_view 事件环用 pthread——链 -lpthread，tui_view 的自唤醒 pipe 依赖它）
+# tui_view 事件环用 pthread——链 -lpthread，tui_view 的自唤醒 pipe 依赖它；
+# B8 test_rename_ai exec 真 ../occ 二进制 + 本地 python3 mock（tests/
+# mock_title_llm.py，127.0.0.1）——../occ 未构建时诚实 skip）
 tests/%: tests/%.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LIB_OBJS) -lpthread
 

@@ -11,8 +11,10 @@
  *   - kitty 键盘协议：探测回复（CSI ? n u）+ CSI-u 键形式；不支持的
  *     终端无回复 → 走 legacy 字节路径（优雅降级，两套解析并存）
  *   - bracketed paste（CSI 200~ / 201~，内容按 CHAR+paste 位回放）
- *   - 鼠标：本棒不做（解析器吞掉鼠标 CSI 不产事件；tui_mouse_enable
- *     留 API 返回 TUI_ERR_UNSUPPORTED）
+ *   - 鼠标（B5）：SGR 1006 为主（CSI < cb;cx;cy M/m → TUI_EV_MOUSE，
+ *     press/release/motion/wheel + 修饰位 + 1 基坐标）；X10 兼容
+ *     （CSI M + 3 原始字节 → 仅 press/wheel，无 release/越 223 坐标）。
+ *     tui_mouse_enable 未开时终端不发报告——解析器照常正确（不假交互）。
  *
  * 事件 → keybind 字符串（tui_event_keystr）产出 OCD keymap 规范名
  * （ctrl+c / alt+f / shift+tab / return / escape / pageup ...），供 c2
@@ -33,8 +35,21 @@ typedef enum {
 	TUI_EV_KEY = 1,
 	TUI_EV_PASTE_START,
 	TUI_EV_PASTE_END,
-	TUI_EV_KITTY_FLAGS	/* arg=kitty 键盘增强 flags（探测回复） */
+	TUI_EV_KITTY_FLAGS,	/* ch=kitty 键盘增强 flags（探测回复） */
+	TUI_EV_MOUSE		/* B5：key=动作（tui_mouse_act）、ch=按钮、
+				 * mods=修饰、mx/my=1 基坐标 */
 } tui_ev_type;
+
+/* ---- 鼠标动作（TUI_EV_MOUSE 时 ev->key） ---- */
+enum {
+	TUI_MOUSE_PRESS = 1,	/* 按下（SGR 'M'；X10 只有这一种） */
+	TUI_MOUSE_RELEASE,	/* 释放（SGR 'm'） */
+	TUI_MOUSE_MOTION,	/* 拖动（仅终端开 motion 报告才有） */
+	TUI_MOUSE_WHEEL_UP,
+	TUI_MOUSE_WHEEL_DOWN
+};
+
+/* 鼠标按钮（TUI_EV_MOUSE 时 ev->ch）：0=左 1=中 2=右；wheel 事件同位 */
 
 /* ---- 键枚举（名字对齐 OCD keybind 规范名） ---- */
 typedef enum {
@@ -61,10 +76,12 @@ typedef enum {
 
 typedef struct {
 	uint8_t type;		/* tui_ev_type */
-	uint16_t key;		/* tui_key（type==TUI_EV_KEY） */
-	uint32_t ch;		/* TUI_KEY_CHAR 时=码点；KITTY_FLAGS 时 flags */
+	uint16_t key;		/* tui_key（KEY）/ tui_mouse_act（MOUSE） */
+	uint32_t ch;		/* TUI_KEY_CHAR 时=码点；KITTY_FLAGS 时 flags；
+				 * MOUSE 时=按钮号 */
 	uint8_t mods;		/* TUI_MOD_* 位或 */
 	uint8_t paste;		/* 1=位于 bracketed paste 内容中 */
+	uint16_t mx, my;	/* TUI_EV_MOUSE：1 基列/行（SGR 原样；X10 减 32）*/
 } tui_event;
 
 #define TUI_INPUT_QMAX 512
@@ -78,7 +95,7 @@ typedef enum {
 	TUI_ST_STR,		/* OSC/DCS/SOS/PM/APC 吞噬态 */
 	TUI_ST_STR_ESC,		/* 串内见 ESC（等 \ 收尾 ST） */
 	TUI_ST_PASTE,		/* bracketed paste 内容 */
-	TUI_ST_MOUSE		/* 传统 X10 鼠标报告吞 3 字节（不产事件） */
+	TUI_ST_MOUSE		/* 传统 X10 鼠标报告收 3 原始字节（B5 起产事件）*/
 } tui_inp_state;
 
 typedef struct {
@@ -105,7 +122,9 @@ typedef struct {
 	uint8_t u8_alt;
 	uint8_t u8_paste;
 	uint64_t u8_t0;
-	uint8_t mouse_left;	/* MOUSE 态剩余吞字节数 */
+	uint8_t mouse_left;	/* MOUSE 态剩余字节数 */
+	uint8_t mouse_b[3];	/* X10 三字节收集（B5：→ 鼠标事件） */
+	uint8_t mouse_n;	/* mouse_b 已收字节数 */
 	/* 事件队列（环） */
 	tui_event q[TUI_INPUT_QMAX];
 	int q_head, q_count;
@@ -140,7 +159,8 @@ const char *tui_key_name(uint16_t key);
  * 事件 → keybind 字符串（规范名+修饰前缀，顺序 ctrl+ alt+ super+ shift+）：
  *   ctrl+c / alt+f / shift+tab / ctrl+shift+a / return / escape /
  *   pageup / f2 / a / 中 / space（CHAR ' '）
- * 非键事件返回 "paste-start"/"paste-end"/"kitty-flags"。
+ * 非键事件返回 "paste-start"/"paste-end"/"kitty-flags"/"mouse-press"
+ * （"mouse-release"/"mouse-motion"/"mouse-wheel-up"/"mouse-wheel-down"）。
  * 返回写入长度（不含 NUL）；cap 不足返回 -1。
  */
 int tui_event_keystr(const tui_event *ev, char *buf, size_t cap);

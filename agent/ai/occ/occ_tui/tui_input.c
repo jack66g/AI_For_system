@@ -12,7 +12,10 @@
  *     legacy 字节，解析器两套并存即优雅降级。
  *   - bracketed paste：CSI 200~ → PASTE 态，终止符 "\x1b[201~" 字节级
  *     匹配（可跨 feed），内容按 CHAR+paste=1 回放（控制字节也当字面量）。
- *   - 鼠标：本棒不做——SGR/传统鼠标报告吞掉不产事件（API 留 core）。
+ *   - 鼠标（B5）：SGR（CSI < cb;cx;cy M/m）全量——press/release/motion/
+ *     wheel + 修饰位（cb 位 4/8/16=shift/alt/ctrl）+1 基坐标；X10 兼容
+ *     （CSI M + 3 原始字节）——无 release、坐标-32、按钮位同 SGR 低 2 位
+ *     +位 6/7（64/128）=wheel。两编码并存：终端开 1000 无 1006 时回 X10。
  */
 #include "tui_input.h"
 
@@ -60,6 +63,8 @@ static int push_key(tui_input *in, uint16_t key, uint32_t ch, uint8_t mods,
 	e->ch = ch;
 	e->mods = mods;
 	e->paste = paste;
+	e->mx = 0;
+	e->my = 0;
 	return 1;
 }
 
@@ -73,6 +78,25 @@ static int push_ev(tui_input *in, uint8_t type, uint32_t ch)
 	e->ch = ch;
 	e->mods = 0;
 	e->paste = 0;
+	e->mx = 0;
+	e->my = 0;
+	return 1;
+}
+
+/* B5：鼠标事件（key=动作、ch=按钮、mods、mx/my 1 基） */
+static int push_mouse(tui_input *in, uint16_t act, uint32_t btn, uint8_t mods,
+		      int x, int y)
+{
+	tui_event *e = q_push(in);
+	if (!e)
+		return 0;
+	e->type = TUI_EV_MOUSE;
+	e->key = act;
+	e->ch = btn;
+	e->mods = mods;
+	e->paste = 0;
+	e->mx = (uint16_t)(x > 0 ? x : 1);
+	e->my = (uint16_t)(y > 0 ? y : 1);
 	return 1;
 }
 
@@ -383,16 +407,45 @@ static void parse_csi(tui_input *in, uint8_t final_b)
 			(np >= 1 && p[0] >= 0) ? (uint32_t)p[0] : 0u);
 		return;
 	}
-	/* 传统/SGR 鼠标报告：吞（本棒不做鼠标） */
-	if (final_b == 'M' || final_b == 'm') {
-		if (priv == '<' || priv == '>' || priv == '=')
-			return;
-		if (priv == 0 && np == 0) {	/* X10: CSI M + 3 原始字节 */
-			in->state = TUI_ST_MOUSE;
-			in->mouse_left = 3;
-		}
+	/* SGR 鼠标（1006）：CSI < cb ; cx ; cy M/m（B5 真实现）
+	 * cb 位：0-1 按钮、2 保留、4 shift、8 alt、16 ctrl、32 motion、
+	 * 64 wheel（0=上 1=下）；'M'=按下/拖动/滚轮，'m'=释放。 */
+	if (priv == '<' && (final_b == 'M' || final_b == 'm')) {
+		int cb = (np >= 1 && p[0] >= 0) ? p[0] : 0;
+		int cx = (np >= 2 && p[1] >= 0) ? p[1] : 1;
+		int cy = (np >= 3 && p[2] >= 0) ? p[2] : 1;
+		uint8_t mods = 0;
+		uint16_t act;
+
+		if (cb & 4)
+			mods |= TUI_MOD_SHIFT;
+		if (cb & 8)
+			mods |= TUI_MOD_ALT;
+		if (cb & 16)
+			mods |= TUI_MOD_CTRL;
+		if (cb & 64)
+			act = (cb & 3) == 0 ? TUI_MOUSE_WHEEL_UP :
+			      TUI_MOUSE_WHEEL_DOWN;
+		else if (cb & 32)
+			act = TUI_MOUSE_MOTION;
+		else if (final_b == 'm')
+			act = TUI_MOUSE_RELEASE;
+		else
+			act = TUI_MOUSE_PRESS;
+		push_mouse(in, act, (uint32_t)(cb & 3), mods, cx, cy);
 		return;
 	}
+	/* X10 兼容：CSI M + 3 原始字节（按钮/列/行各 +32；无释放事件；
+	 * 坐标上限 223——B5 评估后实现：occ 开 1000 无 1006 的终端回落此编码 */
+	if (priv == 0 && np == 0 && final_b == 'M') {
+		in->state = TUI_ST_MOUSE;
+		in->mouse_left = 3;
+		in->mouse_n = 0;
+		return;
+	}
+	/* 其余鼠标编码（urxvt CSI cb;cx;cy M 等）：吞——occ 从不启用 */
+	if (final_b == 'M' || final_b == 'm')
+		return;
 	/* 焦点进出 CSI I / CSI O：吞 */
 	if (priv == 0 && (final_b == 'I' || final_b == 'O'))
 		return;
@@ -629,10 +682,42 @@ static void handle_byte(tui_input *in, uint8_t b, uint64_t now)
 			return;
 		case TUI_ST_MOUSE:
 			in->esc_t0 = now;
-			if (in->mouse_left > 0)
+			if (in->mouse_left > 0) {
 				in->mouse_left--;
-			if (in->mouse_left == 0)
+				if (in->mouse_n < 3)
+					in->mouse_b[in->mouse_n++] = b;
+			}
+			if (in->mouse_left == 0) {
+				/* X10 三字节齐 → 事件（B5）：b0=按钮+32
+				 * （位 4/8/16 修饰、32 motion、64/128 wheel）；
+				 * b1/b2=列/行+32（1 基）。无释放语义。 */
+				int cb = (int)in->mouse_b[0] - 32;
+				int cx = (int)in->mouse_b[1] - 32;
+				int cy = (int)in->mouse_b[2] - 32;
+				uint8_t mods = 0;
+				uint16_t act;
+
+				if (cb < 0)
+					cb = 0;
+				if (cb & 4)
+					mods |= TUI_MOD_SHIFT;
+				if (cb & 8)
+					mods |= TUI_MOD_ALT;
+				if (cb & 16)
+					mods |= TUI_MOD_CTRL;
+				if (cb & 64)
+					act = (cb & 3) == 0 ?
+					      TUI_MOUSE_WHEEL_UP :
+					      TUI_MOUSE_WHEEL_DOWN;
+				else if (cb & 32)
+					act = TUI_MOUSE_MOTION;
+				else
+					act = TUI_MOUSE_PRESS;
+				push_mouse(in, act, (uint32_t)(cb & 3), mods,
+					   cx, cy);
+				in->mouse_n = 0;
 				in->state = TUI_ST_GROUND;
+			}
 			return;
 		default:
 			in->state = TUI_ST_GROUND;
@@ -733,6 +818,20 @@ int tui_event_keystr(const tui_event *ev, char *buf, size_t cap)
 		name = "paste-end";
 	} else if (ev->type == TUI_EV_KITTY_FLAGS) {
 		name = "kitty-flags";
+	} else if (ev->type == TUI_EV_MOUSE) {
+		static const char *const mact[5] = {
+			"press", "release", "motion", "wheel-up", "wheel-down"
+		};
+		size_t k;
+
+		snprintf(tmp, sizeof(tmp), "mouse-%s",
+			 ev->key >= 1 && ev->key <= 5 ? mact[ev->key - 1] :
+			 "?");
+		k = strlen(tmp);
+		if (k + 1 > cap)
+			return -1;
+		memcpy(buf, tmp, k + 1);
+		return (int)k;
 	} else if (ev->key == TUI_KEY_CHAR) {
 		mods = ev->mods;
 		if (mods & TUI_MOD_CTRL) {

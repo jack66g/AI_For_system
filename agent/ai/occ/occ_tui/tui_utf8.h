@@ -51,6 +51,43 @@ int tui_is_combining(uint32_t cp);
 /* 前导字节 → 期望总长度（非法前导返回 0） */
 int tui_utf8_seqlen(uint8_t lead);
 
+/* ---- B7：简化 grapheme 续接判定（「宁可宽一格」的 emoji 落点） ----
+ *
+ * 现状（实测）：ZWJ 序列（👨‍👩‍👧）逐码点计宽=2+0+2+0+2=6 列，现代终端
+ * 按扩展字素簇渲染为 1 个 2 列 emoji——模型宽 > 实际宽 → 行尾错位撕行；
+ * 肤色修饰（👋🏽=2+1）、旗帜对（🇨🇳=2+2）同向；反向：VS16（✌️）文本
+ * 呈现计 1 列、emoji 呈现 2 列——模型宽 < 实际宽 → 覆盖重叠。
+ *
+ * 落点：码点流喂入本状态机，动作分三类（调用方在 cell/gitem 装配处
+ * 执行，tui_core.c tui_screen_put 与 tui_chat.c gi_push 两处）：
+ *   START  新 grapheme 起点，按 tui_wcwidth 占列
+ *   EXTEND 并入前一 grapheme（宽 0；ZWJ 后的下一基字符 / 肤色修饰 /
+ *          旗帜第二枚 RI / 常规组合符）
+ *   BUMP   并入且前 grapheme 宽 1→2（VS16 文本呈现→emoji 呈现；
+ *          调用方放不下（行末/前格宽 2）时按 EXTEND 处理）
+ * 诚实边界：非 UAX#29 全量（无 Extend_Pictographic 全表、无区域外
+ * ZWJ 校验、>TUI_CELL_MAX 字节超长序列截断——截断丢字节但列宽不变，
+ * 对齐保住）；数据面 = 码点特征判定（200D/1F3FB-FF/1F1E6-FF/FE0F），
+ * 无新数据表。
+ */
+typedef struct tui_gph_st {
+	uint32_t prev;		/* 前一码点（0=无） */
+	uint8_t join;		/* ZWJ 后：下一码点并入当前 grapheme */
+	uint8_t ri;		/* 连续 RI 计数（奇=等第二枚闭合旗帜对） */
+} tui_gph_st;
+
+enum {
+	TUI_GPH_START = 0,
+	TUI_GPH_EXTEND,
+	TUI_GPH_BUMP
+};
+
+/*
+ * 喂一个码点（wc=该码点 tui_wcwidth），返回动作并更新 st。
+ * st 应按一次文本装配初始化 {0,0}（序列跨 markdown span 边界不保证）。
+ */
+int tui_graph_feed(tui_gph_st *st, uint32_t cp, int wc);
+
 #ifdef __cplusplus
 }
 #endif

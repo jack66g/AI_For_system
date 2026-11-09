@@ -253,6 +253,133 @@ int main(void)
 	tui_screen_destroy(s);
 	tui_chat_destroy(c);
 
+	/* ---- 10. B5：推理折叠点击展开/收起（live + 定稿） ---- */
+	c = tui_chat_create(NULL);
+	tui_chat_begin_assistant(c);
+	tui_chat_append_reasoning(c, "思路甲乙丙", strlen("思路甲乙丙"));
+	tui_chat_append_text(c, "正文ABC", strlen("正文ABC"));
+	/* live：折叠头行渲染（不含正文思路） */
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, fold = -1, leaked = 0;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "thinking…") != NULL)
+				fold = i;
+			if (strstr(row, "思路甲乙丙") != NULL)
+				leaked = 1;
+		}
+		OK(fold >= 0, "fold-header-rendered");
+		OK(!leaked, "fold-collapsed-no-content");
+		OK(tui_chat_fold_row(c) == fold, "fold-row-api");
+		/* 点击折叠行 → 展开：思路正文渲染 + ⌃ 标记 */
+		OK(tui_chat_click(c, fold) == 1, "fold-click-hit");
+	}
+	tui_screen_destroy(s);
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, found = 0, marker = 0;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "思路甲乙丙") != NULL)
+				found = 1;
+			if (strstr(row, "\xe2\x8c\x83") != NULL)	/* ⌃ */
+				marker = 1;
+		}
+		OK(found, "fold-expanded-content");
+		OK(marker, "fold-open-marker");
+		{
+			int fr = tui_chat_fold_row(c);
+
+			OK(fr >= 0, "fold-row-after-expand");
+			OK(tui_chat_click(c, fr) == 1, "fold-click-collapse");
+		}
+	}
+	tui_screen_destroy(s);
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, leaked = 0;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "思路甲乙丙") != NULL)
+				leaked = 1;
+		}
+		OK(!leaked, "fold-recollapsed");
+	}
+	/* 未命中行点击 → 0 不误切 */
+	OK(tui_chat_click(c, 0) == 0, "fold-click-miss");
+	tui_screen_destroy(s);
+	/* 收口 → 定稿折叠行点击展开（scrollback 内） */
+	tui_chat_end_assistant(c, "");
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, fold = -1;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "thought · ") != NULL)
+				fold = i;
+		}
+		OK(fold >= 0, "final-fold-header");
+		OK(tui_chat_click(c, fold) == 1, "final-fold-click");
+	}
+	tui_screen_destroy(s);
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, found = 0;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "思路甲乙丙") != NULL)
+				found = 1;
+		}
+		OK(found, "final-fold-expanded");
+	}
+	tui_screen_destroy(s);
+	tui_chat_destroy(c);
+
+	/* ---- 11. B7：emoji ZWJ 序列渲染收敛（单 grapheme 宽 2） ---- */
+	c = tui_chat_create(NULL);
+	tui_chat_add_user(c,
+			  "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9"
+			  "\xe2\x80\x8d\xf0\x9f\x91\xa7",
+			  18);			/* 👨‍👩‍👧 */
+	s = render_to(c, 6, 40, 1000);
+	OK(s != NULL, "zwj-render");
+	{
+		int i, found = 0, wide2 = 0;
+		const tui_cell *cc = NULL;
+
+		for (i = 0; i < 6; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "\xf0\x9f\x91\xa8") != NULL) {
+				int k;
+
+				found = 1;
+				for (k = 0; k < 40; k++) {
+					const tui_cell *t =
+						&s->cells[(size_t)i * 40 + k];
+
+					if (t->len == 18) {
+						cc = t;
+						break;
+					}
+				}
+			}
+		}
+		OK(found, "zwj-bytes-in-row");
+		if (cc) {
+			OK(cc->width == 2, "zwj-single-grapheme-width2");
+			wide2 = 1;
+		}
+		OK(wide2, "zwj-cell-found");
+	}
+	tui_screen_destroy(s);
+	tui_chat_destroy(c);
+
 	printf("test_chat: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

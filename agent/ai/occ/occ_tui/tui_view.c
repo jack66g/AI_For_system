@@ -59,7 +59,10 @@ struct tui_view {
 	int closing;			/* 置位后 post 拒收（shutdown 死锁防护） */
 	int dirty_needed;		/* 下帧门到期时重绘 */
 	int busy;			/* OCC-DEBT：异步验证中（spinner 常刷+Esc 改派） */
-	int tr_h;			/* 上帧转写区高（PgUp/PgDn 翻页量） */
+	int tr_h;			/* 上帧转写区高（PgUp/PgDn/滚轮翻页量） */
+	int tr_x, tr_w;			/* 上帧转写区 x/宽（B5 鼠标命中判定） */
+	int mouse_on;			/* B5：tui_mouse_enable 成功（help 如实） */
+	int kitty_pushed;		/* B6：已发 CSI > 1 u（退出前 pop） */
 	/* T9c3：覆盖层 + 键位表 + leader 序列 */
 	tui_overlay *ov;
 	tui_keymap *km;
@@ -294,15 +297,26 @@ static void tv_pull_sessions(tui_view *v)
 
 /* /help 文本（动态：exit 绑定与 leader 取自 keymap——覆盖文件生效后不撒谎；
  * /compact//shell 语义与 occ.c 实现对齐：换窗=occ_ac_compact_now
- * （前置门：OCC_AC=on、turn 空闲、已有会话）、/shell=退屏跑 bash 后重建 view） */
+ * （前置门：OCC_AC=on、turn 空闲、已有会话）、/shell=退屏跑 bash 后重建 view；
+ * B5：mouse 行如实反映 tui_mouse_enable 结果——off 时注明原因，不假交互） */
 static void tv_help_text(tui_view *v, char *buf, size_t cap)
 {
 	char exitb[96];
+	char mline[192];
+	const char *term = getenv("TERM");
 
 	exitb[0] = '\0';
 	if (v->km)
 		(void)tui_keymap_binding_str(v->km, "app.exit", exitb,
 					     sizeof(exitb));
+	if (v->mouse_on)
+		snprintf(mline, sizeof(mline),
+			 "滚轮=滚动 · 点击 ✻ thinking/thought 行=展开/收起"
+			 "（SGR 1006）");
+	else
+		snprintf(mline, sizeof(mline),
+			 "off（TERM=%.16s 无鼠标能力——未启用，仅键盘）",
+			 term && term[0] ? term : "(unset)");
 	snprintf(buf, cap,
 		 "commands: /exit /clear /help (built-in) · /new /sessions"
 		 " /status /models /rename /tools /sandbox /trace /lease"
@@ -313,9 +327,11 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 "keys: Enter=send · Tab=complete · Esc=interrupt ·"
 		 " PgUp/PgDn=scroll · exit=%s · leader=%s (2s timeout;"
 		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
-		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤",
+		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
+		 "mouse: %s",
 		 exitb[0] ? exitb : "ctrl+c, ctrl+d",
-		 v->km ? tui_keymap_leader(v->km) : "ctrl+x");
+		 v->km ? tui_keymap_leader(v->km) : "ctrl+x",
+		 mline);
 }
 
 static void tv_quit(tui_view *v)
@@ -371,7 +387,9 @@ static void tv_submit(tui_view *v)
 			return;
 		}
 		if (strcmp(text, "/help") == 0) {
-			char help[800];	/* 最坏 ~720B（exitb≤95 + leader≤47） */
+			/* B5 加 mouse 行：最坏 ~830B（exitb≤95 + leader≤47 +
+			 * mline≤190） */
+			char help[960];
 
 			tv_help_text(v, help, sizeof(help));
 			tui_chat_add_notice(v->chat, help);
@@ -629,14 +647,89 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 	/* 其余键（未绑定的 return/方向键等）：模态吞掉 */
 }
 
+/* ---- B5：鼠标事件派发（滚轮=滚动；点击=推理折叠行展开/收起） ----
+ * mouse_on=0（TERM 无能力/未开）时忽略——绝不假交互；覆盖层模态吞点击
+ * （面板无鼠标语义，不穿透）。滚动条点击无设计依据（本无滚动条）——不做。 */
+#define TV_WHEEL_LINES 3
+
+static void tv_dispatch_mouse(tui_view *v, const tui_event *ev)
+{
+	if (!v->mouse_on)
+		return;
+	switch (ev->key) {
+	case TUI_MOUSE_WHEEL_UP:
+		tui_chat_scroll(v->chat, TV_WHEEL_LINES);
+		v->dirty_needed = 1;
+		break;
+	case TUI_MOUSE_WHEEL_DOWN:
+		tui_chat_scroll(v->chat, -TV_WHEEL_LINES);
+		v->dirty_needed = 1;
+		break;
+	case TUI_MOUSE_PRESS: {
+		int x = (int)ev->mx - 1;	/* SGR 1 基 → 0 基 */
+		int y = (int)ev->my - 1;
+
+		if (tui_overlay_active(v->ov))
+			break;		/* 模态吞 */
+		if (y < 0 || y >= v->tr_h || x < v->tr_x ||
+		    x >= v->tr_x + v->tr_w)
+			break;		/* 转写区外：无语义 */
+		if (tui_chat_click(v->chat, y))
+			v->dirty_needed = 1;
+		break;
+	}
+	default:
+		break;			/* release/motion：无语义 */
+	}
+}
+
+/* ---- B6：kitty 键盘协议接线 ----
+ * 探测回复 flags 位 0（disambiguate）置位 → push CSI > 1 u（增强键型
+ * CSI-u 与 legacy 两路解析并存）；无回复/位 0 未置 → 不 push（纯 legacy，
+ * 现行为）。push 过则退出前 pop（CSI < u）——不留终端在增强模式。 */
+static void tv_on_kitty_flags(tui_view *v, uint32_t flags)
+{
+	char seq[16];
+	int n;
+
+	if (v->kitty_pushed || !(flags & 1u))
+		return;
+	n = tui_kitty_push_seq(seq, sizeof(seq), 1);
+	if (n <= 0)
+		return;
+	(void)tui_term_write(&v->term, seq, (size_t)n);
+	v->kitty_pushed = 1;
+}
+
+static void tv_kitty_pop(tui_view *v)
+{
+	char seq[16];
+	int n;
+
+	if (!v->kitty_pushed)
+		return;
+	n = tui_kitty_pop_seq(seq, sizeof(seq));
+	if (n > 0)
+		(void)tui_term_write(&v->term, seq, (size_t)n);
+	v->kitty_pushed = 0;
+}
+
 static void tv_dispatch(tui_view *v, const tui_event *ev)
 {
 	char ks[96];
 	int klen;
 	int act_domain;
 
+	if (ev->type == TUI_EV_MOUSE) {
+		tv_dispatch_mouse(v, ev);
+		return;
+	}
+	if (ev->type == TUI_EV_KITTY_FLAGS) {
+		tv_on_kitty_flags(v, ev->ch);
+		return;
+	}
 	if (ev->type != TUI_EV_KEY)
-		return;			/* paste-start/end、kitty flags 忽略 */
+		return;			/* paste-start/end 忽略 */
 	klen = tui_event_keystr(ev, ks, sizeof(ks));
 	if (klen < 0) {
 		ks[0] = '\0';
@@ -829,6 +922,8 @@ static void tv_render(tui_view *v, uint64_t now)
 	if (tr_h < 0)
 		tr_h = 0;
 	v->tr_h = tr_h;
+	v->tr_x = mx;			/* B5：鼠标命中判定用（上帧几何） */
+	v->tr_w = mw;
 
 	/* 侧栏 */
 	if (sbw > 0)
@@ -963,6 +1058,9 @@ int tui_view_run(tui_view *v)
 		tui_term_leave(&v->term);
 		return -1;
 	}
+	/* B5：能力诚实开鼠标（TERM 缺失/dumb → tui_mouse_enable -1 →
+	 * mouse_on=0，无假交互；/help 按此如实展示） */
+	v->mouse_on = (tui_mouse_enable(&v->term, 1) == 0);
 	tv_pull_sessions(v);
 	/* theme/keymap 回落 notice（create 期发现；进屏后打——诚实注明） */
 	if (v->init_notice[0][0])
@@ -1061,13 +1159,17 @@ int tui_view_run(tui_view *v)
 		tv_drain_keys(v);
 	}
 
-	/* 收口：拒收新事件 → 中断+join worker（on_shutdown）→ 退屏 */
+	/* 收口：拒收新事件 → 中断+join worker（on_shutdown）→ 鼠标/kitty
+	 * 复位（B5/B6：不留终端在增强模式）→ 退屏 */
 	pthread_mutex_lock(&v->qm);
 	v->closing = 1;
 	pthread_cond_broadcast(&v->qc);
 	pthread_mutex_unlock(&v->qm);
 	if (v->hooks.on_shutdown)
 		v->hooks.on_shutdown(v->hooks.ud);
+	tv_kitty_pop(v);
+	if (v->mouse_on)
+		(void)tui_mouse_enable(&v->term, 0);
 	tui_term_leave(&v->term);
 	return 0;
 }
@@ -1236,5 +1338,14 @@ void tui_view_set_busy(tui_view *v, int on)
 		return;
 	v->busy = on ? 1 : 0;
 	tui_overlay_busy(v->ov, v->busy);
+	v->dirty_needed = 1;
+}
+
+/* B8：异步改会话数据后拉侧栏快照（/rename AI 标题成功路径——主线程） */
+void tui_view_refresh_sessions(tui_view *v)
+{
+	if (!v)
+		return;
+	tv_pull_sessions(v);
 	v->dirty_needed = 1;
 }

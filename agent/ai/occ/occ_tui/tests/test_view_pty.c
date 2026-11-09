@@ -22,6 +22,12 @@
  *      overlay.cancel 取消 → 「已取消…重试」留步（面板不关）+ 收口
  *   L. /models 非对话（OCC-DEBT）：默认过滤非对话条目；ctrl+t → 显示
  *      全部 + dim + 「·非对话」tag 标注字节
+ *   M. 鼠标（B5）：TERM=xterm-256color → 开鼠标字节 + /help 如实 on；
+ *      滚轮上翻旧内容；点击 live ✻ thinking 行展开/收起；TERM=dumb →
+ *      零鼠标字节 + /help 如实 off（无假交互）
+ *   KT. kitty（B6）：TERM=xterm-kitty 渲染（CJK/SGR 256）；探测回复
+ *      CSI ? 1 u → push CSI > 1 u + CSI-u Enter 提交 + 退出 pop CSI < u；
+ *      无回复 → 零 push 字节（legacy 并行，回退路径）
  *
  * 渲染断言用子串（字节流含帧 diff/SGR 增量，逐字节 golden 不稳定——
  * 细粒度 SGR golden 由 c1 test_render 91 断言与 test_chat 25 断言覆盖）。
@@ -193,6 +199,32 @@ static int mock_command(void *ud, const char *line)
 			(void)tui_view_open_list(m->view, 97, "models", it, 1,
 						 1, "ctrl+t 非对话显隐");
 		}
+		return 0;
+	}
+	if (!strcmp(line, "/many")) {
+		/* M2：30 行通告（滚轮翻旧内容断言用） */
+		int i;
+
+		for (i = 0; i < 30; i++) {
+			char nb[32];
+
+			snprintf(nb, sizeof(nb), "MANY-%02d", i);
+			tui_view_notice(m->view, nb);
+		}
+		return 0;
+	}
+	if (!strcmp(line, "/think")) {
+		/* M3：live 推理块（begin+reasoning——无 turn 的 live 块，
+		 * 折叠行钉转写区底部供点击） */
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_BEGIN, NULL, 0,
+				    NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_REASONING,
+				    "SECRET_THINKING_DATA", 0, NULL, 0);
+		return 0;
+	}
+	if (!strcmp(line, "/cjk")) {
+		/* KT1：CJK 渲染进字节流（kitty TERM 下宽字符兼容） */
+		tui_view_notice(m->view, "汉字宽度测试");
 		return 0;
 	}
 	return 1;			/* 未知 → view 提示 */
@@ -435,6 +467,21 @@ static const char *find_bytes(const char *hay, int haylen, const char *needle)
 	return NULL;
 }
 
+/* 子串出现次数（M3 折叠展开/收起的重绘计数断言） */
+static int count_bytes(const char *hay, int haylen, const char *needle)
+{
+	size_t nlen = strlen(needle);
+	int i, n = 0;
+
+	if (nlen == 0 || haylen < (int)nlen)
+		return 0;
+	for (i = 0; i <= haylen - (int)nlen; i++) {
+		if (memcmp(hay + i, needle, nlen) == 0)
+			n++;
+	}
+	return n;
+}
+
 /* 读到累计输出包含 needle（或超时 -1 / EOF 1） */
 static int read_until_contains(int fd, char *buf, int cap, int *have,
 			       const char *needle, int timeout_ms)
@@ -540,6 +587,16 @@ static int run_scenario(const char *keys, size_t keys_len,
 			rc = -1;
 	}
 	for (i = 0; i < nneedles && rc == 0; i++) {
+		/* BTUI B5："\x01W" 哨兵 needle=不等流——对 master 做
+		 * TIOCSWINSZ（24→25 行）触发子进程 SIGWINCH → renderer
+		 * need_clear 全帧重绘（diff 渲染器只吐变化格——滚轮滚动的
+		 * 行只有尾数字变化，整串 needle 需全帧才可见）。 */
+		if (!strncmp(needles[i], "\x01W", 2)) {
+			struct winsize wz = { .ws_row = 25, .ws_col = 80 };
+
+			(void)ioctl(pt.master, TIOCSWINSZ, &wz);
+			continue;
+		}
 		if (read_until_contains(pt.master, out, OUT_CAP, &have,
 					needles[i], 5000) != 0) {
 			printf("  dbg: needle[%d] '%s' missing (have=%d)\n",
@@ -887,6 +944,157 @@ int main(void)
 		OK(find_bytes(out, out_len,
 			      "\xc2\xb7\xe9\x9d\x9e\xe5\xaf\xb9\xe8\xaf\x9d") !=
 		   NULL, "L-nonchat-tag-bytes");	/* ·非对话 */
+	}
+
+	/* ---- M1. 鼠标：TERM=xterm-256color → 开鼠标字节 + /help 如实 on ----
+	 * 滚动条点击无设计依据（无滚动条）——不测不实现。 */
+	{
+		const char *needles[] = {
+			"\x1b[?1000;1006h",	/* tui_mouse_enable 开 */
+			"SGR 1006"		/* /help mouse 行如实 on */
+		};
+		const char *old = getenv("TERM");
+
+		setenv("TERM", "xterm-256color", 1);
+		rc = run_scenario("/help\r", 6, needles, 2, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "M1-mouse-enable-bytes");
+		OK(find_bytes(out, out_len, "\x1b[?1000;1006h") != NULL,
+		   "M1-enable-in-stream");
+		OK(find_bytes(out, out_len, "SGR 1006") != NULL,
+		   "M1-help-mouse-on-honest");
+		/* 退出复位字节（mouse_on → leave 前置关） */
+		OK(find_bytes(out, out_len, "\x1b[?1000;1006l") != NULL,
+		   "M1-disable-on-exit");
+		if (old)
+			setenv("TERM", old, 1);
+		else
+			unsetenv("TERM");
+	}
+
+	/* ---- M2. 滚轮上翻：/many 30 行 → 初始只显尾部；滚轮×5(15 行)
+	 * → WINCH 全帧重绘 → 头部 MANY-00 整串重现于字节流 ---- */
+	{
+		static const char wheel_up[] =
+			"\x1b[<64;30;10M\x1b[<64;30;10M\x1b[<64;30;10M"
+			"\x1b[<64;30;10M\x1b[<64;30;10M";
+		const char *needles[] = {
+			"MANY-29",	/* 初始尾部可见 */
+			"\x01W",	/* 滚轮后触发 SIGWINCH 全帧重绘 */
+			"MANY-00"	/* 滚轮上翻后头部重现 */
+		};
+
+		setenv("TERM", "xterm-256color", 1);
+		rc = run_scenario("/many\r", 6, needles, 3, 0,
+				  wheel_up, sizeof(wheel_up) - 1,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "M2-wheel-scroll-up");
+		setenv("TERM", "dumb", 1);
+	}
+
+	/* ---- M3. 点击 live ✻ thinking 折叠行：展开 → 正文进字节流；
+	 * 再点同格 → 收起（折叠头重绘，计数增加） ---- */
+	{
+		/* 24 行布局：转写区 0..20、live 折叠行=row20 → SGR y=21；
+		 * 主列 x=22..（80 列有侧栏）→ 点击 x=30 */
+		static const char click[] = "\x1b[<0;30;21M\x1b[<0;30;21m";
+		const char *needles[] = {
+			"thinking",	/* 折叠行渲染 */
+			"SECRET_THINKING_DATA"	/* 展开后正文 */
+		};
+
+		setenv("TERM", "xterm-256color", 1);
+		rc = run_scenario("/think\r", 7, needles, 2, 0,
+				  click, sizeof(click) - 1,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "M3-fold-click-expand");
+		OK(find_bytes(out, out_len, "SECRET_THINKING_DATA") != NULL,
+		   "M3-expanded-reasoning-bytes");
+		OK(find_bytes(out, out_len, "\xe2\x8c\x83") != NULL,
+		   "M3-open-header-marker");	/* ⌃ 展开态标记 */
+		OK(count_bytes(out, out_len, "thinking") >= 2,
+		   "M3-fold-header-redrawn");	/* 折叠头至少画 2 次（展开重绘） */
+		setenv("TERM", "dumb", 1);
+	}
+
+	/* ---- M4. TERM=dumb：零鼠标字节 + /help 如实 off（诚实降级） ---- */
+	{
+		const char *needles[] = { "mouse: off" };
+
+		setenv("TERM", "dumb", 1);
+		rc = run_scenario("/help\r", 6, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "M4-mouse-dumb-degrade");
+		OK(find_bytes(out, out_len, "\x1b[?1000;1006h") == NULL,
+		   "M4-no-mouse-enable-bytes");
+		OK(find_bytes(out, out_len, "mouse: off") != NULL,
+		   "M4-help-mouse-off-honest");
+	}
+
+	/* ---- KT1. TERM=xterm-kitty：进屏/SGR 256/CJK 宽字符渲染 ---- */
+	{
+		const char *needles[] = {
+			"\x1b[?1049h",
+			"38;5;",			/* 256 色 SGR */
+			"\xe6\xb1\x89\xe5\xad\x97\xe5\xae\xbd\xe5\xba\xa6"
+			"\xe6\xb5\x8b\xe8\xaf\x95"	/* 汉字宽度测试 */
+		};
+
+		setenv("TERM", "xterm-kitty", 1);
+		rc = run_scenario("/cjk\r", 6, needles, 3, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "KT1-kitty-term-render");
+		OK(find_bytes(out, out_len, "\x1b[?25l") != NULL,
+		   "KT1-cursor-hide-bytes");
+		OK(find_bytes(out, out_len,
+			      "\xe6\xb1\x89\xe5\xad\x97\xe5\xae\xbd\xe5\xba\xa6"
+			      "\xe6\xb5\x8b\xe8\xaf\x95") != NULL,
+		   "KT1-cjk-widewidth-bytes");
+	}
+
+	/* ---- KT2. kitty 探测回复 → push 增强 + CSI-u Enter 提交 + pop ----
+	 * 进屏即发探测 CSI ? u；注入回复 CSI ? 1 u → view push CSI > 1 u；
+	 * 再 CSI-u 形 Enter（\x1b[13u）提交 /help；退出前 pop CSI < u。 */
+	{
+		static const char reply[] = "\x1b[?1u";	/* 探测回复 flags=1 */
+		static const char keys2[] = "/help\x1b[13u";	/* CSI-u Enter */
+		const char *needles[] = {
+			"\x1b[>1u",		/* push 增强键型 */
+			"commands:"		/* CSI-u Enter 生效 */
+		};
+
+		rc = run_scenario(reply, sizeof(reply) - 1, needles, 2, 0,
+				  keys2, sizeof(keys2) - 1,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "KT2-kitty-probe-push-csiu");
+		OK(find_bytes(out, out_len, "\x1b[>1u") != NULL,
+		   "KT2-push-bytes");
+		OK(find_bytes(out, out_len, "commands:") != NULL,
+		   "KT2-csiu-enter-submit");
+		OK(find_bytes(out, out_len, "\x1b[<u") != NULL,
+		   "KT2-pop-before-exit");
+		/* pop 晚于 push（顺序：增强开启 … 退出前 pop） */
+		{
+			const char *ph = find_bytes(out, out_len, "\x1b[>1u");
+			const char *pp = find_bytes(out, out_len, "\x1b[<u");
+
+			OK(ph != NULL && pp != NULL && pp > ph,
+			   "KT2-pop-after-push");
+		}
+		setenv("TERM", "dumb", 1);
+	}
+
+	/* ---- KT3. 无探测回复 → 零 push 字节（legacy 并行——回退路径） ---- */
+	{
+		const char *needles[] = { "sessions" };
+
+		rc = run_scenario("", 0, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "KT3-no-reply-legacy");
+		OK(find_bytes(out, out_len, "\x1b[>1u") == NULL,
+		   "KT3-no-push-bytes");
+		OK(find_bytes(out, out_len, "\x1b[<u") == NULL,
+		   "KT3-no-pop-bytes");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

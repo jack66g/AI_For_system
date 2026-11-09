@@ -23,8 +23,9 @@
 typedef struct {
 	char b[8];
 	uint8_t n;			/* 字节数 */
-	uint8_t w;			/* 显示宽 0/1/2 */
+	uint8_t w;			/* 显示宽 0/1/2（B7 EXTEND=0 并入） */
 	uint8_t sp;			/* 1=空格（回绕断点） */
+	uint8_t bump;			/* B7：VS16——并入且前 grapheme 1→2 */
 	tui_attr a;
 } gitem;
 
@@ -65,10 +66,17 @@ typedef struct {
 	int has_footer;
 	time_t ts;
 	int live;			/* assistant 流式块 */
+	int reason_open;			/* B5：推理折叠展开态 */
 	/* RESET 截断标记（本轮起点）：boundary 后首个增量时打点 */
 	size_t text_mark, reason_mark;
 	int text_marked, reason_marked;
 } tui_msg;
+
+/* B5：点击命中的折叠行（render 期间记录，click 消费） */
+struct tui_fold_hit {
+	int row;			/* 转写区域相对行 */
+	size_t msg;			/* tui_chat.msgs 下标 */
+};
 
 struct tui_chat {
 	tui_theme th;
@@ -77,6 +85,16 @@ struct tui_chat {
 	tui_scrollback sb;
 	int width;			/* 当前渲染宽度（rewidth 同步） */
 	llist live_lines;		/* live 块行缓存 */
+	/* B5：定稿 reasoning 消息的折叠行 {scrollback 绝对行, msgs 下标}
+	 * ——chat_push_msg 追加（升序）、rebuild 重算；无 reasoning 消息
+	 * 不入表（点击不误中）。二分查找用。 */
+	struct tui_fold_ref {
+		long long abs;
+		size_t msg;
+	} *folds;
+	size_t nfolds, foldscap;
+	struct tui_fold_hit hits[64];	/* 上帧可见折叠行（含 live） */
+	int nhits;
 };
 
 /* ---- lbuf / llist ---- */
@@ -134,7 +152,9 @@ static int lb_gph(lbuf *l, const char *b, uint8_t n, int w, tui_attr a)
 	return 0;
 }
 
-/* 追加一个 grapheme 进行（零宽组合符并入前一格，放不下则丢） */
+/* 追加一个 grapheme 进行（零宽组合符并入前一格，放不下则丢）。
+ * B7：bump（VS16）并入后把前一主格 1→2 宽并补续格——行末（len==cap
+ * 已满或前格宽 2）放不下时按普通并入（宽不变，对齐优先）。 */
 static void lb_push_g(lbuf *lb, const gitem *g)
 {
 	if (g->w == 0) {
@@ -146,6 +166,16 @@ static void lb_push_g(lbuf *lb, const gitem *g)
 			if (prev->len + g->n <= TUI_CELL_MAX) {
 				memcpy(prev->utf8 + prev->len, g->b, g->n);
 				prev->len = (uint8_t)(prev->len + g->n);
+				if (g->bump && prev->width == 1 &&
+				    lb->len < lb->cap) {
+					prev->width = 2;
+					memset(&lb->cells[lb->len], 0,
+					       sizeof(tui_cell));
+					lb->cells[lb->len].width = 0;
+					lb->cells[lb->len].attr = prev->attr;
+					lb->len++;
+					lb->w += 1;
+				}
 			}
 		}
 		return;
@@ -191,13 +221,14 @@ static lbuf *ll_new(llist *ll)
 /* ---- grapheme 装载 ---- */
 
 static int gi_push(gitem **arr, int *n, int *cap, const char *s, size_t len,
-		   tui_attr a)
+		   tui_attr a, tui_gph_st *gst)
 {
 	uint32_t cp;
 	size_t adv = 0;
 	tui_u8stat st;
 	int w;
 	int synth = 0;			/* 1=合成字节（tab→空格），不拷 s */
+	int act;
 	gitem *g;
 	size_t nb;
 
@@ -217,6 +248,12 @@ static int gi_push(gitem **arr, int *n, int *cap, const char *s, size_t len,
 		/* 其他 C0/C1 控制符：丢弃（原字节回写终端会乱移光标） */
 		return (int)adv;
 	}
+	/* B7：ZWJ/肤色/RI/VS16 续接判定（状态跨 gi_push——序列不拆 span） */
+	act = tui_graph_feed(gst, cp, w);
+	if (act == TUI_GPH_EXTEND)
+		w = 0;
+	else if (act == TUI_GPH_BUMP)
+		w = 0;			/* bump 位在 gitem 上 */
 	if (*n == *cap) {
 		int nc = *cap ? *cap * 2 : 64;
 		gitem *nv = realloc(*arr, (size_t)nc * sizeof(gitem));
@@ -249,6 +286,7 @@ static int gi_push(gitem **arr, int *n, int *cap, const char *s, size_t len,
 	g->n = (uint8_t)nb;
 	g->w = (uint8_t)w;
 	g->sp = (cp == ' ') ? 1 : 0;
+	g->bump = (act == TUI_GPH_BUMP) ? 1 : 0;
 	g->a = a;
 	(*n)++;
 	return (int)adv;
@@ -256,12 +294,12 @@ static int gi_push(gitem **arr, int *n, int *cap, const char *s, size_t len,
 
 /* 把一段 UTF-8 文本追加进 grapheme 数组（tab 当 1 空格） */
 static int gi_append(gitem **arr, int *n, int *cap, const char *s, size_t len,
-		     tui_attr a)
+		     tui_attr a, tui_gph_st *gst)
 {
 	size_t i = 0;
 
 	while (i < len) {
-		int adv = gi_push(arr, n, cap, s + i, len - i, a);
+		int adv = gi_push(arr, n, cap, s + i, len - i, a, gst);
 
 		if (adv < 0)
 			return -1;
@@ -276,8 +314,9 @@ static int load_gitems(const char *s, size_t len, tui_attr a, gitem **out,
 {
 	gitem *arr = NULL;
 	int n = 0, cap = 0;
+	tui_gph_st gst = {0, 0, 0};
 
-	if (gi_append(&arr, &n, &cap, s, len, a) < 0) {
+	if (gi_append(&arr, &n, &cap, s, len, a, &gst) < 0) {
 		free(arr);
 		return -1;
 	}
@@ -391,6 +430,7 @@ static int load_code_line(const char *s, size_t len, tui_attr base,
 	gitem *arr = NULL;
 	int n = 0, cap = 0;
 	size_t i = 0;
+	tui_gph_st gst = {0, 0, 0};
 	tui_attr a_cmt = tui_thm_attr(TUI_THM_CMT, TUI_THM_CODE_BG, 0);
 	tui_attr a_str = tui_thm_attr(TUI_THM_STR, TUI_THM_CODE_BG, 0);
 	tui_attr a_num = tui_thm_attr(TUI_THM_NUM, TUI_THM_CODE_BG, 0);
@@ -452,7 +492,7 @@ static int load_code_line(const char *s, size_t len, tui_attr base,
 
 			while (j < i) {
 				adv = gi_push(&arr, &n, &cap, s + j, i - j,
-					      ra);
+					      ra, &gst);
 				if (adv < 0) {
 					free(arr);
 					return -1;
@@ -479,6 +519,7 @@ static int load_inline(const char *s, size_t len, tui_attr base, int code_ctx,
 		gitem *arr = NULL;
 		int n = 0, cap = 0;
 		size_t i = 0;
+		tui_gph_st gst = {0, 0, 0};	/* B7：跨 span 的续接状态 */
 
 		while (i < len) {
 			size_t start = i;
@@ -499,7 +540,7 @@ static int load_inline(const char *s, size_t len, tui_attr base, int code_ctx,
 					while (i < j) {
 						adv = gi_push(&arr, &n, &cap,
 							      s + i, j - i,
-							      ac);
+							      ac, &gst);
 						if (adv < 0) {
 							free(arr);
 							return -1;
@@ -521,11 +562,11 @@ static int load_inline(const char *s, size_t len, tui_attr base, int code_ctx,
 					tui_attr ab = base;
 
 					ab.style |= TUI_ST_BOLD;
-					i = i + 2;
-					while (i < j) {
-						adv = gi_push(&arr, &n, &cap,
-							      s + i, j - i,
-							      ab);
+						i = i + 2;
+						while (i < j) {
+							adv = gi_push(&arr, &n, &cap,
+								      s + i, j - i,
+								      ab, &gst);
 						if (adv < 0) {
 							free(arr);
 							return -1;
@@ -554,7 +595,7 @@ static int load_inline(const char *s, size_t len, tui_attr base, int code_ctx,
 
 				while (j < i) {
 					adv = gi_push(&arr, &n, &cap, s + j,
-						      i - j, base);
+						      i - j, base, &gst);
 					if (adv < 0) {
 						free(arr);
 						return -1;
@@ -636,8 +677,10 @@ static void msg_render_lines(const char *text, size_t len, int width,
 				if (load_gitems("• ", strlen("• "),
 						tui_thm_muted(),
 						&g, &gn, &gcap) == 0) {
+					tui_gph_st lgst = {0, 0, 0};
+
 					if (gi_append(&g, &gn, &gcap, ls, ll,
-						      la) < 0) {
+						      la, &lgst) < 0) {
 						free(g);
 						g = NULL;
 						gn = gcap = 0;
@@ -741,6 +784,46 @@ static tui_msg *chat_push(tui_chat *c, int role)
 	return &c->msgs[c->nmsgs - 1];
 }
 
+/* B5：推理块渲染（折叠行 + 可选展开正文；live 与定稿共用）
+ * 展开正文超 RSN_CAP 字节只渲尾部并加省略行（每帧重渲的 live 块
+ * 需有界；对齐无关——行数不影响列宽）。 */
+#define RSN_CAP 6000
+
+static void render_reasoning(tui_chat *c, tui_msg *m, int live, llist *ll)
+{
+	char hb[96];
+	int hn;
+	const char *rs = m->reason;
+	size_t rn = m->rlen, skip = 0;
+
+	if (!rs || !rn)
+		return;
+	if (m->reason_open) {
+		hn = snprintf(hb, sizeof(hb), live ?
+			      "✻ thinking ⌃ (%zu chars)" :
+			      "✻ thought ⌃ · %zu chars", rn);
+		msg_render_lines(hb, (size_t)hn, c->width, tui_thm_muted(),
+				 TUI_ROLE_NOTICE, ll);
+		if (rn > RSN_CAP) {
+			skip = rn - RSN_CAP;
+			/* 回退到 UTF-8 边界（防切多字节） */
+			while (skip < rn && ((uint8_t)rs[skip] & 0xC0) == 0x80)
+				skip++;
+			msg_render_lines("⋯（前文省略）", strlen("⋯（前文省略）"),
+					 c->width, tui_thm_muted(),
+					 TUI_ROLE_NOTICE, ll);
+		}
+		msg_render_lines(rs + skip, rn - skip, c->width,
+				 tui_thm_muted(), TUI_ROLE_NOTICE, ll);
+		return;
+	}
+	hn = snprintf(hb, sizeof(hb), live ?
+		      "✻ thinking… (%zu chars)" :
+		      "✻ thought · %zu chars", rn);
+	msg_render_lines(hb, (size_t)hn, c->width, tui_thm_muted(),
+			 TUI_ROLE_NOTICE, ll);
+}
+
 /* 把一个定稿消息渲染成行推进 scrollback */
 static void chat_push_msg(tui_chat *c, tui_msg *m)
 {
@@ -751,14 +834,28 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 		return;
 	memset(&ll, 0, sizeof(ll));
 	if (m->role == TUI_ROLE_ASSISTANT) {
-		/* reasoning 折叠行 */
+		/* reasoning 折叠行（B5：点击展开——记 scrollback 绝对行号） */
 		if (m->reason && m->rlen) {
-			char hb[96];
-			int hn = snprintf(hb, sizeof(hb),
-					  "✻ thought · %zu chars", m->rlen);
+			if (c->nfolds == c->foldscap) {
+				size_t nc = c->foldscap ? c->foldscap * 2 : 8;
+				struct tui_fold_ref *nv;
 
-			msg_render_lines(hb, (size_t)hn, c->width,
-					 tui_thm_muted(), TUI_ROLE_NOTICE, &ll);
+				nv = realloc(c->folds,
+					     nc * sizeof(*nv));
+				if (nv) {
+					c->folds = nv;
+					c->foldscap = nc;
+				}
+			}
+			if (c->nfolds < c->foldscap) {
+				c->folds[c->nfolds].abs =
+					(long long)(c->sb.dropped +
+						    c->sb.count);
+				c->folds[c->nfolds].msg =
+					(size_t)(m - c->msgs);
+				c->nfolds++;
+			}
+			render_reasoning(c, m, 0, &ll);
 		}
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
@@ -858,6 +955,7 @@ void tui_chat_destroy(tui_chat *c)
 	for (i = 0; i < c->nmsgs; i++)
 		msg_free(&c->msgs[i]);
 	free(c->msgs);
+	free(c->folds);
 	ll_free(&c->live_lines);
 	tui_sb_destroy(&c->sb);
 	free(c);
@@ -1098,6 +1196,8 @@ void tui_chat_clear(tui_chat *c)
 	for (i = 0; i < c->nmsgs; i++)
 		msg_free(&c->msgs[i]);
 	c->nmsgs = 0;
+	c->nhits = 0;
+	c->nfolds = 0;
 	ll_reset(&c->live_lines);
 	tui_sb_destroy(&c->sb);
 	tui_sb_init(&c->sb, 5000, 10);
@@ -1115,15 +1215,9 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 	if (!m || !m->live || m->role != TUI_ROLE_ASSISTANT)
 		return;
 	(void)now_ms;
-	/* reasoning 折叠单行 */
-	if (m->reason && m->rlen) {
-		char hb[96];
-		int hn = snprintf(hb, sizeof(hb), "✻ thinking… (%zu chars)",
-				  m->rlen);
-
-		msg_render_lines(hb, (size_t)hn, width, tui_thm_muted(),
-				 TUI_ROLE_NOTICE, &c->live_lines);
-	}
+	/* reasoning 折叠行（B5：点击切换展开——可见行号在 render 记 hits） */
+	if (m->reason && m->rlen)
+		render_reasoning(c, m, 1, &c->live_lines);
 	if (m->text && m->tlen)
 		msg_render_lines(m->text, m->tlen, width, tui_thm_plain(),
 				 TUI_ROLE_ASSISTANT, &c->live_lines);
@@ -1177,12 +1271,34 @@ static void draw_line(tui_screen *s, int row, int x, const tui_cell *cells,
 	s->dirty[row] = 1;
 }
 
+/* B5：folds[] 升序（abs）→ 二分找折叠行落在 abs 的消息下标 */
+static long long fold_msg_at(const tui_chat *c, long long abs)
+{
+	size_t lo = 0, hi = c->nfolds;
+
+	if (!c->folds || abs < 0)
+		return -1;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		long long v = c->folds[mid].abs;
+
+		if (v == abs)
+			return (long long)c->folds[mid].msg;
+		if (v < abs)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return -1;
+}
+
 void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 		     uint64_t now_ms)
 {
 	int live_h = 0;
 	int sb_h;
 	int i;
+	tui_msg *lm = chat_live(c);
 
 	if (!c || !s || w < 1 || h < 1)
 		return;
@@ -1205,6 +1321,33 @@ void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 		tui_sb_jump_latest(&c->sb);
 	else
 		tui_sb_scroll(&c->sb, 0);	/* 钳位 */
+
+	/* B5：记录可见折叠行（点击命中表——render 后 click 间有效） */
+	c->nhits = 0;
+	for (i = 0; i < sb_h; i++) {
+		int abs = tui_sb_view_index(&c->sb, i);
+		long long mi = fold_msg_at(c, abs);
+
+		if (mi < 0)
+			continue;
+		if (c->msgs[mi].live || !c->msgs[mi].reason ||
+		    !c->msgs[mi].rlen)
+			continue;
+		if (c->nhits < (int)(sizeof(c->hits) / sizeof(c->hits[0]))) {
+			c->hits[c->nhits].row = i;
+			c->hits[c->nhits].msg = (size_t)mi;
+			c->nhits++;
+		}
+	}
+	if (lm && lm->live && lm->reason && lm->rlen &&
+	    c->live_lines.n - live_h == 0 &&
+	    c->nhits < (int)(sizeof(c->hits) / sizeof(c->hits[0]))) {
+		/* live 折叠行 = live 首行（未被截尾时可见） */
+		c->hits[c->nhits].row = sb_h;
+		c->hits[c->nhits].msg = (size_t)(lm - c->msgs);
+		c->nhits++;
+	}
+
 	for (i = 0; i < sb_h; i++) {
 		int abs = tui_sb_view_index(&c->sb, i);
 		const tui_sline *ln;
@@ -1222,6 +1365,60 @@ void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 
 		draw_line(s, y + sb_h + i, x, lb->cells, lb->len, w);
 	}
+}
+
+int tui_chat_fold_row(const tui_chat *c)
+{
+	if (!c || c->nhits == 0)
+		return -1;
+	return c->hits[c->nhits - 1].row;
+}
+
+/* 重建 scrollback（B5 折叠切换 / rewidth 共用），保视口位置 */
+static void chat_rebuild(tui_chat *c, int keep_view)
+{
+	int top = c->sb.view_top;
+	int follow = c->sb.follow;
+	int rows = c->sb.rows;
+	size_t i;
+
+	tui_sb_destroy(&c->sb);
+	tui_sb_init(&c->sb, 5000, rows > 0 ? rows : 10);
+	c->nfolds = 0;			/* 折叠行绝对号随重建重算 */
+	for (i = 0; i < c->nmsgs; i++) {
+		if (c->msgs[i].live)
+			continue;
+		chat_push_msg(c, &c->msgs[i]);
+	}
+	if (follow || !keep_view) {
+		tui_sb_jump_latest(&c->sb);
+		return;
+	}
+	c->sb.view_top = top;
+	tui_sb_scroll(&c->sb, 0);	/* 钳位（展开行数变化后可能越界） */
+}
+
+int tui_chat_click(tui_chat *c, int row)
+{
+	int i;
+
+	if (!c || row < 0)
+		return 0;
+	for (i = 0; i < c->nhits; i++) {
+		if (c->hits[i].row != row)
+			continue;
+		{
+			tui_msg *m = &c->msgs[c->hits[i].msg];
+			int live = m->live;
+
+			m->reason_open = !m->reason_open;
+			if (!live)
+				chat_rebuild(c, 1);	/* 定稿：重建保视口 */
+			/* live：下帧 live_render 自然反映 */
+		}
+		return 1;
+	}
+	return 0;
 }
 
 void tui_chat_scroll(tui_chat *c, int lines)
@@ -1245,19 +1442,10 @@ int tui_chat_at_bottom(const tui_chat *c)
 
 void tui_chat_rewidth(tui_chat *c, int width)
 {
-	size_t i;
-
 	if (!c || width < 4 || width == c->width)
 		return;
 	c->width = width;
-	tui_sb_destroy(&c->sb);
-	tui_sb_init(&c->sb, 5000, 10);
-	for (i = 0; i < c->nmsgs; i++) {
-		if (c->msgs[i].live)
-			continue;
-		chat_push_msg(c, &c->msgs[i]);
-	}
-	tui_sb_jump_latest(&c->sb);
+	chat_rebuild(c, 0);		/* B5：与折叠切换共用；宽度变化贴底 */
 }
 
 size_t tui_chat_dump_text(const tui_chat *c, char *buf, size_t cap)

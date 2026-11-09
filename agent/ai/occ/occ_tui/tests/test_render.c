@@ -233,6 +233,87 @@ static void test_screen_struct(void)
 	tui_screen_destroy(s);
 }
 
+/* ---- B7：emoji grapheme 续接（ZWJ/肤色/RI/VS16）cell 黄金 ----
+ * 对拍口径（终端真值=现代终端的字素簇渲染）：ZWJ 家庭/肤色修饰/旗帜对
+ * 收敛为 1 个宽 2 grapheme；VS16 文本呈现 1 → emoji 呈现 2（BUMP）。 */
+static void test_screen_emoji(void)
+{
+	tui_screen *s = tui_screen_create(2, 20);
+	tui_attr d = tui_attr_default();
+	const tui_cell *c;
+	int col;
+
+	OK(s != NULL, "emo-screen-create");
+	if (!s)
+		return;
+
+	/* ZWJ 家庭：👨(2) ZWJ 👩 ZWJ 👧 → 1 grapheme 宽 2（+续格），后续
+	 * 文本从第 2 列起（B7 前=6 列错位） */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0,
+			     "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9"
+			     "\xe2\x80\x8d\xf0\x9f\x91\xa7" "X", 19, d);
+	OK(col == 3, "emo-zwj-family-advance3");
+	c = tui_screen_at(s, 0, 0);
+	OK(c->width == 2, "emo-zwj-family-width2");
+	OK(c->len == 18, "emo-zwj-family-bytes18");	/* 4+3+4+3+4 */
+	OK(tui_screen_at(s, 0, 1)->width == 0, "emo-zwj-family-cont");
+	OK(tui_screen_at(s, 0, 2)->utf8[0] == 'X', "emo-zwj-family-tail");
+
+	/* 肤色修饰：👋(2)+1F3FD → 2 列（B7 前=3 列） */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0,
+			     "\xf0\x9f\x91\x8b\xf0\x9f\x8f\xbd", 8, d);
+	OK(col == 2, "emo-skin-advance2");
+	OK(tui_screen_at(s, 0, 0)->width == 2 &&
+	   tui_screen_at(s, 0, 0)->len == 8, "emo-skin-one-grapheme");
+
+	/* 旗帜对：🇨🇳 RI+RI → 2 列（B7 前=2+2=4 列）
+	 * U+1F1E8 U+1F1F3 = F0 9F 87 A8 F0 9F 87 B3 */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0,
+			     "\xf0\x9f\x87\xa8\xf0\x9f\x87\xb3", 8, d);
+	OK(col == 2, "emo-flag-advance2");
+	OK(tui_screen_at(s, 0, 0)->width == 2 &&
+	   tui_screen_at(s, 0, 0)->len == 8, "emo-flag-one-grapheme");
+
+	/* VS16：✌(1)+FE0F → BUMP 宽 2（B7 前=1 列——终端按 emoji 呈现 2） */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0, "\xe2\x9c\x8c\xef\xb8\x8f", 6, d);
+	OK(col == 2, "emo-vs16-advance2");
+	OK(tui_screen_at(s, 0, 0)->width == 2, "emo-vs16-bump-width2");
+	OK(tui_screen_at(s, 0, 0)->len == 6, "emo-vs16-bytes-merged");
+	OK(tui_screen_at(s, 0, 1)->width == 0, "emo-vs16-cont");
+
+	/* keycap：1+FE0F+20E3 → 宽 2（BUMP+组合并入；len=1+3+3=7） */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0,
+			     "1\xef\xb8\x8f\xe2\x83\xa3", 7, d);
+	OK(col == 2, "emo-keycap-advance2");
+	OK(tui_screen_at(s, 0, 0)->width == 2 &&
+	   tui_screen_at(s, 0, 0)->len == 7, "emo-keycap-grapheme");
+
+	/* 常规组合符行为不变：e+U+0301 → 1 列 */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0, "e\xcc\x81", 3, d);
+	OK(col == 1, "emo-combining-unchanged");
+
+	/* 超长序列（>TUI_CELL_MAX=32B）：四人家庭+各肤色 41B → 截断丢尾、
+	 * 列宽不变（对齐优先）——诚实边界 */
+	tui_screen_fill(s, d);
+	col = tui_screen_put(s, 0, 0,
+			     "\xf0\x9f\x91\xa8\xf0\x9f\x8f\xbb\xe2\x80\x8d"
+			     "\xf0\x9f\x91\xa9\xf0\x9f\x8f\xbb\xe2\x80\x8d"
+			     "\xf0\x9f\x91\xa7\xf0\x9f\x8f\xbb\xe2\x80\x8d"
+			     "\xf0\x9f\x91\xa6\xf0\x9f\x8f\xbb" "Y", 41 + 1, d);
+	OK(col == 3, "emo-overflow-advance-still2");
+	OK(tui_screen_at(s, 0, 0)->len <= TUI_CELL_MAX,
+	   "emo-overflow-capped");
+	OK(tui_screen_at(s, 0, 2)->utf8[0] == 'Y', "emo-overflow-tail");
+
+	tui_screen_destroy(s);
+}
+
 /* ---- 脏行 diff golden 字节 ---- */
 
 static void test_flush_golden(void)
@@ -460,6 +541,7 @@ int main(void)
 {
 	test_sgr();
 	test_screen_struct();
+	test_screen_emoji();
 	test_flush_golden();
 	test_span_diff();
 	test_scrollback();

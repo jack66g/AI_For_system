@@ -173,6 +173,87 @@ int main(void)
 	OK(tui_is_combining(0x4E2D) == 0, "combining-cjk-no");
 	OK(tui_is_combining(0x07) == 0, "combining-ctl-no");
 
+	/* ---- B7：grapheme 续接判定（ZWJ/肤色/RI/VS16）----
+	 * 现状实测口径：👨‍👩‍👧 逐码点 6 列 vs 终端 2 列（错位撕行）——
+	 * EXTEND 收敛为单 grapheme 宽 2；VS16 文本呈现 1 列 vs emoji
+	 * 呈现 2 列（反向覆盖）——BUMP 提升前格宽。 */
+	{
+		tui_gph_st st = {0, 0, 0};
+
+		/* 常规文本：全 START */
+		OK(tui_graph_feed(&st, 'a', 1) == TUI_GPH_START, "gph-ascii-start");
+		OK(tui_graph_feed(&st, 0x4E2D, 2) == TUI_GPH_START, "gph-cjk-start");
+		/* ZWJ → EXTEND + join */
+		OK(tui_graph_feed(&st, 0x200D, 0) == TUI_GPH_EXTEND, "gph-zwj-extend");
+		/* join 中基字符（👨 1F468）→ EXTEND（宽 0 并入） */
+		OK(tui_graph_feed(&st, 0x1F468, 2) == TUI_GPH_EXTEND, "gph-zwj-join-base");
+		/* join 后新基字符恢复 START */
+		OK(tui_graph_feed(&st, 0x1F469, 2) == TUI_GPH_START, "gph-after-join-start");
+		/* 连串 ZWJ：👨 ZWJ 👩 ZWJ 👧 → 全并入首 grapheme */
+		{
+			tui_gph_st s2 = {0, 0, 0};
+			uint32_t fam[] = { 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467 };
+			int exp[] = { TUI_GPH_START, TUI_GPH_EXTEND, TUI_GPH_EXTEND,
+				      TUI_GPH_EXTEND, TUI_GPH_EXTEND };
+			int i, all = 1;
+
+			for (i = 0; i < 5; i++) {
+				int act = tui_graph_feed(&s2, fam[i],
+							 tui_wcwidth(fam[i]));
+				if (act != exp[i])
+					all = 0;
+			}
+			OK(all, "gph-family-zwj-collapse");
+		}
+		/* 肤色修饰（1F3FB-1F3FF）→ EXTEND */
+		{
+			tui_gph_st s3 = {0, 0, 0};
+
+			(void)tui_graph_feed(&s3, 0x1F44B, 2);	/* 👋 */
+			OK(tui_graph_feed(&s3, 0x1F3FD, 1) == TUI_GPH_EXTEND,
+			   "gph-skin-modifier");
+		}
+		/* 旗帜对：RI+RI → 第二枚 BUMP（1→2 列）；第三枚起新对 */
+		{
+			tui_gph_st s4 = {0, 0, 0};
+
+			OK(tui_graph_feed(&s4, 0x1F1E8, 1) == TUI_GPH_START,
+			   "gph-flag-first-start");	/* C */
+			OK(tui_graph_feed(&s4, 0x1F1F3, 1) == TUI_GPH_BUMP,
+			   "gph-flag-ri-pair");		/* N 闭合对 → 提宽 2 */
+			OK(tui_graph_feed(&s4, 0x1F1E8, 1) == TUI_GPH_START,
+			   "gph-third-ri-start");	/* 新对起点 */
+			OK(tui_graph_feed(&s4, 0x1F1F3, 1) == TUI_GPH_BUMP,
+			   "gph-fourth-ri-bump");
+		}
+		/* VS16 → BUMP；前格宽 2 时调用方降级 EXTEND（动作仍 BUMP） */
+		{
+			tui_gph_st s5 = {0, 0, 0};
+
+			(void)tui_graph_feed(&s5, 0x270C, 1);	/* ✌ */
+			OK(tui_graph_feed(&s5, 0xFE0F, 0) == TUI_GPH_BUMP,
+			   "gph-vs16-bump");
+		}
+		/* 常规组合符 → EXTEND（既有行为不变） */
+		{
+			tui_gph_st s6 = {0, 0, 0};
+
+			(void)tui_graph_feed(&s6, 'e', 1);
+			OK(tui_graph_feed(&s6, 0x0301, 0) == TUI_GPH_EXTEND,
+			   "gph-combining-extend");
+		}
+		/* keycap：'1' FE0F 20E3 → VS16 BUMP + 组合 EXTEND（2 列） */
+		{
+			tui_gph_st s7 = {0, 0, 0};
+
+			(void)tui_graph_feed(&s7, '1', 1);
+			OK(tui_graph_feed(&s7, 0xFE0F, 0) == TUI_GPH_BUMP,
+			   "gph-keycap-vs16");
+			OK(tui_graph_feed(&s7, 0x20E3, 0) == TUI_GPH_EXTEND,
+			   "gph-keycap-combining");
+		}
+	}
+
 	printf("test_utf8: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

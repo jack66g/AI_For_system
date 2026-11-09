@@ -515,22 +515,90 @@ static void test_swallow(void)
 	ok_count("dcs-1ev", &r, 1);
 	KEY("dcs-z", &r, 0, TUI_KEY_CHAR, 'z', 0);
 
-	/* SGR 鼠标报告吞掉 */
+	/* B5：SGR 鼠标 → 真事件（press@10,20 + release@10,20） */
 	replay_init(&r);
-	feeds(&r, "\x1b[<0;10;20Mm", 100);
-	ok_count("mouse-sgr-1ev", &r, 1);
-	KEY("mouse-sgr-m", &r, 0, TUI_KEY_CHAR, 'm', 0);
+	feeds(&r, "\x1b[<0;10;20M", 100);
+	feeds(&r, "\x1b[<0;10;20m", 100);
+	ok_count("mouse-sgr-2ev", &r, 2);
+	ok_ev("mouse-sgr-press", &r, 0, TUI_EV_MOUSE,
+	      TUI_MOUSE_PRESS, 0, 0, 0);
+	OK(r.ev[0].mx == 10 && r.ev[0].my == 20, "mouse-sgr-coords");
+	ok_ev("mouse-sgr-release", &r, 1, TUI_EV_MOUSE,
+	      TUI_MOUSE_RELEASE, 0, 0, 0);
 
-	/* X10 鼠标：ESC [ M + 3 原始字节全部吞掉 → 0 事件 */
+	/* SGR 修饰位（cb=1+4+8=13 → middle+shift+alt press@1,2） */
 	replay_init(&r);
-	feed(&r, "\x1b[Mabc", 6, 100);
-	ok_count("mouse-x10-0ev", &r, 0);
+	feeds(&r, "\x1b[<13;1;2M", 100);
+	ok_count("mouse-sgr-mods-1ev", &r, 1);
+	ok_ev("mouse-sgr-mods", &r, 0, TUI_EV_MOUSE, TUI_MOUSE_PRESS, 1,
+	      TUI_MOD_SHIFT | TUI_MOD_ALT, 0);
 
-	/* 吞 3 字节后恢复正常解析 */
+	/* SGR 滚轮（cb=64 上 / 65 下） */
+	replay_init(&r);
+	feeds(&r, "\x1b[<64;5;6M\x1b[<65;5;6M", 100);
+	ok_count("mouse-sgr-wheel-2ev", &r, 2);
+	ok_ev("mouse-wheel-up", &r, 0, TUI_EV_MOUSE, TUI_MOUSE_WHEEL_UP,
+	      0, 0, 0);
+	ok_ev("mouse-wheel-down", &r, 1, TUI_EV_MOUSE, TUI_MOUSE_WHEEL_DOWN,
+	      1, 0, 0);
+
+	/* SGR 拖动（cb=32+0 motion；仅开 motion 报告的终端才发） */
+	replay_init(&r);
+	feeds(&r, "\x1b[<32;7;8M", 100);
+	ok_count("mouse-sgr-motion-1ev", &r, 1);
+	ok_ev("mouse-motion", &r, 0, TUI_EV_MOUSE, TUI_MOUSE_MOTION, 0,
+	      0, 0);
+
+	/* SGR 后恢复正常解析 */
+	replay_init(&r);
+	feeds(&r, "\x1b[<0;1;1Mm", 100);
+	ok_count("mouse-sgr-then-key-2ev", &r, 2);
+
+	/* B5：X10 鼠标（ESC [ M + 3 原始字节）→ press 事件（无 release）
+	 * b0=32+0 左键、b1=32+9=41→列 9、b2=32+5→行 5 */
+	replay_init(&r);
+	{
+		uint8_t x10[6] = { 0x1b, '[', 'M', 32, 32 + 9, 32 + 5 };
+
+		feed(&r, (const char *)x10, 6, 100);
+	}
+	ok_count("mouse-x10-1ev", &r, 1);
+	ok_ev("mouse-x10-press", &r, 0, TUI_EV_MOUSE, TUI_MOUSE_PRESS, 0,
+	      0, 0);
+	OK(r.ev[0].mx == 9 && r.ev[0].my == 5, "mouse-x10-coords");
+
+	/* X10 滚轮（b0=32+64=96）→ WHEEL_UP */
+	replay_init(&r);
+	{
+		uint8_t x10[6] = { 0x1b, '[', 'M', 32 + 64, 33, 34 };
+
+		feed(&r, (const char *)x10, 6, 100);
+	}
+	ok_count("mouse-x10-wheel-1ev", &r, 1);
+	ok_ev("mouse-x10-wheel", &r, 0, TUI_EV_MOUSE, TUI_MOUSE_WHEEL_UP,
+	      0, 0, 0);
+
+	/* 收 3 字节后恢复正常解析 */
 	replay_init(&r);
 	feed(&r, "\x1b[MxyzQ", 7, 100);
-	ok_count("mouse-x10-then-key-1ev", &r, 1);
-	KEY("mouse-x10-then-Q", &r, 0, TUI_KEY_CHAR, 'Q', 0);
+	ok_count("mouse-x10-then-key-2ev", &r, 2);
+	ok_ev("mouse-x10-then-Q", &r, 1, TUI_EV_KEY, TUI_KEY_CHAR, 'Q',
+	      0, 0);
+
+	/* keystr：mouse-* 规范名 */
+	{
+		tui_event me;
+		char buf[32];
+
+		memset(&me, 0, sizeof(me));
+		me.type = TUI_EV_MOUSE;
+		me.key = TUI_MOUSE_WHEEL_DOWN;
+		OK(tui_event_keystr(&me, buf, sizeof(buf)) > 0 &&
+		   !strcmp(buf, "mouse-wheel-down"), "mouse-keystr-wheel");
+		me.key = TUI_MOUSE_PRESS;
+		OK(tui_event_keystr(&me, buf, sizeof(buf)) > 0 &&
+		   !strcmp(buf, "mouse-press"), "mouse-keystr-press");
+	}
 
 	/* 焦点进出 */
 	replay_init(&r);

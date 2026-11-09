@@ -205,3 +205,42 @@ int tui_is_combining(uint32_t cp)
 		return 0;		/* 控制符不算组合符 */
 	return in_tbl(cp, comb_tbl, sizeof(comb_tbl) / sizeof(comb_tbl[0]));
 }
+
+/* ---- B7：简化 grapheme 续接判定（头注见 tui_utf8.h） ---- */
+
+#define TUI_IS_RI(cp) ((cp) >= 0x1F1E6 && (cp) <= 0x1F1FF)	/* 旗帜 RI */
+
+int tui_graph_feed(tui_gph_st *st, uint32_t cp, int wc)
+{
+	int act = TUI_GPH_START;
+
+	if (st->join) {
+		/* ZWJ 后：下一码点并入（含基字符）；再遇 ZWJ 维持 join */
+		st->prev = cp;
+		st->join = (cp == 0x200D);
+		st->ri = 0;
+		return TUI_GPH_EXTEND;
+	}
+	if (cp == 0x200D) {			/* ZWJ：并入 + 联结下一码点 */
+		st->prev = cp;
+		st->join = 1;
+		st->ri = 0;
+		return TUI_GPH_EXTEND;
+	}
+	if (cp >= 0x1F3FB && cp <= 0x1F3FF) {	/* 肤色修饰符并入 */
+		act = TUI_GPH_EXTEND;
+	} else if (cp == 0xFE0F) {		/* VS16：emoji 呈现=宽 2 */
+		act = TUI_GPH_BUMP;
+	} else if (TUI_IS_RI(cp)) {
+		/* 旗帜：偶数位 RI 起对（START，单枚按窄字母 1 列），奇数位
+		 * 闭合（BUMP：RI 对=终端 2 列——复用 VS16 的 1→2 机制） */
+		st->ri++;
+		st->prev = cp;
+		return (st->ri & 1) ? TUI_GPH_START : TUI_GPH_BUMP;
+	} else if (wc == 0 && tui_is_combining(cp)) {
+		act = TUI_GPH_EXTEND;		/* 常规组合符并入 */
+	}
+	st->prev = cp;
+	st->ri = 0;
+	return act;
+}

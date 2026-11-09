@@ -66,8 +66,10 @@ size_t tui_sgr_transition(const tui_attr *cur, const tui_attr *want,
 size_t tui_sgr_reset(char *buf, size_t cap);
 
 /* ---- 单元格与屏幕缓冲 ---- */
-#define TUI_CELL_MAX 16		/* 一个 grapheme 的 UTF-8 字节上限
-				 * （基字符≤4 + 组合符追加） */
+#define TUI_CELL_MAX 32		/* 一个 grapheme 的 UTF-8 字节上限
+					 * （基字符≤4 + 组合符/ZWJ 序列追加；
+					 * B7：16→32——家庭 emoji+肤色修饰最长
+					 * ~30B；超出仍丢弃（对齐不撕行）） */
 
 typedef struct {
 	uint8_t utf8[TUI_CELL_MAX];
@@ -201,6 +203,7 @@ typedef struct tui_term {
 	struct termios saved;
 	int entered;		/* 已进全屏 */
 	int sigs_saved;		/* 旧信号处理已保存 */
+	int mouse_on;		/* B5：鼠标模式已开（leave 时补关——幂等） */
 	struct sigaction old_int, old_term, old_hup, old_winch;
 } tui_term;
 
@@ -223,8 +226,17 @@ void tui_term_hide_cursor(tui_term *t);
 void tui_term_show_cursor(tui_term *t);
 int tui_term_write(tui_term *t, const char *data, size_t len);
 
-/* 鼠标：本棒不做，留 API（返回 TUI_ERR_UNSUPPORTED，c2/c3 后续接） */
+/*
+ * B5 鼠标开关：on=1 发 CSI ? 1000;1006 h（正常追踪 + SGR 编码；终端
+ * 无 1006 时回落 X10 三字节报告——解析器两编码并存）；on=0 发复位。
+ * 诚实降级：未进全屏 / 非 tty / TERM 缺失/dumb（无鼠标能力信号）→ -1，
+ * 不发任何字节、不置 mouse_on（调用方 /help 按此如实展示）。成功 0。
+ * 重复同向调用幂等（不发字节）；tui_term_leave 对 mouse_on 补发复位
+ * （含信号/atexit 异常路径），未开鼠标时 leave 字节流与 B5 前逐字节一致。
+ */
 int tui_mouse_enable(tui_term *t, int on);
+/* 查询 mouse_on（帮助文案不撒谎用） */
+int tui_mouse_active(const tui_term *t);
 
 #ifdef __cplusplus
 }
