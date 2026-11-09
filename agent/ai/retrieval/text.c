@@ -10,7 +10,7 @@
  */
 #include "retrieval/text.h"
 
-#include "unicode.h"
+#include "memory/unicode.h"
 
 #include <stdio.h>
 #include <stdlib.h>

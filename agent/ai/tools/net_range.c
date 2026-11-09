@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 #include "net_range.h"
-#include "tool_registry.h"
+#include "tools/tool_registry.h"
 #include "ai_json_util.h"
 #include "ai_types.h"
 #include "netlink/ai_netlink_client.h"

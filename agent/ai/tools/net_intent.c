@@ -38,7 +38,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "tool_registry.h"
+#include "tools/tool_registry.h"
 #include "net_admin.h"
 #include "net_intent.h"
 #include "net_hit.h"

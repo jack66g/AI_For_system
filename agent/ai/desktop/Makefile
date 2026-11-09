@@ -18,7 +18,7 @@
 
 CC ?= cc
 AR ?= ar
-CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include -I../cloud \
+CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include \
 	  -MMD -MP
 
 # cloud/http http_client 编译参数(照 agent/ai/Makefile:mbedtls-trim 配置;

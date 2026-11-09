@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-#include "../tools/tool_registry.h"
+#include "tools/tool_registry.h"
 #include "../tools/net_admin.h"
 
 static int fails = 0;

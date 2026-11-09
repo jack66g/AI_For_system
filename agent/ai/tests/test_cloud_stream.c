@@ -30,7 +30,7 @@
 
 #include "ai_provider.h"
 #include "ai_config.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 
 /* 工厂函数未进公共头（runtime.c 同款名称约定前向声明） */
 struct ai_provider *openai_compatible_provider_create(void);

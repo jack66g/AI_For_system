@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "http_client.h"
+#include "cloud/http/http_client.h"
 
 int main(int argc, char **argv)
 {

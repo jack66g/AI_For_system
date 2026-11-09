@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "as_parquet.h"
+#include "aistreamd/as_parquet.h"
 
 #define MAXROWS	70000
 

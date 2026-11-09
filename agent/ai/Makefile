@@ -153,6 +153,7 @@ COMMON_SRCS := \
 	$(TOOLS_DIR)/bpf_tools.c \
 	$(TOOLS_DIR)/net_intent.c \
 	$(TOOLS_DIR)/net_hit.c \
+	$(TOOLS_DIR)/telemetry_rate.c \
 	$(TOOLS_DIR)/net_chain.c \
 	$(TOOLS_DIR)/net_range.c \
 	$(TOOLS_DIR)/app_profile.c \

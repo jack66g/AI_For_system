@@ -7,10 +7,10 @@
  * 的权重为 1, 1.5, 2, 2.5...），因此 double 累加无舍入；L2 范数的平方和
  * 也精确可表示，sqrt 按 IEEE 正确舍入，归一化结果与 numpy 逐位相同。
  */
-#include "../include/memory/embed_hash.h"
+#include "memory/embed_hash.h"
 
-#include "blake2b.h"
-#include "unicode.h"
+#include "memory/blake2b.h"
+#include "memory/unicode.h"
 
 #include <math.h>
 #include <stdio.h>

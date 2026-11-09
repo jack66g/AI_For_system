@@ -35,7 +35,7 @@
 #include "desktop/dtjson.h"
 #include "desktop/dtstate.h"
 #include "desktop/dtvm.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 
 #define CHAT_LLM_TIMEOUT 25 /* LLM_TIMEOUT 25.0s 单次尝试 */
 

@@ -50,7 +50,7 @@
 
 #include "as_conf.h"
 #include "as_event.h"
-#include "as_parquet.h"
+#include "aistreamd/as_parquet.h"
 #include "as_stats.h"
 
 /* 内核子路径（ai_procfs.c ai_proc_decisions_show；root 前缀拼接） */

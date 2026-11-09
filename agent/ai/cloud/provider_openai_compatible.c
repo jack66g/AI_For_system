@@ -15,7 +15,7 @@
 #include "ai_provider.h"
 #include "ai_config.h"
 #include "ai_stream.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 
 /* ---- 内部类型 ---- */
 

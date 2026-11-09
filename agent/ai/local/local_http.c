@@ -26,7 +26,7 @@
 #include <fcntl.h>
 #include <sys/select.h>
 
-#include "local_http.h"
+#include "local/local_http.h"
 #include "ai_types.h"
 
 /* 收发超时默认值（毫秒），与 [local] timeout_ms 默认值一致 */

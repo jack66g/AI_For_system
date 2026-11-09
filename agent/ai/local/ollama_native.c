@@ -26,9 +26,9 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "ai_chat.h"
-#include "local_http.h"
-#include "local_chat.h"
-#include "ollama_native.h"
+#include "local/local_http.h"
+#include "local/local_chat.h"
+#include "local/ollama_native.h"
 
 /* ---- 可增长字符串缓冲（与 ai_chat_proto.c 同风格的最小实现） ---- */
 

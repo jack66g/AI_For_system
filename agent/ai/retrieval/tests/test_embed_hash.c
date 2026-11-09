@@ -12,7 +12,7 @@
  */
 #include "memory/embed_hash.h"
 #include "store/store_json.h"
-#include "unicode.h"
+#include "memory/unicode.h"
 
 #include <stdint.h>
 #include <stdio.h>

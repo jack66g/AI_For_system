@@ -35,7 +35,7 @@
 
 #include "ai_types.h"
 #include "ai_json_util.h"
-#include "../tools/tool_registry.h"
+#include "tools/tool_registry.h"
 #include "../tools/app_ctl.h"
 
 static int fails;

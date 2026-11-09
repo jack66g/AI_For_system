@@ -20,9 +20,9 @@
 #include <string.h>
 #include "ai_types.h"
 #include "ai_stream.h"
-#include "local_http.h"
-#include "local_chat.h"
-#include "ollama_native.h"
+#include "local/local_http.h"
+#include "local/local_chat.h"
+#include "local/ollama_native.h"
 
 /* 透传给 ai_stream_agg 的上下文 */
 struct feed_ctx {

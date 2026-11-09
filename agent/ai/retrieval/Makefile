@@ -16,8 +16,8 @@
 
 CC ?= cc
 AR ?= ar
-# CTOPO1 棒1: -I../memory = text.c/test_embed_hash.c 的 memory/unicode.h 越界 -I 形态（例外登记：棒2 提升公共位后撤销）
-CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include -I../memory
+# CTOPO2 棒2: unicode.h/blake2b.h 已提升 include/memory/（撤棒1例外 -I../memory）
+CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include
 LDLIBS := -lz -lm
 
 STORE_LIB := ../store/libaikstore.a
@@ -30,21 +30,21 @@ all: $(LIB)
 $(LIB): $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
-text.o: text.c ../include/retrieval/text.h ../memory/unicode.h
+text.o: text.c ../include/retrieval/text.h ../include/memory/unicode.h
 	$(CC) $(CFLAGS) -c -o $@ text.c
 
 bm25.o: bm25.c ../include/retrieval/bm25.h ../include/retrieval/text.h
 	$(CC) $(CFLAGS) -c -o $@ bm25.c
 
 embed_hash.o: ../memory/embed_hash.c ../include/memory/embed_hash.h \
-	../memory/blake2b.h ../memory/unicode.h
+	../include/memory/blake2b.h ../include/memory/unicode.h
 	$(CC) $(CFLAGS) -c -o $@ ../memory/embed_hash.c
 
-blake2b.o: ../memory/blake2b.c ../memory/blake2b.h \
+blake2b.o: ../memory/blake2b.c ../include/memory/blake2b.h \
 	../include/memory/embed_hash.h
 	$(CC) $(CFLAGS) -c -o $@ ../memory/blake2b.c
 
-unicode.o: ../memory/unicode.c ../memory/unicode.h \
+unicode.o: ../memory/unicode.c ../include/memory/unicode.h \
 	../memory/unicode_lower_table.h
 	$(CC) $(CFLAGS) -c -o $@ ../memory/unicode.c
 

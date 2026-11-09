@@ -23,7 +23,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "tool_registry.h"
+#include "tools/tool_registry.h"
 #include "netlink/ai_streams.h"	/* JSON 转义复用 */
 #include "macro_tools.h"
 

@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "as_snappy.h"
+#include "aistreamd/as_snappy.h"
 
 #define SN_BLOCK	65536
 #define SN_HASH_BITS	14

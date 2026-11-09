@@ -12,9 +12,9 @@
  *
  * 字节序：BLAKE2b 全程 little-endian（RFC 7693 §2.5）。
  */
-#include "blake2b.h"
+#include "memory/blake2b.h"
 
-#include "../include/memory/embed_hash.h"
+#include "memory/embed_hash.h"
 
 #include <string.h>
 

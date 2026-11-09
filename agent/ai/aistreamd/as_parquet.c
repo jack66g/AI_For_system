@@ -32,8 +32,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "as_parquet.h"
-#include "as_snappy.h"
+#include "aistreamd/as_parquet.h"
+#include "aistreamd/as_snappy.h"
 
 #define PQ_PAR1		"PAR1"
 #define PQ_CREATED_BY	"aistreamd as_parquet 1.0 (T8 writer-only)"

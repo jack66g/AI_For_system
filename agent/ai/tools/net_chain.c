@@ -56,7 +56,7 @@
 #include <linux/netlink.h>
 
 #include "net_chain.h"
-#include "tool_registry.h"
+#include "tools/tool_registry.h"
 
 #ifndef NLA_TYPE_MASK
 #define NLA_TYPE_MASK 0x3fff

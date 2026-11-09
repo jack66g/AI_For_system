@@ -20,7 +20,7 @@
 #include "ai_shell.h"
 #include "ai_runtime.h"
 #include "ai_config.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 
 static void network_status_cmd(struct ai_shell *shell)
 {

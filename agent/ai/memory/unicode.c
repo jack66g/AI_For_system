@@ -14,7 +14,7 @@
  * 存于 unicode_lower_table.h；等价于 DerivedCoreProperties（含
  * Other_Uppercase / Other_Lowercase，例如 U+2160 Ⅰ、U+00AA ª）。
  */
-#include "unicode.h"
+#include "memory/unicode.h"
 #include "unicode_lower_table.h"
 
 #include <stdio.h>

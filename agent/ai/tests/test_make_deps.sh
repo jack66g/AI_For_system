@@ -53,7 +53,7 @@ check_dep() {
 }
 
 check_dep build/tools/executor.o include/ai_lang.h
-check_dep build/tools/tool_registry.o tools/tool_registry.h
+check_dep build/tools/tool_registry.o include/tools/tool_registry.h
 
 if [ "$fail" -ne 0 ]; then
 	echo "test_make_deps: FAIL"

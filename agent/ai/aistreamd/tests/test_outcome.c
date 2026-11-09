@@ -42,7 +42,7 @@
 #include "as_conf.h"
 #include "as_event.h"
 #include "as_outcome.h"
-#include "as_parquet.h"
+#include "aistreamd/as_parquet.h"
 #include "as_stats.h"
 #include "as_util.h"
 

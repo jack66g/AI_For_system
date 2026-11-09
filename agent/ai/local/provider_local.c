@@ -24,7 +24,7 @@
 #include "ai_provider.h"
 #include "ai_config.h"
 #include "ai_stream.h"
-#include "local_chat.h"
+#include "local/local_chat.h"
 
 /* 默认请求超时（毫秒），与 config_manager.c 中 [local] 默认值一致 */
 #define LOCAL_PROVIDER_DEFAULT_TIMEOUT_MS  60000

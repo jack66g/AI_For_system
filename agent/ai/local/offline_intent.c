@@ -37,7 +37,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "offline_intent.h"
+#include "local/offline_intent.h"
 #include "ai_config.h"
 #include "ai_runtime.h"
 #include "memory/sme_client.h"

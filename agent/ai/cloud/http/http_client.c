@@ -23,7 +23,7 @@
 #include "mbedtls/debug.h"
 #include "mbedtls/x509_crt.h"
 
-#include "http_client.h"
+#include "cloud/http/http_client.h"
 
 /* ---- mbedTLS 全局上下文 ---- */
 

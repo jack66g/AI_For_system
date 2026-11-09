@@ -20,7 +20,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 
-#include "local_http.h"
+#include "local/local_http.h"
 #include "ai_types.h"
 
 static int g_fail;

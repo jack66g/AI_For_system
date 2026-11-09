@@ -42,7 +42,7 @@
 
 #include "ai_types.h"
 #include "ai_streams.h"
-#include "ai_netlink_client.h"
+#include "netlink/ai_netlink_client.h"
 
 /* ---- 公共小工具 ---- */
 

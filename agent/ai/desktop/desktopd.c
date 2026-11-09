@@ -29,7 +29,7 @@
 #include "desktop/dtchat.h"
 #include "desktop/dtstate.h"
 #include "desktop/dtvm.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 #include "desktop/dttheme.h"
 
 #define VM_DISABLED_REASON "vm_unavailable: local desktop only (AIK_DESKTOP_VM=0)"

@@ -24,7 +24,7 @@
 CC      ?= gcc
 CFLAGS  := -Wall -Wextra -Werror -std=c11 -O2 -g -MMD -MP
 
-INCLUDES := -I. -I.. -I../include -I../runtime -I../local
+INCLUDES := -I. -I../include
 
 OBJ_DIR := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
@@ -80,7 +80,7 @@ tests/$(INJECT): tests/ai_inject.c
 
 # T8 差分向量驱动：只链 writer 库（as_snappy + as_parquet，零 aistreamd 依赖）
 tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
-	$(CC) $(CFLAGS) -I. -o $@ $^
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 
 # ---- 单测（对象除 aistreamd.o：tests 自带 main） ----
 

@@ -17,9 +17,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "as_parquet.h"
+#include "aistreamd/as_parquet.h"
 #include "as_pq_sink.h"
-#include "as_snappy.h"
+#include "aistreamd/as_snappy.h"
 #include "as_stats.h"
 #include "as_util.h"
 

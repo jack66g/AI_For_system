@@ -19,8 +19,8 @@
 #include <string.h>
 #include "ai_types.h"
 #include "ai_json_util.h"
-#include "local_http.h"
-#include "local_chat.h"
+#include "local/local_http.h"
+#include "local/local_chat.h"
 
 /* 默认请求超时（毫秒），与 [local].timeout_ms 默认值一致 */
 #define LOCAL_CHAT_DEFAULT_TIMEOUT_MS  60000

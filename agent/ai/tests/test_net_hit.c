@@ -30,7 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../tools/tool_registry.h"
+#include "tools/tool_registry.h"
 #include "../tools/net_intent.h"
 #include "../tools/net_hit.h"
 

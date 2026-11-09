@@ -31,7 +31,7 @@ CC      ?= cc
 CFLAGS  := -Wall -Wextra -Werror -std=c11 -O2 -g -MMD -MP
 
 # CTOPO1 棒1: 撤 -Iocc_llm/-Iocc_tools/-Itests（子目录头统一 子目录/名.h 形态经 -I.；occ_norm.h 等同目录裸名）
-INCLUDES := -I. -I.. -I../include
+INCLUDES := -I. -I../include
 
 OBJ_DIR  := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
@@ -40,7 +40,7 @@ REUSE_DIR := $(OBJ_DIR)/reuse
 CLOUD_HTTP_SRC := ../cloud/http/http_client.c
 HTTP_CLIENT_OBJ := $(REUSE_DIR)/http_client.o
 MBEDTLS_DIR := ../third_party/mbedtls
-CFLAGS_HTTP := $(CFLAGS) -I.. -I../cloud -I$(MBEDTLS_DIR)/include \
+CFLAGS_HTTP := $(CFLAGS) -I.. -I../include -I$(MBEDTLS_DIR)/include \
 	       -DCONFIG_AI_STREAM_MODE \
 	       -DMBEDTLS_CONFIG_FILE='"config/mbedtls-trim.h"'
 MBEDTLS_LIBS := \
@@ -186,7 +186,7 @@ $(REUSE_DIR)/sme_client.o: ../memory/sme_client.c
 
 $(REUSE_DIR)/local_http.o: ../local/local_http.c
 	@mkdir -p $(REUSE_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I../local -c -o $@ $<
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(REUSE_DIR)/ai_json_util.o: ../runtime/ai_json_util.c
 	@mkdir -p $(REUSE_DIR)
@@ -198,11 +198,11 @@ $(REUSE_DIR)/ai_types.o: ../runtime/ai_types.c
 
 $(REUSE_DIR)/as_parquet.o: ../aistreamd/as_parquet.c
 	@mkdir -p $(REUSE_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I../aistreamd -c -o $@ $<
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(REUSE_DIR)/as_snappy.o: ../aistreamd/as_snappy.c
 	@mkdir -p $(REUSE_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I../aistreamd -c -o $@ $<
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # ---- occ 主程序（T9a3+b1+c2+d1）：headless 一次对话 + 工具环 + 交互 TUI ----
 $(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)

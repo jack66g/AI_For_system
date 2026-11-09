@@ -26,7 +26,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
-#include "ai_netlink_client.h"
+#include "netlink/ai_netlink_client.h"
 
 /* ---- 内部辅助：构造请求 ---- */
 

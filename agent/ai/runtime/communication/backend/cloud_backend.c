@@ -16,7 +16,7 @@
 #include <string.h>
 #include "backend.h"
 #include "communication/communication.h"
-#include "http/http_client.h"
+#include "cloud/http/http_client.h"
 #include "ai_types.h"
 #include "ai_stream.h"
 
