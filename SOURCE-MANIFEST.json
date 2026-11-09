@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-09T16:06:18+08:00",
+  "created": "2026-11-09T18:13:43+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -28,7 +28,8 @@
     "SENSE 遥测脱敏（多用户前提）：两道防线——aistreamd 产生侧\nas_redact.c/h（at-rest：落盘/SME/parquet 前）+ apic 暴露侧\napiredact.c/h（in-flight：/sense 出网前），一张权威策略表\n两侧同语义；五档 pass/hash/trunc/mask/drop（drop 键留值 -）；\n三态 SENSE_REDACT=off/soft/strict+盐；出厂默认 off（单用户零\n字节变化，翻档=多用户落地）；decision_id 审计链例外恒原样；\nT8 parquet pid 列同步脱敏。门：aistreamd 10/10（9 既有冻结\nfixture 零改动=off 恒等证明）、apic 123、aikapi 重放 8453\ndiffs=0、run_all 59/59——主会话亲跑；本 commit 含 I-10 集成\n挂接行（同文件两特征）",
     "occ 产品债批次：TUI 历史回放（occ_replay 规划器+HIST 事件，切换会话//shell 往返触发，尾部 200 行预算+更早分隔；回放 footer OCC·回放 不伪造）+向导验证异步化（worker+取消留步，修取消后旗标残留真 bug）+/models 非 chat 标注（快照无 modality 如实降级——catalog type 位+registry is_chat 三态+id 特征表，默认过滤+ctrl+t）；test_replay 51+registry+21+view_pty 27→38；真调用恰 2；修 4 真产品 bug",
     "K 轮内核 #65：affinity 限幅 span=1 整数截断修复（max_t(s64,1,…)，I8-DATA-REPORT 证据链，同盘 A/B 0/6→7/7=100%）+ KUnit span1 回归新增 + NETLINK EVENT glue（uapi 只追加 DEVICE=3/CPU_HOTPLUG=4/HW_ERROR=5；ai_telemetry.c 中心白名单桥 emit_common 单尾挂点+102 行；ai_netlink.c 零改动；订阅端实测 cat3/4 命中、aistreamd 零改动产出 advisory=K3D2 §9-1 达成）+ KUnit telemetry 套件 12→13；bzImage.plain65 v2 md5 f55b3a1a；linux-k2↔repo 正典 md5 对拍 MATCH",
-    "UE 用户态两件：T8 decisions 接线（as_decisions ~600 行——/proc/ai/decisions 周期轮询+decision_id 游标去重+坏行回绕计数+T8 parquet decisions 行 23 列 schema 零改动+合成事件既有管道；DECISIONS_ENABLED 默认 0；pyarrow 读回 5/5 对账）+ I-2 采样率写口工具面（telemetry_rate：cat:ev 枚举+默认率表内置引 REVIEW3 实测、读回校验、越界人话报错；注册表 236→237/seed 247→248/names 45ad9099 三方一致门 PASS）；aistreamd 11 套、run_all 新口径 60/60（+test_telemetry_rate）、差分 62/62、audit PASS"
+    "UE 用户态两件：T8 decisions 接线（as_decisions ~600 行——/proc/ai/decisions 周期轮询+decision_id 游标去重+坏行回绕计数+T8 parquet decisions 行 23 列 schema 零改动+合成事件既有管道；DECISIONS_ENABLED 默认 0；pyarrow 读回 5/5 对账）+ I-2 采样率写口工具面（telemetry_rate：cat:ev 枚举+默认率表内置引 REVIEW3 实测、读回校验、越界人话报错；注册表 236→237/seed 247→248/names 45ad9099 三方一致门 PASS）；aistreamd 11 套、run_all 新口径 60/60（+test_telemetry_rate）、差分 62/62、audit PASS",
+    "F16: ISO alpha.16.1（#65 v2 内核 f55b3a1a+全部新面进厂：occ 产品债/I-10/SENSE/decisions/telemetry_rate 237；conf 三键 OUTCOME=0/SENSE=off/DECISIONS=0 出厂默认关；seed 248 双份补齐）四阶段 7/12/52/101 全 True（verdict 解析器计数）；K3C §9-1 闭环 4/5 门（§5.2 方向一致真设计缺陷登记 K 轨重设计）；I-8 出厂复测 9/9=100%；ISO md5 9381f4ef"
   ],
   "overlay_count": 168,
   "registry": {
@@ -50,10 +51,10 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65212876,
-    "regular_files": 1442,
-    "source_files": 1442,
-    "symlinks": 4,
+    "bytes": 65216768,
+    "regular_files": 1440,
+    "source_files": 1440,
+    "symlinks": 0,
     "tracked_files": 1446
   },
   "schema": "aik-source-manifest/1",
