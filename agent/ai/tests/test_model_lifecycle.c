@@ -31,7 +31,7 @@
 
 #include "ai_types.h"
 #include "ai_config.h"
-#include "shell/commands/model_lifecycle.h"
+#include "shell/model_lifecycle.h"
 
 static int g_fail;
 

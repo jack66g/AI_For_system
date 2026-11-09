@@ -58,7 +58,7 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "bpf_tools.h"
+#include "tools/bpf_tools.h"
 
 #ifndef __NR_bpf
 # if defined(__x86_64__)

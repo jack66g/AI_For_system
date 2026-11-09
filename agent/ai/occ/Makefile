@@ -40,9 +40,9 @@ REUSE_DIR := $(OBJ_DIR)/reuse
 CLOUD_HTTP_SRC := ../cloud/http/http_client.c
 HTTP_CLIENT_OBJ := $(REUSE_DIR)/http_client.o
 MBEDTLS_DIR := ../third_party/mbedtls
-CFLAGS_HTTP := $(CFLAGS) -I.. -I../include -I$(MBEDTLS_DIR)/include \
+CFLAGS_HTTP := $(CFLAGS) -I../include -I$(MBEDTLS_DIR)/include \
 	       -DCONFIG_AI_STREAM_MODE \
-	       -DMBEDTLS_CONFIG_FILE='"config/mbedtls-trim.h"'
+	       -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls-trim.h"'
 MBEDTLS_LIBS := \
 	$(MBEDTLS_DIR)/library/libmbedtls.a \
 	$(MBEDTLS_DIR)/library/libmbedx509.a \

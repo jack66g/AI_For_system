@@ -32,7 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../tools/net_chain.h"
+#include "tools/net_chain.h"
 #include "tools/tool_registry.h"
 
 static int fails, checks, skips;

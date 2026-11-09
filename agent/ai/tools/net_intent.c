@@ -39,9 +39,9 @@
 #include <unistd.h>
 
 #include "tools/tool_registry.h"
-#include "net_admin.h"
-#include "net_intent.h"
-#include "net_hit.h"
+#include "tools/net_admin.h"
+#include "tools/net_intent.h"
+#include "tools/net_hit.h"
 
 /* ======================================================================
  * 0) 小工具

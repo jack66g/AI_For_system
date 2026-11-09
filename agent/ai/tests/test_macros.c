@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "tools/tool_registry.h"
-#include "../tools/macro_tools.h"
+#include "tools/macro_tools.h"
 
 static int fails = 0;
 

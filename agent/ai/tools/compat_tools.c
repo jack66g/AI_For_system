@@ -46,8 +46,8 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "workspace_tools.h"
-#include "compat_tools.h"
+#include "tools/workspace_tools.h"
+#include "tools/compat_tools.h"
 
 #define CP_MAX_REASONS 10
 #define CP_MAX_EV      8

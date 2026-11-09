@@ -237,7 +237,7 @@ STREAM_SRCS := ../cloud/provider_openai_compatible.c \
 	../runtime/communication/stream_parse.c \
 	$(RUNTIME)
 test_cloud_stream: test_cloud_stream.c $(STREAM_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AI_STREAM_MODE -I.. -I../cloud -I../runtime -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\" \
+	$(CC) $(CFLAGS) -DCONFIG_AI_STREAM_MODE -I.. -I../cloud -I../runtime -DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls-trim.h\" \
 		-I$(MBEDTLS_DIR)/include -o $@ test_cloud_stream.c \
 		$(STREAM_SRCS) $(MBEDTLS_LIBS) -lpthread
 
@@ -344,7 +344,7 @@ test_streams: test_streams.c
 # W78 agent-D：mbedtls 服务端能力回归（SSL_SRV_C 回开）。
 # 私钥解析存留 + 回环 mTLS 握手（正/无证书/野CA 三路），内嵌一次性证书。
 test_tls_srv: test_tls_srv.c tls_test_certs.h
-	$(CC) $(CFLAGS) -I.. -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\" \
+	$(CC) $(CFLAGS) -I.. -DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls-trim.h\" \
 		-I$(MBEDTLS_DIR)/include -o $@ test_tls_srv.c $(MBEDTLS_LIBS) -lpthread
 
 # W78：宏工具单测（纯函数+R 件真跑；W 件的 executor 依赖以桩满足链接）

@@ -55,7 +55,7 @@
 #include <linux/netfilter/nfnetlink_conntrack.h>
 #include <linux/netlink.h>
 
-#include "net_chain.h"
+#include "tools/net_chain.h"
 #include "tools/tool_registry.h"
 
 #ifndef NLA_TYPE_MASK

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "ai_types.h"
-#include "telemetry_rate.h"
+#include "tools/telemetry_rate.h"
 
 static int fails;
 

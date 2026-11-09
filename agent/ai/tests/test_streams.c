@@ -15,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../runtime/netlink/ai_streams.h"
+#include "netlink/ai_streams.h"
 
 static int fails = 0;
 

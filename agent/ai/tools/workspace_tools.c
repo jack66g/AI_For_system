@@ -54,7 +54,7 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "workspace_tools.h"
+#include "tools/workspace_tools.h"
 
 /* 路径均以 PATH_MAX 上界构造，snprintf 静态范围无法收敛（与 sandbox 同款） */
 #pragma GCC diagnostic ignored "-Wformat-truncation"

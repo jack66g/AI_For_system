@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "communication.h"
+#include "communication/communication.h"
 #include "backend/backend.h"
 
 static int g_initialized = 0;

@@ -25,7 +25,7 @@
 
 #include "tools/tool_registry.h"
 #include "netlink/ai_streams.h"	/* JSON 转义复用 */
-#include "macro_tools.h"
+#include "tools/macro_tools.h"
 
 /* executor.c 既有实现（W78 去静态供组合复用；不新增旁路语义） */
 extern int exec_netlink_act(const struct ai_tool *tool, const char *args_json,

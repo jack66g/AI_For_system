@@ -27,7 +27,7 @@
 #include "ai_config.h"
 #include "communication/communication.h"
 #include "local/local_chat.h"
-#include "model_lifecycle.h"
+#include "shell/model_lifecycle.h"
 
 /* 前向声明本地 Provider 的配置入口（名称约定，非 ops 虚接口） */
 void local_provider_configure(struct ai_provider *provider,

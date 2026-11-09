@@ -29,7 +29,7 @@
 #include "ai_json_util.h"
 #include "ai_config.h"
 #include "local/local_http.h"
-#include "model_lifecycle.h"
+#include "shell/model_lifecycle.h"
 
 /* ---- 常量 ---- */
 

@@ -42,7 +42,7 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "device_tools.h"
+#include "tools/device_tools.h"
 
 /* ======================================================================
  * 1) 有界缓冲 / 转义 / ids 表 / 纯函数

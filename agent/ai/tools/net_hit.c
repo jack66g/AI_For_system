@@ -41,9 +41,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "net_admin.h"
-#include "net_intent.h"
-#include "net_hit.h"
+#include "tools/net_admin.h"
+#include "tools/net_intent.h"
+#include "tools/net_hit.h"
 
 #define NH_MAX_RULES	256
 #define NH_MAX_ESC	64

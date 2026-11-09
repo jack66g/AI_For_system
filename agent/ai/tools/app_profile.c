@@ -32,8 +32,8 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "workspace_tools.h"
-#include "app_profile.h"
+#include "tools/workspace_tools.h"
+#include "tools/app_profile.h"
 
 /* ======================================================================
  * 1) 通用工具

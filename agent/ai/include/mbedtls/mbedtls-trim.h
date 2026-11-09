@@ -1,6 +1,6 @@
 /* AIKernel mbedTLS 裁剪配置头（进阶档）
  * 注入机制：agent 源码、mbedtls library/3rdparty、tests 云通道测试统一用
- * -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\"（配 -I 指向 agent/ai），
+ * -DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls-trim.h\"（配 -Iinclude 解析；W-C 棒 3 自 config/ 迁入），
  * 保证所有编译单元看到同一份配置，结构体 ABI 一致。
  * 方法：先原样引入默认配置，再逐批 #undef；每批过 TLS 四件套+六套 tests，
  * 红了回退该批。禁止一次性全关。

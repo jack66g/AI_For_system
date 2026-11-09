@@ -10,7 +10,7 @@
 #include <arpa/inet.h>
 
 #include "tools/tool_registry.h"
-#include "../tools/net_admin.h"
+#include "tools/net_admin.h"
 
 static int fails = 0;
 

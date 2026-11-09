@@ -46,7 +46,7 @@
 #include "ai_json_util.h"
 #include "netlink/ai_netlink_client.h"
 #include "tools/tool_registry.h"
-#include "sched_tools.h"
+#include "tools/sched_tools.h"
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))

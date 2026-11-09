@@ -4,7 +4,7 @@
 # agent/ai/cloud/tls_gateway/aik_tls_gateway.py 257 行)
 #
 # 链接方式照 desktop(T6)/apic(T7b) 先例:third_party/mbedtls 三静态库
-# + -DMBEDTLS_CONFIG_FILE(config/mbedtls-trim.h,SSL_SRV_C 已回开)。
+# + -DMBEDTLS_CONFIG_FILE(mbedtls/mbedtls-trim.h,SSL_SRV_C 已回开;W-C 棒 3 迁自 config/)。
 # 复用 T6 基建(源码只读引用编译进本目录对象):
 #   ../desktop/dtcore.c  冻结时钟/sbuf/文件工具
 #
@@ -20,8 +20,8 @@ CFLAGS := -Wall -Wextra -Werror -std=c11 -O2 -g -I../include -MMD -MP
 LDLIBS := -lpthread
 
 MBEDTLS_DIR := ../third_party/mbedtls
-MBEDTLS_INC := -I.. -I$(MBEDTLS_DIR)/include \
-	       -DMBEDTLS_CONFIG_FILE='"config/mbedtls-trim.h"'
+MBEDTLS_INC := -I$(MBEDTLS_DIR)/include \
+	       -DMBEDTLS_CONFIG_FILE='"mbedtls/mbedtls-trim.h"'
 MBEDTLS_LIBS := \
 	$(MBEDTLS_DIR)/library/libmbedtls.a \
 	$(MBEDTLS_DIR)/library/libmbedx509.a \

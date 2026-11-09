@@ -35,7 +35,7 @@
 
 #include "tools/tool_registry.h"
 #include "netlink/ai_streams.h"	/* JSON 转义复用（不修改该文件） */
-#include "net_admin.h"
+#include "tools/net_admin.h"
 
 #define NA_MAX_IFACE	15
 #define NA_MAX_OPS	32

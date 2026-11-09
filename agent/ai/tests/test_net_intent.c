@@ -24,7 +24,7 @@
 #include <arpa/inet.h>
 
 #include "tools/tool_registry.h"
-#include "../tools/net_intent.h"
+#include "tools/net_intent.h"
 
 static int fails = 0;
 static int skips = 0;

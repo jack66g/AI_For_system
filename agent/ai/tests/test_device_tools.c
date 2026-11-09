@@ -54,7 +54,7 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "../tools/device_tools.h"
+#include "tools/device_tools.h"
 
 static int fails;
 static int checks;

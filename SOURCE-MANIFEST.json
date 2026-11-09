@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T05:54:05+08:00",
+  "created": "2026-11-10T06:38:39+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -36,7 +36,8 @@
     "波次 B 第一组（LLM/API 债+A7）：A7 io.priority /act 白名单同款一行修（130 checks；重放 271 步零 diff 语料核验）+B1 parallel_tool_calls env 接线（默认关请求体零变化门；真端点 1 次实证旗标末位发送服务端接受；Anthropic 面显式不支持有据；OutputLimit 续跑mock 全链+9 断言）+B3 direct_base_url 双层配置化+人话校验（deepseek 兜底改判形保留）+B4 Retry-After 全链透传（http 捕获通道纯增量/解析钳制/26+16 新例）+B2 多进程并发写库：压测暴露 3类真竞争（DDL 裸跑/单写语句/零字节首开）→ IMMEDIATE 化+开库重试环修复，三连全绿 integrity ok 零锁错（conc8≈6-8s 单写者 fsyncconvoy 如实入账；WAL 弃用理由在案）",
     "波次 B 第二组（TUI/产品债）：B5 鼠标 API 桩转真（SGR 1006 主解析+X10 兼容回落=真降级链；推理折叠点击展开/收起+滚轮；TERM 无能力诚实 -1 零字节不假开；/help 如实 on/off；pty 字节级黄金含 leave前置关）+B6 kitty 联测可自动化部分（探测回复→push CSI > 1 u 仅开位 0/退出 pop 复位/CSI-u 增强键型两路解析；无回复零 push 不越权；手工清单 11 条移交用户侧如实不冒充）+B7 wcwidth 评估后小步实施（全表扩表否决有据；简化字素簇续接状态机：ZWJ/肤色/RI 对/VS16四类收敛；TUI_CELL_MAX 16→32 超长截断对齐优先；体积账 +6.4MB 最坏/+16KB 二进制）+B8 /rename 空题=AI 生成标题（私有 ctx worker+首条 user 消息 UTF-8 边界截断+sanitize 48B；busy 互斥/Esc 取消留步/失败诚实降级；新套 test_rename_ai 17 ok 四路径+mock_title_llm）。occ_tui 12→13 套全绿；真 API 0",
     "CTOPO1: include 形态归一（波次 C 棒 1）：五模块 93 个 #include 行+3 Makefile 纯形态零语义——-g0 全 TU 111/111 逐位一致、-g 产物 82/132 逐位同+50/132 仅调试段差、0 真差分、双编基线完全可复现；行为门 occ/occ_tui13/p-smoke/差分62/run_all60 主会话亲跑；rel 残留 0；例外登记 -I../memory（unicode.h，棒 2 撤销）；预存红 test_retrieval 夹具陈旧裁定重录（棒 2 项 0）",
-    "CTOPO2: 事实公共头提升（波次 C 棒 2）：15 头 git mv 入 include/（local/memory/netlink/policy/tools/cloud/http/aistreamd 八子目录），57 处引用行+4 Makefile 撤 6 类逃生舱；头内容零改动。夹具重录（test_retrieval 2684/0 红转绿，need_int 未放宽；search.vectors 17 处差异如实录档）；预存 bug 修复=顶层 Makefile 源清单补 telemetry_rate.c（19c8400 埋、make ai 链接断）。G4 三层账 RAWSAME=796/DEBUGONLY=37（strip 后逐位同）/REALDIFF=0；全门（11 模块+run_all60+差分62+parquet parity+重放唯一在册红）主会话亲跑复核；旧位零残留亲扫"
+    "CTOPO2: 事实公共头提升（波次 C 棒 2）：15 头 git mv 入 include/（local/memory/netlink/policy/tools/cloud/http/aistreamd 八子目录），57 处引用行+4 Makefile 撤 6 类逃生舱；头内容零改动。夹具重录（test_retrieval 2684/0 红转绿，need_int 未放宽；search.vectors 17 处差异如实录档）；预存 bug 修复=顶层 Makefile 源清单补 telemetry_rate.c（19c8400 埋、make ai 链接断）。G4 三层账 RAWSAME=796/DEBUGONLY=37（strip 后逐位同）/REALDIFF=0；全门（11 模块+run_all60+差分62+parquet parity+重放唯一在册红）主会话亲跑复核；旧位零残留亲扫",
+    "CTOPO3: legacy 树收编（波次 C 棒 3，终棒）：19 头入 include/（tools 15+netlink ai_streams+shell model_lifecycle+communication+mbedtls-trim；18 R100+1 R097）；顶层 Makefile -I$(SRC_DIR)/-Icloud/-Iruntime 全部消灭，终态=include+mbedtls+linenoise 零例外；CFLAGS_HTTP -I.. 在册例外随 mbedtls-trim 迁移 include/mbedtls/ 闭环撤销（-D 串统一 8 功能点）；12 make 域×6 轮全链重建 RC=0（ai+aikernel-shell 双入口+237 工具）；REALDIFF=0 三层账（strip 228 点/-g0 7 TU/mbedtls 113 成员+.a 同出厂）→ISO 不换代立论；audit 237/248 三方一致（临时副本重灌 F162 手法，冻结 tools.img 原样）；t9d_factory_gate repo+--root 双模式 FAIL=0；行为门主会话亲跑复核"
   ],
   "overlay_count": 168,
   "registry": {
@@ -58,7 +59,7 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65372205,
+    "bytes": 65372239,
     "regular_files": 1446,
     "source_files": 1446,
     "symlinks": 4,

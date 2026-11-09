@@ -41,7 +41,7 @@
 #include <linux/genetlink.h>
 
 #include "ai_types.h"
-#include "ai_streams.h"
+#include "netlink/ai_streams.h"
 #include "netlink/ai_netlink_client.h"
 
 /* ---- 公共小工具 ---- */

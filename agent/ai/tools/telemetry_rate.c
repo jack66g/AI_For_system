@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #include "ai_types.h"
-#include "telemetry_rate.h"
+#include "tools/telemetry_rate.h"
 
 /* 18 大类：名/ev 上界/一句话（ai_telemetry.h:64-81 大类 + :88-215 子类计数） */
 const struct tel_rate_cat tel_rate_cats[TEL_RATE_CAT_MAX] = {

@@ -40,7 +40,7 @@
 #include "local/local_http.h"
 #include "cloud/http/http_client.h"
 #include "ai_json_util.h"
-#include "model_lifecycle.h"
+#include "shell/model_lifecycle.h"
 
 /* onboarding 完成标记（出厂态不存在；AIK_ONBOARDED_PATH 供测试覆盖） */
 static const char *ob_marked_path(void)

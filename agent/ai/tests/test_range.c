@@ -36,7 +36,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../tools/net_range.h"
+#include "tools/net_range.h"
 #include "tools/tool_registry.h"
 #include "policy/ai_lease.h"
 

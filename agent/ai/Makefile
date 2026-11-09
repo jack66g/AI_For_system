@@ -17,7 +17,7 @@
 .NOTPARALLEL:
 
 CC      ?= gcc
-CFLAGS  := -Wall -Wextra -std=c11 -O2 -g -static -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\"
+CFLAGS  := -Wall -Wextra -std=c11 -O2 -g -static -DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls-trim.h\"
 # 自动头文件依赖：-MMD 生成 <obj>.d（-MP 附带空目标防删除头后报错）。
 # 旧实现只在文件末尾追加了一条「%.o: include/*.h」模式规则——GNU make
 # 不会把两条同模式规则合并，该规则实际不生效；ai_lang.h 增加 TR_SB_*
@@ -190,12 +190,10 @@ MBEDTLS_LIBS := \
 	$(MBEDTLS_DIR)/library/libmbedx509.a \
 	$(MBEDTLS_DIR)/library/libmbedcrypto.a
 
-# 头文件路径
-# -I$(SRC_DIR)：允许 backend 等跨目录包含内部头（如 local/local_chat.h）
+# 头文件路径（W-C 棒 3 终态：include + mbedtls + linenoise；
+# 原 -I$(SRC_DIR)/-I$(CLOUD_DIR)/-I$(RUNTIME_DIR) 已废除——跨模块头一律
+# include/ 前缀形态解析，vendored 裁剪配置统一 mbedtls/mbedtls-trim.h）
 INCLUDES := -I$(INCLUDE_DIR) \
-	    -I$(SRC_DIR) \
-	    -I$(CLOUD_DIR) \
-	    -I$(RUNTIME_DIR) \
 	    -I$(MBEDTLS_DIR)/include
 
 # 颜色
@@ -210,7 +208,7 @@ all: mbedtls $(TARGET_AI) $(TARGET_SHELL) aistreamd
 mbedtls:
 	@if [ ! -f $(MBEDTLS_DIR)/library/libmbedtls.a ]; then \
 		echo "$(YELLOW)[MBEDTLS]$(NC) Building mbedTLS..."; \
-		$(MAKE) -C $(MBEDTLS_DIR)/library -j$$(nproc) CFLAGS='-O2 -DMBEDTLS_CONFIG_FILE=\"config/mbedtls-trim.h\" -I$(CURDIR)' 2>&1 | tail -1; \
+		$(MAKE) -C $(MBEDTLS_DIR)/library -j$$(nproc) CFLAGS='-O2 -DMBEDTLS_CONFIG_FILE=\"mbedtls/mbedtls-trim.h\" -I$(CURDIR)/include' 2>&1 | tail -1; \
 	fi
 
 $(TARGET_AI): $(AI_OBJS) $(MBEDTLS_LIBS)

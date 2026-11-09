@@ -43,8 +43,8 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "../tools/app_profile.h"
-#include "../tools/app_policy.h"
+#include "tools/app_profile.h"
+#include "tools/app_policy.h"
 
 static int fails;
 static int checks;

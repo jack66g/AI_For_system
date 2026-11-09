@@ -24,7 +24,7 @@
 #include "ai_commands.h"
 #include "ai_runtime.h"
 #include "ai_config.h"
-#include "model_lifecycle.h"
+#include "shell/model_lifecycle.h"
 
 /* 读一行 y/N（非 TTY 时返回 -1 要求 --yes） */
 static int mlc_confirm(const char *prompt)

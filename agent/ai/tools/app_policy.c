@@ -48,8 +48,8 @@
 #include "ai_types.h"
 #include "ai_json_util.h"
 #include "tools/tool_registry.h"
-#include "app_profile.h"
-#include "app_policy.h"
+#include "tools/app_profile.h"
+#include "tools/app_policy.h"
 
 /* 编译期钉住与内核常量的一致性（改内核常量必须同步改这里） */
 _Static_assert(APOL_MAX_RULES == 64, "APOL_MAX_RULES 必须 == AI_LSM_RULE_MAX");
