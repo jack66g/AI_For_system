@@ -28,6 +28,8 @@
 #include <linux/bitmap.h>
 #include "../core/ai_types.h"
 #include "../core/ai_telemetry.h"
+/* K-B glue 回归：CPU 热插拔 payload（ai_cpu_hotplug_payload） */
+#include "../sched/ai_sched.h"
 
 #ifdef CONFIG_AIKERNEL_TELEMETRY
 
@@ -580,6 +582,71 @@ static void telemetry_write_latency_test(struct kunit *test)
 	KUNIT_EXPECT_LT(test, avg, 100000ULL);
 }
 
+/* K-B NETLINK EVENT glue 回归：三类类型化发射（16.01 设备 / 01.07 CPU
+ * 热插拔 / 16.03 MCE + NMI）走 emit_common 尾部白名单桥不炸主路径，
+ * 且率表门对镜像路径同权（rate=0 → 不入 ring 也不镜像）。
+ * push 端可见性（真订阅端收 cat3/4/5 流）由 qemu 冒烟台架断言
+ * （as_streams 订阅），KUnit 内无 netlink socket 断言面（如实边界）。 */
+static void telemetry_nl_glue_test(struct kunit *test)
+{
+	struct ai_cpu_hotplug_payload hp = { };
+	struct ai_hw_error_payload mce = { };
+	struct ai_telemetry_cpu_stats st;
+	u32 emitted_before;
+	int rc;
+
+	telemetry_pin_cpu0(test);
+	ai_telemetry_init();
+	telemetry_test_quiesce(test);
+	ai_telemetry_reset();
+
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	emitted_before = st.emitted;
+
+	/* rate=1 全量：三类发射全部经桥（push_event 空注册表即返 AI_OK） */
+	rc = ai_telemetry_set_sample_rate(AI_CAT_HW, AI_EV_DEVICE, 1);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	rc = ai_telemetry_device_evt(0, "kunit-nldev", NULL);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	hp.type = AI_SCHED_HOTPLUG;
+	hp.cpu = 0;
+	hp.online = 1;
+	rc = ai_telemetry_cpu_hotplug(AI_SEV_IMPORTANT, &hp, sizeof(hp));
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	mce.cpu = 0;
+	mce.bank = 7;
+	rc = ai_telemetry_hw_error(&mce, AI_SEV_IMPORTANT);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	/* NMI 载荷共享 16.03：入 ring 正常，桥端按载荷形状不镜像
+	 * （无 "cpu,bank" 消费契约；不镜像属设计，KUnit 无断言面） */
+	rc = ai_telemetry_nmi_evt(0, 0, "kunit-nmi");
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_GE(test, st.emitted, emitted_before + 4u);
+
+	/* rate=0：采样关闭 → 不入 ring（镜像同一道门，写口同权生效） */
+	rc = ai_telemetry_set_sample_rate(AI_CAT_HW, AI_EV_DEVICE, 0);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	emitted_before = st.emitted;
+	rc = ai_telemetry_device_evt(0, "kunit-nldev", NULL);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, st.emitted, emitted_before);
+
+	ai_telemetry_set_sample_rate(AI_CAT_HW, AI_EV_DEVICE, 1);
+	ai_telemetry_reset();
+}
+
 static void telemetry_cat18_test(struct kunit *test)
 {
 	/*
@@ -801,6 +868,7 @@ static struct kunit_case telemetry_test_cases[] = {
 	KUNIT_CASE(telemetry_sample_rate_test),
 	KUNIT_CASE(telemetry_rate_cmd_test),
 	KUNIT_CASE(telemetry_emit_direct_test),
+	KUNIT_CASE(telemetry_nl_glue_test),
 	KUNIT_CASE(telemetry_cat18_test),
 	KUNIT_CASE(telemetry_drain_test),
 	KUNIT_CASE(telemetry_drain_immediate_test),

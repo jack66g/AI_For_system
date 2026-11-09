@@ -106,7 +106,20 @@ struct ai_nl_reg {
 /* 事件大类（category）：只追加不重排 */
 #define AI_NL_EV_POLICY		1	/* 策略执行结果（event_id=decision_id） */
 #define AI_NL_EV_MODEL		2	/* 模型装载/卸载（event_id=model id） */
-#define AI_NL_EV_MAX		2
+/*
+ * K-B NETLINK EVENT glue（REVIEW3 §C，只追加不重排）：遥测热插拔事件
+ * 镜像（ai_telemetry.c 中心白名单桥），3/4/5 语义与 K3d-2 用户侧冻结
+ * 契约（as_streams.c:225-250）严格一致：
+ *   DEVICE      code 0=probe / 1=remove，param=dev 名（>23B 截断）
+ *   CPU_HOTPLUG code=online 位（1=上线 / 0=下线），param=cpu 号（十进制）
+ *   HW_ERROR    MCE 硬件错误，param="cpu,bank"
+ * 注意：本 category 空间与遥测 18 大类（AI_CAT_*）是两个命名空间，
+ * 勿按数值混用（AI_CAT_SCHED=1 与 AI_NL_EV_POLICY=1 撞号，K3D2 §7-4）。
+ */
+#define AI_NL_EV_DEVICE		3	/* 设备 probe/remove（遥测 16.01 镜像） */
+#define AI_NL_EV_CPU_HOTPLUG	4	/* CPU 上下线（遥测 01.07 镜像） */
+#define AI_NL_EV_HW_ERROR	5	/* MCE 硬件错误（遥测 16.03 镜像） */
+#define AI_NL_EV_MAX		5
 
 /* 严重级 */
 #define AI_NL_EV_SEV_INFO	0

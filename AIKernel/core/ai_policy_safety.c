@@ -85,7 +85,13 @@ int ai_policy_safety_limit_value(s64 param_min, s64 param_max,
 	/* ② 最大影响幅度限制 */
 	pct = READ_ONCE(ai_safety_max_impact);
 	if (pct < 100) {
-		allowed = (param_max - param_min) * (s64)pct / 100;
+		/* K65 修复（I8-DATA-REPORT §3.3）：span×pct/100 整数截断在
+		 * span=1（如 2 CPU 系统的 sched.affinity 0..nr_cpu_ids-1）且
+		 * pct<100 时 allowed=0，任意请求都被钳回当前值，小 span 旋钮
+		 * 结构性失效（I-8 台架实测读回 0/18=0%）。保底每决策 ±1 的
+		 * 最小移动幅度；span≥2 时结果与原式一致（span=3→1、39→19），
+		 * pct=100 全幅通道（上方 if）不变。 */
+		allowed = max_t(s64, 1, (param_max - param_min) * (s64)pct / 100);
 		lo = cur - allowed;
 		hi = cur + allowed;
 		if (req < lo || req > hi) {

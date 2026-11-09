@@ -220,6 +220,51 @@ static void policy_safety_clamp_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, test_param, 55L); /* 已回滚到决策前值 */
 }
 
+/* K65（I8-DATA-REPORT §3.3）：小 span 幅度限幅整数截断回归测试。
+ * 修复前 allowed=(max-min)*pct/100 在 span=1、pct=50 时 =0，任意请求被
+ * 钳回当前值（sched.affinity 2 CPU 台架读回 0/18=0%）；修复后保底 1。 */
+static void policy_safety_span1_test(struct kunit *test)
+{
+	u32 saved = ai_policy_safety_get_max_impact();
+	s64 v;
+	u8 clamped;
+
+	KUNIT_ASSERT_EQ(test, ai_policy_safety_set_max_impact(50), AI_OK);
+
+	/* span=1（0..1，2 CPU sched.affinity 同构）：单步翻转须放行 */
+	v = 1; clamped = 0;
+	KUNIT_EXPECT_EQ(test,
+		ai_policy_safety_limit_value(0, 1, 0, &v, &clamped), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, 1);
+	KUNIT_EXPECT_EQ(test, clamped, 0);
+
+	/* span=1 反向：1→0 同样单步可动 */
+	v = 0; clamped = 0;
+	KUNIT_EXPECT_EQ(test,
+		ai_policy_safety_limit_value(0, 1, 1, &v, &clamped), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, 0);
+	KUNIT_EXPECT_EQ(test, clamped, 0);
+
+	/* span=39（nice -20..19）pct=50 → allowed=19：大步仍钳（限幅语义保持，
+	 * I-8 台架 10→-15 被钳 -9 同款） */
+	v = -20; clamped = 0;
+	KUNIT_EXPECT_EQ(test,
+		ai_policy_safety_limit_value(-20, 19, 0, &v, &clamped), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, -19);
+	KUNIT_EXPECT_EQ(test, clamped, 1);
+
+	/* pct=100 门不变：全幅直达（不进幅度分支） */
+	KUNIT_ASSERT_EQ(test, ai_policy_safety_set_max_impact(100), AI_OK);
+	v = -20; clamped = 0;
+	KUNIT_EXPECT_EQ(test,
+		ai_policy_safety_limit_value(-20, 19, 0, &v, &clamped), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, -20);
+	KUNIT_EXPECT_EQ(test, clamped, 0);
+
+	/* 还原全局幅度 */
+	KUNIT_EXPECT_EQ(test, ai_policy_safety_set_max_impact(saved), AI_OK);
+}
+
 static void policy_fail_rollback_test(struct kunit *test)
 {
 	long before;
@@ -339,6 +384,7 @@ static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_outcome_test),
 	KUNIT_CASE(policy_rollback_test),
 	KUNIT_CASE(policy_safety_clamp_test),
+	KUNIT_CASE(policy_safety_span1_test),
 	KUNIT_CASE(policy_fail_rollback_test),
 	KUNIT_CASE(policy_stats_test),
 	KUNIT_CASE(policy_execute_latency_test),

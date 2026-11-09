@@ -29,8 +29,10 @@
 #include "../security/ai_lsm.h"
 #include "../core/ai_policy_safety.h"
 
-/* 翻转类测试前置：max_impact_pct=50 时 [0..1] 参数单步翻转（幅度 100%）
- * 会被安全层 clamp 跳过（既有设计）；翻转验证显式放宽到 100%，测后还原 */
+/* 翻转类测试前置：翻转验证显式放宽到 100%，测后还原。
+ * K65 前 [0..1] 参数在 pct=50 被整幅钳回（span=1 截断，I8-DATA-REPORT
+ * §3.3）；K65 后保底 allowed=1 单步翻转可动。此处维持 100% 口径不变，
+ * 保持「幅度不受限的全域翻转」测试语义与既有断言不变。 */
 static void safety_impact_set(struct kunit *test, u32 pct)
 {
 	KUNIT_ASSERT_EQ(test, ai_policy_safety_set_max_impact(pct), AI_OK);

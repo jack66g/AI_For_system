@@ -81,7 +81,9 @@ int ai_policy_safety_set_max_impact(u32 pct);
  * @clamped:  输出 1=被限制（越界或超幅），0=原样通过
  *
  * 规则：① 硬范围 clamp 到 [param_min, param_max]；
- *       ② 幅度限制 |requested-current| ≤ (max-min)*max_impact_pct/100。
+ *       ② 幅度限制 |requested-current| ≤ max(1, (max-min)*max_impact_pct/100)
+ *          （K65：span=1 整数截断修复，小 span 参数保底单步可动，
+ *           证据 I8-DATA-REPORT §3.3 affinity 0/18）。
  * 返回 AI_OK。
  */
 int ai_policy_safety_limit_value(s64 param_min, s64 param_max,

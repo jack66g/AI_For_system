@@ -51,6 +51,10 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include "ai_telemetry.h"
+/* K-B glue：CPU 热插拔 payload 布局（仅取 struct 定义，无调度逻辑依赖） */
+#include "../sched/ai_sched.h"
+/* K-B glue：NETLINK EVENT 通用推送面（CONFIG_AIKERNEL_NETLINK=n 时为桩） */
+#include "../net/ai_netlink.h"
 
 /*
  * per-CPU ring buffer 布局：
@@ -507,6 +511,98 @@ static bool ai_ring_sample(struct ai_ring_cpu *r, u16 rate)
 	return true;
 }
 
+/* ---- K-B NETLINK EVENT 白名单桥（REVIEW3 §C 方案 A：中心白名单 + 尾挂） ----
+ *
+ * 把三类热插拔遥测事件镜像到 NETLINK_AI EVENT 通道（uapi category 3/4/5，
+ * K3d-2 用户侧契约已冻结，aistreamd 零改动即收）：
+ *   (AI_CAT_HW,     AI_EV_DEVICE)      → AI_NL_EV_DEVICE      16.01
+ *   (AI_CAT_SCHED,  AI_EV_CPU_HOTPLUG) → AI_NL_EV_CPU_HOTPLUG 01.07
+ *   (AI_CAT_HW,     AI_EV_HW_ERROR)    → AI_NL_EV_HW_ERROR    16.03（仅 MCE 载荷）
+ * 设计约束：
+ *   - 只镜像不改主路径：ring 写入与 SENSE 出口零变化，ai_netlink.c 零改动
+ *     （push_event 本就是面向原子上下文的通用面：GFP_ATOMIC + MSG_DONTWAIT，
+ *     无注册者空表即返；#MC 上下文短临界区自旋与上游 mce_log 先例同级）；
+ *   - 挂点在 emit_common 尾部 local_irq_restore 之后、ring 发布成功
+ *     （rc==AI_OK）才推：采样判定已通过才镜像——DEVICE 类自动继承率表
+ *     1/16 默认限频，rate=cat:ev:N 写口对 EVENT 推送同权生效（含归零关闭）；
+ *     emit_direct（不采样全量路径）经同一尾挂自然全量推（MCE 频度稀疏）；
+ *   - 载荷形状按 data_len 识别，未知形状只留遥测 ring 不推（NMI 载荷共享
+ *     16.03 但无 "cpu,bank" 消费契约，留 ring 不镜像——诚实边界）；
+ *   - event_id 用遥测时间戳（cat 3/4/5 消费面不读 event_id，仅作关联用）。
+ * 上下文注意：category 命名空间——AI_NL_EV_*（EVENT 通道）与遥测 18 大类
+ * AI_CAT_* 是两个空间，勿按数值混用（K3D2 §7-4）。
+ */
+static atomic_long_t ai_tel_nl_param_trunc;
+
+static u8 ai_tel_nl_sev(u8 severity)
+{
+	switch (severity) {
+	case AI_SEV_CRITICAL:
+		return AI_NL_EV_SEV_ERROR;
+	case AI_SEV_IMPORTANT:
+		return AI_NL_EV_SEV_WARN;
+	default:
+		return AI_NL_EV_SEV_INFO;
+	}
+}
+
+static void ai_telemetry_nl_bridge(u8 category, u8 event_type, u8 severity,
+				   const void *data, u16 data_len, u64 ts)
+{
+	char param[AI_NL_ACT_PARAM_LEN];
+	s32 code = 0;
+	u8 nl_cat;
+
+	if (category == AI_CAT_HW && event_type == AI_EV_DEVICE)
+		nl_cat = AI_NL_EV_DEVICE;
+	else if (category == AI_CAT_SCHED && event_type == AI_EV_CPU_HOTPLUG)
+		nl_cat = AI_NL_EV_CPU_HOTPLUG;
+	else if (category == AI_CAT_HW && event_type == AI_EV_HW_ERROR)
+		nl_cat = AI_NL_EV_HW_ERROR;
+	else
+		return;
+
+	if (nl_cat == AI_NL_EV_DEVICE) {
+		if (data_len == sizeof(struct ai_device_payload)) {
+			/* dd.c probe/remove：code 0=probe 1=remove，param=dev 名 */
+			const struct ai_device_payload *p = data;
+
+			code = p->action;
+			if (strscpy(param, p->dev, sizeof(param)) == -E2BIG)
+				atomic_long_inc(&ai_tel_nl_param_trunc);
+		} else if (data_len == sizeof(struct ai_platform_payload)) {
+			/* platform.c probe：同属 16.01，视作 add（code=0） */
+			const struct ai_platform_payload *p = data;
+
+			code = 0;
+			if (strscpy(param, p->name, sizeof(param)) == -E2BIG)
+				atomic_long_inc(&ai_tel_nl_param_trunc);
+		} else {
+			return;
+		}
+	} else if (nl_cat == AI_NL_EV_CPU_HOTPLUG) {
+		/* cpuhp 链：code=online 位，param=cpu 号 */
+		const struct ai_cpu_hotplug_payload *p = data;
+
+		if (data_len != sizeof(*p))
+			return;
+		code = p->online ? 1 : 0;
+		scnprintf(param, sizeof(param), "%u", p->cpu);
+	} else {
+		/* MCE（mce/core.c）：param="cpu,bank"（K3d-2 冻结契约）。
+		 * NMI 载荷（ai_nmi_payload）共享 16.03 但形状不同且无消费
+		 * 契约——data_len 不匹配即不推，只留遥测 ring。 */
+		const struct ai_hw_error_payload *p = data;
+
+		if (data_len != sizeof(*p))
+			return;
+		code = (s32)p->severity;
+		scnprintf(param, sizeof(param), "%u,%u", p->cpu, p->bank);
+	}
+
+	ai_netlink_push_event(nl_cat, ai_tel_nl_sev(severity), ts, code, param);
+}
+
 static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 				    const void *data, u16 data_len,
 				    bool sampling_done)
@@ -628,6 +724,12 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 		atomic_inc(&r->dropped);
 	}
 	local_irq_restore(flags);
+
+	/* K-B glue：NETLINK EVENT 镜像——ring 发布成功（rc==AI_OK）才推，
+	 * 保证订阅端与 SENSE 出口同源同视图；采样判定在前段已通过。 */
+	if (rc == AI_OK)
+		ai_telemetry_nl_bridge(category, event_type, severity,
+				       data, data_len, rec.timestamp_ns);
 
 	return rc;
 }
