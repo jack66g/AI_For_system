@@ -155,6 +155,7 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 {
 	struct ai_control_param *p = arg;
 	s64 requested, cur_val, pre, task_cur;
+	bool per_task_unreadable = false;   /* K66 T1 */
 	u8 clamped = 0;
 	s32 pid = 0;
 	int rc;
@@ -192,12 +193,24 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 	 * pre 都不再拿参数表全局 cur 当基准。原实现：对 pid A 设值 V
 	 * 后（全局 cur=V），对 pid B 下发同值 V 被静默短路（B 实际未
 	 * 生效却记成功）；回滚恢复的也是全局表值而非该任务旧值。
-	 * 无 read 回调或读取失败（任务退出、多 CPU 亲和掩码等无法单值
-	 * 忠实表出的情形）→ 退回全局表 cur 语义（原行为不变）。 */
-	if ((p->flags & AI_CTRL_F_TASK) && p->read &&
-	    p->read(p, pid, &task_cur) == AI_OK) {
-		cur_val = task_cur;
-		pre = task_cur;
+	 * 无 read 回调 → 退回全局表 cur 语义（原行为不变）；有 read 回调
+	 * 但读取失败（任务退出、多 CPU 亲和掩码等无法单值忠实表出）→
+	 * cur/pre 退回全局表值，且禁用同值快路径（K66 T1，见下）。 */
+	if ((p->flags & AI_CTRL_F_TASK) && p->read) {
+		if (p->read(p, pid, &task_cur) == AI_OK) {
+			cur_val = task_cur;
+			pre = task_cur;
+		} else {
+			/* K66 T1（A2/F16-PROGRESS §2-2）：per-task 读失败（多 CPU
+			 * 亲和掩码无法单值忠实表出、目标任务已退出等）时不得以
+			 * 全局表 cur 判同值走快路径——请求值==全局 cur 而目标任务
+			 * 真值不同的注入会被静默 no-op（记 executed=1 实未应用；
+			 * 首电池 7/8 中 1 miss 与 I-10 会话 7 连 miss 均为此）。
+			 * 读失败 → 禁用同值快路径，必须真应用；cur/pre 维持全局
+			 * 表值（限幅与回滚基准语义不变）。目标任务已退出情形由
+			 * 后续 apply 如实返回 NOT_FOUND（原为假成功）。 */
+			per_task_unreadable = true;
+		}
 	}
 
 	/* 安全边界限幅（硬范围 + 最大影响幅度；标识型参数只做硬范围） */
@@ -217,8 +230,11 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 		ai_policy_safety_note_rejected();
 
 	/* 快路径：值无变化 → 无副作用，免快照免应用（恒等决策 ≈15ns）；
-	 * 事件型参数（AI_CTRL_F_EVENT，如 proc.signal）重复同值仍执行 */
-	if (requested == cur_val && !(p->flags & AI_CTRL_F_EVENT))
+	 * 事件型参数（AI_CTRL_F_EVENT，如 proc.signal）重复同值仍执行；
+	 * K66 T1：per-task 读失败（per_task_unreadable）不得判同值跳过
+	 * ——此时 cur_val 是全局表值而非目标任务真值，必须真应用 */
+	if (requested == cur_val && !(p->flags & AI_CTRL_F_EVENT) &&
+	    !per_task_unreadable)
 		return clamped ? AI_POLICY_RC_CLAMPED : AI_OK;
 
 	/* 决策前值快照（回滚依据） */

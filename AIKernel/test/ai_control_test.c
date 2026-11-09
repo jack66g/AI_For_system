@@ -272,6 +272,45 @@ static void sec_seccomp_reserved_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, p.apply_ex == NULL, true);
 }
 
+/* K66 T2（A3/F16-PROGRESS §2-3）：sec.ws_label 数据面——
+ * TASK 参数契约 data[0]=pid、data[1]=label（ai_lsm.c 注册注释约定）。
+ * /act 用户态缺口：apic api_is_task_param 白名单（aikapi.c:560）缺
+ * sec.ws_label，装包成 data[0]=label、data[1]=0 → pid 未进决策数据面、
+ * label 0 不落 ws_labels（F16 实测 data=7:0 形态）。内核数据面契约本身
+ * 正确：data=[pid,label] 时标签真落 per-task blob 且可读回；/proc/ai/
+ * ws_labels 落盘由 qemu think 路径取证（本用例证 API 数据面）。 */
+static void ws_label_data_plane_test(struct kunit *test)
+{
+	u8 label = 0;
+	int rc;
+
+	if (ai_lsm_ws_label_get(current->pid, &label) == AI_ERR_DISABLED) {
+		kunit_mark_skipped(test, "ai LSM blob not ready");
+		return;
+	}
+
+	/* data=[pid,label] → 标签真落 per-task blob */
+	rc = execute_named("sec.ws_label", AI_POLICY_DOMAIN_SECURITY,
+			   (u64)current->pid, 7, 0);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, ai_lsm_ws_label_get(current->pid, &label),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, label, 7);
+
+	/* label=0 清除（0=无标签） */
+	rc = execute_named("sec.ws_label", AI_POLICY_DOMAIN_SECURITY,
+			   (u64)current->pid, 0, 0);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, ai_lsm_ws_label_get(current->pid, &label),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, label, 0);
+
+	/* 非法 pid（data[0]=0）→ INVALID_ARG，不落标签（executed=0） */
+	rc = execute_named("sec.ws_label", AI_POLICY_DOMAIN_SECURITY,
+			   0, 7, 0);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+}
+
 /* net.nftables：netfilter 钩子真注册/摘除 */
 static void nftables_test(struct kunit *test)
 {
@@ -374,6 +413,7 @@ static struct kunit_case ai_control_test_cases[] = {
 	KUNIT_CASE(audit_gate_test),
 	KUNIT_CASE(lsm_seccomp_test),
 	KUNIT_CASE(sec_seccomp_reserved_test),
+	KUNIT_CASE(ws_label_data_plane_test),
 	KUNIT_CASE(nftables_test),
 #if IS_ENABLED(CONFIG_NET_SCHED) && defined(CONFIG_INET)
 	KUNIT_CASE(qdisc_set_test),

@@ -6,7 +6,8 @@
  * 取值 < MAX_LINKS=32，23~31 保留区中的空闲编号）。
  *
  * 命令（nlmsg_type）：
- *   AI_CMD_SENSE - 拉取感知数据（最近 N 条遥测记录，N 由载荷携带，上限 4096）
+ *   AI_CMD_SENSE - 拉取感知数据（最近 N 条遥测记录，N 由载荷携带，上限 4096；
+ *                  需 CAP_SYS_ADMIN——K2b K1B-13：遥测流零脱敏与 ACT 同权）
  *   AI_CMD_ACT   - 下发决策指令（执行对应决策域策略 + 记录决策日志，需 CAP_SYS_ADMIN）
  *   AI_CMD_REG   - 注册回调（登记发起方 portid，供后续异步事件推送，需 CAP_SYS_ADMIN）
  *

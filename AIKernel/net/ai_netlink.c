@@ -12,8 +12,8 @@
  *   AI_CMD_REG   - 注册/注销异步事件推送（登记发起方 portid）
  *   AI_CMD_EVENT - 内核 → 用户异步事件推送（策略执行/模型生命周期）
  *
- * 权限：SENSE 无权限要求（感知数据流与 /proc/ai/telemetry 一致）；ACT/REG
- * 经 netlink_net_capable()（内部走 LSM 的 security_capable）。
+ * 权限：SENSE/ACT/REG 均经 netlink_net_capable(CAP_SYS_ADMIN)（SENSE 为
+ * K2b K1B-13 收紧：遥测流零脱敏，与 ACT/REG 同权；出厂 root 形态不变）。
  */
 
 #include <linux/module.h>

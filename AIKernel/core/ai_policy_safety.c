@@ -171,6 +171,41 @@ int ai_policy_safety_snapshot_save(u64 decision_id, u32 param_index,
 }
 EXPORT_SYMBOL_GPL(ai_policy_safety_snapshot_save);
 
+int ai_policy_safety_snapshot_lookup(u64 decision_id, s64 *pre_values,
+				     u8 *n_params)
+{
+	struct ai_safety_snapshot *s = NULL;
+	unsigned long flags;
+	unsigned int i;
+	u8 k, cap;
+
+	if (!decision_id || !pre_values || !n_params || !*n_params)
+		return AI_ERR_INVALID_ARG;
+
+	spin_lock_irqsave(&ai_safety_lock, flags);
+	for (i = 0; i < ai_safety_snap_count; i++) {
+		struct ai_safety_snapshot *c =
+			ai_safety_slot(ai_safety_snap_head - ai_safety_snap_count
+				       + i);
+
+		if (c->decision_id == decision_id) {
+			s = c;
+			break;
+		}
+	}
+	if (!s) {
+		spin_unlock_irqrestore(&ai_safety_lock, flags);
+		return AI_ERR_NOT_FOUND;
+	}
+	cap = *n_params;
+	for (k = 0; k < s->n && k < cap; k++)
+		pre_values[k] = s->params[k].pre_value;
+	*n_params = s->n;
+	spin_unlock_irqrestore(&ai_safety_lock, flags);
+	return AI_OK;
+}
+EXPORT_SYMBOL_GPL(ai_policy_safety_snapshot_lookup);
+
 int ai_policy_safety_rollback_decision(u64 decision_id,
 				       ai_safety_restore_t restore)
 {

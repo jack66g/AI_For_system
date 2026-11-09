@@ -35,6 +35,7 @@
 #include "ai_policy.h"
 #include "ai_causal.h"
 #include "ai_control.h"
+#include "ai_policy_safety.h"
 
 #define AI_PROC_TELEMETRY_CHUNK   (64 * 1024)   /* 单次 read 处理上限 */
 
@@ -154,10 +155,28 @@ static void ai_proc_dec_record(struct seq_file *m,
 	seq_printf(m,
 		   " exec_ts=%llu outcome_ts=%llu outcome=%u delta=%lld "
 		   "ver=%u conf=%u domain=%u src=%u executed=%u "
-		   "safety_clamped=%u\n",
+		   "safety_clamped=%u",
 		   e->execute_ts, e->outcome_ts, e->outcome,
 		   e->metric_delta, e->model_version, e->confidence,
 		   e->domain, e->source, e->executed, e->safety_clamped);
+	/* K66 T3：决策前值（append-only 行尾字段；快照被 rollback 消费
+	 * 或环淘汰后为 none；精确语法见 K66-REPORT §5） */
+	seq_puts(m, " pre=");
+	{
+		s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+		u8 n = AI_SAFETY_SNAPSHOT_PARAMS;
+		u8 k;
+
+		if (ai_policy_safety_snapshot_lookup(e->decision_id,
+						     pre_vals, &n) == AI_OK) {
+			for (k = 0; k < n; k++)
+				seq_printf(m, "%s%lld", k ? ":" : "",
+					   pre_vals[k]);
+		} else {
+			seq_puts(m, "none");
+		}
+	}
+	seq_putc(m, '\n');
 }
 
 static int ai_proc_decisions_show(struct seq_file *m, void *v)

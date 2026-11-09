@@ -14,9 +14,12 @@
 
 #include <kunit/test.h>
 #include <linux/ktime.h>
+#include <linux/sched.h>
+#include <linux/cpumask.h>
 #include "../core/ai_types.h"
 #include "../core/ai_policy.h"
 #include "../core/ai_policy_safety.h"
+#include "../core/ai_control.h"
 #include "../core/ai_runtime.h"
 #include "../core/ai_telemetry.h"
 
@@ -378,6 +381,161 @@ static void policy_execute_latency_test(struct kunit *test)
 	KUNIT_EXPECT_LT(test, avg, 10000000ULL);
 }
 
+/* K66 T1（A2/F16-PROGRESS §2-2）恒等快路径回归：
+ * ① per-task 读 NOT_FOUND（多 CPU 掩码，sched.affinity 真值无法单值
+ *    忠实表出）时，请求值==全局 cur 必须真应用——修复前同值快路径
+ *    静默 no-op（executed=1 实未迁移）；
+ * ② per-task 真值==请求值时，同值快路径合法（免快照免应用）。
+ * 同时覆盖 K66 T3 快照查询：真应用决策 pre 可查、快路径决策无快照。 */
+static void policy_affinity_idem_fastpath_test(struct kunit *test)
+{
+	struct ai_policy_ctx ctx = { 0 };
+	s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+	s64 gcur = -1;
+	u8 n = AI_SAFETY_SNAPSHOT_PARAMS;
+	int rc;
+
+	if (num_online_cpus() < 2) {
+		kunit_mark_skipped(test, "needs SMP, online=%u",
+				   num_online_cpus());
+		return;
+	}
+
+	/* 步骤 1：真实应用 pin 本线程到 CPU1 → 全局 cur=1 */
+	memset(&ctx, 0, sizeof(ctx));
+	strscpy(ctx.param, "sched.affinity", sizeof(ctx.param));
+	ctx.domain = AI_POLICY_DOMAIN_SCHED;
+	ctx.decision_type = 90;
+	ctx.decision_id = 0x66000001ULL;
+	ctx.decision_data[0] = (u64)current->pid;
+	ctx.decision_data[1] = 1;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, cpumask_weight(current->cpus_ptr), 1);
+	KUNIT_EXPECT_EQ(test, cpumask_first(current->cpus_ptr), 1);
+	KUNIT_EXPECT_EQ(test, ai_control_get_value("sched.affinity", &gcur),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, gcur, 1);
+
+	/* 步骤 2：人工恢复全 CPU 掩码（真值≠全局 cur 的多掩码态），
+	 * 再注入与全局 cur 相同的值 1——修复前此处被同值快路径静默
+	 * no-op（I-10 会话 7 连 miss 形态）；修复后必须真迁移。 */
+	rc = set_cpus_allowed_ptr(current, cpu_online_mask);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, cpumask_weight(current->cpus_ptr),
+			num_online_cpus());
+
+	memset(&ctx, 0, sizeof(ctx));
+	strscpy(ctx.param, "sched.affinity", sizeof(ctx.param));
+	ctx.domain = AI_POLICY_DOMAIN_SCHED;
+	ctx.decision_type = 90;
+	ctx.decision_id = 0x66000002ULL;
+	ctx.decision_data[0] = (u64)current->pid;
+	ctx.decision_data[1] = 1;   /* == 全局 cur，真值是全 CPU 掩码 */
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, cpumask_weight(current->cpus_ptr), 1);
+	KUNIT_EXPECT_EQ(test, cpumask_first(current->cpus_ptr), 1);
+
+	/* T3：真应用决策有 pre 快照（读失败分支 pre=全局表值 1） */
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000002ULL,
+							 pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, n, 1);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], 1);
+
+	/* 步骤 3：真值==请求值 → 同值快路径合法（无快照、不应用） */
+	memset(&ctx, 0, sizeof(ctx));
+	strscpy(ctx.param, "sched.affinity", sizeof(ctx.param));
+	ctx.domain = AI_POLICY_DOMAIN_SCHED;
+	ctx.decision_type = 90;
+	ctx.decision_id = 0x66000003ULL;
+	ctx.decision_data[0] = (u64)current->pid;
+	ctx.decision_data[1] = 1;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, cpumask_first(current->cpus_ptr), 1);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000003ULL,
+							 pre_vals, &n),
+			AI_ERR_NOT_FOUND);
+
+	/* 还原 KUnit 线程亲和，避免影响后续套件 */
+	set_cpus_allowed_ptr(current, cpu_online_mask);
+}
+
+/* K66 T3：决策前值快照查询 API（/proc/ai/decisions pre= 的取数入口） */
+static void policy_snapshot_pre_lookup_test(struct kunit *test)
+{
+	s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+	u8 n = AI_SAFETY_SNAPSHOT_PARAMS;
+	int rc;
+
+	/* 保存（负值覆盖 sched.nice 域）→ 查询回读 */
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_save(0x66000011ULL, 0, 1,
+						       -5), AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	rc = ai_policy_safety_snapshot_lookup(0x66000011ULL, pre_vals, &n);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, n, 1);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], -5);
+
+	/* 同决策同参数覆盖 → 新值 */
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_save(0x66000011ULL, 0, 1,
+						       -7), AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000011ULL,
+							 pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, n, 1);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], -7);
+
+	/* 同决策第二参数 → 保存序两条 */
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_save(0x66000011ULL, 3, 2,
+						       42), AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000011ULL,
+							 pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, n, 2);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], -7);
+	KUNIT_EXPECT_EQ(test, pre_vals[1], 42);
+
+	/* 小容量数组：拷贝截断到容量，出参 n=实际条数 */
+	n = 1;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000011ULL,
+							 pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, n, 2);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], -7);
+
+	/* 未知决策 → NOT_FOUND */
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000099ULL,
+							 pre_vals, &n),
+			AI_ERR_NOT_FOUND);
+
+	/* rollback 消费快照（restore=NULL 不执行恢复）→ 再查 NOT_FOUND */
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_rollback_decision(0x66000011ULL,
+							   NULL), AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(0x66000011ULL,
+							 pre_vals, &n),
+			AI_ERR_NOT_FOUND);
+}
+
 static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_register_execute_test),
 	KUNIT_CASE(policy_param_target_test),
@@ -388,6 +546,8 @@ static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_fail_rollback_test),
 	KUNIT_CASE(policy_stats_test),
 	KUNIT_CASE(policy_execute_latency_test),
+	KUNIT_CASE(policy_affinity_idem_fastpath_test),
+	KUNIT_CASE(policy_snapshot_pre_lookup_test),
 	{}
 };
 

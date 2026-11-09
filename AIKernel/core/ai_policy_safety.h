@@ -102,6 +102,21 @@ int ai_policy_safety_snapshot_save(u64 decision_id, u32 param_index,
 				   s32 pid, s64 pre_value);
 
 /**
+ * ai_policy_safety_snapshot_lookup() - 查询决策快照前值（K66 T3）
+ * @decision_id: 决策 ID
+ * @pre_values: 输出数组（调用方分配，容量 = *n_params 入参）
+ * @n_params: 入参=数组容量；出参=该决策实际快照参数数
+ *
+ * 按 handler 保存（执行）序拷贝该决策全部参数的 pre 值。
+ * /proc/ai/decisions 行尾 append-only 暴露 pre= 的取数入口。
+ * 注意：rollback（单决策/all）会消费快照；环容量 64 决策，被淘汰
+ * 或已回滚的决策返回 NOT_FOUND。
+ * 返回 AI_OK 或 AI_ERR_NOT_FOUND（无该决策快照）。
+ */
+int ai_policy_safety_snapshot_lookup(u64 decision_id, s64 *pre_values,
+				     u8 *n_params);
+
+/**
  * ai_policy_safety_rollback_decision() - 按决策 ID 回滚
  * @decision_id: 目标决策
  * @restore: 恢复回调（参数表提供，恢复 param_index 对应参数）
@@ -146,6 +161,11 @@ static inline int ai_policy_safety_snapshot_save(u64 id, u32 idx, s32 pid,
 						 s64 pre)
 {
 	return AI_OK;
+}
+static inline int ai_policy_safety_snapshot_lookup(u64 id,
+						   s64 *pre_values, u8 *n_params)
+{
+	return AI_ERR_NOT_FOUND;
 }
 typedef int (*ai_safety_restore_t)(u32 param_index, s32 pid, s64 value);
 static inline int ai_policy_safety_rollback_decision(
