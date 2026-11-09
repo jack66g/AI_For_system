@@ -58,6 +58,7 @@ struct tui_view {
 	int quit;
 	int closing;			/* 置位后 post 拒收（shutdown 死锁防护） */
 	int dirty_needed;		/* 下帧门到期时重绘 */
+	int busy;			/* OCC-DEBT：异步验证中（spinner 常刷+Esc 改派） */
 	int tr_h;			/* 上帧转写区高（PgUp/PgDn 翻页量） */
 	/* T9c3：覆盖层 + 键位表 + leader 序列 */
 	tui_overlay *ov;
@@ -244,6 +245,30 @@ static int tv_drain(tui_view *v)
 						       &v->sb_data);
 			break;
 		}
+		/* ---- OCC-DEBT：历史回放（occ.c 主线程投递；渲染形态与
+		 * live 完全同路——定稿进 scrollback，live 块不受影响） ---- */
+		case TUI_VIEW_HIST_USER:
+			if (e->text && e->len)
+				tui_chat_add_user(v->chat, e->text, e->len);
+			break;
+		case TUI_VIEW_HIST_SEP:
+			if (e->text)
+				tui_chat_add_notice(v->chat, e->text);
+			break;
+		case TUI_VIEW_HIST_BEGIN:
+			tui_chat_begin_assistant(v->chat);
+			break;
+		case TUI_VIEW_HIST_CLEAR:
+			tui_chat_clear(v->chat);
+			break;
+		case TUI_VIEW_ASYNC_RESULT:
+			/* 异步 worker 结果回投主循环（occ.c 决策后续 UI） */
+			if (v->hooks.on_async_result)
+				v->hooks.on_async_result(v->hooks.ud,
+							 e->rc,
+							 e->text ? e->text :
+							 "");
+			break;
 		default:
 			break;
 		}
@@ -481,6 +506,17 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 
 	if (act) {
 		if (!strcmp(act, "dialog.close")) {
+			/* OCC-DEBT：busy 态（异步验证中）Esc 不关面板——
+			 * 改派 overlay.cancel（返回 0=已处理留步可重试；
+			 * 非 0=无处理器，回落正常关闭语义） */
+			if (v->busy && v->hooks.on_overlay_key &&
+			    v->hooks.on_overlay_key(v->hooks.ud,
+						    tui_overlay_id(v->ov),
+						    "overlay.cancel",
+						    -1) == 0) {
+				v->dirty_needed = 1;
+				return;
+			}
 			if (v->hooks.on_overlay_close)
 				v->hooks.on_overlay_close(v->hooks.ud,
 							  tui_overlay_id(v->ov));
@@ -553,7 +589,8 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 			return;
 		}
 		if (!strcmp(act, "model.add") ||
-		    !strcmp(act, "model.favorite")) {
+		    !strcmp(act, "model.favorite") ||
+		    !strcmp(act, "model.nonchat")) {
 			int idx = tui_overlay_submit_idx(v->ov);
 			int rc = v->hooks.on_overlay_key ?
 				 v->hooks.on_overlay_key(v->hooks.ud,
@@ -956,8 +993,9 @@ int tui_view_run(tui_view *v)
 				v->dirty_needed = 1;
 			}
 		}
-		/* 运行中：30fps 常刷（spinner 动画 + 流式即时性） */
-		if (v->running)
+		/* 运行中：30fps 常刷（spinner 动画 + 流式即时性）；
+		 * busy 态（异步验证）同口径常刷驱动 overlay spinner */
+		if (v->running || v->busy)
 			v->dirty_needed = 1;
 		if (v->dirty_needed && tui_frame_due(&v->frame, now)) {
 			tv_render(v, now);
@@ -967,8 +1005,9 @@ int tui_view_run(tui_view *v)
 		if (v->quit)
 			break;
 
-		/* poll 超时：待渲染→帧门剩余；孤立 Esc→结算截止 */
-		if (v->dirty_needed) {
+		/* poll 超时：待渲染/busy 态（spinner 常刷——无事件也要按时醒）
+		 * → 帧门剩余；孤立 Esc→结算截止 */
+		if (v->dirty_needed || v->busy) {
 			uint64_t w = tui_frame_wait_ms(&v->frame, now);
 
 			timeout = (w > 0x7ffffffu) ? 0x7fffffff : (int)w;
@@ -1189,4 +1228,13 @@ void tui_view_paint(tui_view *v)
 		return;
 	tv_render(v, tv_now_ms());
 	v->dirty_needed = 0;
+}
+
+void tui_view_set_busy(tui_view *v, int on)
+{
+	if (!v)
+		return;
+	v->busy = on ? 1 : 0;
+	tui_overlay_busy(v->ov, v->busy);
+	v->dirty_needed = 1;
 }

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "tui_utf8.h"
 
@@ -28,6 +29,7 @@ struct tui_overlay {
 	char prompt[TUI_OV_PROMPT_MAX];
 	char status[TUI_OV_STATUS_MAX];
 	int status_err;
+	int busy;				/* OCC-DEBT：状态行 spinner 前缀 */
 	/* list */
 	tui_ov_item *items;
 	int nitems, itemscap;
@@ -368,6 +370,12 @@ void tui_overlay_status(tui_overlay *ov, const char *msg, int is_err)
 	ov->status_err = is_err ? 1 : 0;
 }
 
+void tui_overlay_busy(tui_overlay *ov, int on)
+{
+	if (ov)
+		ov->busy = on ? 1 : 0;
+}
+
 /* ---- 键动作 ---- */
 
 int tui_overlay_nav(tui_overlay *ov, int dir)
@@ -598,11 +606,33 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 					*cur_col = cols - 1;
 			}
 		}
-		if (rows > 3 && ov->status[0])
-			(void)tui_screen_put(s, rows - 2, 1, ov->status,
-					     strlen(ov->status),
-					     ov->status_err ? a_err :
-					     a_status);
+		if (rows > 3 && ov->status[0]) {
+			if (ov->busy) {
+				struct timespec ts;
+				uint64_t now = 0;
+				const char *sp;
+
+				(void)clock_gettime(CLOCK_MONOTONIC, &ts);
+				now = (uint64_t)ts.tv_sec * 1000u +
+				      (uint64_t)(ts.tv_nsec / 1000000);
+				sp = tui_thm_spinner(now);
+				(void)tui_screen_put(s, rows - 2, 1, sp,
+						     strlen(sp),
+						     ov->status_err ? a_err :
+						     a_status);
+				(void)tui_screen_put(s, rows - 2, 3,
+						     ov->status,
+						     strlen(ov->status),
+						     ov->status_err ? a_err :
+						     a_status);
+			} else {
+				(void)tui_screen_put(s, rows - 2, 1,
+						     ov->status,
+						     strlen(ov->status),
+						     ov->status_err ? a_err :
+						     a_status);
+			}
+		}
 		if (ov->footer[0] && rows >= 2)
 			(void)tui_screen_put(s, rows - 1, 1, ov->footer,
 					     strlen(ov->footer), a_muted);
@@ -696,7 +726,7 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 			}
 		}
 
-		/* detail / status 行（rows-2） */
+		/* detail / status 行（rows-2；busy 态前缀 spinner 帧自走） */
 		if (detail_row > 0 && detail_row < rows) {
 			const char *msg = NULL;
 			tui_attr a = a_muted;
@@ -711,9 +741,29 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 				if (it->detail[0])
 					msg = it->detail;
 			}
-			if (msg)
-				(void)tui_screen_put(s, detail_row, 1, msg,
-						     strlen(msg), a);
+			if (msg) {
+				if (ov->busy) {
+					struct timespec ts;
+					uint64_t now = 0;
+					const char *sp;
+
+					(void)clock_gettime(CLOCK_MONOTONIC,
+							    &ts);
+					now = (uint64_t)ts.tv_sec * 1000u +
+					      (uint64_t)(ts.tv_nsec / 1000000);
+					sp = tui_thm_spinner(now);
+					(void)tui_screen_put(s, detail_row, 1,
+							     sp, strlen(sp),
+							     a);
+					(void)tui_screen_put(s, detail_row, 3,
+							     msg, strlen(msg),
+							     a);
+				} else {
+					(void)tui_screen_put(s, detail_row, 1,
+							     msg, strlen(msg),
+							     a);
+				}
+			}
 		}
 		if (ov->footer[0])
 			(void)tui_screen_put(s, rows - 1, 1, ov->footer,

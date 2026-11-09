@@ -100,6 +100,13 @@ int tui_overlay_submit_idx(const tui_overlay *ov);
 void tui_overlay_status(tui_overlay *ov, const char *msg, int is_err);
 
 /*
+ * OCC-DEBT：busy 态（异步验证中）。on=1 时状态行前缀 braille spinner
+ * （渲染期按 CLOCK_MONOTONIC 自走帧——调用方须以 ≥10fps 重渲驱动动画）；
+ * on=0 恢复静态状态行。
+ */
+void tui_overlay_busy(tui_overlay *ov, int on);
+
+/*
  * 渲染全屏面板（整屏填底 → 标题 → 过滤行 → 列表窗/detail → footer；
  * 输入态 → 提示 + 输入行 + status）。维护滚动窗（top/body_h）。
  * 光标：输入态写 (cur_row,cur_col)（文本尾，横移保可见）；列表态 -1。

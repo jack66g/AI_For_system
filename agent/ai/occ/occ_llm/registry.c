@@ -65,6 +65,60 @@ static void reg_fill_from_catalog(occ_reg_model *m,
 	m->context_limit = cm->context_limit;
 	m->tools = cm->tools;
 	m->is_deprecated = cm->is_deprecated;
+	m->is_chat = cm->is_chat ? 1 : 0;	/* 目录 type 位（数据正典） */
+}
+
+/* 子串（大小写不敏感；strcasestr 是 GNU 扩展，自实现对齐 overlay 手法） */
+static int id_contains_ci(const char *hay, const char *needle)
+{
+	size_t nl = strlen(needle), hl = strlen(hay), i, j;
+
+	if (!nl || nl > hl)
+		return 0;
+	for (i = 0; i + nl <= hl; i++) {
+		for (j = 0; j < nl; j++)
+			if (tolower((unsigned char)hay[i + j]) !=
+			    tolower((unsigned char)needle[j]))
+				break;
+		if (j == nl)
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * OCC-DEBT：id 特征非对话判定。高置信特征表（子串、大小写不敏感）：
+ * 嵌入/重排/语音合成与识别/内容审核/图像·视频生成系。宁缺勿错——
+ * vision、audio、realtime、guard、ocr 等特征常见于真对话模型，一律
+ * 不入表（实测快照内 vision 类 id 全部 type=="chat"）。
+ */
+int occ_reg_nonchat_by_id(const char *model_id)
+{
+	static const char *const feats[] = {
+		"embed",			/* embedding/text-embedding */
+		"rerank",
+		"tts",
+		"whisper",
+		"speech",			/* speech-to-text 系 */
+		"moderation",
+		"dall-e", "dalle",
+		"imagen",
+		"sora",
+		"seedream", "seedance",
+		"flux",
+		"stable-diffusion", "sdxl", "sd3",
+		"video-generate", "video-generation",
+		"transcribe",
+		NULL
+	};
+	size_t i;
+
+	if (!model_id || !model_id[0])
+		return 0;
+	for (i = 0; feats[i]; i++)
+		if (id_contains_ci(model_id, feats[i]))
+			return 1;
+	return 0;
 }
 
 static int reg_has(const occ_registry *reg, const char *provider,
@@ -117,6 +171,8 @@ void occ_registry_build(occ_registry *reg, const occ_provider_config *cfg,
 			snprintf(m.base_url, sizeof(m.base_url), "%s",
 				 s->base_url);
 			snprintf(m.slot_id, sizeof(m.slot_id), "%s", s->id);
+			/* 配置位无 type 数据：id 特征命中才标非对话，否则未知 */
+			m.is_chat = occ_reg_nonchat_by_id(m.id) ? 0 : -1;
 			reg_push(reg, &m);
 		}
 	}
@@ -175,6 +231,7 @@ size_t occ_registry_add_ollama(occ_registry *reg, const char *tags_json,
 		m.source = OCC_REG_SRC_OLLAMA;
 		m.proto = OCC_PROTO_OPENAI_COMPAT;
 		snprintf(m.base_url, sizeof(m.base_url), "%s", OLLAMA_BASE);
+		m.is_chat = occ_reg_nonchat_by_id(m.id) ? 0 : -1;
 		if (reg_push(reg, &m) == 0)
 			added++;
 	}

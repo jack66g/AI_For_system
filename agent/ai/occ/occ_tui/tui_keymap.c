@@ -66,7 +66,10 @@ static const struct km_def KM_DEFAULTS[] = {
 	{ "dialog.select.submit", TUI_KM_CTX_OVERLAY, "return" },
 	{ "dialog.close", TUI_KM_CTX_OVERLAY, "escape" },
 	{ "model.add", TUI_KM_CTX_OVERLAY, "ctrl+a" },
-	{ "model.favorite", TUI_KM_CTX_OVERLAY, "ctrl+f" }
+	{ "model.favorite", TUI_KM_CTX_OVERLAY, "ctrl+f" },
+	/* OCC-DEBT：/models 非对话条目显隐切换（OCD ctrl+t=variant 未实现，
+	 * occ 借位；keymap 覆盖文件可改绑） */
+	{ "model.nonchat", TUI_KM_CTX_OVERLAY, "ctrl+t" }
 };
 #define KM_NDEFAULTS ((int)(sizeof(KM_DEFAULTS) / sizeof(KM_DEFAULTS[0])))
 

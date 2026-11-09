@@ -64,9 +64,10 @@ LLM_CALL_OBJ := $(OBJ_DIR)/occ_llm/llm_call.o
 # occ_core（T9a3+b2）：session/loop/tokens/revert（/undo 三段式）
 # T9d：+ occ_sme（§8 记忆注入/写回）+ occ_ac（§9 transcript/轮询/换窗）
 #       + occ_telemetry（§9.6 会话遥测 → T8 parquet 链）
+# OCC-DEBT：+ replay（TUI 历史回放规划器——纯函数）
 CORE_SRCS := occ_core/session.c occ_core/loop.c occ_core/tokens.c \
 	     occ_core/revert.c occ_core/occ_sme.c occ_core/occ_ac.c \
-	     occ_core/occ_telemetry.c
+	     occ_core/occ_telemetry.c occ_core/replay.c
 CORE_OBJS := $(CORE_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # T9d 绑定复用对象（只读源码 → 本目录对象；显式规则防模式规则歧义）
@@ -112,10 +113,11 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 # c3：test_tui_data（tools.json/trace/lease 读取器夹具对拍——链 aik_json）
 # d1：test_sme（§8 注入/写回配额/降级）+ test_ac（§9 transcript/轮询/换窗）
 #     + test_telemetry（§9.6 会话遥测落 T8 parquet + footer 读回）
+# OCC-DEBT：test_replay（回放规划器——纯规划 + mock db 夹具两相）
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
-	     tests/test_ac tests/test_telemetry
+	     tests/test_ac tests/test_telemetry tests/test_replay
 
 BIN_OCC := occ
 
@@ -134,10 +136,10 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_tokens tests/test_loop tests/test_tools \
 		  tests/test_revert tests/test_retry tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
-		  tests/test_telemetry; do \
+		  tests/test_telemetry tests/test_replay; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
@@ -319,6 +321,13 @@ tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 tests/test_retry: tests/test_retry.c $(OBJ_DIR)/occ_llm/retry.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_retry.c \
 		$(OBJ_DIR)/occ_llm/retry.o $(LDLIBS)
+
+# replay（OCC-DEBT）：回放规划器——纯规划 + mock db 夹具（链 session）
+tests/test_replay: tests/test_replay.c $(OBJ_DIR)/occ_core/replay.o \
+		   $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_replay.c \
+		$(OBJ_DIR)/occ_core/replay.o $(OBJ_DIR)/occ_core/session.o \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tui_data（T9c3）：tools.json/trace/lease 读取器夹具对拍（aik_json only）
 tests/test_tui_data: tests/test_tui_data.c $(OBJ_DIR)/occ_tui/tui_data.o \

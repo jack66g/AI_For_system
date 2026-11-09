@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-09T12:20:34+08:00",
+  "created": "2026-11-09T16:06:13+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -25,7 +25,8 @@
     "T9e 出厂面：aikernel-shell/ai 出厂移除（备份 factory-pre-alpha16）+ .profile 默认入口 occ（tty 分流、SSH 保持 bash）+ 注册表 230→236 三件套五份同步（seed 247 不变、names_sha 3c6cb4bb、risk R101/W157/W277）+ ac 三件 strip 进 /usr/local/sbin（unit --port 8762+enable+hook+factory_gate 入 share）+ run_all 口径 59−2+2=59 + ISO alpha.16.0 md5 2156f635（四阶段 6/12/40/95 全 True，计数勘误在案；真 API 0）",
     "T9tail：/help 与 notice 占位文案转真——/compact//shell 并入 (live) 组+两行真实语义（与 occ.c 实现逐条对齐）；view_pty 23→27（场景 I 真 pty 全链断言新文案+占位串字节级负向）；`归 T9` 全树零残留；occ 全套/occ_tui 12 套 653 断言/p-smoke/差分 62/62/run_all 59/59 主会话亲跑",
     "I-10 决策闭环第 4 步回填器：as_outcome.c/h（28 旋钮指标全量+意图分类 SUCCESS/WORSE/PARTIAL+match 迁移+有界 pending 队+/sys/kernel/ai/policy/outcome 写口+审计行+合成事件走 SME/parquet 管道）；test_outcome.c 1445 行验收门（Tier-A 6 旋钮 100%、对照 PARTIAL 10/10、delta 48、降级三型）；C3 默认关（OUTCOME_ENABLED=0 出厂实证）；qemu 真内核轮待 K3C §9-1",
-    "SENSE 遥测脱敏（多用户前提）：两道防线——aistreamd 产生侧\nas_redact.c/h（at-rest：落盘/SME/parquet 前）+ apic 暴露侧\napiredact.c/h（in-flight：/sense 出网前），一张权威策略表\n两侧同语义；五档 pass/hash/trunc/mask/drop（drop 键留值 -）；\n三态 SENSE_REDACT=off/soft/strict+盐；出厂默认 off（单用户零\n字节变化，翻档=多用户落地）；decision_id 审计链例外恒原样；\nT8 parquet pid 列同步脱敏。门：aistreamd 10/10（9 既有冻结\nfixture 零改动=off 恒等证明）、apic 123、aikapi 重放 8453\ndiffs=0、run_all 59/59——主会话亲跑；本 commit 含 I-10 集成\n挂接行（同文件两特征）"
+    "SENSE 遥测脱敏（多用户前提）：两道防线——aistreamd 产生侧\nas_redact.c/h（at-rest：落盘/SME/parquet 前）+ apic 暴露侧\napiredact.c/h（in-flight：/sense 出网前），一张权威策略表\n两侧同语义；五档 pass/hash/trunc/mask/drop（drop 键留值 -）；\n三态 SENSE_REDACT=off/soft/strict+盐；出厂默认 off（单用户零\n字节变化，翻档=多用户落地）；decision_id 审计链例外恒原样；\nT8 parquet pid 列同步脱敏。门：aistreamd 10/10（9 既有冻结\nfixture 零改动=off 恒等证明）、apic 123、aikapi 重放 8453\ndiffs=0、run_all 59/59——主会话亲跑；本 commit 含 I-10 集成\n挂接行（同文件两特征）",
+    "occ 产品债批次：TUI 历史回放（occ_replay 规划器+HIST 事件，切换会话//shell 往返触发，尾部 200 行预算+更早分隔；回放 footer OCC·回放 不伪造）+向导验证异步化（worker+取消留步，修取消后旗标残留真 bug）+/models 非 chat 标注（快照无 modality 如实降级——catalog type 位+registry is_chat 三态+id 特征表，默认过滤+ctrl+t）；test_replay 51+registry+21+view_pty 27→38；真调用恰 2；修 4 真产品 bug"
   ],
   "overlay_count": 168,
   "registry": {
@@ -47,11 +48,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65064498,
-    "regular_files": 1433,
-    "source_files": 1433,
+    "bytes": 65155353,
+    "regular_files": 1436,
+    "source_files": 1436,
     "symlinks": 4,
-    "tracked_files": 1437
+    "tracked_files": 1440
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",

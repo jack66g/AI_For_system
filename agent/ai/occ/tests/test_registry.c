@@ -448,6 +448,89 @@ static void test_state_json(void)
 	occ_registry_free(&reg2);
 }
 
+/* ---- OCC-DEBT：非 chat 标注（is_chat 三态位 + id 特征分类器） ---- */
+static void test_nonchat(void)
+{
+	char path[128];
+	occ_provider_config cfg;
+	occ_catalog cat;
+	occ_registry reg;
+	static const char NC_TOML[] =
+		"[default]\nmodel = \"cloud\"\n"
+		"\n"
+		"[models.cloud]\n"
+		"provider_type = \"openai_compatible\"\n"
+		"model_name = \"deepseek-chat\"\n"
+		"base_url = \"http://127.0.0.1:1\"\n"
+		"api_key = \"sk-fixture-nc\"\n"
+		"\n"
+		"[models.emb]\n"
+		"provider_type = \"openai_compatible\"\n"
+		"model_name = \"text-embedding-3-small\"\n"
+		"base_url = \"http://127.0.0.1:1\"\n"
+		"api_key = \"sk-fixture-nc\"\n";
+	static const char NC_CAT[] =
+		"{\"providers\":{\"xx\":{\"name\":\"XX\",\"models\":{"
+		"\"chatty\":{\"id\":\"chatty\",\"name\":\"Chatty\","
+		"\"type\":\"chat\",\"context_limit\":100},"
+		"\"decidy\":{\"id\":\"decidy\",\"name\":\"Decidy\","
+		"\"type\":\"decision\"}"
+		"}}}}";
+
+	/* 分类器边界：高置信特征命中 */
+	OK(occ_reg_nonchat_by_id("text-embedding-3-small") == 1,
+	   "nc-embed");
+	OK(occ_reg_nonchat_by_id("bge-reranker-v2-m3") == 1, "nc-rerank");
+	OK(occ_reg_nonchat_by_id("tts-1-hd") == 1, "nc-tts");
+	OK(occ_reg_nonchat_by_id("whisper-large-v3") == 1, "nc-whisper");
+	OK(occ_reg_nonchat_by_id("dall-e-3") == 1, "nc-dalle");
+	OK(occ_reg_nonchat_by_id("seedream-4-0-250828") == 1, "nc-seedream");
+	OK(occ_reg_nonchat_by_id("flux-1-pro") == 1, "nc-flux");
+	OK(occ_reg_nonchat_by_id("funasr-Speech-01") == 1, "nc-speech-ci");
+	/* 宁缺勿错：多模态对话常见特征不得误杀（快照实测 vision 类全 chat） */
+	OK(occ_reg_nonchat_by_id("gpt-4-turbo-vision") == 0, "nc-vision-is-chat");
+	OK(occ_reg_nonchat_by_id("deepseek-v4-flash-vision-exp") == 0,
+	   "nc-vision-exp-is-chat");
+	OK(occ_reg_nonchat_by_id("qwen3guard-gen-8b") == 0, "nc-guard-is-chat");
+	OK(occ_reg_nonchat_by_id("deepseek-chat") == 0, "nc-plain-chat");
+	OK(occ_reg_nonchat_by_id("qwen2.5:1.5b") == 0, "nc-ollama-chat");
+	OK(occ_reg_nonchat_by_id("") == 0 && occ_reg_nonchat_by_id(NULL) == 0,
+	   "nc-empty-null");
+
+	/* 三态位传播：目录 type 位；toml id 特征/未知 */
+	{
+		char tpath[128];
+
+		snprintf(tpath, sizeof(tpath), "%s/nc_model.toml", tmpdir);
+		write_file(tpath, NC_TOML);
+		snprintf(path, sizeof(path), "%s/nc_cat.json", tmpdir);
+		write_file(path, NC_CAT);
+		OK(occ_provider_load_all(&cfg, tpath, NULL) == 0, "nc-load-toml");
+	}
+	OK(occ_catalog_load(&cat, path) == 0, "nc-load-cat");
+	if (occ_registry_init(&reg) != 0) {
+		OK(0, "nc-reg-init");
+		return;
+	}
+	occ_registry_build(&reg, &cfg, &cat);
+	OK(reg.nmodels == 4, "nc-union-4");
+	{
+		const occ_reg_model *m;
+
+		m = occ_registry_find(&reg, "xx", "chatty");
+		OK(m && m->is_chat == 1, "nc-catalog-chat-1");
+		m = occ_registry_find(&reg, "xx", "decidy");
+		OK(m && m->is_chat == 0, "nc-catalog-decision-0");
+		m = occ_registry_find(&reg, "cloud", "deepseek-chat");
+		OK(m && m->is_chat == -1, "nc-toml-unknown--1");
+		m = occ_registry_find(&reg, "emb", "text-embedding-3-small");
+		OK(m && m->is_chat == 0, "nc-toml-embed-0");
+	}
+	occ_provider_config_free(&cfg);
+	occ_catalog_free(&cat);
+	occ_registry_free(&reg);
+}
+
 int main(void)
 {
 	snprintf(tmpdir, sizeof(tmpdir), "/tmp/occ-reg-test-XXXXXX");
@@ -460,6 +543,7 @@ int main(void)
 	test_write_roundtrip();
 	test_registry_views();
 	test_state_json();
+	test_nonchat();
 	rmtree(tmpdir);
 	if (fails) {
 		printf("test_registry: FAIL(%d)\n", fails);

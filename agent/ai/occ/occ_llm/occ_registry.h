@@ -40,13 +40,21 @@ typedef struct occ_reg_model {
 	char provider[OCC_CAT_PROVIDER_MAX];	/* 分组键：provider id */
 	char provider_name[OCC_CAT_NAME_MAX];
 	char id[OCC_CAT_ID_MAX];		/* 模型 id */
-	char display[OCC_CAT_NAME_MAX];		/* 显示名（模型 name） */
+	char display[OCC_CAT_NAME_MAX];	/* 显示名（模型 name） */
 	occ_reg_source source;
 	occ_protocol proto;			/* 调用协议 */
 	char base_url[OCC_PROVIDER_URL_MAX];	/* 配置/本地才有 */
-	long long context_limit;		/* 快照/0 */
+	long long context_limit;			/* 快照/0 */
 	int tools;				/* 快照能力位 */
 	int is_deprecated;			/* 列表过滤 */
+	/*
+	 * OCC-DEBT 非 chat 标注（三态）：1=对话（目录 type=="chat"）；
+	 * 0=非对话（目录 type!="chat"，或 id 命中高置信非对话特征）；
+	 * -1=无据可判（toml/ollama 且 id 无特征——不过滤不标注，宁缺勿错）。
+	 * 注：models.dev 快照无 modality 字段（裁剪器只留 type）——目录
+	 * 条目用 type 位；vision 不算非对话（多模态对话模型常见）。
+	 */
+	int is_chat;
 	/* toml 槽位回链（source==TOML 且配置了槽位时；occ_provider_resolve） */
 	char slot_id[OCC_TOML_ID_MAX];
 } occ_reg_model;
@@ -117,5 +125,12 @@ void occ_registry_touch(occ_registry *reg, const char *provider,
 /* 收藏切换：已收→取消；未收→追加。返回新状态（1=已收藏）。 */
 int occ_registry_toggle_favorite(occ_registry *reg, const char *provider,
 				 const char *model_id);
+
+/*
+ * OCC-DEBT：id 特征非对话判定（高置信特征表：embed/rerank/tts/whisper/
+ * 图像·视频生成等）。返回 1=命中特征（非对话）、0=未命中（≠对话——
+ * 仅「无据可判」）。宁缺勿错：vision/audio 等多模态对话常见特征不入表。
+ */
+int occ_reg_nonchat_by_id(const char *model_id);
 
 #endif /* _OCC_REGISTRY_H */

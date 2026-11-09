@@ -45,6 +45,7 @@
 
 #include "occ_core/occ_ac.h"
 #include "occ_core/occ_loop.h"
+#include "occ_core/occ_replay.h"
 #include "occ_core/occ_revert.h"
 #include "occ_llm/occ_catalog.h"
 #include "occ_llm/occ_registry.h"
@@ -61,7 +62,8 @@ static const char USAGE[] =
 	"  occ redo --session <id>              恢复上次 undo\n"
 	"  occ retry --session <id>             重发最后一条 user 消息\n"
 	"  occ sessions                         会话列表\n"
-	"环境：OCC_MODEL_TOML / OCC_PROVIDER_TOML / OCC_DB / OCC_SNAPROOT 可覆盖\n";
+	"环境：OCC_MODEL_TOML / OCC_PROVIDER_TOML / OCC_DB / OCC_SNAPROOT 可覆盖；"
+	" 交互模式另支持 OCC_REPLAY_LINES（历史回放行数预算，缺省 200，0=禁）\n";
 
 /* ---- SIGINT（T9b2；OCD §7.1 headless 版） ----
  * 第一次：置 occ_interrupt_flag——loop 在安全点（每工具后/每轮 LLM 前/
@@ -504,6 +506,17 @@ struct tui_app {
 		char key[256];
 	} wiz;
 
+	/* ---- OCC-DEBT：向导 4/4 验证 worker（异步——偿还 T9C3 取舍 4） ----
+	 * 线程私有 ctx（含 key 拷贝）——wiz_reset/wiz.key 清零不影响在途调用；
+	 * wiz_cancel 置位 + pthread_kill(SIGINT) = Esc 取消（EINTR 打断读）。 */
+	pthread_t wiz_thread;
+	int wiz_thread_live;		/* mu 保护 */
+	int wiz_thread_created;		/* 仅主线程（create/join 配对） */
+	int wiz_cancel;			/* mu 保护 */
+
+	/* ---- OCC-DEBT：/models 非对话条目显隐（默认过滤；ctrl+t 切换） ---- */
+	int show_nonchat;
+
 	/* ---- c3：overlay 工作集（打开期间有效；换开重分配） ---- */
 	size_t *ov_map;
 	size_t ov_map_n;
@@ -521,6 +534,123 @@ static uint64_t tui_now_ms(void)
 
 /* k/M 档：已由 tui_usage_fmt 承担（c3 同源化；fmt_tok 退役） */
 
+/* ===================== OCC-DEBT：TUI 历史回放 =====================
+ * 偿还 T9C2 裁定 2（转写不回放历史）：进屏（/shell 往返）与 /sessions
+ * 切换时，从 durable SQLite 读当前会话消息 → occ_replay_plan 圈尾部
+ * （OCD §1.3 尾部挂载语义；行预算 OCC_REPLAY_LINES 缺省 200，0=禁）
+ * → 逐条 tui_view_post 渲染进 scrollback。事件走既有队列，drain 在
+ * 主循环——与 live 渲染完全同路（工具行/推理折叠/页脚形态不变）。
+ * 运行中不回放（事件会插进 live 块）——诚实 notice，收口后切换可补。 */
+static int app_replay_lines_budget(void)
+{
+	const char *v = getenv("OCC_REPLAY_LINES");
+	long n;
+	char *end = NULL;
+
+	if (!v || !v[0])
+		return 200;
+	n = strtol(v, &end, 10);
+	if (!end || *end != '\0' || n < 0 || n > 1000000)
+		return 200;
+	return (int)n;
+}
+
+static void app_replay_session(struct tui_app *a, const char *sid,
+			       int clear_first)
+{
+	occ_msg_row *rows = NULL;
+	occ_tc_row *tcs = NULL;
+	occ_replay_item *plan = NULL;
+	size_t n = 0, ntc = 0, nplan = 0, nearlier = 0, i;
+	char e[160];
+	int budget;
+	int live;
+
+	if (!sid || !sid[0])
+		return;
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		tui_view_notice(a->view,
+				"replay: turn 运行中——历史回放跳过（收口后"
+				"重进 /sessions 可补）");
+		return;
+	}
+	budget = app_replay_lines_budget();
+	if (budget == 0)
+		return;				/* 显式禁用（静默——配置意图） */
+	if (occ_msg_list(a->db, sid, &rows, &n, e, sizeof(e)) != 0) {
+		tui_view_notice(a->view, e);
+		return;
+	}
+	(void)occ_toolcalls_since(a->db, sid, 0, &tcs, &ntc, NULL, 0);
+	if (occ_replay_plan(rows, n, tcs, ntc, budget, &plan, &nplan,
+			    &nearlier) != 0) {
+		occ_msg_rows_free(rows, n);
+		occ_tc_rows_free(tcs, ntc);
+		tui_view_notice(a->view, "replay: 规划失败（OOM）");
+		return;
+	}
+	if (clear_first)
+		(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
+				    NULL, 0);
+	for (i = 0; i < nplan; i++) {
+		const occ_replay_item *it = &plan[i];
+
+		switch (it->kind) {
+		case OCC_RP_SEP: {
+			char sep[96];
+
+			snprintf(sep, sizeof(sep),
+				 "⋯ 更早 %d 条消息未回放（尾部 %d 行挂载）",
+				 it->rc, budget);
+			(void)tui_view_post(a->view, TUI_VIEW_HIST_SEP, sep,
+					    0, NULL, 0);
+			break;
+		}
+		case OCC_RP_USER:
+			(void)tui_view_post(a->view, TUI_VIEW_HIST_USER,
+					    it->text, strlen(it->text), NULL,
+					    0);
+			break;
+		case OCC_RP_BEGIN:
+			(void)tui_view_post(a->view, TUI_VIEW_HIST_BEGIN, NULL,
+					    0, NULL, 0);
+			break;
+		case OCC_RP_REASON:
+			(void)tui_view_post(a->view, TUI_VIEW_REASONING,
+					    it->text, strlen(it->text), NULL,
+					    0);
+			break;
+		case OCC_RP_TEXT:
+			(void)tui_view_post(a->view, TUI_VIEW_TEXT, it->text,
+					    strlen(it->text), NULL, 0);
+			break;
+		case OCC_RP_TOOL_START:
+			(void)tui_view_post(a->view, TUI_VIEW_TOOL_START,
+					    it->text, 0, it->arg, 0);
+			break;
+		case OCC_RP_TOOL_END:
+			(void)tui_view_post(a->view, TUI_VIEW_TOOL_END,
+					    it->text, 0, it->arg, it->rc);
+			break;
+		case OCC_RP_END:
+			/* 回放页脚：如实标「回放」——DB 无时长/tok-s 数据，
+			 * 不伪造 live 页脚的段值 */
+			(void)tui_view_post(a->view, TUI_VIEW_TURN_END,
+					    "OCC · 回放", 0, NULL, 0);
+			break;
+		default:
+			break;
+		}
+	}
+	free(plan);
+	occ_tc_rows_free(tcs, ntc);
+	occ_msg_rows_free(rows, n);
+}
+
+
 /* SIGINT（进屏后覆盖 tui_sig_fatal）：仅置 b2 中断旗标。
  * sa_flags=0 → 无 SA_RESTART：阻塞读 EINTR 打断（b2 通路复用）。
  * headless 的双击强退不适用 TUI（raw 模式 Ctrl+C 是字节非信号）。 */
@@ -532,14 +662,19 @@ static void tui_on_sigint(int sig)
 
 static void tui_app_on_entered(void *ud)
 {
+	struct tui_app *a = ud;
 	struct sigaction sa;
 
-	(void)ud;
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = tui_on_sigint;
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
+	/* OCC-DEBT 历史回放：进屏时已有当前会话（/shell 退屏往返）→ 从
+	 * durable SQLite 回放尾部进 scrollback（T9C2 裁定 2 偿还）。
+	 * 首次进屏无会话——保持「首条提交建新会话」（c2 语义不变）。 */
+	if (a->session_id[0])
+		app_replay_session(a, a->session_id, 0);
 }
 
 /* sink 回调（worker 线程）→ view 事件环（拷贝后返回） */
@@ -1094,25 +1229,27 @@ static void wiz_save(struct tui_app *a)
 	wiz_reset(a);
 }
 
-/* 向导 4/4：1-token 连通实测（真调用——预算记账见报告；测试走 mock） */
-static void wiz_verify_save(struct tui_app *a)
+/* ---- 向导 4/4：1-token 连通实测（OCC-DEBT 异步化——偿还 T9C3 取舍 4）
+ * worker 线程跑 occ_llm_call（真调用——预算记账见报告；测试走 mock）；
+ * 主线程自由渲染：busy spinner + Esc 取消（overlay.cancel → wiz_cancel
+ * 置位 + pthread_kill SIGINT → 阻塞读 EINTR → 以取消态收口回投）。
+ * 线程私有 ctx 深拷贝 provider/key——wiz_reset/wiz.key 清零互不影响。 */
+struct wiz_vctx {
+	struct tui_app *a;
+	occ_provider vp;		/* api_key=heap 拷贝（线程私有） */
+};
+
+static void *wiz_verify_thread(void *arg)
 {
-	occ_provider vp;
+	struct wiz_vctx *c = arg;
 	occ_llm_req req;
 	occ_msg msg;
 	char *verr = NULL;
-	int rc;
-
-	memset(&vp, 0, sizeof(vp));
-	snprintf(vp.name, sizeof(vp.name), "%s", a->wiz.slot);
-	vp.proto = occ_protocol_from_type(a->wiz.ptype);
-	snprintf(vp.base_url, sizeof(vp.base_url), "%s", a->wiz.base_url);
-	snprintf(vp.model, sizeof(vp.model), "%.95s", a->wiz.model_id);
-	vp.api_key = a->wiz.key;	/* 借用：绝不 occ_provider_free（非 heap） */
+	int rc, cancel;
 
 	memset(&req, 0, sizeof(req));
-	req.proto = vp.proto;
-	req.model = vp.model;
+	req.proto = c->vp.proto;
+	req.model = c->vp.model;
 	memset(&msg, 0, sizeof(msg));
 	msg.role = OCC_ROLE_USER;
 	msg.text = "ping";
@@ -1121,21 +1258,109 @@ static void wiz_verify_save(struct tui_app *a)
 	req.gen.max_tokens = 1;
 	req.gen.has_max_tokens = 1;
 
-	tui_view_overlay_status(a->view,
-				 "验证中…（1-token 连通实测，最长约 10s）",
-				 0);
-	tui_view_paint(a->view);	/* 阻塞前先画出状态帧 */
-	rc = occ_llm_call(&vp, &req, wiz_verify_cb, NULL, &verr);
+	rc = occ_llm_call(&c->vp, &req, wiz_verify_cb, NULL, &verr);
+	pthread_mutex_lock(&c->a->mu);
+	cancel = c->a->wiz_cancel;
+	pthread_mutex_unlock(&c->a->mu);
 	if (rc == 0) {
 		free(verr);
-		wiz_save(a);
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT, NULL,
+				    0, NULL, 0);
+	} else if (cancel) {
+		free(verr);
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    "cancelled", 0, NULL, 2);
+	} else {
+		/* 错误文本回投主线程人话化（text 转移所有权语义：post 拷贝） */
+		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
+				    verr ? verr : "", 0, NULL, 1);
+		free(verr);
+	}
+	free(c->vp.api_key);
+	free(c);
+	return NULL;
+}
+
+static void wiz_verify_save(struct tui_app *a)
+{
+	struct wiz_vctx *c;
+	int live;
+
+	/* 并发门：turn 运行中不验证——Esc 取消路径会置 occ_interrupt_flag
+	 *（SIGINT 处理器全局），会误伤在途 turn；诚实留步。 */
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live || a->wiz_thread_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		tui_view_overlay_status(a->view,
+					a->worker_live ?
+					"turn 运行中——Esc 中断或收口后再验证" :
+					"验证已在进行中（Esc 取消）", 1);
+		return;
+	}
+	c = calloc(1, sizeof(*c));
+	if (!c) {
+		tui_view_overlay_status(a->view, "向导：内存不足", 1);
+		return;
+	}
+	c->a = a;
+	snprintf(c->vp.name, sizeof(c->vp.name), "%s", a->wiz.slot);
+	c->vp.proto = occ_protocol_from_type(a->wiz.ptype);
+	snprintf(c->vp.base_url, sizeof(c->vp.base_url), "%s", a->wiz.base_url);
+	snprintf(c->vp.model, sizeof(c->vp.model), "%.95s", a->wiz.model_id);
+	c->vp.api_key = strdup(a->wiz.key[0] ? a->wiz.key : "");
+	if (!c->vp.api_key) {
+		free(c);
+		tui_view_overlay_status(a->view, "向导：内存不足", 1);
+		return;
+	}
+	/* 清上一轮遗留中断旗标（取消路径经 SIGINT 处理器置位；llm_call
+	 * 尝试前查旗标即中止——不清则重试永远失败。同 on_submit 口径） */
+	occ_interrupt_flag = 0;
+	a->wiz_cancel = 0;
+	if (pthread_create(&a->wiz_thread, NULL, wiz_verify_thread, c) != 0) {
+		free(c->vp.api_key);
+		free(c);
+		tui_view_overlay_status(a->view,
+					"验证线程创建失败（稍后重试）", 1);
+		return;
+	}
+	pthread_mutex_lock(&a->mu);
+	a->wiz_thread_live = 1;
+	pthread_mutex_unlock(&a->mu);
+	a->wiz_thread_created = 1;
+	tui_view_overlay_status(a->view,
+				"验证中…（1-token 实测，Esc 取消）", 0);
+	tui_view_set_busy(a->view, 1);	/* spinner 常刷 + Esc 改派 cancel */
+}
+
+/* 异步结果回投（主循环 drain；TUI_VIEW_ASYNC_RESULT） */
+static void tui_app_on_async_result(void *ud, int rc, const char *text)
+{
+	struct tui_app *a = ud;
+
+	if (a->wiz_thread_created) {	/* 线程已发完结果：join 瞬返收尸 */
+		pthread_join(a->wiz_thread, NULL);
+		a->wiz_thread_created = 0;
+	}
+	pthread_mutex_lock(&a->mu);
+	a->wiz_thread_live = 0;
+	pthread_mutex_unlock(&a->mu);
+	tui_view_set_busy(a->view, 0);
+	if (rc == 0) {
+		wiz_save(a);		/* 成功：写 toml + 切换 + 关面板 */
+		return;
+	}
+	if (rc == 2) {
+		/* 取消：留步可改 key 重试——与失败路径同语义（面板不关） */
+		tui_view_overlay_status(a->view,
+					"已取消——可修改 key 后回车重试", 0);
 		return;
 	}
 	{
 		char human[240];
 
-		wiz_err_human(verr, human, sizeof(human));
-		free(verr);
+		wiz_err_human(text, human, sizeof(human));
 		tui_view_overlay_status(a->view, human, 1);
 	}
 }
@@ -1171,7 +1396,11 @@ static int cmd_models(struct tui_app *a)
 	nall = occ_registry_all_by_provider(a->reg, 0, all,
 					    a->reg->nmodels);
 
+/* OCC-DEBT：非对话条目（is_chat==0）默认过滤；ctrl+t 显隐切换后
+ * 显示时 dim + tag 标「非对话」（registry 三态位——目录 type 为主、
+ * 配置位 id 特征；-1 未知不过滤不标注，宁缺勿错） */
 #define PUSH_MODEL(RM) do { \
+	if (a->show_nonchat || (RM)->is_chat != 0) { \
 	if (n + 1 < cap) { \
 		snprintf(items[n].text, sizeof(items[n].text), "%s", \
 			 (RM)->display[0] ? (RM)->display : (RM)->id); \
@@ -1185,9 +1414,10 @@ static int cmd_models(struct tui_app *a)
 				} \
 			} \
 			snprintf(items[n].tag, sizeof(items[n].tag), \
-				 "%s%.44s", f ? "★ " : "", \
+				 "%s%.36s%s", f ? "★ " : "", \
 				 (RM)->provider_name[0] ? \
-				 (RM)->provider_name : (RM)->provider); \
+				 (RM)->provider_name : (RM)->provider, \
+				 (RM)->is_chat == 0 ? " ·非对话" : ""); \
 		} \
 		{ \
 			char ctx[24]; \
@@ -1205,9 +1435,11 @@ static int cmd_models(struct tui_app *a)
 				  "本地 ollama" : \
 				  "目录（需 key：ctrl+a 添加）")); \
 		} \
-		items[n].flags = (RM)->is_deprecated ? TUI_OV_DIM : 0; \
+		items[n].flags = ((RM)->is_deprecated || \
+				  (RM)->is_chat == 0) ? TUI_OV_DIM : 0; \
 		a->ov_map[n] = (size_t)((RM) - a->reg->models); \
 		n++; \
+	} \
 	} \
 } while (0)
 
@@ -1257,13 +1489,16 @@ static int cmd_models(struct tui_app *a)
 #undef PUSH_HEADER
 #undef PUSH_MODEL
 	if (n == 0) {
-		rc = -1;
+		/* 全量被非对话过滤掏空：诚实说明而非谎报 OOM */
+		tui_view_notice(a->view,
+				"models: 匹配条目全部为非对话（默认隐藏）——"
+				"ctrl+t 显示全部");
 		goto out;
 	}
 	(void)tui_view_open_list(a->view, OV_MODELS, "models", items,
 				 (int)n, 1,
-				 "Enter=切换/接入 · ctrl+a 添加 key · "
-				 "ctrl+f 收藏 · 输入过滤 · Esc=关闭");
+				 "Enter=切换/接入 · ctrl+a key · ctrl+f ★ · "
+				 "ctrl+t 非对话 · 过滤 · Esc=关闭");
 out:
 	if (rc != 0)
 		tui_view_notice(a->view, "models: 构建列表失败（OOM）");
@@ -1316,7 +1551,7 @@ static int cmd_sessions_overlay(struct tui_app *a)
 	}
 	(void)tui_view_open_list(a->view, OV_SESSIONS, "sessions", items,
 				 (int)n, 1,
-				 "Enter=切换会话（下一轮生效）· Esc=关闭");
+				 "Enter=切换并回放历史 · Esc=关闭");
 	free(items);		/* overlay 已深拷贝；行数据留 ov_rows 待提交 */
 	return 0;
 }
@@ -1831,6 +2066,7 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 	case OV_SESSIONS: {
 		occ_session_row *r;
 		char nb[320];
+		int live;
 
 		if ((size_t)idx >= a->ov_rows_n)
 			return 1;
@@ -1838,12 +2074,30 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 		pthread_mutex_lock(&a->mu);
 		snprintf(a->session_id, sizeof(a->session_id), "%s", r->id);
 		a->tokens_total = r->tokens_total;
+		live = a->worker_live;
 		pthread_mutex_unlock(&a->mu);
 		app_load_usage_from_db(a, r->id);
 		tui_view_close_overlay(a->view);
-		snprintf(nb, sizeof(nb), "── switched to %.100s (%.14s…) ──",
-			 r->title[0] ? r->title : "(untitled)", r->id);
-		tui_view_notice(a->view, nb);
+		/* OCC-DEBT：切换即回放该会话尾部历史（清旧转写；
+		 * turn 运行中跳过——事件会插进 live 块，诚实留步）。
+		 * 切换通告也走事件队列（在 HIST_CLEAR 之后入队）——直写
+		 * chat 会被 CLEAR 清掉；落在历史尾部恰成分隔。 */
+		if (!live) {
+			app_replay_session(a, r->id, 1);
+			snprintf(nb, sizeof(nb),
+				 "── switched to %.100s (%.14s…) ──",
+				 r->title[0] ? r->title : "(untitled)", r->id);
+			(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb,
+					    strlen(nb), NULL, 0);
+		} else {
+			snprintf(nb, sizeof(nb),
+				 "── switched to %.100s (%.14s…) ──",
+				 r->title[0] ? r->title : "(untitled)", r->id);
+			tui_view_notice(a->view, nb);
+			tui_view_notice(a->view,
+					"turn 运行中——历史回放待收口（重进"
+					" /sessions 可补）");
+		}
 		return 0;
 	}
 	case OV_WIZ_MODEL: {
@@ -1965,11 +2219,50 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 {
 	struct tui_app *a = ud;
 
+	/* OCC-DEBT：busy 态 Esc → 取消在途验证（面板留步——与失败路径
+	 * 同语义；由 tui_view_set_busy(1) 期间的 dialog.close 改派而来） */
+	if (!strcmp(action, "overlay.cancel")) {
+		int live;
+
+		pthread_mutex_lock(&a->mu);
+		live = a->wiz_thread_live;
+		if (live)
+			a->wiz_cancel = 1;
+		pthread_mutex_unlock(&a->mu);
+		if (!live)
+			return 1;	/* 无在途验证：回落正常关闭 */
+		(void)pthread_kill(a->wiz_thread, SIGINT);
+		tui_view_overlay_status(a->view,
+					 "取消验证中…（收口后可改 key 重试）",
+					 0);
+		return 0;
+	}
 	if (ov_id != OV_MODELS)
 		return 1;
 	if (!strcmp(action, "model.add")) {
 		wiz_reset(a);
 		wiz_open_model(a);
+		return 0;
+	}
+	if (!strcmp(action, "model.nonchat")) {
+		/* OCC-DEBT：非对话条目显隐切换（默认过滤；显示时 dim 标注） */
+		size_t i, nnon = 0;
+		char st[96];
+
+		if (!a->reg)
+			return 1;
+		for (i = 0; i < a->reg->nmodels; i++)
+			if (a->reg->models[i].is_chat == 0)
+				nnon++;
+		a->show_nonchat = !a->show_nonchat;
+		(void)cmd_models(a);	/* 重开列表反映过滤态（选择复位） */
+		if (a->show_nonchat)
+			snprintf(st, sizeof(st),
+				 "已显示全部（非对话 %zu 条 dim 标注）", nnon);
+		else
+			snprintf(st, sizeof(st),
+				 "非对话 %zu 条已隐藏（默认过滤）", nnon);
+		tui_view_overlay_status(a->view, st, 0);
 		return 0;
 	}
 	if (!strcmp(action, "model.favorite")) {
@@ -2089,18 +2382,27 @@ static void tui_app_fill_sessions(void *ud, tui_sb_data *out)
 static void tui_app_on_shutdown(void *ud)
 {
 	struct tui_app *a = ud;
-	int live;
+	int live, wlive;
 
 	pthread_mutex_lock(&a->mu);
 	live = a->worker_live;
-	if (live)
+	wlive = a->wiz_thread_live;
+	if (live || wlive)
 		occ_interrupt_flag = 1;
+	if (wlive)
+		a->wiz_cancel = 1;
 	pthread_mutex_unlock(&a->mu);
 	if (live)
 		(void)pthread_kill(a->worker, SIGINT);
 	if (a->worker_created) {	/* join：等 worker 安全收口 */
 		pthread_join(a->worker, NULL);
 		a->worker_created = 0;
+	}
+	if (wlive)
+		(void)pthread_kill(a->wiz_thread, SIGINT);
+	if (a->wiz_thread_created) {	/* 向导验证线程同理（OCC-DEBT） */
+		pthread_join(a->wiz_thread, NULL);
+		a->wiz_thread_created = 0;
 	}
 	/* mutex/prompt 由 run_interactive 收尾（enter 早退路径也要清） */
 }
@@ -2179,6 +2481,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	h.on_overlay_input = tui_app_on_overlay_input;
 	h.on_overlay_key = tui_app_on_overlay_key;
 	h.on_overlay_close = tui_app_on_overlay_close;
+	h.on_async_result = tui_app_on_async_result;	/* OCC-DEBT */
 
 		/* T9e：view 生命周期循环——/shell 退屏跑 bash 后重建 view 续跑。
 		 * ctx_fallback 提示只在首屏发一次（每轮重发会刷屏）。 */
@@ -2216,6 +2519,15 @@ static int run_interactive(occ_db *db, const char *model_toml,
 				if (a.worker_created) {
 					pthread_join(a.worker, NULL);
 					a.worker_created = 0;
+				}
+				if (a.wiz_thread_created) {	/* OCC-DEBT 同口径 */
+					occ_interrupt_flag = 1;
+					pthread_kill(a.wiz_thread, SIGINT);
+					pthread_join(a.wiz_thread, NULL);
+					a.wiz_thread_created = 0;
+					pthread_mutex_lock(&a.mu);
+					a.wiz_thread_live = 0;
+					pthread_mutex_unlock(&a.mu);
 				}
 				if (rc != 0 || !a.shell_req)
 					break;

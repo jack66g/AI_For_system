@@ -44,7 +44,16 @@ enum {
 	TUI_VIEW_TOOL_END = 3,		/* == OCC_SINK_TOOL_END */
 	TUI_VIEW_NOTICE = 4,		/* == OCC_SINK_NOTICE */
 	TUI_VIEW_RESET = 5,		/* == OCC_SINK_RESET */
-	TUI_VIEW_TURN_END = 6		/* text=footer（可 NULL）；rc=0 正常 */
+	TUI_VIEW_TURN_END = 6,		/* text=footer（可 NULL）；rc=0 正常 */
+	/* ---- OCC-DEBT：历史回放（进屏//sessions 切换时 occ.c 投递；主线程
+	 * 或 worker 均可 post——与 sink 事件同一队列） ---- */
+	TUI_VIEW_HIST_USER = 7,		/* 定稿 user 消息（text） */
+	TUI_VIEW_HIST_SEP = 8,		/* 「⋯ 更早 N 条」分隔行（text） */
+	TUI_VIEW_HIST_BEGIN = 9,	/* assistant 回放块开始（live 语义） */
+	TUI_VIEW_HIST_CLEAR = 10,	/* 清空转写（切会话前旧内容） */
+	/* ---- OCC-DEBT：异步结果回投（向导验证 worker → 主循环）；
+	 * rc/text 语义由 occ.c 定义（0=成功 1=失败(text=错误) 2=取消） ---- */
+	TUI_VIEW_ASYNC_RESULT = 11
 };
 
 /* occ.c 提供的钩子（全部主线程调用；on_submit/on_interrupt 例外见注） */
@@ -76,12 +85,16 @@ typedef struct {
 	/* 输入态 Enter（rename/key/base_url） */
 	int (*on_overlay_input)(void *ud, int ov_id, const char *text,
 				size_t len);
-	/* overlay 专用动作（model.add=ctrl+a / model.favorite=ctrl+f）；
+	/* overlay 专用动作（model.add=ctrl+a / model.favorite=ctrl+f /
+	 * model.nonchat=ctrl+t / busy 态 Esc → overlay.cancel）；
 	 * idx=当前选择的原始下标（无=-1）；返回 0=已处理，非 0 → 状态行 */
 	int (*on_overlay_key)(void *ud, int ov_id, const char *action,
 			      int idx);
 	/* Esc 关面板（occ 侧清理：向导取消时 key 即刻清零） */
 	void (*on_overlay_close)(void *ud, int ov_id);
+	/* ---- OCC-DEBT：异步 worker 结果（TUI_VIEW_ASYNC_RESULT 出队时；
+	 * rc/text 语义 occ.c 定义——向导验证 0=成功 1=失败 2=取消） ---- */
+	void (*on_async_result)(void *ud, int rc, const char *text);
 } tui_view_hooks;
 
 /* 创建视图（hooks 各回调可 NULL）。非 tty 的判定在 tui_view_run。 */
@@ -127,6 +140,13 @@ void tui_view_overlay_status(tui_view *v, const char *msg, int is_err);
 int tui_view_overlay_open(const tui_view *v);
 /* 立即渲染一帧（向导阻塞验证前预渲染状态；主线程、run 内调用） */
 void tui_view_paint(tui_view *v);
+/*
+ * OCC-DEBT：busy 态（异步验证中）：①主循环按运行中口径常刷（spinner
+ * 动画）；②覆盖层状态行前缀 spinner（tui_overlay_busy）；③覆盖层
+ * dialog.close（Esc）不再关面板——改派 on_overlay_key "overlay.cancel"
+ * （返回 0=已处理留步；非 0=回落正常关闭）。
+ */
+void tui_view_set_busy(tui_view *v, int on);
 
 #ifdef __cplusplus
 }

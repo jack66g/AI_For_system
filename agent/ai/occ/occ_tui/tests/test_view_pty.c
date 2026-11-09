@@ -16,6 +16,12 @@
  *   I. /help 真实语义（T9 收尾）：/compact 换窗与 /shell bash 文案进字节流、
  *      假占位归属（T9d/T9e）零残留（命令本体已接真：occ_ac_compact_now
  *      换窗 / fork bash 重建 view——文案不得再谎称归后续棒）
+ *   J. 历史回放（OCC-DEBT）：HIST_* 事件 → 分隔行/user 行/「OCC · 回放」
+ *      footer 进字节流（occ.c 侧 db→事件端到端由 test_replay+取证脚本承）
+ *   K. 向导异步验证（OCC-DEBT）：输入 key → busy spinner 帧字节 + Esc →
+ *      overlay.cancel 取消 → 「已取消…重试」留步（面板不关）+ 收口
+ *   L. /models 非对话（OCC-DEBT）：默认过滤非对话条目；ctrl+t → 显示
+ *      全部 + dim + 「·非对话」tag 标注字节
  *
  * 渲染断言用子串（字节流含帧 diff/SGR 增量，逐字节 golden 不稳定——
  * 细粒度 SGR golden 由 c1 test_render 91 断言与 test_chat 25 断言覆盖）。
@@ -54,6 +60,12 @@ struct mock {
 	volatile int stop;
 	int slow;			/* 1=长 turn（等中断） */
 	char model[64];			/* /models 选中后改写（F 场景） */
+	/* OCC-DEBT K：异步验证线程（busy spinner + Esc 取消） */
+	pthread_t wizth;
+	int wiz_live;
+	volatile int wiz_stop;
+	/* OCC-DEBT L：非对话显隐（模拟 occ.c 过滤态） */
+	int show_all;
 };
 
 /* 快 turn：50ms 后跨线程 post 回复 + 收口 */
@@ -136,6 +148,53 @@ static int mock_command(void *ud, const char *line)
 					 "Enter=switch · Esc=close");
 		return 0;
 	}
+	if (!strcmp(line, "/replay")) {
+		/* J：模拟 occ.c 回放投递（db→事件由 occ 级 test_replay 承） */
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
+				    NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_SEP,
+				    "⋯ 更早 2 条消息未回放", 0, NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_USER,
+				    "HISTQ-user-line", 0, NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_BEGIN, NULL, 0,
+				    NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_TEXT, "HISTA-asst-line",
+				    0, NULL, 0);
+		(void)tui_view_post(m->view, TUI_VIEW_TOOL_START, "bash",
+				    0, "{\"cmd\":\"echo hi\"}", 0);
+		(void)tui_view_post(m->view, TUI_VIEW_TOOL_END, "bash", 0,
+				    "hi", 0);
+		(void)tui_view_post(m->view, TUI_VIEW_TURN_END, "OCC · 回放",
+				    0, NULL, 0);
+		return 0;
+	}
+	if (!strcmp(line, "/wiz")) {
+		/* K：向导 3/4 key 输入面板（模拟 occ.c wiz_open_key） */
+		(void)tui_view_open_input(m->view, 98,
+					  "add key · 3/4 API key",
+					  "粘贴 key（掩码显示）", NULL, 1);
+		return 0;
+	}
+	if (!strcmp(line, "/models2")) {
+		/* L：模拟 occ.c /models 过滤态（非对话默认隐藏） */
+		tui_ov_item it[2];
+
+		memset(it, 0, sizeof(it));
+		snprintf(it[0].text, sizeof(it[0].text), "chat-model");
+		snprintf(it[0].tag, sizeof(it[0].tag), "prov-a");
+		if (m->show_all) {
+			snprintf(it[1].text, sizeof(it[1].text), "emb-model");
+			snprintf(it[1].tag, sizeof(it[1].tag),
+				 "prov-a ·非对话");
+			it[1].flags = TUI_OV_DIM;
+			(void)tui_view_open_list(m->view, 97, "models", it, 2,
+						 1, "ctrl+t 非对话显隐");
+		} else {
+			(void)tui_view_open_list(m->view, 97, "models", it, 1,
+						 1, "ctrl+t 非对话显隐");
+		}
+		return 0;
+	}
 	return 1;			/* 未知 → view 提示 */
 }
 
@@ -154,6 +213,89 @@ static int mock_overlay_submit(void *ud, int ov_id, int idx)
 		return 1;
 	tui_view_close_overlay(m->view);
 	return 0;
+}
+
+/* ---- K：异步验证（模拟 occ.c wiz 验证 worker：忙等取消/超时收口） ---- */
+
+static void *mock_verify_thread(void *arg)
+{
+	struct mock *m = arg;
+	int i;
+
+	for (i = 0; i < 60 && !m->wiz_stop; i++)
+		usleep(50000);		/* 最多 3s（超时=成功路径兜底） */
+	(void)tui_view_post(m->view, TUI_VIEW_ASYNC_RESULT,
+			    m->wiz_stop ? "cancelled" : "", 0, NULL,
+			    m->wiz_stop ? 2 : 0);
+	return NULL;
+}
+
+/* 输入态 Enter（ov 98=key 面板）：启验证线程 + busy spinner */
+static int mock_overlay_input(void *ud, int ov_id, const char *text,
+			      size_t len)
+{
+	struct mock *m = ud;
+
+	(void)text;
+	if (ov_id != 98 || len == 0)
+		return 1;
+	if (m->wiz_live) {
+		pthread_join(m->wizth, NULL);
+		m->wiz_live = 0;
+	}
+	m->wiz_stop = 0;
+	if (pthread_create(&m->wizth, NULL, mock_verify_thread, m) != 0)
+		return 1;
+	m->wiz_live = 1;
+	tui_view_overlay_status(m->view, "验证中…（1-token 实测，Esc 取消）",
+				0);
+	tui_view_set_busy(m->view, 1);
+	return 0;
+}
+
+/* busy 态 Esc（view 改派 overlay.cancel）/ ctrl+t（model.nonchat） */
+static int mock_overlay_key(void *ud, int ov_id, const char *action,
+			    int idx)
+{
+	struct mock *m = ud;
+
+	(void)idx;
+	if (!strcmp(action, "overlay.cancel")) {
+		if (!m->wiz_live)
+			return 1;	/* 回落正常关闭 */
+		m->wiz_stop = 1;
+		tui_view_overlay_status(m->view, "取消验证中…", 0);
+		return 0;
+	}
+	if (ov_id == 97 && !strcmp(action, "model.nonchat")) {
+		m->show_all = !m->show_all;
+		(void)mock_command(m, "/models2");	/* 重开反映过滤态 */
+		tui_view_overlay_status(m->view, m->show_all ?
+					"已显示全部（非对话 dim 标注）" :
+					"非对话条目已隐藏（默认）", 0);
+		return 0;
+	}
+	return 1;
+}
+
+/* 异步结果（主循环 drain）：取消=留步；成功=关面板+notice */
+static void mock_async_result(void *ud, int rc, const char *text)
+{
+	struct mock *m = ud;
+
+	(void)text;
+	if (m->wiz_live) {
+		pthread_join(m->wizth, NULL);
+		m->wiz_live = 0;
+	}
+	tui_view_set_busy(m->view, 0);
+	if (rc == 0) {
+		tui_view_close_overlay(m->view);
+		tui_view_notice(m->view, "WIZ_SAVED");
+	} else if (rc == 2) {
+		tui_view_overlay_status(m->view,
+					"已取消——可修改 key 后回车重试", 0);
+	}
 }
 
 static int mock_meta(void *ud, char *buf, size_t cap)
@@ -195,6 +337,11 @@ static void mock_shutdown(void *ud)
 		pthread_join(m->th, NULL);
 		m->th_live = 0;
 	}
+	m->wiz_stop = 1;
+	if (m->wiz_live) {
+		pthread_join(m->wizth, NULL);
+		m->wiz_live = 0;
+	}
 }
 
 /* ---- 子进程：跑完整视图 ---- */
@@ -218,6 +365,10 @@ static int child_main(void)
 	h.fill_sessions = mock_sessions;
 	h.on_shutdown = mock_shutdown;
 	h.on_overlay_submit = mock_overlay_submit;
+
+	h.on_overlay_input = mock_overlay_input;
+	h.on_overlay_key = mock_overlay_key;
+	h.on_async_result = mock_async_result;
 
 	m.view = tui_view_create(&h);
 	if (!m.view)
@@ -336,10 +487,12 @@ static int read_until_contains(int fd, char *buf, int cap, int *have,
 }
 
 /* 在 pty 上跑一轮子进程：进屏 → 写 keys → 等 needles（第 after_n 根
- * 出现后补写 keys2，供中断场景中途注入 Esc）→ 收尾 exit_keys → 等 leave */
+ * 出现后补写 keys2、第 after2 根后补写 keys3——中途多点注入，供中断/
+ * 异步取消场景）→ 收尾 exit_keys → 等 leave */
 static int run_scenario(const char *keys, size_t keys_len,
 			const char *const *needles, int nneedles, int after_n,
 			const char *keys2, size_t keys2_len,
+			int after2, const char *keys3, size_t keys3_len,
 			const char *exit_keys, size_t exit_len,
 			char *out, int *out_len, int slow)
 {
@@ -398,10 +551,24 @@ static int run_scenario(const char *keys, size_t keys_len,
 			if (write(pt.master, keys2, keys2_len) < 0)
 				rc = -1;
 		}
+		if (keys3 && i == after2) {
+			if (write(pt.master, keys3, keys3_len) < 0)
+				rc = -1;
+		}
 	}
 	if (rc == 0 && exit_len > 0) {
-		if (write(pt.master, exit_keys, exit_len) < 0)
-			rc = -1;
+		if (exit_keys[0] == '\x1b' && exit_len > 1) {
+			/* 首字节 Esc 须单独写——与后续字节同批会被 c1 解析成
+			 * Alt+<char>（真实终端人类时序；c3 取证教训 #8） */
+			if (write(pt.master, exit_keys, 1) < 0)
+				rc = -1;
+			usleep(60000);		/* > 25ms 孤立 Esc 结算窗 */
+			if (write(pt.master, exit_keys + 1, exit_len - 1) < 0)
+				rc = -1;
+		} else {
+			if (write(pt.master, exit_keys, exit_len) < 0)
+				rc = -1;
+		}
 		/* leave 序列 = 子进程收尾完成 */
 		if (read_until_contains(pt.master, out, OUT_CAP, &have,
 					"\x1b[?1049l", 5000) != 0) {
@@ -453,7 +620,7 @@ int main(void)
 			"ses_aaaa",		/* 会话行（侧栏 id 截 8 位） */
 		};
 
-		rc = run_scenario("", 0, needles, 5, -1, NULL, 0,
+		rc = run_scenario("", 0, needles, 5, -1, NULL, 0, -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "A-enter-screen-render");
 		OK(find_bytes(out, out_len, "\x1b[?1049h") != NULL,
@@ -468,6 +635,7 @@ int main(void)
 
 		/* 键入等回显；再 8 次退格清空 + /exit 退出 */
 		rc = run_scenario("helloTUI", 8, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0,
 				  "\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f/exit\r",
 				  14, out, &out_len, 0);
 		OK(rc == 0, "B-input-echo-exit");
@@ -480,6 +648,7 @@ int main(void)
 		const char *needles[] = { "helloTUI", "MOCK_REPLY" };
 
 		rc = run_scenario("helloTUI\r", 9, needles, 2, -1, NULL, 0,
+				  -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "C-submit-stream");
 		OK(find_bytes(out, out_len, "MOCK_REPLY") != NULL,
@@ -498,6 +667,7 @@ int main(void)
 		char esc = 0x1b;
 
 		rc = run_scenario("x\r", 2, needles, 2, 0, &esc, 1,
+				  -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 1 /* slow */);
 		OK(rc == 0, "D-interrupt-path");
 		OK(find_bytes(out, out_len, "GOT_INTERRUPT") != NULL,
@@ -514,6 +684,7 @@ int main(void)
 
 		/* exit_keys=NULL：ctrl+d 本身即退出，只等子进程 rc=0 */
 		rc = run_scenario(&ctrl_d, 1, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0,
 				  NULL, 0, out, &out_len, 0);
 		OK(rc == 0, "E1-ctrl-d-exit");
 	}
@@ -523,6 +694,7 @@ int main(void)
 		const char *needles[] = { "sessions" };
 
 		rc = run_scenario("quit\r", 5, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0,
 				  NULL, 0, out, &out_len, 0);
 		OK(rc == 0, "E2-quit-word-exit");
 	}
@@ -540,6 +712,7 @@ int main(void)
 
 		rc = run_scenario(keys, sizeof(keys) - 1, needles, 2, 0,
 				  keys2, sizeof(keys2) - 1,
+				  -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "F-models-overlay-switch");
 		OK(find_bytes(out, out_len, "model-beta") != NULL,
@@ -572,7 +745,8 @@ int main(void)
 		setenv("OCC_KEYMAP", kmppath, 1);
 		/* ctrl+g（0x07）arm leader → q 解析 <leader>q=app.exit → 退出 */
 		rc = run_scenario(keys, sizeof(keys) - 1, needles, 1, -1,
-				  NULL, 0, NULL, 0, out, &out_len, 0);
+				  NULL, 0, -1, NULL, 0, NULL, 0, out,
+				  &out_len, 0);
 		OK(rc == 0, "G-keymap-leader-override");
 		unsetenv("OCC_KEYMAP");
 		unlink(kmppath);
@@ -599,8 +773,8 @@ int main(void)
 			}
 		}
 		setenv("OCC_THEME", thpath, 1);
-		rc = run_scenario("", 0, needles, 2, -1, NULL, 0,
-				  "/exit\r", 6, out, &out_len, 0);
+		rc = run_scenario("", 0, needles, 2, -1, NULL, 0, -1, NULL,
+				  0, "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "H-theme-file-load");
 		OK(find_bytes(out, out_len, "38;5;196") != NULL,
 		   "H-accent-sgr-bytes");
@@ -619,6 +793,7 @@ int main(void)
 		};
 
 		rc = run_scenario("/help\r", 6, needles, 2, -1, NULL, 0,
+				  -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "I-help-real-semantics");
 		OK(find_bytes(out, out_len, "autocondense") != NULL,
@@ -629,6 +804,89 @@ int main(void)
 	 * 源码 grep 零残留口径连测试文件一并成立） */
 		OK(find_bytes(out, out_len, "\xe5\xbd\x92 T9") == NULL,
 		   "I-help-no-t9-placeholder");
+	}
+
+	/* ---- J. 历史回放（OCC-DEBT）：/replay → HIST 事件渲染进字节流 ----
+	 * 断言：分隔行（更早 N 条）+ user 消息行 + 工具行 + 「OCC · 回放」
+	 * footer——渲染形态与 live 同路（db→事件规划链由 test_replay 承）。 */
+	{
+		const char *needles[] = {
+			"HISTQ-user-line",	/* 回放 user 消息 */
+			"HISTA-asst-line",	/* 回放 assistant 正文 */
+			"OCC \xc2\xb7 \xe5\x9b\x9e\xe6\x94\xbe"	/* OCC · 回放 */
+		};
+		static const char keys[] = "/replay\r";
+
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 3, -1,
+				  NULL, 0, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "J-hist-replay-render");
+		OK(find_bytes(out, out_len,
+			      "\xe2\x8b\xaf \xe6\x9b\xb4\xe6\x97\xa9 2") !=
+		   NULL, "J-hist-separator");		/* ⋯ 更早 2 */
+		OK(find_bytes(out, out_len, "HISTQ-user-line") != NULL,
+		   "J-hist-user-line");
+		OK(find_bytes(out, out_len,
+			      "OCC \xc2\xb7 \xe5\x9b\x9e\xe6\x94\xbe") !=
+		   NULL, "J-hist-footer");
+		/* 工具行 ✓ bash（回放折叠形态=live 工具行） */
+		OK(find_bytes(out, out_len, "\xe2\x9c\x93 bash") != NULL,
+		   "J-hist-tool-row");
+	}
+
+	/* ---- K. 向导异步验证（OCC-DEBT）：busy spinner + Esc 取消留步 ----
+	 * /wiz 开 key 面板 → 输入 sk-mock 并回车 → 验证线程起（busy spinner
+	 * 帧字节=braille e2 a0 xx）→ 等「验证中」渲染后注入 Esc → 取消路径
+	 * （overlay.cancel → 线程停 → ASYNC_RESULT rc=2 → 留步提示）→
+	 * Esc 关面板（busy 已除）→ /exit 退出。 */
+	{
+		const char *needles[] = {
+			"add key",		/* key 输入面板 */
+			"验证中",		/* busy 状态行 */
+			"已取消——可修改 key 后回车重试"	/* 取消留步（面板未关） */
+		};
+		static const char keys[] = "/wiz\r";
+		static const char keys2[] = "sk-mock-key\r";
+		static const char keys3[] = "\x1b";		/* Esc=取消 */
+		static const char exit_keys[] = "\x1b/exit\r";	/* Esc 关面板再退 */
+
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 3, 0,
+				  keys2, sizeof(keys2) - 1,
+				  1, keys3, sizeof(keys3) - 1,
+				  exit_keys, sizeof(exit_keys) - 1,
+				  out, &out_len, 0);
+		OK(rc == 0, "K-wiz-async-cancel");
+		/* spinner 帧字节（U+2800 段 braille：e2 a0 80..bf） */
+		OK(find_bytes(out, out_len, "\xe2\xa0") != NULL,
+		   "K-busy-spinner-bytes");
+		/* 掩码输入（mask=1：明文 key 不得进字节流） */
+		OK(find_bytes(out, out_len, "sk-mock-key") == NULL,
+		   "K-key-not-echoed");
+		/* 留步提示渲染=面板仍开（状态行只在面板上） */
+		OK(find_bytes(out, out_len, "已取消") != NULL,
+		   "K-cancel-stay-open");
+	}
+
+	/* ---- L. /models 非对话（OCC-DEBT）：默认过滤 + ctrl+t 显示全部 ---- */
+	{
+		const char *needles[] = {
+			"chat-model",		/* 默认视图（非对话已隐藏） */
+			"emb-model"		/* ctrl+t 后非对话条目出现 */
+		};
+		static const char keys[] = "/models2\r";
+		static const char keys2[] = "\x14";	/* ctrl+t */
+		static const char exit_keys[] = "\x1b/exit\r";
+
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 2, 0,
+				  keys2, sizeof(keys2) - 1,
+				  -1, NULL, 0,
+				  exit_keys, sizeof(exit_keys) - 1,
+				  out, &out_len, 0);
+		OK(rc == 0, "L-nonchat-toggle");
+		/* ctrl+t 后 tag 标注「·非对话」（UTF-8 字节） */
+		OK(find_bytes(out, out_len,
+			      "\xc2\xb7\xe9\x9d\x9e\xe5\xaf\xb9\xe8\xaf\x9d") !=
+		   NULL, "L-nonchat-tag-bytes");	/* ·非对话 */
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);
