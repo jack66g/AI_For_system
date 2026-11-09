@@ -9,12 +9,19 @@
  *
  * schema 外部验证：测试另开 sqlite3 连接（独立观察者）直查
  * sqlite_master/PRAGMA——证明 occ_db_open 的产物对任何标准工具可见。
+ *
+ * B2（T9B2 §8-4 → 波次 B）：写锁竞态钉——另一连接持 RESERVED 时
+ * occ 单语句写（set_status）必须经 IMMEDIATE+busy_timeout 等待后
+ * 成功（修前 deferred 隐式写升级瞬时 SQLITE_BUSY，不进 busy
+ * handler）。多进程面由 tests/bllm_conc_drill.sh 压测钉。
  */
 #define _POSIX_C_SOURCE 200809L
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <sqlite3.h>
@@ -30,6 +37,45 @@ static int n_ok;
 } while (0)
 
 static char tmpdir[128];
+
+/* ---- B2 写锁竞态钉 ---- */
+static const char *g_b2_path;
+static volatile int g_b2_held;
+
+/* ms 睡（nanosleep——POSIX.1-2008 无 usleep 严格面） */
+static void b2_msleep(int ms)
+{
+	struct timespec ts;
+
+	ts.tv_sec = 0;
+	ts.tv_nsec = (long)ms * 1000 * 1000;
+	nanosleep(&ts, NULL);
+}
+
+/* 独立连接持 RESERVED（BEGIN IMMEDIATE+UPDATE 未提交）150ms 后释放 */
+static void *b2_hold_reserved_thread(void *unused)
+{
+	sqlite3 *h = NULL;
+	char sql[128];
+
+	(void)unused;
+	if (sqlite3_open_v2(g_b2_path, &h, SQLITE_OPEN_READWRITE, NULL)
+	    != SQLITE_OK) {
+		if (h)
+			sqlite3_close(h);
+		return NULL;
+	}
+	sqlite3_exec(h, "PRAGMA busy_timeout=2000;", NULL, NULL, NULL);
+	snprintf(sql, sizeof(sql),
+		 "BEGIN IMMEDIATE; UPDATE occ_session SET title='b2hold'"
+		 " WHERE rowid=1;");
+	if (sqlite3_exec(h, sql, NULL, NULL, NULL) == SQLITE_OK)
+		g_b2_held = 1;
+	b2_msleep(150);
+	sqlite3_exec(h, "COMMIT;", NULL, NULL, NULL);
+	sqlite3_close(h);
+	return NULL;
+}
 
 /* 完整 UTF-8 序列校验（leading→continuation 链；孤立续字节=非法） */
 static int utf8_valid(const char *s)
@@ -429,6 +475,36 @@ int main(void)
 			sqlite3_close(h);
 		}
 		OK(count_msgs(s5.id) == 0, "fk-cascade-delete");
+	}
+
+	/* ---- B2：写锁竞态钉（RESERVED 持有者 + occ 单语句写） ---- */
+	{
+		pthread_t th;
+		char dbpath[256];
+		struct timeval t0, t1;
+		long el;
+		int rc, spin;
+
+		snprintf(dbpath, sizeof(dbpath), "%s/sessions.db", tmpdir);
+		g_b2_path = dbpath;
+		if (pthread_create(&th, NULL, b2_hold_reserved_thread, NULL)) {
+			OK(0, "b2-thread-create");
+		} else {
+			/* 等 RESERVED 真正到手（上限 2s） */
+			for (spin = 0; spin < 2000 && !g_b2_held; spin++)
+				b2_msleep(1);
+			OK(g_b2_held, "b2-reserved-held");
+			gettimeofday(&t0, NULL);
+			rc = occ_session_set_status(g_db, s.id, "running",
+						    err, sizeof(err));
+			gettimeofday(&t1, NULL);
+			pthread_join(th, NULL);
+			el = (t1.tv_sec - t0.tv_sec) * 1000 +
+			     (t1.tv_usec - t0.tv_usec) / 1000;
+			OK(rc == 0, "b2-set-status-waits-and-succeeds");
+			OK(el >= 100 && el < 4500,
+			   "b2-waited-not-instant-not-timeout");
+		}
 	}
 
 	/* ---- 收尾：半开事务由 close 回滚（fault 后库仍可用） ---- */

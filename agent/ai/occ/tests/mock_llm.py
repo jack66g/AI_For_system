@@ -24,6 +24,12 @@ T9b2 演练扩展（环境变量，缺省全关=旧行为不变）：
   OCC_MOCK_BIND        监听地址（缺省 127.0.0.1；重试演练用 127.0.0.2
                        ——非 loopback 字面量，避开 occ 的 forwarder→direct
                        兜底，绝不触真网）
+BLLM 波次 B 扩展（缺省全关=旧行为不变）：
+  OCC_MOCK_LENGTH_FIRST=1 → 第 1 个请求回 finish_reason=length 截断流
+                       （正文 LONGPART-A），其后请求回普通回复
+                       ——B1 OutputLimit 续跑链路演练
+  OCC_MOCK_RETRY_AFTER  失败响应附 Retry-After 头（B4 定向退避演练；
+                       值原样入头——"1"/"abc"/"3600" 覆盖正/畸/过大面）
 """
 import json
 import os
@@ -75,6 +81,18 @@ FAIL_N = int(os.environ.get("OCC_MOCK_FAIL_N", "0") or "0")
 ALWAYS_FAIL = os.environ.get("OCC_MOCK_ALWAYS_FAIL", "") == "1"
 FAIL_STATUS = int(os.environ.get("OCC_MOCK_FAIL_STATUS", "503") or "503")
 BIND = os.environ.get("OCC_MOCK_BIND", "127.0.0.1")
+LENGTH_FIRST = os.environ.get("OCC_MOCK_LENGTH_FIRST", "") == "1"
+RETRY_AFTER = os.environ.get("OCC_MOCK_RETRY_AFTER", "")
+
+# B1：OutputLimit 截断流（finish=length + 正文，无后续轮内容）
+LENGTH_SSE = (
+    'data: {"choices":[{"delta":{"role":"assistant","content":'
+    '"LONGPART-A"}}]}\n\n'
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+    'data: {"choices":[],"usage":{"prompt_tokens":40,'
+    '"completion_tokens":7}}\n\n'
+    'data: [DONE]\n\n'
+)
 
 state = {"n": 0}
 lock = threading.Lock()
@@ -111,12 +129,24 @@ class Handler(BaseHTTPRequestHandler):
                 {"error": {"message": "mock injected failure"}},
                 ensure_ascii=False,
             ).encode("utf-8")
-            self._send_bytes(FAIL_STATUS, "application/json; charset=utf-8",
-                             err)
+            if RETRY_AFTER:
+                # B4：失败响应附 Retry-After 头（值原样）
+                self.send_response(FAIL_STATUS)
+                self.send_header("Content-Type",
+                                 "application/json; charset=utf-8")
+                self.send_header("Retry-After", RETRY_AFTER)
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+            else:
+                self._send_bytes(FAIL_STATUS,
+                                 "application/json; charset=utf-8", err)
             return
 
         if TOOL_MODE and n == 1:
             payload_s = TOOL_SSE
+        elif LENGTH_FIRST and n == 1:
+            payload_s = LENGTH_SSE
         else:
             payload_s = SSE
         payload = payload_s.encode("utf-8")

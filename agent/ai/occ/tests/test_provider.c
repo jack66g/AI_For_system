@@ -101,6 +101,150 @@ int main(void)
 	CHECK(occ_chat_url(buf, sizeof(buf), OCC_PROTO_OPENAI_COMPAT, "") == -1,
 	      "url empty base -> -1");
 
+	/* ---- B3：direct 地址配置化 + conf 校验 + 人话报错 ---- */
+	{
+		char p2path[] = "/tmp/occ_test_model_b3_XXXXXX";
+		int fd2 = mkstemp(p2path);
+		occ_provider_config cfg;
+		occ_provider rp;
+		char err[256];
+
+		CHECK(fd2 >= 0, "b3 mkstemp fixture");
+		f = fdopen(fd2, "w");
+		fprintf(f, "[models.cloud]\n");
+		fprintf(f, "provider = \"deepseek\"\n");
+		fprintf(f, "model_name = \"deepseek-chat\"\n");
+		fprintf(f, "[models.directslot]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "model_name = \"m2\"\n");
+		fprintf(f, "base_url = \"http://127.0.0.1:9443\"\n");
+		fprintf(f, "direct_base_url = \"https://api.deepseek.com/v1\"\n");
+		fprintf(f, "[models.ovr]\n");
+		fprintf(f, "provider = \"deepseek\"\n");
+		fprintf(f, "direct_base_url = \"https://override.example/v1\"\n");
+		fprintf(f, "[provider.deepseek]\n");
+		fprintf(f, "type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"http://127.0.0.1:9443\"\n");
+		fprintf(f, "direct_base_url = \"https://direct-from-provider/v1\"\n");
+		fprintf(f, "key = \"sk-testonly-not-real\"\n");
+		fclose(f);
+
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p2path, NULL) == 0,
+		      "b3 load_all ok");
+		CHECK(cfg.nslots == 3 && cfg.nproviders == 1, "b3 sections");
+
+		/* 引用式无槽位级 direct → 取 provider 段 direct */
+		memset(&rp, 0, sizeof(rp));
+		CHECK(occ_provider_resolve(&cfg, "cloud", &rp) == 0,
+		      "b3 resolve cloud");
+		CHECK(!strcmp(rp.direct_base_url,
+			      "https://direct-from-provider/v1"),
+		      "b3 direct from provider section");
+		occ_provider_free(&rp);
+
+		/* 直填式槽位级 direct */
+		memset(&rp, 0, sizeof(rp));
+		CHECK(occ_provider_resolve(&cfg, "directslot", &rp) == 0,
+		      "b3 resolve directslot");
+		CHECK(!strcmp(rp.direct_base_url,
+			      "https://api.deepseek.com/v1"),
+		      "b3 direct from slot");
+		CHECK(!strcmp(rp.base_url, "http://127.0.0.1:9443"),
+		      "b3 base_url proxy kept");
+		occ_provider_free(&rp);
+
+		/* 槽位级覆盖 provider 段 */
+		memset(&rp, 0, sizeof(rp));
+		CHECK(occ_provider_resolve(&cfg, "ovr", &rp) == 0,
+		      "b3 resolve ovr");
+		CHECK(!strcmp(rp.direct_base_url, "https://override.example/v1"),
+		      "b3 slot direct overrides provider");
+		occ_provider_free(&rp);
+
+		/* 未配置 direct 的既有 L1 形态：direct 为空（loop 走旧缺省
+		 * 判形——B3 兼容语义） */
+		/* resolve_ex：人话报错面 */
+		memset(&rp, 0, sizeof(rp));
+		err[0] = '\0';
+		CHECK(occ_provider_resolve_ex(&cfg, "nosuch", &rp, err,
+					      sizeof(err)) == -1 &&
+		      strstr(err, "models.nosuch") != NULL,
+		      "b3 resolve_ex unknown slot human error");
+		CHECK(occ_provider_resolve_ex(&cfg, "cloud", &rp, err,
+					      sizeof(err)) == 0,
+		      "b3 resolve_ex ok path");
+		occ_provider_free(&rp);
+
+		occ_provider_config_free(&cfg);
+		unlink(p2path);
+	}
+
+	/* B3：occ_provider_validate_url 人话校验矩阵 */
+	{
+		char err[256];
+
+		CHECK(occ_provider_validate_url("https://api.x.com/v1", err,
+						sizeof(err)) == 0,
+		      "b3 url valid https");
+		CHECK(occ_provider_validate_url("http://127.0.0.1:9443", err,
+						sizeof(err)) == 0,
+		      "b3 url valid http loopback");
+		CHECK(occ_provider_validate_url("ftp://x.example", err,
+						sizeof(err)) == -1 &&
+		      strstr(err, "http") != NULL,
+		      "b3 url bad scheme human msg");
+		CHECK(occ_provider_validate_url("https://", err,
+						sizeof(err)) == -1 &&
+		      strstr(err, "主机名") != NULL,
+		      "b3 url empty host");
+		CHECK(occ_provider_validate_url("https://a b.com", err,
+						sizeof(err)) == -1 &&
+		      strstr(err, "非法字符") != NULL,
+		      "b3 url space rejected");
+		CHECK(occ_provider_validate_url("https://x/\"q", err,
+						sizeof(err)) == -1,
+		      "b3 url quote rejected");
+		CHECK(occ_provider_validate_url("", err, sizeof(err)) == -1,
+		      "b3 url empty");
+		CHECK(occ_provider_validate_url(NULL, err, sizeof(err)) == -1,
+		      "b3 url NULL");
+	}
+
+	/* B3：坏 direct_base_url → resolve_ex 拒收（conf 校验门） */
+	{
+		char p3path[] = "/tmp/occ_test_model_b3b_XXXXXX";
+		int fd3 = mkstemp(p3path);
+		occ_provider_config cfg;
+		occ_provider rp;
+		char err[256];
+
+		CHECK(fd3 >= 0, "b3b mkstemp fixture");
+		f = fdopen(fd3, "w");
+		fprintf(f, "[models.bad]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://ok.example/v1\"\n");
+		fprintf(f, "direct_base_url = \"not-a-url\"\n");
+		fclose(f);
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p3path, NULL) == 0,
+		      "b3b load_all ok");
+		memset(&rp, 0, sizeof(rp));
+		err[0] = '\0';
+		CHECK(occ_provider_resolve_ex(&cfg, "bad", &rp, err,
+					      sizeof(err)) == -1 &&
+		      strstr(err, "direct_base_url 非法") != NULL,
+		      "b3b bad direct rejected with human msg");
+		CHECK(rp.api_key == NULL && rp.direct_base_url[0] == '\0',
+		      "b3b no leak on reject");
+		/* 旧 resolve（无人话面）同样拒收 */
+		memset(&rp, 0, sizeof(rp));
+		CHECK(occ_provider_resolve(&cfg, "bad", &rp) == -1,
+		      "b3b legacy resolve also rejects");
+		occ_provider_config_free(&cfg);
+		unlink(p3path);
+	}
+
 	if (fails) {
 		printf("test_provider: %d FAIL(s)\n", fails);
 		return 1;

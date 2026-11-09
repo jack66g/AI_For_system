@@ -2,8 +2,10 @@
 /*
  * retry.c - occ_llm 自动重试参数族与错误分级（T9b2；OCD §7.2 数值）
  *
- * 策略（opencode model-retry.ts:18-46 对齐；provider Retry-After 未接
- * ——http_client 不透传响应头，诚实差异见 T9B2-REPORT）：
+ * 策略（opencode model-retry.ts:18-46 对齐；B4（T9B2 §8-5）清欠：
+ * 429/503 带 Retry-After 时 occ_llm_retry_after_ms 解析服务端定向
+ * 退避替代指数基数，经 https_capture_resp_header 响应头捕获通道
+ * 透传——畸形/过大钳制见该函数头注）：
  *   指数退避 2s 起步、单次间隔封顶 10s、常规类最多 10 次、超时类最多
  *   3 次、带抖动（±10%，在 llm_call 侧施加；本文件给确定性基数）。
  *
@@ -108,6 +110,59 @@ long long occ_llm_retry_backoff_ms(int attempt)
 	if (d > rp.cap_ms)
 		d = rp.cap_ms;
 	return d;
+}
+
+/*
+ * occ_llm_retry_after_ms - B4（T9B2 §8-5）：Retry-After 响应头值 →
+ * 等待毫秒。仅 delta-seconds 形态（"120"=120s）；HTTP-date 形态
+ * （RFC 9110 允许）不支持——LLM API 实况（OpenAI/Anthropic/DeepSeek）
+ * 均用秒数，date 形态返回 -1 回指数基数（诚实边界，BLLM-REPORT §7）。
+ *   返回 >=0：等待毫秒（0=服务端指示立即重试）
+ *   返回 -1：畸形/NULL/空/非纯数字/带符号/溢出 → 调用方回指数退避
+ * 上限保护：v_ms > cap_ms → 钳制 cap_ms（cap<=0 视为不钳制）。
+ */
+long long occ_llm_retry_after_ms(const char *v, long long cap_ms)
+{
+	long long sec = 0;
+	size_t i;
+
+	if (!v)
+		return -1;
+	/* 前后容忍 OWS（http 层捕获已去值外空白，这里双保险） */
+	while (*v == ' ' || *v == '\t')
+		v++;
+	if (!*v)
+		return -1;
+	for (i = 0; v[i]; i++) {
+		char c = v[i];
+
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			/* 尾随空白：其后必须再无内容 */
+			size_t j = i;
+
+			while (v[j] == ' ' || v[j] == '\t' || v[j] == '\r' ||
+			       v[j] == '\n')
+				j++;
+			if (v[j] != '\0')
+				return -1;
+			break;
+		}
+		if (c < '0' || c > '9')
+			return -1;	/* 负号/小数/日期形态/杂字符 */
+		if (sec > 99999999)	/* 已 9 位：再进位必超界 → 钳制 */
+			sec = 999999999;
+		else
+			sec = sec * 10 + (c - '0');
+	}
+	if (sec > 999999999)
+		sec = 999999999;
+	{
+		long long ms = sec * 1000;
+
+		if (cap_ms > 0 && ms > cap_ms)
+			ms = cap_ms;
+		return ms;
+	}
 }
 
 /* 大小写不敏感子串（-std=c11 无 strcasestr，自写） */

@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sqlite3.h>
@@ -318,16 +319,66 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 		free(db);
 		return NULL;
 	}
-	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2 迁移 */
+	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2 迁移。
+	 * B2（T9B2 §8-4 → NEXT-PLAN 波次 B）两处并发面修：
+	 *  a) DDL+迁移包 BEGIN IMMEDIATE——deferred 隐式写事务的
+	 *     SHARED→EXCLUSIVE 升级瞬时 SQLITE_BUSY（死锁回避路径不进
+	 *     busy handler）；IMMEDIATE 先取写锁，等待走 busy_timeout，
+	 *     IF NOT EXISTS/PRAGMA user_version 读检查在写事务内。
+	 *  b) 零字节新库初始化竞态：并发首开时 BEGIN IMMEDIATE 对 0 长
+	 *     度文件可能即时 SQLITE_BUSY（另一进程正在建库，pager 立即
+	 *     让位不进 busy handler）——重试环兜底（实测 N=8 并发首开
+	 *     1-3/8 失败 → 重试后全绿；tests/bllm_conc_drill.sh 钉）。 */
 	if (sqlite3_exec(db->h, "PRAGMA busy_timeout=5000;"
-			"PRAGMA foreign_keys=ON;", NULL, NULL, &perr) != SQLITE_OK ||
-	    sqlite3_exec(db->h, OCC_DDL, NULL, NULL, &perr) != SQLITE_OK ||
-	    occ_migrate_v2(db, err, errlen)) {
-		set_err(err, errlen, "occ_db_open: %s",
-			perr ? perr : (err && err[0]) ? err : "init failed");
+			"PRAGMA foreign_keys=ON;", NULL, NULL, &perr) != SQLITE_OK) {
+		set_err(err, errlen, "occ_db_open[pragma]: %s",
+			perr ? perr : "init failed");
 		sqlite3_free(perr);
 		occ_db_close(db);
 		return NULL;
+	}
+	{
+		int attempt;
+
+		for (attempt = 0; attempt < 20; attempt++) {
+			int ec;
+
+			sqlite3_free(perr);
+			perr = NULL;
+			err[0] = '\0';
+			if (sqlite3_exec(db->h, "BEGIN IMMEDIATE", NULL,
+					 NULL, &perr) != SQLITE_OK)
+				ec = sqlite3_errcode(db->h);
+			else if (sqlite3_exec(db->h, OCC_DDL, NULL, NULL,
+					      &perr) != SQLITE_OK)
+				ec = sqlite3_errcode(db->h);
+			else if (occ_migrate_v2(db, err, errlen))
+				ec = SQLITE_ERROR;
+			else if (sqlite3_exec(db->h, "COMMIT", NULL, NULL,
+					      &perr) != SQLITE_OK)
+				ec = sqlite3_errcode(db->h);
+			else
+				return db;		/* 全链成功 */
+			/* BUSY/LOCKED（并发建库竞态）→ 回滚后 50ms 重试
+			 * （至多 20 次≈1s 外加各步 busy_timeout 等待）；
+			 * 其余错误终局报错 */
+			sqlite3_exec(db->h, "ROLLBACK", NULL, NULL, NULL);
+			if ((ec == SQLITE_BUSY || ec == SQLITE_LOCKED) &&
+			    attempt + 1 < 20) {
+				struct timespec ts;
+
+				ts.tv_sec = 0;
+				ts.tv_nsec = 50 * 1000 * 1000;
+				nanosleep(&ts, NULL);
+				continue;
+			}
+			set_err(err, errlen, "occ_db_open: %s",
+				perr ? perr : (err && err[0]) ? err :
+				sqlite3_errmsg(db->h));
+			sqlite3_free(perr);
+			occ_db_close(db);
+			return NULL;
+		}
 	}
 	return db;
 }
@@ -380,23 +431,64 @@ static int tx_commit(occ_db *db, char *err, size_t errlen)
 	return 0;
 }
 
-/* 单串绑定执行（UPDATE 类） */
+/* 单条写语句包 IMMEDIATE 事务执行（B2：裸 sqlite3_exec 写是 deferred
+ * 隐式写事务——并发下 SHARED→EXCLUSIVE 升级瞬时 SQLITE_BUSY，不进
+ * busy handler；IMMEDIATE 先取写锁，等待走 busy_timeout。读语句与
+ * 多语句复合事务不走此路。） */
+static int exec_tx(occ_db *db, const char *sql, const char *what,
+		   char *err, size_t errlen)
+{
+	char *perr = NULL;
+
+	if (sqlite3_exec(db->h, "BEGIN IMMEDIATE", NULL, NULL, &perr) !=
+	    SQLITE_OK) {
+		set_err(err, errlen, "%s tx: %s", what,
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		return -1;
+	}
+	if (sqlite3_exec(db->h, sql, NULL, NULL, &perr) != SQLITE_OK) {
+		set_err(err, errlen, "%s: %s", what,
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		tx_rollback(db);
+		return -1;
+	}
+	if (sqlite3_exec(db->h, "COMMIT", NULL, NULL, &perr) != SQLITE_OK) {
+		set_err(err, errlen, "%s commit: %s", what,
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		tx_rollback(db);
+		return -1;
+	}
+	return 0;
+}
+
+/* 单串绑定执行（UPDATE 类；B2：同包 IMMEDIATE——绑定语句裸跑同为
+ * deferred 隐式写） */
 static int run_s1(occ_db *db, const char *sql, const char *s1,
 		  char *err, size_t errlen)
 {
 	sqlite3_stmt *st = NULL;
 
+	if (tx_begin(db, err, errlen))
+		return -1;
 	if (sqlite3_prepare_v2(db->h, sql, -1, &st, NULL) != SQLITE_OK) {
 		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(db->h));
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_bind_text(st, 1, s1, -1, SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_DONE) {
-		set_err(err, errlen, "step: %s", sqlite3_errmsg(db->h));
+		set_err(err, errlen, "step[s1 %.32s]: %s", sql,
+			sqlite3_errmsg(db->h));
 		sqlite3_finalize(st);
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_finalize(st);
+	if (tx_commit(db, err, errlen))
+		return -1;
 	return 0;
 }
 
@@ -612,8 +704,13 @@ int occ_session_create(occ_db *db, const char *model,
 		set_err(err, errlen, "occ_session_create: urandom");
 		return -1;
 	}
+	/* B2：两枚 INSERT 包单条 IMMEDIATE 事务（裸 INSERT 为 deferred
+	 * 隐式写——并发开库实测瞬时 SQLITE_BUSY，见 bllm_conc_drill） */
+	if (tx_begin(db, err, errlen))
+		return -1;
 	if (sqlite3_prepare_v2(db->h, ins, -1, &st, NULL) != SQLITE_OK) {
 		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(db->h));
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
@@ -622,21 +719,26 @@ int occ_session_create(occ_db *db, const char *model,
 	if (sqlite3_step(st) != SQLITE_DONE) {
 		set_err(err, errlen, "step: %s", sqlite3_errmsg(db->h));
 		sqlite3_finalize(st);
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_finalize(st);
 	/* occ_window：a3 恒 native 单行（窗口裁剪 b 棒 / 换窗 d 棒） */
 	if (sqlite3_prepare_v2(db->h, win, -1, &st, NULL) != SQLITE_OK) {
 		set_err(err, errlen, "prepare win: %s", sqlite3_errmsg(db->h));
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_DONE) {
 		set_err(err, errlen, "step win: %s", sqlite3_errmsg(db->h));
 		sqlite3_finalize(st);
+		tx_rollback(db);
 		return -1;
 	}
 	sqlite3_finalize(st);
+	if (tx_commit(db, err, errlen))
+		return -1;
 	if (out) {
 		snprintf(out->id, sizeof(out->id), "%s", id);
 		snprintf(out->model, sizeof(out->model), "%s", model);
@@ -776,10 +878,8 @@ int occ_session_set_status(occ_db *db, const char *id, const char *status,
 	snprintf(sql, sizeof(sql),
 		 "UPDATE occ_session SET status='%s', updated=%lld"
 		 " WHERE id='%s'", status, now_ms(), id);
-	if (sqlite3_exec(db->h, sql, NULL, NULL, NULL) != SQLITE_OK) {
-		set_err(err, errlen, "set_status: %s", sqlite3_errmsg(db->h));
+	if (exec_tx(db, sql, "set_status", err, errlen))
 		return -1;
-	}
 	return 0;
 }
 
@@ -811,10 +911,8 @@ int occ_session_set_tokens(occ_db *db, const char *id, long long total,
 		 "UPDATE occ_session SET tokens_total=%lld, tokens_est=%d,"
 		 " updated=%lld WHERE id='%s'", total, est ? 1 : 0, now_ms(),
 		 id);
-	if (sqlite3_exec(db->h, sql, NULL, NULL, NULL) != SQLITE_OK) {
-		set_err(err, errlen, "set_tokens: %s", sqlite3_errmsg(db->h));
+	if (exec_tx(db, sql, "set_tokens", err, errlen))
 		return -1;
-	}
 	return 0;
 }
 
@@ -1473,11 +1571,8 @@ int occ_msg_delete(occ_db *db, const char *msg_id, char *err, size_t errlen)
 	}
 	snprintf(sql, sizeof(sql),
 		 "DELETE FROM occ_message WHERE id='%s'", msg_id);
-	if (sqlite3_exec(db->h, sql, NULL, NULL, NULL) != SQLITE_OK) {
-		set_err(err, errlen, "occ_msg_delete: %s",
-			sqlite3_errmsg(db->h));
+	if (exec_tx(db, sql, "occ_msg_delete", err, errlen))
 		return -1;
-	}
 	return 0;
 }
 
@@ -1651,11 +1746,8 @@ int occ_revert_clear(occ_db *db, const char *session_id,
 	}
 	snprintf(sql, sizeof(sql),
 		 "DELETE FROM occ_revert WHERE session_id='%s'", session_id);
-	if (sqlite3_exec(db->h, sql, NULL, NULL, NULL) != SQLITE_OK) {
-		set_err(err, errlen, "occ_revert_clear: %s",
-			sqlite3_errmsg(db->h));
+	if (exec_tx(db, sql, "occ_revert_clear", err, errlen))
 		return -1;
-	}
 	return 0;
 }
 

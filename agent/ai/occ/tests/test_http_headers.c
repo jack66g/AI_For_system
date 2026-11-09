@@ -37,6 +37,9 @@ static int fails;
 
 #define RESP "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"ok\":1}"
 
+/* B4：可注入响应（NULL=默认 RESP）——捕获通道用例的 429/503 变体 */
+static const char *g_mock_resp;
+
 /* strcasestr 便携版（c11 无保证） */
 static char *ci_strstr(const char *h, const char *ndl)
 {
@@ -143,8 +146,12 @@ static void mock_server_child(int report_fd, const char *dump_path)
 		_exit(16);
 	fwrite(buf, 1, have, dump);
 	fclose(dump);
-	if (write(cli, RESP, strlen(RESP)) < 0)
-		_exit(17);
+	{
+		const char *r = g_mock_resp ? g_mock_resp : RESP;
+
+		if (write(cli, r, strlen(r)) < 0)
+			_exit(17);
+	}
 	close(cli);
 	close(srv);
 	_exit(0);
@@ -267,6 +274,30 @@ static int header_count(const char *h, const char *name)
 	return n;
 }
 
+/* B4：一次带自定义响应的请求后断言捕获值（want=NULL=期待未开启） */
+static void capture_case(const char *resp, const char *want, const char *name)
+{
+	char *b;
+
+	g_mock_resp = resp;
+	b = fire_request("sk-cap", NULL, 0, 'e');
+	g_mock_resp = NULL;
+	if (!b) {
+		OK(0, name);
+		return;
+	}
+	free(b);
+	if (want == NULL) {
+		OK(https_last_resp_header() == NULL, name);
+		return;
+	}
+	{
+		const char *got = https_last_resp_header();
+
+		OK(got != NULL && strcmp(got, want) == 0, name);
+	}
+}
+
 int main(void)
 {
 	char *old_bytes, *exnull_bytes, *ant, *authov, *both, *nokey;
@@ -379,6 +410,66 @@ int main(void)
 	free(authov);
 	free(both);
 	free(nokey);
+
+	/* ---- B4（T9B2 §8-5）：Retry-After 响应头捕获通道 ---- */
+	OK(https_last_resp_header() == NULL, "cap-off-returns-null");
+	https_capture_resp_header("Retry-After");
+	{
+		const char *v = https_last_resp_header();
+
+		OK(v != NULL && !strcmp(v, ""), "cap-on-empty-before-call");
+	}
+	capture_case("HTTP/1.1 429 Too Many Requests\r\n"
+		     "Retry-After: 2\r\nContent-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     "2", "cap-429-ra-2");
+	capture_case("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n"
+		     "Connection: close\r\n\r\n{\"ok\":1}",
+		     "", "cap-absent-clears-stale");
+	capture_case("HTTP/1.1 503 Service Unavailable\r\n"
+		     "rETRY-aFTER: 7\r\nContent-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     "7", "cap-case-insensitive");
+	capture_case("HTTP/1.1 429 Too Many Requests\r\n"
+		     "Retry-After:   5  \r\nContent-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     "5", "cap-ows-trimmed");
+	capture_case("HTTP/1.1 503 Service Unavailable\r\n"
+		     "Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n"
+		     "Content-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     "Wed, 21 Oct 2026 07:28:00 GMT",
+		     "cap-date-raw-captured");
+	capture_case("HTTP/1.1 429 Too Many Requests\r\n"
+		     "Retry-After: 3\r\nRetry-After: 9\r\n"
+		     "Content-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     "3", "cap-first-wins");
+	/* 过长值截断 159 字节 */
+	{
+		char big[512], want[256];
+		int i;
+		size_t bl;
+
+		strcpy(big, "HTTP/1.1 429 Too Many Requests\r\n"
+		       "Retry-After: ");
+		bl = strlen(big);
+		for (i = 0; i < 300; i++)
+			big[bl++] = (char)(0x30 + (i % 10));
+		big[bl] = 0;
+		strcat(big, "\r\nContent-Length: 3\r\n"
+		       "Connection: close\r\n\r\n{}");
+		memset(want, 0, sizeof(want));
+		for (i = 0; i < 159; i++)
+			want[i] = (char)(0x30 + (i % 10));
+		capture_case(big, want, "cap-oversize-truncated-159");
+	}
+	/* 关闭捕获 → NULL */
+	https_capture_resp_header(NULL);
+	capture_case("HTTP/1.1 429 Too Many Requests\r\n"
+		     "Retry-After: 2\r\nContent-Length: 3\r\n"
+		     "Connection: close\r\n\r\n{}",
+		     NULL, "cap-disabled-returns-null");
 
 	if (fails) {
 		printf("test_http_headers: FAIL(%d)\n", fails);

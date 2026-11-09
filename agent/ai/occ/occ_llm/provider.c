@@ -437,6 +437,14 @@ static void parse_model_section(const char *txt, const struct toml_sec *s,
 		snprintf(slot.base_url, sizeof(slot.base_url), "%s", v);
 		free(v);
 	}
+	/* B3（T9A3 §5.5 清欠）：direct 地址（forwarder 代理失效时的
+	 * 直连兜底，槽位级覆盖 provider 段） */
+	v = toml_body_str(txt, s, "direct_base_url");
+	if (v) {
+		snprintf(slot.direct_base_url, sizeof(slot.direct_base_url),
+			 "%s", v);
+		free(v);
+	}
 	v = toml_body_str(txt, s, "model_name");
 	if (!v)
 		v = toml_body_str(txt, s, "model");
@@ -480,6 +488,12 @@ static void parse_provider_section(const char *txt, const struct toml_sec *s,
 	v = toml_body_str(txt, s, "base_url");
 	if (v) {
 		snprintf(def.base_url, sizeof(def.base_url), "%s", v);
+		free(v);
+	}
+	v = toml_body_str(txt, s, "direct_base_url");
+	if (v) {
+		snprintf(def.direct_base_url, sizeof(def.direct_base_url),
+			 "%s", v);
 		free(v);
 	}
 	def.api_key = toml_body_str(txt, s, "key");
@@ -575,22 +589,95 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 	return 0;
 }
 
+/*
+ * occ_provider_validate_url - B3（T9A3 §5.5）：provider 地址人话校验。
+ * 通过返回 0；不通过 -1 且 err 写人话（截断安全）。规则：
+ *   - 必须以 http:// 或 https:// 开头（大小写敏感——scheme 小写正典）
+ *   - scheme 后非空（有主机名）
+ *   - 全程无 ASCII 控制字符/空格/引号（防 TOML 值截断/注入）
+ */
+int occ_provider_validate_url(const char *url, char *err, size_t errlen)
+{
+	size_t i, slen;
+	const char *scheme = NULL;
+
+	if (!err || errlen == 0)
+		return -1;
+	err[0] = '\0';
+	if (!url || !url[0]) {
+		snprintf(err, errlen, "地址为空");
+		return -1;
+	}
+	if (!strncmp(url, "http://", 7))
+		scheme = "http://";
+	else if (!strncmp(url, "https://", 8))
+		scheme = "https://";
+	if (!scheme) {
+		snprintf(err, errlen,
+			 "地址必须以 http:// 或 https:// 开头（当前开头 24 字符：%.24s）",
+			 url);
+		return -1;
+	}
+	if (!url[strlen(scheme)]) {
+		snprintf(err, errlen, "scheme 后为空（缺主机名）：%s", url);
+		return -1;
+	}
+	slen = strlen(url);
+	for (i = 0; i < slen; i++) {
+		unsigned char c = (unsigned char)url[i];
+
+		if (c < 0x21 || c == 0x7f || c == '"' || c == '\'') {
+			snprintf(err, errlen,
+				 "地址含非法字符（第 %zu 字节，ASCII 0x%02x）",
+				 i + 1, c);
+			return -1;
+		}
+	}
+	return 0;
+}
+
 int occ_provider_resolve(const occ_provider_config *cfg, const char *slot_id,
 			 occ_provider *out)
+{
+	return occ_provider_resolve_ex(cfg, slot_id, out, NULL, 0);
+}
+
+/*
+ * occ_provider_resolve_ex - B3：resolve + 人话报错（err 可 NULL=不要
+ * 详情；resolve 失败时 out 已清零、无泄漏）。校验面：base_url 必填
+ * 合法；direct_base_url 选填但给值必须合法（B3 conf 校验门）。
+ */
+int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
+			    occ_provider *out, char *err, size_t errlen)
 {
 	size_t i;
 	const occ_model_slot *slot = NULL;
 	const occ_provider_def *def = NULL;
+	char verr[192];
 
-	if (!cfg || !slot_id || !out)
+	if (!err || errlen == 0) {
+		err = NULL;
+		errlen = 0;
+	} else {
+		err[0] = '\0';
+	}
+	if (!cfg || !slot_id || !out) {
+		if (err)
+			snprintf(err, errlen, "内部错误：参数为空");
 		return -1;
+	}
 	for (i = 0; i < cfg->nslots; i++)
 		if (!strcmp(cfg->slots[i].id, slot_id)) {
 			slot = &cfg->slots[i];
 			break;
 		}
-	if (!slot)
+	if (!slot) {
+		if (err)
+			snprintf(err, errlen,
+				 "model.toml 无 [models.%s] 槽位（可用槽位 %zu 个）",
+				 slot_id, cfg->nslots);
 		return -1;
+	}
 	if (slot->provider_ref[0]) {
 		for (i = 0; i < cfg->nproviders; i++)
 			if (!strcmp(cfg->providers[i].name,
@@ -598,8 +685,13 @@ int occ_provider_resolve(const occ_provider_config *cfg, const char *slot_id,
 				def = &cfg->providers[i];
 				break;
 			}
-		if (!def)
+		if (!def) {
+			if (err)
+				snprintf(err, errlen,
+					 "[models.%s] 引用的 [provider.%s] 段不存在",
+					 slot->id, slot->provider_ref);
 			return -1;	/* 引用目标不存在 */
+		}
 	}
 	memset(out, 0, sizeof(*out));
 	snprintf(out->name, sizeof(out->name), "%s", slot->id);
@@ -611,8 +703,40 @@ int occ_provider_resolve(const occ_provider_config *cfg, const char *slot_id,
 	else if (def && def->base_url[0])
 		snprintf(out->base_url, sizeof(out->base_url), "%s",
 			 def->base_url);
-	if (!out->base_url[0])
+	if (!out->base_url[0]) {
+		if (err)
+			snprintf(err, errlen,
+				 "[models.%s] 无 base_url（直填式缺键，或引用的 [provider.%s] 段也未给）",
+				 slot->id, slot->provider_ref[0] ?
+				 slot->provider_ref : "-");
 		return -1;
+	}
+	if (occ_provider_validate_url(out->base_url, verr, sizeof(verr))) {
+		if (err)
+			snprintf(err, errlen,
+				 "[models.%s] base_url 非法：%s", slot->id,
+				 verr);
+		return -1;
+	}
+	/* B3：direct 地址——槽位级覆盖 provider 段；给值必须过校验 */
+	if (slot->direct_base_url[0])
+		snprintf(out->direct_base_url,
+			 sizeof(out->direct_base_url), "%s",
+			 slot->direct_base_url);
+	else if (def && def->direct_base_url[0])
+		snprintf(out->direct_base_url,
+			 sizeof(out->direct_base_url), "%s",
+			 def->direct_base_url);
+	if (out->direct_base_url[0] &&
+	    occ_provider_validate_url(out->direct_base_url, verr,
+				      sizeof(verr))) {
+		if (err)
+			snprintf(err, errlen,
+				 "[models.%s] direct_base_url 非法：%s",
+				 slot->id, verr);
+		out->direct_base_url[0] = '\0';
+		return -1;
+	}
 	if (slot->model[0])
 		snprintf(out->model, sizeof(out->model), "%s", slot->model);
 	else if (def && def->base_url[0])
@@ -624,8 +748,11 @@ int occ_provider_resolve(const occ_provider_config *cfg, const char *slot_id,
 		out->api_key = strdup(def->api_key);
 	else
 		out->api_key = calloc(1, 1);
-	if (!out->api_key)
+	if (!out->api_key) {
+		if (err)
+			snprintf(err, errlen, "内存不足（key 拷贝）");
 		return -1;
+	}
 	return 0;
 }
 
@@ -649,6 +776,10 @@ static char *render_slot_section(const occ_model_slot *slot)
 	if (slot->base_url[0])
 		n += snprintf(buf + n, cap - n, "base_url = \"%s\"\n",
 			      slot->base_url);
+	if (slot->direct_base_url[0])
+		n += snprintf(buf + n, cap - n,
+			      "direct_base_url = \"%s\"\n",
+			      slot->direct_base_url);
 	if (slot->model[0])
 		n += snprintf(buf + n, cap - n, "model_name = \"%s\"\n",
 			      slot->model);
@@ -675,6 +806,10 @@ static char *render_provider_section(const occ_provider_def *def)
 	if (def->base_url[0])
 		n += snprintf(buf + n, cap - n, "base_url = \"%s\"\n",
 			      def->base_url);
+	if (def->direct_base_url[0])
+		n += snprintf(buf + n, cap - n,
+			      "direct_base_url = \"%s\"\n",
+			      def->direct_base_url);
 	if (def->api_key && def->api_key[0])
 		n += snprintf(buf + n, cap - n, "key = \"%s\"\n",
 			      def->api_key);
@@ -698,13 +833,15 @@ static int slot_values_safe(const occ_model_slot *s)
 {
 	return value_safe(s->id) && value_safe(s->provider_type) &&
 	       value_safe(s->provider_ref) && value_safe(s->base_url) &&
-	       value_safe(s->model) && value_safe(s->api_key);
+	       value_safe(s->model) && value_safe(s->api_key) &&
+	       value_safe(s->direct_base_url);	/* B3 */
 }
 
 static int def_values_safe(const occ_provider_def *d)
 {
 	return value_safe(d->name) && value_safe(d->type) &&
-	       value_safe(d->base_url) && value_safe(d->api_key);
+	       value_safe(d->base_url) && value_safe(d->api_key) &&
+	       value_safe(d->direct_base_url);	/* B3 */
 }
 
 /*

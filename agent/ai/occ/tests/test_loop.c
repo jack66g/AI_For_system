@@ -51,6 +51,15 @@ static const char SSE_NO_USAGE[] =
 	"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
 	"data: [DONE]\n\n";
 
+/* B1：OutputLimit 截断轮（finish=length 且有正文 → loop 续跑） */
+static const char SSE_LENGTH[] =
+	"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\","
+	"\"content\":\"前半\"}}]}\n\n"
+	"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"
+	"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":50,"
+	"\"completion_tokens\":5}}\n\n"
+	"data: [DONE]\n\n";
+
 static const char SSE_BAD[] =
 	"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
 	"data: {THIS IS NOT JSON}\n\n"
@@ -350,6 +359,70 @@ int main(void)
 		fclose(opts.stream_out);
 		occ_loop_result_free(&res);
 	}
+
+	/* ---- 用例 1b（B1）：OutputLimit 续跑（finish=length 且有正文，
+	 * 至多 OCC_LOOP_MAX_LEN_CONT 次）——mock 层断言完整链路：
+	 * 轮 1 截断（length+正文）→ 轮 2 续跑（stop），两轮 assistant
+	 * 均落库、收口 finish=stop、收口正文含两段、轮 2 请求上下文
+	 * 含轮 1 assistant 截断文本。 ---- */
+	sse_set2(SSE_LENGTH, SSE_NORMAL);
+	memset(&opts, 0, sizeof(opts));
+	opts.prompt = "写长文";
+	opts.llm_call = fake_llm_call;
+	opts.stream_out = tmpfile();
+	{
+		int rc = occ_loop_run(db, &p, NULL, &opts, &res, err,
+				      sizeof(err));
+		char *fin;
+		int nfin;
+
+		OK(rc == OCC_LOOP_OK, "loop1b-rc-ok");
+		OK(msgs_of(res.session_id) == 3,
+		   "loop1b-3-msgs-user+2assistant");
+		OK(res.finish && !strcmp(res.finish, "stop"),
+		   "loop1b-final-finish-stop");
+		/* 收口轮 ctx 每轮新收集器 → res.text=末轮正文（opencode
+		 * 同语义：续跑轮各自成 assistant 消息；拼接面在流式输出
+		 * 与库） */
+		OK(res.text && strstr(res.text, "你好") != NULL,
+		   "loop1b-text-final-round");
+		{
+			char cap[512];
+			size_t n;
+
+			rewind(opts.stream_out);
+			n = fread(cap, 1, sizeof(cap) - 1, opts.stream_out);
+			cap[n] = '\0';
+			OK(strstr(cap, "前半") != NULL &&
+			   strstr(cap, "你好") != NULL,
+			   "loop1b-stream-both-parts");
+		}
+		fin = str_of("SELECT finish FROM occ_message WHERE"
+			     " session_id=?1 AND role='assistant'"
+			     " ORDER BY rowid DESC LIMIT 1",
+			     res.session_id);
+		OK(fin && !strcmp(fin, "stop"),
+		   "loop1b-db-last-assistant-stop");
+		free(fin);
+		nfin = (int)ll_of("SELECT COUNT(*) FROM occ_message WHERE"
+				  " session_id=?1 AND role='assistant'",
+				  res.session_id);
+		OK(nfin == 2, "loop1b-two-assistant-rounds");
+		/* 轮 2（续跑）请求上下文含轮 1 截断 assistant（fake 记录
+		 * 的是最后一次调用面） */
+		OK(strstr(g_msgs_log, "A:前半") != NULL,
+		   "loop1b-cont-ctx-has-truncated-assistant");
+		/* DB 中间轮 finish=length 落账 */
+		fin = str_of("SELECT finish FROM occ_message WHERE"
+			     " session_id=?1 AND role='assistant'"
+			     " ORDER BY rowid ASC LIMIT 1",
+			     res.session_id);
+		OK(fin && !strcmp(fin, "length"),
+		   "loop1b-db-first-assistant-length");
+		free(fin);
+	}
+	fclose(opts.stream_out);
+	occ_loop_result_free(&res);
 
 	/* ---- 用例 2：续接（--session 语义）——历史全量进请求 ---- */
 	sse_set(SSE_NORMAL);

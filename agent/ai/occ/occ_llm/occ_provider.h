@@ -22,6 +22,9 @@ typedef struct occ_provider {
 	char base_url[OCC_PROVIDER_URL_MAX];
 	char model[OCC_PROVIDER_MODEL_MAX];
 	char *api_key;				/* heap；绝不打印/落日志 */
+	char direct_base_url[OCC_PROVIDER_URL_MAX];	/* B3：直连兜底地址
+							 *（空=未配置；槽位
+							 * 覆盖 provider 段） */
 } occ_provider;
 
 /* provider_type 字符串 → 协议；未知返回 -1 */
@@ -63,6 +66,7 @@ typedef struct occ_model_slot {
 	char model[OCC_PROVIDER_MODEL_MAX];
 	char *api_key;				/* heap 或 NULL（引用式为
 						 * NULL——key 在 provider 段） */
+	char direct_base_url[OCC_PROVIDER_URL_MAX];	/* B3（空=缺省） */
 } occ_model_slot;
 
 /* occ_provider_def - model.toml [provider.<name>] 段（key/base_url） */
@@ -70,7 +74,9 @@ typedef struct occ_provider_def {
 	char name[OCC_TOML_ID_MAX];
 	char type[48];				/* 缺省 openai_compatible */
 	occ_protocol proto;
-	char base_url[OCC_PROVIDER_URL_MAX];
+	char base_url[OCC_PROVIDER_URL_MAX];	/* 代理/forwarder 地址 */
+	char direct_base_url[OCC_PROVIDER_URL_MAX];	/* B3：直连地址（空=
+							 * 未配置） */
 	char *api_key;				/* key；heap 或 NULL */
 } occ_provider_def;
 
@@ -106,9 +112,27 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
  * occ_provider_resolve - 槽位 → 可调用的 occ_provider（解析 provider 引用
  * 链：槽位缺 base_url/key 时取 [provider.<ref>] 补齐）。槽位缺协议/无
  * base_url → -1。api_key 归 out 所有（occ_provider_free 清零释放）。
+ * B3：direct_base_url 同链解析（槽位级覆盖 provider 段）填入
+ * out->direct_base_url（未配置=空串）。
  */
 int occ_provider_resolve(const occ_provider_config *cfg, const char *slot_id,
 			 occ_provider *out);
+
+/*
+ * occ_provider_resolve_ex - B3（T9A3 §5.5 清欠）：resolve + conf 校验 +
+ * 人话报错。err/errlen 可 NULL/0=不要详情。校验：base_url 必填且合法
+ * （http(s):// 前缀、无控制字符/空格/引号）；direct_base_url 选填但
+ * 给值必须合法。失败 -1 且 err 写人话（中文，含槽位/段名上下文）；
+ * out 已清零无泄漏。
+ */
+int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
+			    occ_provider *out, char *err, size_t errlen);
+
+/*
+ * occ_provider_validate_url - B3：单地址校验（resolve_ex 内部用；单测
+ * 直测）。通过 0；-1 且 err 人话。规则见 provider.c 实现头注。
+ */
+int occ_provider_validate_url(const char *url, char *err, size_t errlen);
 
 /*
  * occ_provider_toml_add_slot - 向导写辅助：[models.<slot->id>] 段整段

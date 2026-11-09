@@ -5,6 +5,11 @@
  * 请求构造对齐 opencode packages/ai/src/protocols/anthropic-messages.ts：
  *   - 体序 :1108-1129 model, system[], messages, tools, tool_choice,
  *     stream:true, max_tokens, temperature, ...
+ *   - B1：parallel_tool_calls 为 OpenAI 面字段，anthropic 面显式不
+ *     支持——Anthropic Messages API 无该键（工具并行=缺省行为；禁并
+ *     行是 tool_choice.disable_parallel_tool_use 的反方向能力，不在
+ *     occ 请求面）。req->parallel_tool_calls=1 时本构造器也绝不发该
+ *     键（test_anthropic_build B1 用例钉死）。
  *   - tools 无则整体省略（:1083）；DEFAULT_MAX_TOKENS=32000（:40,:1101）
  *   - system 顶层 text 块数组（:1091-1097）
  *   - 工具定义 {name, description?, input_schema}（:271,:561-566）

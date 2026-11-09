@@ -143,6 +143,13 @@ void occ_llm_retry_params(occ_retry_params *out);
 long long occ_llm_retry_backoff_ms(int attempt);
 
 /*
+ * occ_llm_retry_after_ms - B4（T9B2 §8-5）：Retry-After 响应头值
+ * （delta-seconds 形态）→ 等待毫秒；畸形/NULL/HTTP-date 形态 → -1
+ * （调用方回指数退避）；过大值钳制到 cap_ms（cap<=0=不钳制）。
+ */
+long long occ_llm_retry_after_ms(const char *v, long long cap_ms);
+
+/*
  * occ_interrupt_flag - 进程级中断旗标（T9b2 SIGINT 语义；放传输层使
  * llm_call 重试与 loop 安全点共用一处）。SIGINT 处理器（occ.c）置 1；
  * loop 在安全点（每轮 LLM 前/每工具后/流返回后）检查；llm_call 在每次

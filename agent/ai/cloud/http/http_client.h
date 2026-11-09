@@ -117,6 +117,24 @@ int https_post_stream_ex(const char *url,
 			 int *status_code,
 			 char **error_msg);
 
+/* ---- 响应头捕获（B4 纯增量；缺省关=行为逐字节不变） ---- */
+
+/*
+ * https_capture_resp_header - 开启响应头捕获（name 例 "Retry-After"）
+ * 之后的 https_post_stream / https_post_stream_ex 调用：入口清空上次
+ * 捕获值，响应头块命中该头（大小写不敏感；值去首尾空白；多次出现取
+ * 首见；>159 字节截断）→ 存进程级静态缓冲。name NULL/空/超 63 字节
+ * = 关闭捕获。线程/进程边界：静态共享，调用方自串行（occ 走全局锁）。
+ */
+void https_capture_resp_header(const char *name);
+
+/*
+ * https_last_resp_header - 读最近一次流式调用捕获到的头值
+ * 返回：捕获开启且最近调用未命中 → ""；捕获从未开启 → NULL；
+ * 命中 → 值字符串（静态缓冲，下次流式调用失效）。
+ */
+const char *https_last_resp_header(void);
+
 /* ---- Timeout ---- */
 
 /*

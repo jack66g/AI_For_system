@@ -26,7 +26,9 @@
  * 重发同一请求体。SSE 层 ERROR 事件在尝试内暂存不转发（否则消费方
  * llm_error 会误置位、把可重试失败当终局）；终局才发一次 ERROR。
  * 成功判定=收到协议终结（FINISH 或 DONE 哨兵/message_stop）且无流内
- * 错误。Retry-After 未接（http_client 不透传响应头——诚实差异）。
+ * 错误。B4（T9B2 §8-5 清欠）：Retry-After 已接——https_capture_resp_
+ * header 响应头捕获通道（cloud/http 纯增量）+ occ_llm_retry_after_ms
+ * 解析（畸形/非数字→回指数基数；过大钳制 cap）。
  */
 #define _POSIX_C_SOURCE 200809L
 #include "occ_llm.h"
@@ -225,6 +227,23 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 	{
 		occ_llm_req r2 = *req;
 
+		/* B1（NEXT-PLAN 波次 B；T9B1 §8-4）：并行工具调用旗标接线。
+		 * 请求构造面字段 openai.c:293 已就位（旗标+有 tools 时发
+		 * "parallel_tool_calls":true，末位）；本层补真实调用面开关：
+		 * OCC_PARALLEL_TOOL_CALLS=1 → openai 协议且有 tools 时置位
+		 *（同 OCC_LLM_RETRY_* 产品配置族 env 惯例，retry.c 先例）。
+		 * 缺省关=请求体逐字节零变化（差分 62/62 回归红线）。
+		 * anthropic 面显式不支持：Anthropic Messages API 无该字段
+		 *（工具并行是缺省行为，反方向按工具配 disable_parallel_tool_
+		 * use，见 anthropic.c 头注）——此处仅 openai 协议生效。 */
+		if (!r2.parallel_tool_calls &&
+		    r2.proto == OCC_PROTO_OPENAI_COMPAT && r2.ntools > 0) {
+			const char *pv = getenv("OCC_PARALLEL_TOOL_CALLS");
+
+			if (pv && (!strcmp(pv, "1") || !strcasecmp(pv, "on") ||
+				   !strcasecmp(pv, "true")))
+				r2.parallel_tool_calls = 1;
+		}
 		if (r2.proto == OCC_PROTO_OPENAI_COMPAT && !r2.require_reasoning) {
 			const char *mp;
 			int hit = 0;
@@ -249,6 +268,12 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 		https_init();
 		g_http_inited = 1;
 	}
+	/* B4（T9B2 §8-5）：Retry-After 响应头捕获通道开启（cloud/http
+	 * 纯增量接口；每次 https_* 调用先清后存——无该头的响应读到
+	 * NULL，绝不误用上一次尝试的陈旧值）。occ 自身出网经
+	 * g_occ_http_lock 串行，捕获缓冲消费窗口安全；进程级共享面
+	 * （desktop 等同进程其他调用方）为诚实边界，见 BLLM-REPORT §7。 */
+	https_capture_resp_header("Retry-After");
 	occ_llm_retry_params(&rp);
 
 	for (;;) {
@@ -356,7 +381,7 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 			int cap = (cls == 2) ? rp.timeout_max : rp.max_attempts;
 			int *cnt = (cls == 2) ? &n_timeout : &n_regular;
 			char msg[400];
-			long long base_d, delay;
+			long long base_d, delay, ra_ms;
 
 			(*cnt)++;
 			if (*cnt >= cap) {
@@ -368,6 +393,37 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 				break;
 			}
 			/* 上一尝试部分输出作废（消费方清空收集器） */
+			/* B4（T9B2 §8-5）：服务端 Retry-After 定向退避替代
+			 * 固定指数基数——429/503 响应带该头时（经 http 层
+			 * 捕获通道透传）按服务端指令等待（不加抖动）；
+			 * 无头/畸形/非数字（HTTP-date 形态不支持，诚实
+			 * 边界）→ -1 回指数基数；过大值在解析侧钳制到
+			 * cap_ms（上限保护，替代旧「钳制抖动值」单一面）。 */
+			{
+				const char *ra = https_last_resp_header();
+
+				ra_ms = ra ? occ_llm_retry_after_ms(ra,
+								    rp.cap_ms)
+					   : -1;
+				if (ra_ms >= 0) {
+					delay = ra_ms;
+					snprintf(msg, sizeof(msg),
+						 "重试：第 %d/%d 次尝试将在"
+						 " %lldms 后重发（服务端"
+						 " Retry-After：%s；%s）",
+						 *cnt + 1, cap, delay, ra,
+						 reason);
+					emit_reset(cb, ud, msg);
+					if (backoff_wait(delay)) {
+						if (err_out)
+							*err_out = strdup(
+								"interrupted by user");
+						rc = -1;
+						break;
+					}
+					continue;
+				}
+			}
 			base_d = occ_llm_retry_backoff_ms(attempt);
 			delay = base_d * (90 + rand() % 21) / 100;
 			if (delay < 1)

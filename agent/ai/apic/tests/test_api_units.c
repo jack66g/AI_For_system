@@ -233,9 +233,17 @@ static void test_control_parse(void)
 	CHECK(api_is_task_param("proc.rlimit"));
 	/* U66/T2：sec.ws_label 入 TASK 白名单（K66-REPORT §1-T2 一行修）*/
 	CHECK(api_is_task_param("sec.ws_label"));
+	/* A7：io.priority 内核侧 AI_CTRL_F_TASK（ai_block.c:627）
+	 * 同构入白名单（与 sec.ws_label 同一缺名病灶：白名单缺名时
+	 * /act 走 api_nl_pack_act(..., value, 0) 把 value 当 pid） */
+	CHECK(api_is_task_param("io.priority"));
 	CHECK(!api_is_task_param("llm.top_k"));
 	CHECK(!api_is_task_param("sec.ws_labels"));
 	CHECK(!api_is_task_param("sec.audit"));
+	/* A7 负例：近形/近义不入白名单 */
+	CHECK(!api_is_task_param("io.priorities"));
+	CHECK(!api_is_task_param("io.bandwidth"));
+	CHECK(!api_is_task_param("IO.PRIORITY"));
 }
 
 static void test_nl_pack(void)

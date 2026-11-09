@@ -206,6 +206,37 @@ int main(void)
 		free(b);
 	}
 
+	/* ---- B1：parallel_tool_calls 在 anthropic 面显式不支持 ----
+	 * Anthropic Messages API 无该字段（工具并行=缺省行为；反方向按
+	 * 工具配 disable_parallel_tool_use，不在此面）。旗标置 1 时构造体
+	 * 也绝不出现该键（显式不支持有据——单测钉死）。 */
+	{
+		occ_llm_req r;
+		occ_msg msgs[1];
+		occ_tool_def tools[1];
+		char *b;
+
+		memset(&r, 0, sizeof(r));
+		memset(msgs, 0, sizeof(msgs));
+		memset(tools, 0, sizeof(tools));
+		r.proto = OCC_PROTO_ANTHROPIC;
+		r.model = "m";
+		msgs[0].role = OCC_ROLE_USER;
+		msgs[0].text = "hi";
+		r.msgs = msgs;
+		r.nmsgs = 1;
+		tools[0].name = "t";
+		tools[0].description = "d";
+		tools[0].parameters = "{\"type\":\"object\"}";
+		r.tools = tools;
+		r.ntools = 1;
+		r.parallel_tool_calls = 1;	/* 旗标开也绝不入 anthropic 体 */
+		b = occ_build_request_anthropic(&r, NULL);
+		CHECK(b && !strstr(b, "parallel_tool_calls"),
+		      "B1 anthropic face omits parallel_tool_calls (explicit)");
+		free(b);
+	}
+
 	if (fails) {
 		printf("test_anthropic_build: %d FAIL(s)\n", fails);
 		return 1;

@@ -145,6 +145,30 @@ int main(void)
 	occ_interrupt_flag = 0;
 	OK(occ_interrupt_flag == 0, "flag-clear");
 
+	/* ---- 5) B4：Retry-After 解析（occ_llm_retry_after_ms） ---- */
+	/* 合法 delta-seconds → 毫秒 */
+	OK(occ_llm_retry_after_ms("0", 10000) == 0, "ra-zero");
+	OK(occ_llm_retry_after_ms("1", 10000) == 1000, "ra-1s");
+	OK(occ_llm_retry_after_ms("30", 60000) == 30000, "ra-30s");
+	OK(occ_llm_retry_after_ms(" 2 ", 10000) == 2000, "ra-ows");
+	/* 畸形 → -1（回指数退避） */
+	OK(occ_llm_retry_after_ms(NULL, 10000) == -1, "ra-null");
+	OK(occ_llm_retry_after_ms("", 10000) == -1, "ra-empty");
+	OK(occ_llm_retry_after_ms("abc", 10000) == -1, "ra-garbage");
+	OK(occ_llm_retry_after_ms("-3", 10000) == -1, "ra-negative");
+	OK(occ_llm_retry_after_ms("1.5", 10000) == -1, "ra-float");
+	OK(occ_llm_retry_after_ms("12x", 10000) == -1, "ra-trailing-junk");
+	OK(occ_llm_retry_after_ms("Wed, 21 Oct 2026 07:28:00 GMT",
+				  10000) == -1, "ra-http-date-unsupported");
+	/* 过大值钳制（上限保护） */
+	OK(occ_llm_retry_after_ms("3600", 10000) == 10000, "ra-clamped-cap");
+	OK(occ_llm_retry_after_ms("999999999999", 10000) == 10000,
+	   "ra-overflow-clamped");
+	OK(occ_llm_retry_after_ms("999999999", 0) == 999999999000LL,
+	   "ra-nocap-huge");		/* cap<=0=不钳制（测试专用面） */
+	OK(occ_llm_retry_after_ms("2", 1500) == 1500, "ra-clamp-1500");
+	OK(occ_llm_retry_after_ms("1", 1500) == 1000, "ra-under-cap");
+
 	printf("test_retry: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

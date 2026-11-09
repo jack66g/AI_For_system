@@ -895,6 +895,81 @@ static int hdr_status_code(const char *hdr)
 	return sp ? atoi(sp + 1) : 0;
 }
 
+/* ---- B4（T9B2 §8-5）：响应头捕获（纯增量；缺省关=行为逐字节不变） ----
+ * https_capture_resp_header("Retry-After") 开启后，每次 https_post_
+ * stream/_ex 调用：入口清空上次捕获值，响应头块解析时若命中该头
+ * （大小写不敏感、值去首尾 OWS、多次出现取首见）→ 存入静态缓冲；
+ * https_last_resp_header() 读回（未开启/未命中/距上次调用已再发起
+ * 新调用 → 空串或 NULL 语义：未命中返回 ""）。值超 159 字节截断
+ *（Retry-After 实况为短秒数）；名超 63 字节视为非法忽略（捕获关）。
+ * 进程级共享静态（与 g_initialized 等同尺度）；调用方自串行（occ
+ * 经 g_occ_http_lock），见 BLLM-REPORT §7 诚实边界。 */
+static char g_capture_name[64];
+static char g_capture_val[160];
+
+void https_capture_resp_header(const char *name)
+{
+	size_t n = name ? strlen(name) : 0;
+
+	if (n == 0 || n >= sizeof(g_capture_name)) {
+		g_capture_name[0] = '\0';
+		g_capture_val[0] = '\0';
+		return;
+	}
+	memcpy(g_capture_name, name, n + 1);
+	g_capture_val[0] = '\0';
+}
+
+const char *https_last_resp_header(void)
+{
+	return g_capture_name[0] ? g_capture_val : NULL;
+}
+
+/* 在完整响应头块 hdr 中提取捕获头（仅 TLS/明文流式路径调用） */
+static void hdr_capture_one(const char *hdr)
+{
+	size_t nl;
+
+	g_capture_val[0] = '\0';
+	if (!hdr || !g_capture_name[0])
+		return;
+	nl = strlen(g_capture_name);
+	{
+		const char *line = hdr;
+		const char *le;
+
+		while (line && *line) {
+			le = strpbrk(line, "\r\n");
+			if (!strncasecmp(line, g_capture_name, nl) &&
+			    line[nl] == ':') {
+				const char *v = line + nl + 1;
+				const char *ve;
+				size_t vl;
+
+				while (*v == ' ' || *v == '\t')
+					v++;
+				ve = v;
+				while (*ve && *ve != '\r' && *ve != '\n')
+					ve++;
+				while (ve > v &&
+				       (ve[-1] == ' ' || ve[-1] == '\t'))
+					ve--;
+				vl = (size_t)(ve - v);
+				if (vl >= sizeof(g_capture_val))
+					vl = sizeof(g_capture_val) - 1;
+				memcpy(g_capture_val, v, vl);
+				g_capture_val[vl] = '\0';
+				return;		/* 首见优先 */
+			}
+			if (!le)
+				break;
+			line = le + 1;
+			if (*le == '\r' && *line == '\n')
+				line++;		/* \r\n 跨越 */
+		}
+	}
+}
+
 /* 头部是否声明 chunked（大小写不敏感，多头/多值均容忍） */
 static int hdr_is_chunked(const char *hdr)
 {
@@ -1030,6 +1105,9 @@ static int https_post_stream_impl(const char *url, const char *api_key,
 		*status_code = 0;
 	if (error_msg)
 		*error_msg = NULL;
+	/* B4：每次流式调用先清捕获值（无该头的响应读到 ""——绝不
+	 * 误用上一次调用的陈旧值） */
+	g_capture_val[0] = '\0';
 
 	if (!on_data || !json_body) {
 		if (error_msg)
@@ -1139,6 +1217,7 @@ static int https_post_stream_impl(const char *url, const char *api_key,
 		if (status_code)
 			*status_code = hdr_status_code(hdr);
 		chunked = hdr_is_chunked(hdr);
+		hdr_capture_one(hdr);	/* B4：捕获头提取（未开启=no-op） */
 		memset(&cd, 0, sizeof(cd));
 
 		/* 头部终止符之后的残留字节即 body 首段 */
@@ -1265,6 +1344,7 @@ ps_tls_cleanup:
 		if (status_code)
 			*status_code = hdr_status_code(hdr);
 		chunked = hdr_is_chunked(hdr);
+		hdr_capture_one(hdr);	/* B4：捕获头提取（未开启=no-op） */
 		memset(&cd, 0, sizeof(cd));
 
 		/* 头部终止符之后的残留字节即 body 首段 */

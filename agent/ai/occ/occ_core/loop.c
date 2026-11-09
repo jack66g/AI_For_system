@@ -363,6 +363,24 @@ static int is_loopback(const char *url)
 	return url && (strstr(url, "127.0.0.1") || strstr(url, "localhost"));
 }
 
+/* B3：deepseek 形态判定（base_url 含 deepseek.com 或 model 名含
+ * deepseek——与 llm_call.c requireReasoning 判形同构）：旧 direct
+ * 兜底缺省仅对 deepseek 形态保留；其余 provider 用显式
+ * direct_base_url 配置（或人话失败）。 */
+static int provider_is_deepseek(const occ_provider *p)
+{
+	const char *mp;
+
+	if (!p)
+		return 0;
+	if (p->base_url[0] && strstr(p->base_url, "deepseek.com"))
+		return 1;
+	for (mp = p->model; mp && *mp; mp++)
+		if (!strncasecmp(mp, "deepseek", 8))
+			return 1;
+	return 0;
+}
+
 /* 重置事件收集器（保留 opts；occ_smoke 先例：失败尝试的传输错误事件
  * 不混入成功输出） */
 static void ev_ctx_reset_keep_opts(loop_ev_ctx *c)
@@ -980,9 +998,23 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			    ctx.llm_error) {
 				if (occ_interrupt_flag)
 					goto llm_interrupted;
+				/* B3（T9A3 §5.5 清欠）：direct 地址配置化——
+				 * 槽位/rotocol 链解析出的 p->direct_base_url
+				 * 优先（[models.<id>].direct_base_url 覆盖
+				 * [provider.<name>].direct_base_url）；未配置
+				 * 时保留旧缺省（deepseek 形态 provider 直连
+				 * api.deepseek.com——L1 实况唯一云位兼容；
+				 * 判形与 llm_call.c requireReasoning 同构）。
+				 * 非 deepseek 形态不再静默兜底到 deepseek
+				 * （人话失败，BLLM-REPORT §2-B3）。 */
 				if (is_loopback(p->base_url) &&
-				    p->proto == OCC_PROTO_OPENAI_COMPAT) {
+				    p->proto == OCC_PROTO_OPENAI_COMPAT &&
+				    (p->direct_base_url[0] ||
+				     provider_is_deepseek(p))) {
 					occ_provider d;
+					const char *durl = p->direct_base_url[0] ?
+						p->direct_base_url :
+						"https://api.deepseek.com/v1";
 
 					/* 重置收集器后 direct 重试
 					 *（occ_smoke 先例） */
@@ -998,7 +1030,7 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 						 "%s", p->model);
 					snprintf(d.base_url,
 						 sizeof(d.base_url), "%s",
-						 "https://api.deepseek.com/v1");
+						 durl);
 					d.api_key = p->api_key;/* 借用不转移 */
 					if (occ_llm_call(&d, &req, ev_cb,
 							 &ctx, &llm_err) ||
