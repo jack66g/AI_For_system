@@ -61,13 +61,13 @@ from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 
 SCHEMA = "aik-w75-audit/1"
-EXPECTED_TOOLS = 236        # T9e：230 + occ 六件套并入（seed 仍 230 单件）
+EXPECTED_TOOLS = 237        # T9e 236 + UE：I-2 telemetry_rate（seed 231 单件）
 EXPECTED_SANDBOX_TOOLS = 7
 EXPECTED_DOMAINS = 11       # T9e：9 域 + occ + coding（union sub）
 EXPECTED_DESKTOP_TOOLS = 20
-EXPECTED_SEED_COUNT = 247
-EXPECTED_SEED_KINDS = {"domain-header": 9, "tool": 230, "combo": 8}
-EXPECTED_TOOL_NAMES_SHA256 = "3c6cb4bb7b91b03f09b5e54cdc9c07795933f68d7f14f5acce319d4515c5707b"
+EXPECTED_SEED_COUNT = 248
+EXPECTED_SEED_KINDS = {"domain-header": 9, "tool": 231, "combo": 8}
+EXPECTED_TOOL_NAMES_SHA256 = "45ad909953ac6c840e79c13f867ed0a93cf6a64abdf596f9ac12943b0bf3e34c"
 # T7d 重校准：python3 子配方摘除后，FS-06/FS-07/FS-09/MEM-07 四个
 # 原以 escape:python3 充当读路径的对象归零（94/97→90/97=92.8%）。
 # 旧 95.0 把 escape 逃逸计入 read_any，属虚高；新基线只含一等读路径。

@@ -29,6 +29,7 @@ sysfs_write_policy_refresh 同步策略目录（扫
 sysfs_write_policy_chain_dir 因果链 CSV 导出根
 procfs_write_telemetry_format format=raw（原始定
 procfs_write_telemetry_reset 清空全部遥测/决
+procfs_write_telemetry_rate 内核观测面本身可
 netlink_act_sched_nice 设置进程 nice 值（
 netlink_act_sched_affinity 设置进程 CPU 亲和
 netlink_act_sched_oom_score 设置进程 oom_score_a

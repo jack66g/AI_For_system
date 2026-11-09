@@ -76,6 +76,15 @@ void as_pq_sink_flush(struct as_pq_sink *s);
 /* 保留策略单跑（flush 内部调用；单测可直调） */
 void as_pq_retain(struct as_pq_sink *s);
 
+/*
+ * as_pq_retain_root - 保留策略核心（root 级；T8 遗留接线：
+ * as_decisions 落盘后与本 sink 共用同一规则——telemetry+decisions 链
+ * 同一 PARQUET_MAX_GB 预算/同一布局白名单/同一当天不删口径；删除计数
+ * 仍记 pq.retained_*（链级统一账目，decisions.* 段不重复计））。
+ */
+void as_pq_retain_root(const char *root, long long max_gb, int64_t btime,
+		       struct as_stats *st);
+
 /* 退出路径：flush + 释放 */
 void as_pq_sink_close(struct as_pq_sink *s);
 

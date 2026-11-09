@@ -7,7 +7,8 @@
  *                   stats、/sys/fs/cgroup/ai.*）；失败（如无 AIKernel 内核）
  *                   返回"通道不可用"。
  *   sysfs-write   : 写注册表登记的固定节点（value 参数；也承载
- *                   /proc/ai/telemetry 的 format=/reset 写工具）；
+ *                   /proc/ai/telemetry 的 format=/reset/rate= 写工具
+ *                   ——rate=cat:ev:N 按 I-2 特路由 telemetry_rate.c）；
  *                   EPERM 时提示需要 CAP_SYS_ADMIN。
  *   netlink-act   : 组 struct ai_nl_act 下发（domain/confidence/data 约定
  *                   与内核 ai_control 一致：任务参数 data[0]=pid,
@@ -79,6 +80,7 @@
 #include "bpf_tools.h"
 #include "memory/sme_client.h"
 #include "tools/executor.h"
+#include "telemetry_rate.h"          /* I-2：采样率写口（按名特路由） */
 #include "ai_config.h"
 #include "shell/commands/model_lifecycle.h"
 #include "local/local_http.h"
@@ -5828,7 +5830,27 @@ int tool_executor_run(const struct ai_tool *tool, const char *args_json,
 		rc = exec_procfs_read(tool, out);
 		break;
 	case TOOL_CH_SYSFS_WRITE:
-		rc = exec_sysfs_write(tool, args_json, out);
+		/* I-2（REVIEW3-REPORT §A-1）：采样率写口组合参数（cat:ev:N
+		 * 非固定枚举），按名特路由到 telemetry_rate 面（cat:ev 枚举
+		 * 表+默认率表内置、越界人话报错、/proc/ai/status 读回校验；
+		 * sysctl_get/set 同款名路由先例） */
+		if (strcmp(tool->name, TEL_RATE_TOOL_NAME) == 0) {
+			char *val = arg_str(args_json, "value");
+
+			if (!val || !val[0]) {
+				*out = strdup(
+					"ERROR: 缺少必填参数 value（格式 cat:ev:N，"
+					"如 16:1:64；0=丢弃 1=全量 N=每 N 条记 1 条）");
+				free(val);
+				rc = AI_ERR_INVALID_ARG;
+			} else {
+				rc = tel_rate_run(val, tool->path,
+						  "/proc/ai/status", out);
+				free(val);
+			}
+		} else {
+			rc = exec_sysfs_write(tool, args_json, out);
+		}
 		break;
 	case TOOL_CH_NETLINK_ACT:
 		rc = exec_netlink_act(tool, args_json, out);

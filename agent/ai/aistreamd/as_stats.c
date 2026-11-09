@@ -158,6 +158,27 @@ void as_stats_render(const struct as_stats *st, int ring_used,
 	fprintf(out, "outcome.dropped=%lld\n", st->oc.dropped);
 	fprintf(out, "outcome.noop=%lld\n", st->oc.noop);
 	fprintf(out, "outcome.verify_fail=%lld\n", st->oc.verify_fail);
+	/* T8 遗留接线：decisions 消费（追加段，旧键零位移） */
+	fprintf(out, "decisions.enabled=%d\n", st->dec.enabled);
+	fprintf(out, "decisions.polls=%lld\n", st->dec.polls);
+	fprintf(out, "decisions.noiface_polls=%lld\n",
+		st->dec.noiface_polls);
+	fprintf(out, "decisions.rows_seen=%lld\n", st->dec.rows_seen);
+	fprintf(out, "decisions.rows_new=%lld\n", st->dec.rows_new);
+	fprintf(out, "decisions.dup_skip=%lld\n", st->dec.dup_skip);
+	fprintf(out, "decisions.bad_lines=%lld\n", st->dec.bad_lines);
+	fprintf(out, "decisions.gaps=%lld\n", st->dec.gaps);
+	fprintf(out, "decisions.rebases=%lld\n", st->dec.rebases);
+	fprintf(out, "decisions.events=%lld\n", st->dec.events);
+	fprintf(out, "decisions.flushes=%lld\n", st->dec.flushes);
+	fprintf(out, "decisions.rows_written=%lld\n",
+		st->dec.rows_written);
+	fprintf(out, "decisions.files=%lld\n", st->dec.files);
+	fprintf(out, "decisions.bytes=%lld\n", st->dec.bytes);
+	fprintf(out, "decisions.write_fail=%lld\n", st->dec.write_fail);
+	fprintf(out, "decisions.write_skipped=%lld\n",
+		st->dec.write_skipped);
+	fprintf(out, "decisions.dropped=%lld\n", st->dec.dropped);
 	/* SENSE 脱敏（追加段，旧键零位移；计数源=as_redact 全局——render
 	 * 时快照；unknown_pass>0 提示字段表外有字段透传（设计 §3.5）） */
 	{

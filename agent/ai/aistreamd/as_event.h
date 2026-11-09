@@ -83,6 +83,16 @@ void as_event_ai_policy(struct as_event *ev, unsigned long long decision_id,
  * "[kern] event outcome decision_id=%llu outcome=%s delta=%lld knob=%s"） */
 void as_event_outcome(struct as_event *ev, unsigned long long decision_id,
 		      int outcome, long long delta, const char *knob);
+/* T8 遗留接线：decisions 消费合成事件（as_decisions 游标去重后每条新
+ * 决策一行；与内核 ai_telemetry.h 18.01 AI_EV_AI_DECISION「决策记录回写
+ * ring」对应——telemetry 链 category=18/event_type=0（aistreamd 归一化行
+ * 专用，与 outcome 合成事件同口径，零新类）；行格式冻结：
+ * "[kern] event decision decision_id=%llu type=%u domain=%u executed=%u
+ *  safety_clamped=%u outcome=%u delta=%lld" */
+void as_event_decision(struct as_event *ev, unsigned long long decision_id,
+		       unsigned type, unsigned domain, unsigned executed,
+		       unsigned safety_clamped, unsigned outcome,
+		       long long delta);
 
 void as_event_ai_model(struct as_event *ev, unsigned long long model_id,
 		       int loaded, const char *name);

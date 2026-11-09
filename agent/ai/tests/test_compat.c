@@ -7,7 +7,7 @@
  *   - probe：缺解释器脚本（#!/usr/bin/python4.9）→ MISSING_INTERPRETER，
  *     候选解释器来自真实本机；/bin/sh → runnable；不存在 → MISSING_TARGET；
  *     无执行位 → NOT_EXECUTABLE（且 adaptable=true，说明可 L0 修）
- *   - registry：236 件 / compat 通道 4 件 / 风险 R,W1,W2,W1
+ *   - registry：237 件 / compat 通道 4 件 / 风险 R,W1,W2,W1
  *   - compat_generate 非法名/非法 target → AI_ERR_INVALID_ARG；
  *     compat_apply 不存在的适配器 → 诚实报错（不静默成功）
  *
@@ -168,7 +168,7 @@ static void test_registry(void)
 
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK, "tools.json 加载");
-	CHECK(reg.tool_count == 236, "工具总数 236");
+	CHECK(reg.tool_count == 237, "工具总数 237");
 	for (i = 0; i < reg.tool_count; i++)
 		if (reg.tools[i].channel == TOOL_CH_COMPAT)
 			compat++;

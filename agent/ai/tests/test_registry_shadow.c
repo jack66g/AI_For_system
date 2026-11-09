@@ -64,8 +64,8 @@ int main(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "树根无环境变量加载 tools.json");
-	CHECK(reg.tool_count == 236,
-	      "树根加载到 236 件（T9e：230 + occ 六件套）");
+	CHECK(reg.tool_count == 237,
+	      "树根加载到 237 件（T9e 237 + UE I-2）");
 	CHECK(reg.source_path && same_realpath(reg.source_path,
 					       "tools/tools.json"),
 	      "source_path 指向正典 tools/tools.json（符号链接已解析）");

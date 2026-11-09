@@ -95,6 +95,27 @@ struct as_stats {
 		long long verify_fail;			/* 写后 decisions 自校验
 						 * outcome_ts 仍 0 */
 	} oc;
+	/* T8 遗留接线：decisions 消费计数（stats 文件追加 decisions.* 段，
+	 * 旧键零位移；计数=消费面验收的决定性口径——UE-REPORT §A） */
+	struct {
+		int enabled;			/* conf DECISIONS_ENABLED */
+		long long polls;		/* 轮询次数（含无新行） */
+		long long noiface_polls;	/* 读失败（无内核面）次数 */
+		long long rows_seen;		/* 读到的行数（含已摄取） */
+		long long rows_new;		/* 新摄取行数（>游标） */
+		long long dup_skip;		/* 游标去重跳过行数 */
+		long long bad_lines;		/* 坏行跳过计数 */
+		long long gaps;			/* id 空洞（ring 覆盖丢失） */
+		long long rebases;		/* 游标回贴（回绕/重启）次数 */
+		long long events;		/* 合成事件发出数 */
+		long long flushes;		/* decisions parquet 写次数 */
+		long long rows_written;		/* 写入行数（累积重写计） */
+		long long files;		/* 写入文件数 */
+		long long bytes;		/* 写入字节 */
+		long long write_fail;		/* 写失败（批保留重试） */
+		long long write_skipped;	/* PARQUET_ENABLED=0 跳过数 */
+		long long dropped;		/* 日批容量满丢最旧 */
+	} dec;
 	long long started_mono_ms;
 	long long started_real_ms;
 	int pid;

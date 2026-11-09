@@ -1,13 +1,13 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-09T02:20:19",
+  "generated_at": "2026-11-09T15:20:22",
   "source": "AIKernel 内核源码静态梳理",
-  "tool_count": 236,
-  "tool_names_sha256": "3c6cb4bb7b91b03f09b5e54cdc9c07795933f68d7f14f5acce319d4515c5707b",
+  "tool_count": 237,
+  "tool_names_sha256": "45ad909953ac6c840e79c13f867ed0a93cf6a64abdf596f9ac12943b0bf3e34c",
   "channel_counts": {
     "procfs-read": 36,
-    "sysfs-write": 25,
+    "sysfs-write": 26,
     "netlink-act": 27,
     "netlink-sense": 1,
     "stream": 6,
@@ -36,7 +36,7 @@
   },
   "risk_counts": {
     "R": 101,
-    "W1": 57,
+    "W1": 58,
     "W2": 77,
     "exec按命令": 1
   },
@@ -659,6 +659,28 @@
             "enum": [
               "reset"
             ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "sub": [
+        "aicore"
+      ]
+    },
+    {
+      "name": "procfs_write_telemetry_rate",
+      "channel": "sysfs-write",
+      "risk": "W1",
+      "description": "调 /proc/ai/telemetry 单事件采样率（I-2：内核观测面本身可被 AI 管理；写需 CAP_SYS_ADMIN）。value 格式 cat:ev:N（自动补 rate= 前缀），如 16:1:64=设备事件限为 1/64、0=丢弃该事件全部后续样本、1=全量、N=每 N 条记 1 条。cat 1..18/ev 按类（sched 1..8、mm 1..10、hw 1..5、kconfig 1..3 等，ai_telemetry.h:64-215）、N 0..65535。出厂默认全量 1，仅 16:1:16（设备）、16:4:64（DMA）、17:2:16（sysctl）三处限频（ai_telemetry.c:421-427）。率表易失：重启即默认、无持久化；恢复出厂写对应默认值",
+      "path": "/proc/ai/telemetry",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "格式 cat:ev:N（可带 rate= 前缀），如 16:1:64；0=丢弃 1=全量 N=每 N 条记 1 条"
           }
         },
         "required": [

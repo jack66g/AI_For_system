@@ -44,7 +44,7 @@ W46a 防呆（v2.1）：
      tools/ 目录）运行才就地生成；在其他目录运行一律拒绝并要求显式
      --out-dir——根除 W45 事故（在源树根误跑本脚本，默认输出把 75 件
      旧口径 tools.json 落在树根，遮蔽 tools/ 下 79 件正典表）。
-  2. 正典数目断言：主表工具数必须 == EXPECTED_TOOL_COUNT(236)、受限表
+  2. 正典数目断言：主表工具数必须 == EXPECTED_TOOL_COUNT(237)、受限表
      必须 == EXPECTED_SANDBOX_TOOL_COUNT(7)，写盘前断言，不符即报错
      退出 nonzero（错误信息含期望值与实际值）。静态表增删工具后必须
      有意识地同步锚点常量，杜绝静默漂移。
@@ -347,6 +347,7 @@ SUB_MAP = {
     "sysfs_write_policy_chain_dir": ["aicore"],
     "procfs_write_telemetry_format": ["aicore"],
     "procfs_write_telemetry_reset": ["aicore"],
+    "procfs_write_telemetry_rate": ["aicore"],
     "netlink_act_ai_decision_inject": ["aicore"],
     "netlink_act_ai_decision_oom": ["aicore", "res"],
     "netlink_act_ai_decision_sched": ["aicore", "res"],
@@ -833,7 +834,7 @@ SYSFS_READ_ALLOW_PREFIXES = [
 # 静态表增删工具时必须同步：EXPECTED_TOOL_COUNT / EXPECTED_TOOL_NAMES /
 # EXPECTED_TOOL_NAMES_SHA256（运行脚本失败信息会打印实际清单与哈希）。
 # ---------------------------------------------------------------------------
-EXPECTED_TOOL_COUNT = 236        # 主表 tools.json（T9e：230 + occ 六件套并入）
+EXPECTED_TOOL_COUNT = 237        # 主表 tools.json（T9e 236 + UE：I-2 telemetry_rate）
 EXPECTED_SANDBOX_TOOL_COUNT = 7  # 受限表 tools-sandbox.json
 # W72：受限表 exec 命令数。W69 为 54（46R+8W1）；W72 新增 python3/gcc/cc
 #（沙箱内 W1）后为 57；T7d 摘除 python3（镜像不再携带解释器）后为 56。
@@ -872,6 +873,7 @@ EXPECTED_TOOL_NAMES = [
     "sysfs_write_policy_chain_dir",
     "procfs_write_telemetry_format",
     "procfs_write_telemetry_reset",
+    "procfs_write_telemetry_rate",
     "netlink_act_sched_nice",
     "netlink_act_sched_affinity",
     "netlink_act_sched_oom_score",
@@ -1079,7 +1081,7 @@ EXPECTED_TOOL_NAMES = [
     "grep",
     "bash",
 ]
-EXPECTED_TOOL_NAMES_SHA256 = "3c6cb4bb7b91b03f09b5e54cdc9c07795933f68d7f14f5acce319d4515c5707b"
+EXPECTED_TOOL_NAMES_SHA256 = "45ad909953ac6c840e79c13f867ed0a93cf6a64abdf596f9ac12943b0bf3e34c"
 
 
 def manifest_sha256(names):
@@ -3601,11 +3603,12 @@ def inject_sub(tools):
 
 
 def write_corpus_seed(tools, out_dir):
-    """单源生成 sme-seed-w51.jsonl（区头 9 + 单件 230 + 配方 8 = 247）。
+    """单源生成 sme-seed-w51.jsonl（区头 9 + 单件 231 + 配方 8 = 248）。
 
     T9e：channel=occ 六件套不入 seed——seed/目录页喂系统 ask 路由，
     occ 工具由 occ 自执行、系统 executor 不路由（TOOL_CH_OCC 诚实拒绝），
-    入册反而误导路由。seed 条目数保持 247 不变量。
+    入册反而误导路由。UE 棒（I-2）：telemetry_rate 走系统 executor
+    （sysfs-write），正常入册（单件 230→231）。
     """
     tools = [t for t in tools if t.get("channel") != CH_OCC]
     records = []
@@ -5111,7 +5114,8 @@ def compat_tools():
 #   - tool_registry 侧 TOOL_CH_OCC 已注册（from_str/channel_str/fields
 #     无必填），executor 对本通道诚实拒绝（occ 工具由 occ 自执行）；
 #   - write_corpus_seed 排除本通道——seed 喂系统 ask 路由，occ 六件套
-#     不经系统 executor，入册反而误导（区头仍 9、单件仍 230、总 247）；
+#     不经系统 executor，入册反而误导（区头仍 9；单件 231、总 248 为
+#     UE 棒 I-2 telemetry_rate 入册后的新账）；
 #   - 沙盒受限表（_sb_keep）不含本通道，tools-sandbox.json 不变。
 # ---------------------------------------------------------------------------
 def occ_tools():
@@ -5245,6 +5249,32 @@ def build_tools(procfs_table, sysfs_table):
                                     "enum": venum}},
                                            ["value"]))
                  for name, venum, risk, d in TELEMETRY_WRITES)
+
+    # I-2（UE 棒激活，REVIEW3-REPORT §A-1）：采样率写口 rate=cat:ev:N。
+    # 参数组合式（cat 1..18 × ev 按类 1..N × rate 0..65535），非固定
+    # 枚举，独立装配；executor 按名特路由 telemetry_rate.c（枚举表+
+    # 默认率表内置、越界人话报错、/proc/ai/status 读回校验）。
+    tools.append({
+        "name": "procfs_write_telemetry_rate",
+        "channel": CH_SYSFS,
+        "risk": RISK_W1,
+        "description": "调 /proc/ai/telemetry 单事件采样率（I-2：内核观测"
+                       "面本身可被 AI 管理；写需 CAP_SYS_ADMIN）。value 格式"
+                       " cat:ev:N（自动补 rate= 前缀），如 16:1:64=设备事件"
+                       "限为 1/64、0=丢弃该事件全部后续样本、1=全量、N=每 N"
+                       " 条记 1 条。cat 1..18/ev 按类（sched 1..8、mm 1..10、"
+                       "hw 1..5、kconfig 1..3 等，ai_telemetry.h:64-215）、"
+                       "N 0..65535。出厂默认全量 1，仅 16:1:16（设备）、"
+                       "16:4:64（DMA）、17:2:16（sysctl）三处限频"
+                       "（ai_telemetry.c:421-427）。率表易失：重启即默认、"
+                       "无持久化；恢复出厂写对应默认值",
+        "path": "/proc/ai/telemetry",
+        "parameters": obj_schema({"value": {
+            "type": "string",
+            "description": "格式 cat:ev:N（可带 rate= 前缀），如 16:1:64；"
+                           "0=丢弃 1=全量 N=每 N 条记 1 条",
+        }}, ["value"]),
+    })
 
     tools.extend(tool_netlink(*p) for p in NETLINK_PARAMS)
     tools.append(tool_netlink_sense())

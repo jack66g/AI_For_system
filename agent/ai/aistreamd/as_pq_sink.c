@@ -313,14 +313,17 @@ static int collect_days(const char *root, char days[][16], int max)
 	return n;
 }
 
-/* 保留策略（flush 后调用；单测可直调：手工造 sink 状态） */
-void as_pq_retain(struct as_pq_sink *s)
+/* 保留策略（flush 后调用；单测可直调：手工造 sink 状态）。
+ * T8 遗留接线：核心体抽 as_pq_retain_root（as_decisions 落盘后共用
+ * 同一规则——telemetry+decisions 链同一预算/同一布局白名单/同一
+ * 当天不删口径；计数仍记 pq.retained_*，链级统一账目）。 */
+void as_pq_retain_root(const char *root, long long max_gb, int64_t btime,
+		       struct as_stats *st)
 {
-	const char *root = s->root;
 	char today[11];
 	char (*days)[16];
 	int ndays;
-	long long budget = s->max_gb * 1024LL * 1024LL * 1024LL;
+	long long budget = max_gb * 1024LL * 1024LL * 1024LL;
 	long long total = 0;
 	int guard = 0;
 
@@ -363,7 +366,7 @@ void as_pq_retain(struct as_pq_sink *s)
 		return;
 
 	/* 当天（UTC）目录永不删（ts=0 → btime 口径的今天=运行日） */
-	as_pq_day_from_ts(0, s->btime, today);
+	as_pq_day_from_ts(0, btime, today);
 	days = malloc(512 * 16);
 	if (!days)
 		return;
@@ -400,13 +403,13 @@ void as_pq_retain(struct as_pq_sink *s)
 			long long freed = 0;
 
 			as_log("parquet retain: purging day %s (over "
-			       "%lldGB budget)", days[picked], s->max_gb);
+			       "%lldGB budget)", days[picked], max_gb);
 			snprintf(td, sizeof(td), "%s/telemetry/%s", root,
 				 days[picked]);
 			snprintf(dd, sizeof(dd), "%s/decisions/%s", root,
 				 days[picked]);
-			freed += purge_layout_files(td, 0, s->stats);
-			freed += purge_layout_files(dd, 1, s->stats);
+			freed += purge_layout_files(td, 0, st);
+			freed += purge_layout_files(dd, 1, st);
 			rmdir_if_empty(td);
 			rmdir_if_empty(dd);
 			days[picked][0] = '\0';	/* 出候选（防空转重选） */
@@ -422,6 +425,11 @@ void as_pq_retain(struct as_pq_sink *s)
 
 		as_pq_update_index(root, &sk);
 	}
+}
+
+void as_pq_retain(struct as_pq_sink *s)
+{
+	as_pq_retain_root(s->root, s->max_gb, s->btime, s->stats);
 }
 
 void as_pq_sink_flush(struct as_pq_sink *s)

@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "as_conf.h"
+#include "as_decisions.h"
 #include "as_event.h"
 #include "as_hotplug.h"
 #include "as_outcome.h"
@@ -47,7 +48,7 @@
 #include "as_util.h"
 
 #define AISTREAMD_VERSION \
-	"aistreamd 1.4 (K3c + K3d-2 I-9 hotplug advisory + T8 parquet + I-10 outcome backfill + SENSE redact)"
+	"aistreamd 1.5 (K3c + K3d-2 I-9 hotplug advisory + T8 parquet + I-10 outcome backfill + SENSE redact + T8 decisions ingest)"
 
 /* ---- 全局上下文（单线程，信号只置标志） ---- */
 
@@ -65,6 +66,7 @@ struct g_ctx {
 	struct as_hotplug hotplug;	/* K3d-2：advisory-only（C7 红线） */
 	struct as_outcome outcome;	/* I-10：决策 outcome 回填（C3 默认关） */
 	struct as_pq_sink pq;		/* T8：事件→Parquet 落盘（默认关） */
+	struct as_decisions dec;	/* T8 遗留：decisions 消费（C1 默认关） */
 	int lock_fd;
 };
 
@@ -141,6 +143,17 @@ static void on_event(struct as_event *ev, void *u)
  * 唯一 decision_id，无重复语义），直接 parquet 采样 + 配额 → SME
  * （环形缓冲兜底——SME 不可达不阻塞 outcome 写，设计 §4.4） */
 static void outcome_emit(struct as_event *ev, void *u)
+{
+	struct g_ctx *g = u;
+
+	as_pq_sink_feed(&g->pq, ev);
+	quota_then_deliver(g, ev);
+}
+
+/* T8 遗留接线：decisions 消费合成事件出口——与 outcome_emit 同手法
+ * （游标已去重、每条含唯一 decision_id，无重复语义；直接 parquet 采样
+ * + 配额 → SME） */
+static void decisions_emit(struct as_event *ev, void *u)
 {
 	struct g_ctx *g = u;
 
@@ -336,6 +349,19 @@ int main(int argc, char **argv)
 		       G.conf.outcome_mock_root,
 		       strcmp(G.conf.outcome_mock_root, "/") == 0 ?
 		       "" : " (TEST ONLY)");
+		printf("decisions enabled=%d interval=%llds scan_max=%lld "
+		       "batch_max=%lld write_sme=%d (C1 read-only poll of "
+		       "/proc/ai/decisions -> T8 parquet decisions rows + "
+		       "synthetic events cat18)\n",
+		       G.conf.decisions_enabled,
+		       G.conf.decisions_interval_sec,
+		       G.conf.decisions_scan_max,
+		       G.conf.decisions_batch_max,
+		       G.conf.decisions_write_sme);
+		printf("decisions_mock_root=%s%s\n",
+		       G.conf.decisions_mock_root,
+		       strcmp(G.conf.decisions_mock_root, "/") == 0 ?
+		       "" : " (TEST ONLY)");
 		printf("sense_redact=%s%s salt=%s\n",
 		       G.conf.sense_redact_level == 2 ? "strict" :
 		       G.conf.sense_redact_level == 1 ? "soft" : "off",
@@ -387,6 +413,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	as_outcome_set_sink(&G.outcome, outcome_emit, &G);
+	if (as_decisions_init(&G.dec, &G.conf, &G.stats) != 0) {
+		/* 仅日批内存失败致命（enabled=0 时零分配零开销） */
+		as_log("FATAL: decisions ingest init");
+		return 1;
+	}
+	as_decisions_set_sink(&G.dec, decisions_emit, &G);
 	if (as_streams_setup(&G.streams, &G.conf, &G.stats, on_event,
 			     &G) != 0) {
 		as_log("FATAL: streams setup");
@@ -457,6 +489,15 @@ int main(int argc, char **argv)
 			if (odue > 0 && odue < timeout)
 				timeout = odue;
 		}
+		/* T8 遗留接线：decisions 消费 tick（轮询到期；due 纳入超时） */
+		{
+			long long ddue = as_decisions_due_ms(&G.dec, now);
+
+			if (ddue == 0)
+				as_decisions_tick(&G.dec, now);
+			if (ddue > 0 && ddue < timeout)
+				timeout = ddue;
+		}
 		due = as_streams_taskstats_due_ms(&G.streams);
 		if (due <= 0) {
 			as_streams_taskstats_tick(&G.streams);
@@ -501,8 +542,11 @@ int main(int argc, char **argv)
 	as_sme_flush(&G.sme);
 	as_hotplug_close(&G.hotplug);	/* K3d-2：flush+close advisory JSONL */
 	as_outcome_close(&G.outcome);	/* I-10：pending 队释放（停守护=
-					 * decisions 回全量 outcome_ts=0，
-					 * §5.7 回滚语义） */	/* K3d-2：flush+close advisory JSONL */
+						 * decisions 回全量 outcome_ts=0，
+						 * §5.7 回滚语义） */	/* K3d-2：flush+close advisory JSONL */
+	as_decisions_close(&G.dec);	/* T8 遗留：decisions 日批尽力 flush
+					 * 后释放（游标为运行态——重启后
+					 * 首轮重摄取可见 ring=自然回填） */
 	as_pq_sink_close(&G.pq);	/* T8：缓冲行 flush 后释放 */
 	write_stats(&G, "final");
 	as_sme_free(&G.sme);

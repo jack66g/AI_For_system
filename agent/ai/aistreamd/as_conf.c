@@ -56,6 +56,13 @@ void as_conf_defaults(struct as_conf *c)
 	c->outcome_auto_rollback = 0;
 	/* TEST ONLY（L1 mock 冒烟；生产恒 "/"） */
 	snprintf(c->outcome_mock_root, sizeof(c->outcome_mock_root), "/");
+	/* T8 遗留接线：decisions 消费（默认关——出厂默认关，ISO 拍板翻） */
+	c->decisions_enabled = 0;
+	c->decisions_interval_sec = 5;
+	c->decisions_scan_max = 4096;
+	c->decisions_batch_max = 8192;
+	c->decisions_write_sme = 1;
+	snprintf(c->decisions_mock_root, sizeof(c->decisions_mock_root), "/");
 	/* SENSE 脱敏（多用户前提；默认 off=单用户现状零字节变化——
 	 * 设计 SENSE-REDACT-DESIGN §5 出厂默认建议） */
 	c->sense_redact_level = 0;	/* 0=off 1=soft 2=strict */
@@ -134,6 +141,9 @@ enum key_id {
 	K_OUTCOME_MAX_PENDING, K_OUTCOME_DECISIONS_SCAN_MAX,
 	K_OUTCOME_WRITE_SME, K_OUTCOME_AUTO_ROLLBACK,
 	K_OUTCOME_MOCK_ROOT,
+	K_DECISIONS_ENABLED, K_DECISIONS_INTERVAL_SEC,
+	K_DECISIONS_SCAN_MAX, K_DECISIONS_BATCH_MAX,
+	K_DECISIONS_WRITE_SME, K_DECISIONS_MOCK_ROOT,
 	K_SENSE_REDACT, K_SENSE_REDACT_SALT,
 	K_MAX
 };
@@ -156,6 +166,9 @@ static const char *const key_names[K_MAX] = {
 	"OUTCOME_MAX_PENDING", "OUTCOME_DECISIONS_SCAN_MAX",
 	"OUTCOME_WRITE_SME", "OUTCOME_AUTO_ROLLBACK",
 	"OUTCOME_MOCK_ROOT",
+	"DECISIONS_ENABLED", "DECISIONS_INTERVAL_SEC",
+	"DECISIONS_SCAN_MAX", "DECISIONS_BATCH_MAX",
+	"DECISIONS_WRITE_SME", "DECISIONS_MOCK_ROOT",
 	"SENSE_REDACT", "SENSE_REDACT_SALT",
 };
 
@@ -248,6 +261,7 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_HOTPLUG_MODEL:
 		case K_HOTPLUG_LOG:
 		case K_OUTCOME_MOCK_ROOT:
+		case K_DECISIONS_MOCK_ROOT:
 		case K_PARQUET_DIR: {
 			/* 三个字符串槽循环使用（校验即时完成，不持有引用） */
 			char *dst;
@@ -290,10 +304,18 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			}
 			if (id == K_OUTCOME_MOCK_ROOT &&
 			    (v[0] != '/' || strstr(v, "..") ||
-			     strpbrk(v, " 	"))) {
+			    strpbrk(v, " 	"))) {
 				fclose(f);
 				return bad(err, errcap, lineno,
 					   "bad OUTCOME_MOCK_ROOT (need absolute "
+					   "path, no ..): ", v, NULL);
+			}
+			if (id == K_DECISIONS_MOCK_ROOT &&
+			    (v[0] != '/' || strstr(v, "..") ||
+			    strpbrk(v, " 	"))) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad DECISIONS_MOCK_ROOT (need absolute "
 					   "path, no ..): ", v, NULL);
 			}
 			if (id == K_PARQUET_DIR &&
@@ -322,6 +344,9 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			} else if (id == K_OUTCOME_MOCK_ROOT) {
 				dst = c->outcome_mock_root;
 				dstcap = sizeof(c->outcome_mock_root);
+			} else if (id == K_DECISIONS_MOCK_ROOT) {
+				dst = c->decisions_mock_root;
+				dstcap = sizeof(c->decisions_mock_root);
 			} else if (id == K_PARQUET_DIR) {
 				dst = c->parquet_dir;
 				dstcap = sizeof(c->parquet_dir);
@@ -469,6 +494,26 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 		case K_OUTCOME_AUTO_ROLLBACK:
 			NEED_LL("OUTCOME_AUTO_ROLLBACK", 0, 1,
 				c->outcome_auto_rollback);
+			break;
+		case K_DECISIONS_ENABLED:
+			NEED_LL("DECISIONS_ENABLED", 0, 1,
+				c->decisions_enabled);
+			break;
+		case K_DECISIONS_INTERVAL_SEC:
+			NEED_LL("DECISIONS_INTERVAL_SEC", 1, 86400,
+				c->decisions_interval_sec);
+			break;
+		case K_DECISIONS_SCAN_MAX:
+			NEED_LL("DECISIONS_SCAN_MAX", 16, 4096,
+				c->decisions_scan_max);
+			break;
+		case K_DECISIONS_BATCH_MAX:
+			NEED_LL("DECISIONS_BATCH_MAX", 1024, 262144,
+				c->decisions_batch_max);
+			break;
+		case K_DECISIONS_WRITE_SME:
+			NEED_LL("DECISIONS_WRITE_SME", 0, 1,
+				c->decisions_write_sme);
 			break;
 		case K_SENSE_REDACT:
 			if (strcmp(v, "off") == 0) {

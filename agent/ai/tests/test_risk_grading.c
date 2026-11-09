@@ -91,8 +91,8 @@ int main(void)
 	memset(&reg, 0, sizeof(reg));
 	CHECK(tool_registry_load(&reg, &err) == AI_OK,
 	      "主注册表加载（tools.json）");
-	CHECK(reg.tool_count == 236,
-	      "注册表 236 件（T9e：230 + occ 六件套）");
+	CHECK(reg.tool_count == 237,
+	      "注册表 237 件（T9e 237 + UE I-2）");
 
 	/* ---- 0. W50 记忆管理面风险分级 ---- */
 	CHECK(strcmp(risk_of(&reg, "memory_update", "{}"), "W1") == 0,

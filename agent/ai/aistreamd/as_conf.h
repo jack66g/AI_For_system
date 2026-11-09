@@ -101,6 +101,23 @@ struct as_conf {
 						 * （需单独拍板，置 1 仅 journal
 						 * 提示） */
 
+	/* ---- T8 遗留接线：/proc/ai/decisions 消费面（as_decisions.c；
+	 * C1 只读轮询 + T8 parquet decisions 行 + 合成事件 18.01 口径；
+	 * 默认关——与 HOTPLUG/OUTCOME/SENSE 新面节奏一致，ISO 拍板翻） ---- */
+	int decisions_enabled;			/* 默认 0（建议与理由见
+						 * aistreamd.conf 注释） */
+	long long decisions_interval_sec;	/* 轮询间隔（默认 5，同 REF
+						 * aikd POLL_SEC） */
+	long long decisions_scan_max;		/* 单轮最大解析行数（默认 4096
+						 * =内核 ring 全量） */
+	long long decisions_batch_max;		/* 日批行容量（默认 8192；满
+						 * 丢最旧+计数） */
+	int decisions_write_sme;		/* 新决策合成事件走既有 SME/
+						 * parquet 管道（默认 1） */
+	char decisions_mock_root[256];		/* TEST ONLY：decisions 树前缀
+						 * （L1 mock 冒烟用；生产恒
+						 * 默认 "/"——journal 明示） */
+
 	/* ---- SENSE 遥测脱敏（产生侧；设计 SENSE-REDACT-DESIGN §2.2/§5；
 	 * 多用户前提，出厂默认 off=单用户现状零字节变化 ---- */
 	int sense_redact_level;			/* 0=off 1=soft 2=strict
