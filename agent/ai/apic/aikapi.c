@@ -557,9 +557,17 @@ fail:
 
 int api_is_task_param(const char *name)
 {
+	/* U66/T2（K66-REPORT §1-T2）：内核侧 sec.ws_label 为
+	 * AI_CTRL_F_TASK（ai_lsm.c:1858），白名单缺名使 /act 走
+	 * api_nl_pack_act(..., value, 0) → data=[value,0] 把 value 当
+	 * pid（F16 §2-3 实证）。think 5 字段通道与 v2 定向 netlink 不受
+	 * 影响（仅 /act 面）。注：io.priority 内核侧同为 TASK
+	 * （ai_block.c:627）但不在本棒拍板范围（K66 只裁 ws_label 一行，
+	 * io.priority 差缺口登记 U66-REPORT 交主会话）。 */
 	static const char *tp[] = { "sched.nice", "sched.affinity",
 				    "sched.oom_score", "proc.signal",
-				    "proc.freeze", "proc.rlimit" };
+				    "proc.freeze", "proc.rlimit",
+				    "sec.ws_label" };
 	size_t i;
 
 	for (i = 0; i < sizeof(tp) / sizeof(tp[0]); i++) {

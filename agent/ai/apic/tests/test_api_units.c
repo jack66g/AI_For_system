@@ -231,7 +231,11 @@ static void test_control_parse(void)
 	}
 	CHECK(api_is_task_param("sched.nice"));
 	CHECK(api_is_task_param("proc.rlimit"));
+	/* U66/T2：sec.ws_label 入 TASK 白名单（K66-REPORT §1-T2 一行修）*/
+	CHECK(api_is_task_param("sec.ws_label"));
 	CHECK(!api_is_task_param("llm.top_k"));
+	CHECK(!api_is_task_param("sec.ws_labels"));
+	CHECK(!api_is_task_param("sec.audit"));
 }
 
 static void test_nl_pack(void)
