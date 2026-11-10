@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T07:41:15+08:00",
+  "created": "2026-11-10T10:15:52+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -38,7 +38,8 @@
     "CTOPO1: include 形态归一（波次 C 棒 1）：五模块 93 个 #include 行+3 Makefile 纯形态零语义——-g0 全 TU 111/111 逐位一致、-g 产物 82/132 逐位同+50/132 仅调试段差、0 真差分、双编基线完全可复现；行为门 occ/occ_tui13/p-smoke/差分62/run_all60 主会话亲跑；rel 残留 0；例外登记 -I../memory（unicode.h，棒 2 撤销）；预存红 test_retrieval 夹具陈旧裁定重录（棒 2 项 0）",
     "CTOPO2: 事实公共头提升（波次 C 棒 2）：15 头 git mv 入 include/（local/memory/netlink/policy/tools/cloud/http/aistreamd 八子目录），57 处引用行+4 Makefile 撤 6 类逃生舱；头内容零改动。夹具重录（test_retrieval 2684/0 红转绿，need_int 未放宽；search.vectors 17 处差异如实录档）；预存 bug 修复=顶层 Makefile 源清单补 telemetry_rate.c（19c8400 埋、make ai 链接断）。G4 三层账 RAWSAME=796/DEBUGONLY=37（strip 后逐位同）/REALDIFF=0；全门（11 模块+run_all60+差分62+parquet parity+重放唯一在册红）主会话亲跑复核；旧位零残留亲扫",
     "CTOPO3: legacy 树收编（波次 C 棒 3，终棒）：19 头入 include/（tools 15+netlink ai_streams+shell model_lifecycle+communication+mbedtls-trim；18 R100+1 R097）；顶层 Makefile -I$(SRC_DIR)/-Icloud/-Iruntime 全部消灭，终态=include+mbedtls+linenoise 零例外；CFLAGS_HTTP -I.. 在册例外随 mbedtls-trim 迁移 include/mbedtls/ 闭环撤销（-D 串统一 8 功能点）；12 make 域×6 轮全链重建 RC=0（ai+aikernel-shell 双入口+237 工具）；REALDIFF=0 三层账（strip 228 点/-g0 7 TU/mbedtls 113 成员+.a 同出厂）→ISO 不换代立论；audit 237/248 三方一致（临时副本重灌 F162 手法，冻结 tools.img 原样）；t9d_factory_gate repo+--root 双模式 FAIL=0；行为门主会话亲跑复核",
-    "LT-BUG-001（LT-1 实机首 bug，P0）：occ 工具调用收集器把事件 idx 当槽位开槽——anthropic 流线上 content-block 序号（智谱 glm-4.6 恒 thinking@0+tool@1）≠ 工具序数，slot0 永空→每轮幻影空调用（空名报未知工具→模型重试雪崩，VM 实机复现 10 连错）。修=消费侧 loop.c idxmap append-on-START 映射（发射侧/差分/REF-PY 契约零动——62/62 无豁免）；test_loop 新增智谱形态全环回归钉（恰 1 真调用零幻影，独立会话）；mitm 双 tee 实弹复验：单真调用→read 执行→回传轮→终答 stop"
+    "LT-BUG-001（LT-1 实机首 bug，P0）：occ 工具调用收集器把事件 idx 当槽位开槽——anthropic 流线上 content-block 序号（智谱 glm-4.6 恒 thinking@0+tool@1）≠ 工具序数，slot0 永空→每轮幻影空调用（空名报未知工具→模型重试雪崩，VM 实机复现 10 连错）。修=消费侧 loop.c idxmap append-on-START 映射（发射侧/差分/REF-PY 契约零动——62/62 无豁免）；test_loop 新增智谱形态全环回归钉（恰 1 真调用零幻影，独立会话）；mitm 双 tee 实弹复验：单真调用→read 执行→回传轮→终答 stop",
+    "LT-BUG-002+003（LT-1 实机第二/三 bug）：①glob 绝对模式前导被静默当相对组件（/var/log/** 报「/root 下无匹配」）→ 以 / 为根+字面前缀锚定下钻（朴素走查无剪枝防全盘遍历）；②read_whole 按 ftell 尺寸读——procfs/sysfs 虚拟文件 size=0 读出空（/proc/1/comm 报「空文件」）→ sz==0 流式读至 EOF（read/edit/grep/bash 出读共用一处修全家）。test_tools 74→86（绝对命中/proc 读值/grep 命中六断言）；差分 62/62+run_all 60+p-smoke 全绿；VM 实弹双复验（glob 列全 /var/log 树+read 真读出 systemd）"
   ],
   "overlay_count": 168,
   "registry": {
@@ -60,7 +61,7 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65375736,
+    "bytes": 65379232,
     "regular_files": 1446,
     "source_files": 1446,
     "symlinks": 4,

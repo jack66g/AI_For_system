@@ -467,6 +467,20 @@ int main(void)
 		OK(s && !strstr(s, ".hidden.c"), "glob-hidden-excluded");
 		s = (char *)exec_tool("glob", "{\"pattern\":\"**/.*.c\"}");
 		OK(s && strstr(s, ".hidden.c"), "glob-hidden-explicit");
+		/* LT-BUG-002：绝对模式 + 字面前缀锚定（修前绝对前导被当
+		 * 相对组件在工作目录下永无匹配） */
+		s = (char *)exec_tool("glob",
+					      "{\"pattern\":\"/etc/host*\"}");
+		OK(exec_rc() == 0, "glob-abs-rc");
+		OK(s && strstr(s, "/etc/hostname"), "glob-abs-hit");
+		/* LT-BUG-003：procfs 零尺寸虚拟文件流式读（修前报空文件；
+		 * read/edit/grep/bash 出读共用路径） */
+		s = (char *)exec_tool("read", "{\"path\":\"/proc/version\"}");
+		OK(exec_rc() == 0, "read-proc-rc");
+		OK(s && strstr(s, "Linux version"), "read-proc-content");
+		s = (char *)exec_tool("grep", "{\"pattern\":\"Linux\",\"path\":\"/proc/version\"}");
+		OK(exec_rc() == 0, "grep-proc-rc");
+		OK(s && strstr(s, "Linux version"), "grep-proc-hit");
 		s = (char *)exec_tool("glob", "{\"pattern\":\"a/*.c\"}");
 		OK(s && strstr(s, "top.c") && !strstr(s, "deep.c"),
 		   "glob-star-no-cross");

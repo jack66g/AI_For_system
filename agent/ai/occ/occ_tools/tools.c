@@ -278,6 +278,44 @@ static int read_whole(const char *path, size_t max, char **out, size_t *len)
 		return -1;
 	}
 	rewind(f);
+	if (sz == 0) {
+		/* LT-BUG-003：procfs/sysfs 虚拟文件 stat 尺寸为 0——
+		 * fseek/ftell 快路读出空内容假象（实测 /proc/1/comm 报
+		 * 「空文件」）；流式读至 EOF。read/edit/grep/bash 出读
+		 * 共用本函数，一处修全家。 */
+		size_t cap = 8192, n = 0, r;
+
+		buf = malloc(cap + 1);
+		if (!buf) {
+			fclose(f);
+			errno = ENOMEM;
+			return -1;
+		}
+		while (n < max && (r = fread(buf + n, 1, cap - n, f)) > 0) {
+			n += r;
+			if (n == cap && cap < max) {
+				char *nb;
+				size_t nc = cap * 2;
+
+				if (nc > max)
+					nc = max;
+				nb = realloc(buf, nc + 1);
+				if (!nb) {
+					free(buf);
+					fclose(f);
+					errno = ENOMEM;
+					return -1;
+				}
+				buf = nb;
+				cap = nc;
+			}
+		}
+		buf[n] = '\0';
+		fclose(f);
+		*out = buf;
+		*len = n;
+		return 0;
+	}
 	buf = malloc((size_t)sz + 1);
 	if (!buf) {
 		fclose(f);
@@ -763,6 +801,7 @@ typedef struct {
 	size_t ncomps;
 	char *results[GLOB_MAX_RESULTS];
 	size_t nresults;
+	size_t c0;			/* 起始组件索引（LT-BUG-002 锚定） */
 	int overflow;
 } glob_walk;
 
@@ -809,7 +848,7 @@ static void glob_walk_dir(glob_walk *g, const char *dir, char **parts,
 		}
 		snprintf(full, sizeof(full), "%s/%s", dir, name);
 		parts[np] = name;
-		if (glob_match_c(g, 0, 0, parts, np + 1)) {
+		if (glob_match_c(g, g->c0, 0, parts, np + 1)) {
 			if (g->nresults < GLOB_MAX_RESULTS)
 				g->results[g->nresults++] = strdup(full);
 			else
@@ -864,6 +903,69 @@ static int tool_glob(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	     tok = strtok_r(NULL, "/", &save)) {
 		if (g.ncomps < GLOB_MAX_COMPS)
 			g.comps[g.ncomps++] = strdup(tok);
+	}
+	/* LT-BUG-002：绝对模式（/ 开头）以 / 为根——修前绝对前导被
+	 * 静默当相对组件（如 /var/log 加星号的绝对模式在工作目录下
+	 * 永无匹配，报错文案还误导）。并把连续字面前缀组件锚定为
+	 * 起点目录
+	 * 下钻：朴素走查无剪枝，/ 起步=全盘遍历；字面前缀只可能在
+	 * 同一路径下命中，锚定后绝对/相对语义不变。 */
+	{
+		size_t ci = 0;
+		char anchor[4000];
+		struct stat st;
+
+		if (pattern[0] == '/')
+			snprintf(root, sizeof(root), "/");
+		anchor[0] = '\0';
+		while (ci < g.ncomps && !strpbrk(g.comps[ci], "*?[")) {
+			size_t cl = strlen(g.comps[ci]);
+			size_t al = strlen(anchor);
+
+			if ((al ? al + 1 : 0) + cl + 1 > sizeof(anchor))
+				break;
+			if (al) {
+				anchor[al] = '/';
+				anchor[al + 1] = '\0';
+			}
+			strcat(anchor, g.comps[ci]);
+			ci++;
+		}
+		if (anchor[0]) {
+			char full[8200];
+
+			if (!strcmp(root, "/"))
+				snprintf(full, sizeof(full), "/%s", anchor);
+			else
+				snprintf(full, sizeof(full), "%s/%s", root,
+					 anchor);
+			if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {
+				if (strlen(full) < sizeof(root))
+					strcpy(root, full);
+				g.c0 = ci;
+			} else if (stat(full, &st) == 0 &&
+				   S_ISREG(st.st_mode) && ci == g.ncomps) {
+				/* 全字面且目标是文件（如 /etc/hostname）：
+				 * 最后组件留给匹配 */
+				char *sl = strrchr(full, '/');
+
+				if (sl && sl != full) {
+					*sl = '\0';
+					if (strlen(full) < sizeof(root))
+						strcpy(root, full);
+					g.c0 = ci - 1;
+				}
+			} else {
+				/* 字面前缀不存在/非目录（且非全字面文件）：
+				 * 必然无匹配——快路空结果 */
+				occ_ob_printf(o, "（%s 下无匹配 %s 的路径）",
+					      root, pattern);
+				for (i = 0; i < g.ncomps; i++)
+					free(g.comps[i]);
+				free(pbuf);
+				return 0;
+			}
+		}
 	}
 	glob_walk_dir(&g, root, parts, 0, 0);
 	qsort(g.results, g.nresults, sizeof(char *), cmp_str);
