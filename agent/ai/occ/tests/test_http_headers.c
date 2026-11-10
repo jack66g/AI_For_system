@@ -165,6 +165,14 @@ static void sink_cb(void *ud, const char *data, size_t len)
 	(void)len;
 }
 
+/* LT-BUG-006：可编程取消回调（g_cancel_ret 控返回值） */
+static int g_cancel_ret;
+static int cancel_cb(void *ud)
+{
+	(void)ud;
+	return g_cancel_ret;
+}
+
 /*
  * 一次请求：fork mock → https_post_stream(_ex) 发明文请求 → 收 dump。
  * use_ex=0 走旧通道；1 走 ex 通道。
@@ -470,6 +478,99 @@ int main(void)
 		     "Retry-After: 2\r\nContent-Length: 3\r\n"
 		     "Connection: close\r\n\r\n{}",
 		     NULL, "cap-disabled-returns-null");
+
+	/* ---- LT-BUG-006：传输取消钩子（缺省/未命中=行为不变；命中即中止） ---- */
+	{
+		char *b1, *b2;
+
+		/* 1. 未注册（缺省 NULL）→ 现状：完整响应、0 返回 */
+		https_set_cancel_cb(NULL, NULL);
+		b1 = fire_request("sk-cxl", NULL, 0, 'f');
+		OK(b1 != NULL, "cancel-default-null-served");
+		if (b1)
+			OK(contains(b1, "Authorization: Bearer sk-cxl\r\n") &&
+			   contains(b1, "POST /vf HTTP/1.1\r\n") &&
+			   contains(b1, "\r\n\r\n{\"x\":1}"),
+			   "cancel-default-request-bytes-unchanged");
+
+		/* 2. 注册但恒 0 → 逐字节同现状（旗标未置=零行为变化） */
+		g_cancel_ret = 0;
+		https_set_cancel_cb(cancel_cb, NULL);
+		b2 = fire_request("sk-cxl", NULL, 0, 'f');
+		OK(b2 != NULL, "cancel-false-served");
+		if (b1 && b2)
+			OK(strcmp(b1, b2) == 0,
+			   "cancel-false-byte-identical");
+		free(b1);
+		free(b2);
+
+		/* 3. 恒 1 → 流式调用即刻中止：负返回 + 专属文案 */
+		{
+			int fds[2];
+			char tmpl[] = "/tmp/occ-cxl-test-XXXXXX";
+			int tfd;
+			char dump_path[64];
+			pid_t pid;
+			char portbuf[16];
+			int port;
+			ssize_t n;
+			int status;
+			char url[64];
+			char *err = NULL;
+			int rc;
+
+			if (pipe(fds) < 0) {
+				OK(0, "cancel-true-pipe");
+				goto cancel_done;
+			}
+			tfd = mkstemp(tmpl);
+			if (tfd < 0) {
+				close(fds[0]);
+				close(fds[1]);
+				OK(0, "cancel-true-mkstemp");
+				goto cancel_done;
+			}
+			close(tfd);
+			snprintf(dump_path, sizeof(dump_path), "%s", tmpl);
+			pid = fork();
+			if (pid == 0) {
+				close(fds[0]);
+				mock_server_child(fds[1], dump_path);
+				_exit(99);
+			}
+			close(fds[1]);
+			n = read(fds[0], portbuf, sizeof(portbuf) - 1);
+			close(fds[0]);
+			if (n <= 0) {
+				waitpid(pid, &status, 0);
+				unlink(dump_path);
+				OK(0, "cancel-true-mock-up");
+				goto cancel_done;
+			}
+			portbuf[n] = '\0';
+			port = atoi(portbuf);
+			snprintf(url, sizeof(url),
+				 "http://127.0.0.1:%d/cxl", port);
+			g_cancel_ret = 1;
+			https_set_cancel_cb(cancel_cb, NULL);
+			rc = https_post_stream(url, "sk-x", "{\"x\":1}",
+					       sink_cb, NULL, NULL, &err);
+			https_set_cancel_cb(NULL, NULL);	/* 用后即清 */
+			g_cancel_ret = 0;
+			OK(rc < 0, "cancel-true-aborts");
+			OK(err && !strcmp(err, "Cancelled by caller"),
+			   "cancel-true-message");
+			free(err);
+			waitpid(pid, &status, 0);
+			unlink(dump_path);
+
+			/* 4. 清钩子后 → 回到现状（0 返回） */
+			b1 = fire_request("sk-after", NULL, 0, 'g');
+			OK(b1 != NULL, "cancel-cleared-served");
+			free(b1);
+		}
+	}
+cancel_done:
 
 	if (fails) {
 		printf("test_http_headers: FAIL(%d)\n", fails);

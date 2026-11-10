@@ -925,6 +925,26 @@ const char *https_last_resp_header(void)
 	return g_capture_name[0] ? g_capture_val : NULL;
 }
 
+/* ---- LT-BUG-006：流式传输取消钩子（纯增量；缺省 NULL=零行为变化） ----
+ * occ 流中 Esc 掐流：SIGINT 踢开阻塞读后 mbedTLS 把 EINTR 映成
+ * WANT_READ，读循环原样重试——踢击被吞、流照跑到自然收尾。注册方
+ * （occ_llm）把进程级中断旗标桥接进来，读循环逐块查询、命中即中止
+ * 本次传输（负返回 + "Cancelled by caller"，区别于网络错误）。 */
+static int (*g_cancel_cb)(void *ud);
+static void *g_cancel_ud;
+
+void https_set_cancel_cb(int (*cancelled)(void *ud), void *ud)
+{
+	g_cancel_cb = cancelled;
+	g_cancel_ud = ud;
+}
+
+/* 读循环检查点：已注册且返回非 0 → 中止（未注册=一次 NULL 判定） */
+static int cancel_hit(void)
+{
+	return g_cancel_cb && g_cancel_cb(g_cancel_ud) != 0;
+}
+
 /* 在完整响应头块 hdr 中提取捕获头（仅 TLS/明文流式路径调用） */
 static void hdr_capture_one(const char *hdr)
 {
@@ -1187,6 +1207,8 @@ static int https_post_stream_impl(const char *url, const char *api_key,
 			int r = sread(&io, buf, sizeof(buf));
 			size_t avail;
 
+			if (cancel_hit())
+				goto ps_cancelled;	/* LT-BUG-006 */
 			if (r == MBEDTLS_ERR_SSL_WANT_READ ||
 			    r == MBEDTLS_ERR_SSL_WANT_WRITE)
 				continue;
@@ -1243,6 +1265,8 @@ static int https_post_stream_impl(const char *url, const char *api_key,
 			char buf[8192];
 			int r = sread(&io, buf, sizeof(buf));
 
+			if (cancel_hit())
+				goto ps_cancelled;	/* LT-BUG-006 */
 			if (r == MBEDTLS_ERR_SSL_WANT_READ ||
 			    r == MBEDTLS_ERR_SSL_WANT_WRITE)
 				continue;
@@ -1269,6 +1293,11 @@ static int https_post_stream_impl(const char *url, const char *api_key,
 			}
 		}
 		ret = 0;
+		goto ps_tls_cleanup;
+ps_cancelled:				/* LT-BUG-006：取消钩子命中→中止 */
+		if (error_msg)
+			*error_msg = strdup("Cancelled by caller");
+		ret = -1;
 ps_tls_cleanup:
 		mbedtls_ssl_free(&ssl);
 		mbedtls_ssl_config_free(&conf);
@@ -1312,6 +1341,13 @@ ps_tls_cleanup:
 			int r = sread(&io, buf, sizeof(buf));
 			size_t avail;
 
+			if (cancel_hit()) {		/* LT-BUG-006：中止 */
+				if (error_msg)
+					*error_msg = strdup("Cancelled by caller");
+				close(sock);
+				free(hdr);
+				return -1;
+			}
 			if (r <= 0) {
 				if (error_msg)
 					*error_msg = strdup("Connection closed before HTTP header");
@@ -1374,6 +1410,13 @@ ps_tls_cleanup:
 			const char *bp;
 			size_t bn;
 
+			if (cancel_hit()) {		/* LT-BUG-006：中止 */
+				if (error_msg)
+					*error_msg = strdup("Cancelled by caller");
+				close(sock);
+				free(hdr);
+				return -1;
+			}
 			if (r < 0)
 				break;      /* 错误/超时 → 流结束 */
 			if (r == 0)

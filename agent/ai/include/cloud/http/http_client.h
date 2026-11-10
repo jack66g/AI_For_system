@@ -135,6 +135,23 @@ void https_capture_resp_header(const char *name);
  */
 const char *https_last_resp_header(void);
 
+/* ---- 传输取消钩子（LT-BUG-006 纯增量；缺省 NULL=行为逐字节不变） ---- */
+
+/*
+ * https_set_cancel_cb - 注册流式传输取消查询回调
+ * @cancelled: 返回非 0 = 立即中止传输——本次 https_post_stream /
+ *             https_post_stream_ex 以负值返回，error_msg=
+ *             "Cancelled by caller"（区别于网络错误）；返回 0 = 照常。
+ *             NULL = 关闭（缺省）。
+ * @ud:        回调上下文（透传，不解释）。
+ *
+ * 检查点：流式读循环每次网络读返回后（含 WANT_READ/EINTR 打断返回），
+ * 逐块粒度；请求写与非流式接口（https_post/get/_ex）不受影响。
+ * 线程/进程边界：进程级静态（同 https_capture_resp_header），调用方
+ * 自串行（occ 走全局锁；建议用后即清 https_set_cancel_cb(NULL, NULL)）。
+ */
+void https_set_cancel_cb(int (*cancelled)(void *ud), void *ud);
+
 /* ---- Timeout ---- */
 
 /*

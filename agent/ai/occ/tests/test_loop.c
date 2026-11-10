@@ -130,6 +130,13 @@ static const char SSE_ANT_FINAL[] =
 	"{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
 	"data: {\"type\":\"message_stop\"}\n\n";
 
+/* ---- LT-BUG-006 夹具：流中 Esc——只含首个增量（无 finish/DONE，
+ * 传输在流中被掐断；对照 SSE_NORMAL 即其前缀） ---- */
+
+static const char SSE_MIDSTREAM_HEAD[] =
+	"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\","
+	"\"content\":\"你好\"}}]}\n\n";
+
 /* ---- 伪传输 ---- */
 
 static const char *g_seq[4];			/* 回放序列（末位循环） */
@@ -141,6 +148,9 @@ static const char *g_req_system;
 static char g_msgs_log[2048];
 static int g_fake_reset;			/* b2：先发垃圾文本+RESET 再
 						 * 回放（验证收集器清空） */
+static int g_fake_midstream_abort;		/* LT-BUG-006：流出首块后置旗
+						 * 中止（模拟流中 Esc：传
+						 * 输层逐块查旗标命中即掐） */
 
 static void sse_set(const char *one)
 {
@@ -218,6 +228,25 @@ static int fake_llm_call(const occ_provider *p, const occ_llm_req *req,
 		ev.type = OCC_EV_RESET;
 		ev.err = "重试：第 1/2 次尝试将在 1ms 后重发（单测模拟）";
 		cb(&ev, ud);
+	}
+
+	if (g_fake_midstream_abort) {
+		/* LT-BUG-006 场景：首个增量已流出（消费方已见「你好」），
+		 * 流中 Esc 置旗 → 修复后传输层中止本次调用——不再喂
+		 * 终结事件、返回失败（err=interrupted；不重试不发
+		 * ERROR）。对照真链路：occ_llm 取消钩子命中即掐流。 */
+		occ_sse *s2 = occ_sse_new(req->proto, cb, ud);
+
+		g_seq_i++;			/* 计入调用次数（断言面） */
+		if (s2) {
+			occ_sse_feed(s2, SSE_MIDSTREAM_HEAD,
+				     strlen(SSE_MIDSTREAM_HEAD));
+			occ_sse_free(s2);
+		}
+		occ_interrupt_flag = 1;		/* Esc 到达（并发线程） */
+		if (err_out)
+			*err_out = strdup("interrupted by user");
+		return -1;
 	}
 
 	cur = g_seq[g_seq_i < g_seq_n ? g_seq_i : g_seq_n - 1];
@@ -979,6 +1008,47 @@ int main(void)
 			occ_loop_result_free(&res);
 		}
 		}
+
+		/* ---- 用例 15（LT-BUG-006）：流中 Esc——增量已流出、传输
+		 *    中止 → res.interrupted=1 + status=interrupted + 半截
+		 *    assistant 不落库 + 清旗重放收口（interrupted → retry/
+		 *    --recover 续跑语义保持） ---- */
+	{
+		occ_msg_row last;
+		char sid15[OCC_ID_LEN];
+		int rc;
+
+		g_fake_midstream_abort = 1;
+		opts.prompt = "第十五问：流中中断";
+		sse_set(SSE_NORMAL);
+		rc = occ_loop_run(db, &p, NULL, &opts, &res, err,
+				  sizeof(err));
+		g_fake_midstream_abort = 0;
+		snprintf(sid15, sizeof(sid15), "%s", res.session_id);
+		OK(rc == OCC_LOOP_OK, "loop15-rc-ok");
+		OK(res.interrupted == 1, "loop15-interrupted-flag");
+		OK(g_seq_i == 1, "loop15-llm-then-aborted");
+		OK(status_is(sid15, "interrupted"),
+		   "loop15-status-interrupted");
+		OK(occ_msg_last(db, sid15, &last, err, sizeof(err)) == 1 &&
+		   !strcmp(last.role, "user"),
+		   "loop15-tail-user-replayable");
+		occ_msg_row_free(&last);
+		OK(res.text == NULL && res.assistant_msg_id[0] == '\0',
+		   "loop15-no-partial-output");
+		occ_loop_result_free(&res);
+
+		/* 清旗重放（occ retry / --recover 同路径）→ 收口归位 */
+		occ_interrupt_flag = 0;
+		opts.prompt = NULL;
+		sse_set(SSE_NORMAL);
+		rc = occ_loop_run(db, &p, sid15, &opts, &res, err,
+				  sizeof(err));
+		OK(rc == OCC_LOOP_OK, "loop15b-replay-rc");
+		OK(res.interrupted == 0, "loop15b-not-interrupted");
+		OK(status_is(sid15, "active"), "loop15b-active");
+		occ_loop_result_free(&res);
+	}
 
 		/* ---- 用例 8（可选）：a1 vectors 真 fixture 回放一环 ---- */
 	{

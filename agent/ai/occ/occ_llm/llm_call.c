@@ -63,6 +63,21 @@ struct occ_call_ctx {
 	char first_err[192];		/* 首个流内 ERROR 文本（分级/人话） */
 };
 
+/*
+ * LT-BUG-006：流中 Esc 掐流——把进程级中断旗标桥接为 http 传输层
+ * 取消钩子（https_post_stream 读循环逐块查询）。旧行为：SIGINT 踢开
+ * 阻塞读后 mbedTLS 把 EINTR 映成 WANT_READ，读循环原样重读——踢击被
+ * 吞、纯流轮照跑到自然收尾。注册后旗标置位（TUI Esc / headless
+ * Ctrl+C）即中止本次尝试；取消≠网络错误——见下方尝试判定的
+ * 「中断优先于错误」分支（不重试、不发 ERROR，loop.c llm_interrupted
+ * 落 status=interrupted，与安全点中断同语义）。
+ */
+static int occ_cancel_poll(void *ud)
+{
+	(void)ud;
+	return occ_interrupt_flag ? 1 : 0;
+}
+
 static int err_append(struct occ_call_ctx *c, const char *data, size_t len)
 {
 	if (c->err_cap - c->err_len < len) {
@@ -313,6 +328,9 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 
 		pthread_mutex_lock(&g_occ_http_lock);
 		https_set_timeout(60, 60);
+		/* LT-BUG-006：本尝试传输窗口内挂取消钩子（读循环逐块查
+		 * 旗标）；用后即清——静态共享面不留跨尝试残留 */
+		https_set_cancel_cb(occ_cancel_poll, NULL);
 		if (req->proto == OCC_PROTO_ANTHROPIC) {
 			/*
 			 * Anthropic 原生认证（T9a2）：x-api-key +
@@ -337,10 +355,22 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 						body, occ_on_data, &c, &status,
 						&herr);
 		}
+		https_set_cancel_cb(NULL, NULL);	/* LT-BUG-006：出窗即清 */
 		pthread_mutex_unlock(&g_occ_http_lock);
 
 		/* ---- 本次尝试判定 ---- */
 		if (hrc != 0) {
+			/* LT-BUG-006：中断优先于错误——取消钩子掐断（流中
+			 * Esc 置旗）按中断收口：不重试、不发 ERROR（消费方
+			 * 按中断处理），err 标 interrupted */
+			if (occ_interrupt_flag) {
+				free(herr);
+				if (err_out)
+					*err_out = strdup(
+						"interrupted by user");
+				rc = -1;
+				break;
+			}
 			snprintf(reason, sizeof(reason), "%s",
 				 (herr && herr[0]) ? herr :
 				 "transport error");
@@ -348,6 +378,15 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 			free(herr);
 			herr = NULL;
 		} else if (status >= 400) {
+			/* LT-BUG-006：错误体流到一半被 Esc 掐断同样按中断
+			 * 收口（不走 4xx 分级重试） */
+			if (occ_interrupt_flag) {
+				if (err_out)
+					*err_out = strdup(
+						"interrupted by user");
+				rc = -1;
+				break;
+			}
 			build_http_msg(&c, status, reason, sizeof(reason));
 			cls = occ_llm_retry_class(status, NULL, 0);
 		} else {
@@ -355,6 +394,16 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 			terminal = c.finish_seen || c.done_real;
 			if (terminal && !c.first_err[0]) {
 				rc = 0;		/* 成功收口 */
+				break;
+			}
+			/* LT-BUG-006：非终结且旗标已置（踢击落在末块处理
+			 * 窗口/干净提前 EOF 后）→ 中断收口，不绕行
+			 * RESET+退避 */
+			if (occ_interrupt_flag) {
+				if (err_out)
+					*err_out = strdup(
+						"interrupted by user");
+				rc = -1;
 				break;
 			}
 			if (c.first_err[0])
