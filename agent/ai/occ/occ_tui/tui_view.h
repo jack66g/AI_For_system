@@ -34,6 +34,24 @@ extern "C" {
 typedef struct tui_view tui_view;
 
 /*
+ * UXAB A+B：图形化 footer 供数结构（fill_usage 填充；全部字段可零）。
+ * 渲染形态：`model │ ▓░ N% │ ↑in ↓out ⟳cr │ cwd`（│ dim、
+ * ↑ 绿/↓ 正常/⟳ 紫槽、进度条按 tui_usage_bar 分档+水位着色）。
+ * est=1 → 百分比前缀 `~`；fallback=1 → 模型名后缀 `*`
+ *（catalog 未命中语义与旧 meta 行一致——进屏 notice 注明口径不变）。
+ */
+struct tui_footer {
+	char model[64];		/* 模型 id（如 glm-5.3） */
+	char cwd[160];		/* 尾段目录（空=不渲染尾段） */
+	long long in;		/* ↑ input tokens */
+	long long out;		/* ↓ output tokens */
+	long long cache_read;	/* ⟳ cache read tokens */
+	int pct;		/* 上下文占用 %（tui_usage_pct；<0 未知） */
+	int est;		/* 1=估算（~ 前缀） */
+	int fallback;		/* 1=catalog 未命中（* 后缀） */
+};
+
+/*
  * 事件 kind：0..5 与 occ_sink_kind 逐位对齐（occ.c 直接透传 sink 事件，
  * 见 occ_loop.h）；6.. 为 view 本地事件。
  */
@@ -69,11 +87,22 @@ typedef struct {
 	 * 返回 0=已处理，1=未知命令（view 出提示） */
 	int (*on_command)(void *ud, const char *line);
 	/* 元数据行：写主体 "occ · model · 12.3k/200k"（不含百分比——
-	 * view 按返回的 pct 追加 " (N%)" 并按 70 黄/90 红 着色；
-	 * pct<0=未知则不加后缀） */
+	 * view 按返回的 pct 追加 " (N%)" 并按 70 黄/90 红着色；
+	 * pct<0=未知则不加后缀）。
+	 * UXAB：fill_usage 存在时本钩子不被调用（新图形 footer 取代），
+	 * 保留为回落路径（fill_usage==NULL 的嵌入方/旧测试）。 */
 	int (*fill_meta)(void *ud, char *buf, size_t cap);
-	/* 状态行（idle）：写 "cwd:branch"；返回写入长度 */
+	/* 状态行（idle）：写 "cwd:branch"；返回写入长度。
+	 * UXAB：同 fill_meta——fill_usage 存在时不再调用。 */
 	int (*fill_status)(void *ud, char *buf, size_t cap);
+	/* ---- UXAB A+B：顶栏 + 图形化 footer（结构化供数；任一为 NULL
+	 * 则对应元素不渲染并回落旧两行布局——零钩子=完全旧行为） ---- */
+	/* 顶栏：title=当前会话标题（空串=无会话，左侧留空）；model=
+	 * "glm-5.3 · zhipu" 形式的模型标签（右侧）。NULL=不渲染顶栏行 */
+	void (*fill_topbar)(void *ud, char *title, size_t tcap,
+			    char *model, size_t mcap);
+	/* footer 结构化供数（NULL=回落 fill_meta+fill_status 旧布局） */
+	void (*fill_usage)(void *ud, struct tui_footer *out);
 	/* 会话侧栏快照（启动/TURN_END/命令后 view 主动拉取） */
 	void (*fill_sessions)(void *ud, tui_sb_data *out);
 	/* 退屏后、销毁前调（occ.c：中断 + join worker） */
@@ -150,6 +179,10 @@ void tui_view_set_busy(tui_view *v, int on);
 
 /* B8：主线程拉会话侧栏快照并置脏（异步改名等改数据后的刷新口） */
 void tui_view_refresh_sessions(tui_view *v);
+
+/* UXAB：assistant 消息块头标签（`◆ <label> · HH:MM`；缺省 "occ"）。
+ * occ.c 在模型解析/切换后设为模型名——每条 assistant 消息随块留档 */
+void tui_view_set_assist_label(tui_view *v, const char *label);
 
 #ifdef __cplusplus
 }

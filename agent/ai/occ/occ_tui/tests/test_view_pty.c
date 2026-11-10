@@ -339,6 +339,34 @@ static int mock_meta(void *ud, char *buf, size_t cap)
 	return 1;
 }
 
+/* ---- UXAB A+B：新布局 mock（MOCK_NEWUI=1 时接线） ---- */
+
+static void mock_topbar(void *ud, char *title, size_t tcap, char *model,
+			size_t mcap)
+{
+	struct mock *m = ud;
+
+	snprintf(title, tcap, "%s", "mock-title");
+	snprintf(model, mcap, "%s · prov-x",
+		 m->model[0] ? m->model : "mock-model");
+}
+
+static void mock_usage(void *ud, struct tui_footer *out)
+{
+	struct mock *m = ud;
+
+	memset(out, 0, sizeof(*out));
+	snprintf(out->model, sizeof(out->model), "%s",
+		 m->model[0] ? m->model : "mock-model");
+	snprintf(out->cwd, sizeof(out->cwd), "%s", "mockrepo");
+	out->in = 12300;			/* ↑12.3k */
+	out->out = 351;				/* ↓351 */
+	out->cache_read = 1600;			/* ⟳1.6k */
+	out->pct = 12;				/* ▓░ 12% */
+	out->est = 0;
+	out->fallback = 1;			/* model* */
+}
+
 static int mock_status(void *ud, char *buf, size_t cap)
 {
 	(void)ud;
@@ -401,6 +429,10 @@ static int child_main(void)
 	h.on_overlay_input = mock_overlay_input;
 	h.on_overlay_key = mock_overlay_key;
 	h.on_async_result = mock_async_result;
+	if (getenv("MOCK_NEWUI")) {		/* UXAB A+B 新布局场景 */
+		h.fill_topbar = mock_topbar;
+		h.fill_usage = mock_usage;
+	}
 
 	m.view = tui_view_create(&h);
 	if (!m.view)
@@ -710,7 +742,9 @@ int main(void)
 		OK(rc == 0, "C-submit-stream");
 		OK(find_bytes(out, out_len, "MOCK_REPLY") != NULL,
 		   "C-streamed-reply-rendered");
-		OK(find_bytes(out, out_len, "you") != NULL,
+		/* UXAB：块头 `❯ 你 · …`（你=E4 BD A0） */
+		OK(find_bytes(out, out_len,
+			      "\xe2\x9d\xaf \xe4\xbd\xa0") != NULL,
 		   "C-user-header");
 		OK(find_bytes(out, out_len, "OCC · mock") != NULL,
 		   "C-footer");
@@ -1095,6 +1129,53 @@ int main(void)
 		   "KT3-no-push-bytes");
 		OK(find_bytes(out, out_len, "\x1b[<u") == NULL,
 		   "KT3-no-pop-bytes");
+	}
+
+	/* ---- N. UXAB A+B 新布局：顶栏/分隔线/图形 footer/水印/busy ----
+	 * MOCK_NEWUI=1 → mock 接 fill_topbar+fill_usage（慢 turn——busy 水印
+	 * 稳定可见）。断言新视觉元素全进 pty 字节流：顶栏标题+`模型 · 厂商`
+	 * 标签+dim ─ 填充、聊天/输入分隔线、footer `model* │ ▓░ 12% │
+	 * ↑12.3k ↓351 ⟳1.6k │ mockrepo`、空态水印、busy spinner 水印
+	 * （正在思考… Esc 中断）、❯ 你 / ◆ occ 块头。 */
+	{
+		const char *needles[] = {
+			"mock-title",		/* 顶栏标题 */
+			"mock-model · prov-x",	/* 顶栏模型标签 */
+			"\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80",	/* ─── */
+			"mock-model*",		/* footer 模型+* 兜底 */
+			"\xe2\x96\x93\xe2\x96\x91",	/* ▓░（与数字间 SGR 断开） */
+			"12%",			/* 水位数字 */
+			"\xe2\x86\x91" "12.3k",	/* ↑12.3k */
+			"\xe2\x9f\xb3" "1.6k",	/* ⟳1.6k */
+			"\xe8\xbe\x93\xe5\x85\xa5\xe6\xb6\x88\xe6\x81\xaf",
+						/* 输入消息（空态水印） */
+			"\xe2\x9d\xaf \xe4\xbd\xa0",	/* ❯ 你 */
+			"\xe6\xad\xa3\xe5\x9c\xa8\xe6\x80\x9d\xe8\x80\x83",
+						/* 正在思考（busy 水印） */
+			"SLOWTEXT",
+			"GOT_INTERRUPT"
+		};
+		static const char keys[] = "hi\r";
+		char esc = 0x1b;
+
+		setenv("MOCK_NEWUI", "1", 1);
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 13, 10,
+				  &esc, 1, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 1 /* slow */);
+		OK(rc == 0, "N-newui-all-elements");
+		/* ◆ 块头（assistant live 块——mock 未设标签=缺省 occ） */
+		OK(find_bytes(out, out_len, "\xe2\x97\x86 occ") != NULL,
+		   "N-assistant-header");
+		/* footer │ 分隔（E2 94 82 两侧空格） */
+		OK(find_bytes(out, out_len, " \xe2\x94\x82 ") != NULL,
+		   "N-footer-sep");
+		/* 空态水印 › 提示符（E2 80 BA） */
+		OK(find_bytes(out, out_len, "\xe2\x80\xba ") != NULL,
+		   "N-watermark-mark");
+		/* ↓351（footer 输出段） */
+		OK(find_bytes(out, out_len, "\xe2\x86\x93" "351") != NULL,
+		   "N-footer-down");
+		unsetenv("MOCK_NEWUI");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

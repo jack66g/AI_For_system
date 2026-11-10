@@ -35,6 +35,10 @@ typedef struct tui_chat tui_chat;
 tui_chat *tui_chat_create(const tui_theme *th);
 void tui_chat_destroy(tui_chat *c);
 
+/* UXAB：assistant 块头标签（`◆ <label> · HH:MM`；缺省 "occ"）。
+ * occ.c 在模型解析/切换后设为当前模型名 */
+void tui_chat_set_assist_label(tui_chat *c, const char *label);
+
 /* ---- 模型更新（主线程；sink 事件经 view queue 派发后调用） ---- */
 
 /* user 消息：立即渲染定稿推进 scrollback */

@@ -80,8 +80,10 @@ int main(void)
 	tui_chat_add_user(c, "hello tui", 9);
 	s = render_to(c, 8, 40, 1000);
 	OK(s != NULL, "render1");
+	/* UXAB：块头 `❯ 你 · HH:MM`（❯=E2 9D AF、你=E4 BD A0） */
 	OK(screen_row(s, 0, 0, 40, row, sizeof(row)) > 0 &&
-	   strstr(row, "you") != NULL, "user-header");
+	   strstr(row, "\xe2\x9d\xaf \xe4\xbd\xa0 \xc2\xb7") != NULL,
+	   "user-header");
 	OK(screen_row(s, 1, 0, 40, row, sizeof(row)) != 0 &&
 	   strcmp(row, "hello tui") == 0, "user-text");
 	tui_screen_destroy(s);
@@ -105,8 +107,19 @@ int main(void)
 	tui_screen_destroy(s);
 	tui_chat_end_assistant(c, "Agent · model · 1.0s · 20 tok/s");
 	s = render_to(c, 8, 40, 1000);
-	OK(screen_row(s, 3, 0, 40, row, sizeof(row)) != 0 &&
-	   strstr(row, "Agent") != NULL, "footer-in-scrollback");
+	{	/* UXAB：assistant 块多了 ◆ 头行——footer 落位后移，全行扫描断言 */
+		int i, found_ft = 0, found_hdr = 0;
+
+		for (i = 0; i < 8; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "Agent") != NULL)
+				found_ft = 1;
+			if (strstr(row, "\xe2\x97\x86 occ") != NULL) /* ◆ occ */
+				found_hdr = 1;
+		}
+		OK(found_ft, "footer-in-scrollback");
+		OK(found_hdr, "assistant-block-header");
+	}
 	tui_screen_destroy(s);
 
 	/* ---- 3. markdown-lite：标题/列表/引用/行内 ---- */
@@ -184,15 +197,19 @@ int main(void)
 	tui_chat_tool_end(c, "bash", "file1\nfile2", 0);
 	s = render_to(c, 8, 40, 1000);
 	{
-		int i, found_ok = 0;
+		int i, found_ok = 0, found_tree = 0;
 
 		for (i = 0; i < 8; i++) {
 			screen_row(s, i, 0, 40, row, sizeof(row));
 			if (strstr(row, "✓") != NULL &&
 			    strstr(row, "bash") != NULL)
 				found_ok = 1;
+			/* UXAB：树形枝干 `  ├─ `（├─=E2 94 9C E2 94 80） */
+			if (strstr(row, "  \xe2\x94\x9c\xe2\x94\x80 ") != NULL)
+				found_tree = 1;
 		}
 		OK(found_ok, "tool-ok-mark");
+		OK(found_tree, "tool-tree-branch");
 	}
 	tui_screen_destroy(s);
 	tui_chat_end_assistant(c, "");

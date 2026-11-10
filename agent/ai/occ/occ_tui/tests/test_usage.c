@@ -75,6 +75,44 @@ int main(void)
 	tui_usage_items(buf, sizeof(buf), 0, 0, 0, -1, 0);
 	OK(strcmp(buf, "i0 o0 c0 r–") == 0, "items-zero");
 
+	/* ---- UXAB：进度条分档（▓=E2 96 93、░=E2 96 91） ---- */
+	tui_usage_bar(-1, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x91") == 0, "bar-unknown");
+	tui_usage_bar(0, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x91") == 0, "bar-0");
+	tui_usage_bar(9, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x91") == 0, "bar-9");
+	tui_usage_bar(10, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x93\xe2\x96\x91") == 0, "bar-10");
+	tui_usage_bar(19, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x93\xe2\x96\x91") == 0, "bar-19");
+	tui_usage_bar(20, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x91") == 0,
+	   "bar-20");
+	tui_usage_bar(39, buf, sizeof(buf));
+	OK(strcmp(buf, "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x91") == 0,
+	   "bar-39");
+	tui_usage_bar(59, buf, sizeof(buf));
+	OK(strcmp(buf,
+		  "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93\xe2\x96\x91") == 0,
+	   "bar-59");
+	tui_usage_bar(79, buf, sizeof(buf));
+	OK(strcmp(buf,
+		  "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93"
+		  "\xe2\x96\x91") == 0, "bar-79");
+	tui_usage_bar(80, buf, sizeof(buf));
+	OK(strcmp(buf,
+		  "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93"
+		  "\xe2\x96\x93") == 0, "bar-80-full");
+	tui_usage_bar(100, buf, sizeof(buf));
+	OK(strcmp(buf,
+		  "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93"
+		  "\xe2\x96\x93") == 0, "bar-100-full");
+	tui_usage_bar(250, buf, sizeof(buf));
+	OK(strcmp(buf,
+		  "\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93\xe2\x96\x93"
+		  "\xe2\x96\x93") == 0, "bar-over-clamped");
+
 	printf("test_usage: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

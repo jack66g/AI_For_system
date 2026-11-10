@@ -8,6 +8,7 @@
 #include "tui_usage.h"
 
 #include <stdio.h>
+#include <string.h>
 
 int tui_usage_pct(long long tokens, long long limit)
 {
@@ -73,4 +74,29 @@ void tui_usage_items(char *buf, size_t cap, long long in, long long out,
 		     si, so, sc, sr);
 	if (n < 0)
 		buf[0] = '\0';
+}
+
+void tui_usage_bar(int pct, char *buf, size_t cap)
+{
+	int fill, i, n = 0;
+
+	if (!buf || cap == 0)
+		return;
+	if (pct < 0)
+		pct = 0;
+	if (pct > 100)
+		pct = 100;
+	/* 分档：0-9→0 … 10-19→1、20-39→2、40-59→3、60-79→4、80+→5 */
+	fill = pct < 10 ? 0 : (pct + 20) / 20;
+	if (fill > 5)
+		fill = 5;
+	for (i = 0; i < fill && n + 4 <= (int)cap - 1; i++) {
+		memcpy(buf + n, "▓", 3);
+		n += 3;
+	}
+	if (fill < 5 && n + 4 <= (int)cap - 1) {
+		memcpy(buf + n, "░", 3);
+		n += 3;
+	}
+	buf[n] = '\0';
 }

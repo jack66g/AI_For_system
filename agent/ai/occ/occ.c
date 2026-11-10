@@ -472,6 +472,10 @@ struct tui_app {
 	int shell_req;			/* T9e /shell：退屏跑 bash 后重建 view */
 	char *prompt;			/* 本轮输入（主线程分配，worker 用） */
 	char session_id[OCC_ID_LEN];	/* 当前会话；空=下条提交建新会话 */
+	/* UXAB：顶栏缓存（title 由 worker/切换/改名写——mu 保护；
+	 * model_prov 仅主线程，模型解析/切换后 app_update_model_prov 刷） */
+	char session_title[128];
+	char model_prov[48];
 	long long tokens_total;		/* 会话累计计费额（/status 展示） */
 	long long ctx_limit;		/* catalog limit.context；缺省 200k */
 	int ctx_fallback;		/* 1=catalog 未命中/不可读 → 200k* */
@@ -726,15 +730,23 @@ static void *tui_worker_main(void *arg)
 		occ_session_row row;
 		char e2[160];
 		long long tok = 0;
+		int have_row = 0;
 
 		if (occ_session_get(a->db, res.session_id, &row, e2,
-				    sizeof(e2)) == 1)
+				    sizeof(e2)) == 1) {
 			tok = row.tokens_total;
+			have_row = 1;
+		}
 		pthread_mutex_lock(&a->mu);
 		if (!a->session_id[0] || !strcmp(a->session_id, res.session_id)) {
 			snprintf(a->session_id, sizeof(a->session_id), "%s",
 				 res.session_id);
 			a->tokens_total = tok;
+			/* UXAB：首条消息建会话 → 顶栏标题即时可见 */
+			if (have_row)
+				snprintf(a->session_title,
+					 sizeof(a->session_title), "%.95s",
+					 row.title);
 		}
 		pthread_mutex_unlock(&a->mu);
 	}
@@ -993,6 +1005,9 @@ static void app_load_usage_from_db(struct tui_app *a, const char *sid)
 
 /* ---- 密钥向导（OPENCODE-PLAN §2.4 ≤4 步） ---- */
 
+/* UXAB：顶栏厂商标签刷新（定义在 fill_meta 区——wiz_save 先用） */
+static void app_update_model_prov(struct tui_app *a);
+
 static void wiz_reset(struct tui_app *a)
 {
 	memset(&a->wiz, 0, sizeof(a->wiz));
@@ -1219,6 +1234,9 @@ static void wiz_save(struct tui_app *a)
 				a->ctx_limit = 200000;
 				a->ctx_fallback = 1;
 			}
+			/* UXAB：顶栏厂商+块头模型标签随向导保存刷新 */
+			app_update_model_prov(a);
+			tui_view_set_assist_label(a->view, a->p.model);
 		}
 	}
 	if (a->reg) {
@@ -1595,6 +1613,10 @@ static void tui_app_on_async_result(void *ud, int rc, const char *text)
 				tui_view_overlay_status(a->view, e, 1);
 				return;
 			}
+			pthread_mutex_lock(&a->mu);
+			snprintf(a->session_title, sizeof(a->session_title),
+				 "%.95s", text);	/* UXAB：顶栏即时更新 */
+			pthread_mutex_unlock(&a->mu);
 			tui_view_close_overlay(a->view);
 			snprintf(nb, sizeof(nb), "renamed → %.200s", text);
 			tui_view_notice(a->view, nb);
@@ -2111,6 +2133,7 @@ static int tui_app_on_command(void *ud, const char *line)
 	if (!strcmp(line, "/new")) {
 		pthread_mutex_lock(&a->mu);
 		a->session_id[0] = '\0';
+		a->session_title[0] = '\0';	/* UXAB：顶栏随之清空 */
 		a->tokens_total = 0;
 		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
 		a->u_est = 0;
@@ -2303,10 +2326,13 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 							 1);
 				return 0;
 			}
-			occ_provider_free(&a->p);
-			a->p = np;
-			app_resolve_ctx(a);
-			occ_registry_touch(a->reg, rm->provider, rm->id);
+				occ_provider_free(&a->p);
+				a->p = np;
+				app_resolve_ctx(a);
+				/* UXAB：顶栏厂商+块头模型标签随切换刷新 */
+				app_update_model_prov(a);
+				tui_view_set_assist_label(a->view, a->p.model);
+				occ_registry_touch(a->reg, rm->provider, rm->id);
 			(void)occ_state_save(a->reg, a->state_path);
 			tui_view_close_overlay(a->view);
 			{
@@ -2344,6 +2370,8 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 		r = &a->ov_rows[idx];
 		pthread_mutex_lock(&a->mu);
 		snprintf(a->session_id, sizeof(a->session_id), "%s", r->id);
+		snprintf(a->session_title, sizeof(a->session_title), "%.95s",
+			 r->title);			/* UXAB：顶栏即时切换 */
 		a->tokens_total = r->tokens_total;
 		live = a->worker_live;
 		pthread_mutex_unlock(&a->mu);
@@ -2483,6 +2511,10 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 			tui_view_overlay_status(a->view, e, 1);
 			return 0;
 		}
+		pthread_mutex_lock(&a->mu);
+		snprintf(a->session_title, sizeof(a->session_title), "%.95s",
+			 text);			/* UXAB：顶栏即时更新 */
+		pthread_mutex_unlock(&a->mu);
 		snprintf(nb, sizeof(nb), "renamed → %.200s", text);
 		tui_view_close_overlay(a->view);
 		tui_view_notice(a->view, nb);
@@ -2627,6 +2659,78 @@ static int tui_app_fill_status(void *ud, char *buf, size_t cap)
 	return snprintf(buf, cap, "%s:%s", a->cwd, base);
 }
 
+/* ---- UXAB A+B：顶栏 + 图形化 footer 供数 ---- */
+
+/* 模型厂商标签（catalog 按 model id 查 provider；未命中留空=只显模型名）。
+ * 仅主线程调用（与 app_resolve_ctx 同批：启动 /models 切换 / 向导保存） */
+static void app_update_model_prov(struct tui_app *a)
+{
+	const occ_catalog_model *m = NULL;
+
+	a->model_prov[0] = '\0';
+	app_load_catalog(a);
+	if (!a->cat || a->cat->nmodels == 0)
+		return;
+	m = occ_catalog_find(a->cat, NULL, a->p.model);
+	if (!m) {
+		const occ_catalog_model *hits[4];
+		size_t nh = occ_catalog_search(a->cat, a->p.model, 0, hits, 4);
+
+		if (nh >= 1)
+			m = hits[0];
+	}
+	if (m)
+		snprintf(a->model_prov, sizeof(a->model_prov), "%.40s",
+			 m->provider);
+}
+
+/* 顶栏：title=当前会话标题（缓存——worker/切换/改名点写）；model=
+ * `glm-5.3 · zhipu`（厂商未命中=仅模型名）。每帧拉取：只做互斥+拷贝 */
+static void tui_app_fill_topbar(void *ud, char *title, size_t tcap,
+				char *model, size_t mcap)
+{
+	struct tui_app *a = ud;
+
+	pthread_mutex_lock(&a->mu);
+	snprintf(title, tcap, "%.95s", a->session_title);
+	pthread_mutex_unlock(&a->mu);
+	if (a->model_prov[0])
+		snprintf(model, mcap, "%.60s · %s", a->p.model, a->model_prov);
+	else
+		snprintf(model, mcap, "%.60s", a->p.model);
+}
+
+/* footer 结构化供数：ctx/pct 公式与旧 fill_meta 同源（tui_usage_ctx/
+ * tui_usage_pct——OCD §5.2 五项和口径不变，纯展示层换图形） */
+static void tui_app_fill_usage(void *ud, struct tui_footer *out)
+{
+	struct tui_app *a = ud;
+	long long in, out2, cr, cw, tok, lim;
+	int est, fb;
+
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	pthread_mutex_lock(&a->mu);
+	in = a->u_in;
+	out2 = a->u_out;
+	cr = a->u_cr;
+	cw = a->u_cw;
+	est = a->u_est;
+	lim = a->ctx_limit;
+	fb = a->ctx_fallback;
+	pthread_mutex_unlock(&a->mu);
+	snprintf(out->model, sizeof(out->model), "%.60s", a->p.model);
+	snprintf(out->cwd, sizeof(out->cwd), "%.150s", a->cwd);
+	out->in = in;
+	out->out = out2;
+	out->cache_read = cr;
+	tok = tui_usage_ctx(in, out2, cr, cw, -1);
+	out->pct = tui_usage_pct(tok, lim);
+	out->est = est;
+	out->fallback = fb;
+}
+
 static void tui_app_fill_sessions(void *ud, tui_sb_data *out)
 {
 	struct tui_app *a = ud;
@@ -2764,6 +2868,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	/* catalog 分母（exe 锚定搜索链；未命中 → 200k* 进屏 notice） */
 	app_load_catalog(&a);
 	app_resolve_ctx(&a);
+	app_update_model_prov(&a);		/* UXAB：顶栏厂商标签 */
 
 	memset(&h, 0, sizeof(h));
 	h.ud = &a;
@@ -2773,6 +2878,8 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	h.on_command = tui_app_on_command;
 	h.fill_meta = tui_app_fill_meta;
 	h.fill_status = tui_app_fill_status;
+	h.fill_topbar = tui_app_fill_topbar;	/* UXAB A+B：顶栏 */
+	h.fill_usage = tui_app_fill_usage;	/* UXAB A+B：图形 footer */
 	h.fill_sessions = tui_app_fill_sessions;
 	h.on_shutdown = tui_app_on_shutdown;
 	h.on_overlay_submit = tui_app_on_overlay_submit;
@@ -2797,6 +2904,9 @@ static int run_interactive(occ_db *db, const char *model_toml,
 					pthread_mutex_destroy(&a.mu);
 					return 1;
 				}
+				/* UXAB：assistant 块头标签=当前模型名
+				 *（/shell 往返重建 view 后也要重设） */
+				tui_view_set_assist_label(a.view, a.p.model);
 				if (first_screen && a.ctx_fallback) {
 					char nb[320];
 

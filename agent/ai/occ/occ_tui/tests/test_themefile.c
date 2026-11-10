@@ -49,10 +49,12 @@ int main(void)
 	OK(tui_thm_color(TUI_THM_WARN) == 214, "def-warn");
 	OK(tui_thm_color(TUI_THM_CODE_FG) == 186, "def-code-fg");
 	OK(tui_thm_color(TUI_THM_LINK) == 75, "def-link");
+	OK(tui_thm_color(TUI_THM_CACHE) == 140, "def-cache");
 	OK(tui_thm_color(999) == 252, "def-oob-slot-safe");
 
 	/* ---- 槽位名表 ---- */
 	OK(tui_thm_slot_by_name("fg") == TUI_THM_FG, "name-fg");
+	OK(tui_thm_slot_by_name("cache") == TUI_THM_CACHE, "name-cache");
 	OK(tui_thm_slot_by_name("assist_bg") == TUI_THM_ASSIST_BG,
 	   "name-assist-bg");
 	OK(tui_thm_slot_by_name("nope") == -1, "name-unknown");

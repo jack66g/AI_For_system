@@ -82,7 +82,8 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 		th = &loc;
 	}
 	a_title = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, TUI_ST_BOLD);
-	a_cur = tui_thm_attr(TUI_THM_BG, TUI_THM_ACCENT, 0);	/* 反白高亮 */
+	/* UXAB：当前行=左标条 ▎(accent) + 亮色文字（fg 加粗）——替旧反白 */
+	a_cur = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, TUI_ST_BOLD);
 	a_dim = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
 	a_bottom = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
 
@@ -98,23 +99,31 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 		int avail;
 		tui_attr a = r->is_current ? a_cur : a_dim;
 
+		/* UXAB：当前行首列画 ▎ 标条（accent）；正文右移一列 */
+		if (r->is_current) {
+			(void)tui_screen_put(s, y, 0, "▎", strlen("▎"),
+					     tui_thm_attr(TUI_THM_ACCENT,
+							  TUI_THM_BG, 0));
+		}
 		/* id 前 8 字符（ses_XXXX…） */
 		snprintf(id12, sizeof(id12), "%.8s", r->id);
-		avail = TUI_SB_WIDTH - 1 - (int)strlen(id12) - 1;
+		avail = TUI_SB_WIDTH - 1 - (r->is_current ? 2 : 0) -
+			(int)strlen(id12) - 1;
 		if (avail < 4)
 			avail = 4;
 		clip_cols(r->title, avail, title_clip, sizeof(title_clip));
 		snprintf(rest, sizeof(rest), "%s %s", id12, title_clip);
-		(void)tui_screen_put(s, y, 0, rest, strlen(rest), a);
+		(void)tui_screen_put(s, y, r->is_current ? 1 : 0, rest,
+				     strlen(rest), a);
 	}
 
-	/* 底部 token 水位行（倒数第 1 行） */
+	/* 底部 token 水位行（倒数第 1 行；UXAB：` · ` 分隔） */
 	if (rows >= 2) {
-		char pct[16];
+		char pct[20];
 
 		fmt_tok(d->tokens_total, tok, sizeof(tok));
 		if (d->pct >= 0)
-			snprintf(pct, sizeof(pct), " %d%%", d->pct);
+			snprintf(pct, sizeof(pct), " · %d%%", d->pct);
 		else
 			pct[0] = '\0';
 		snprintf(line, sizeof(line), "%s%s", tok, pct);

@@ -47,6 +47,8 @@ enum {
 	TUI_THM_NUM,
 	TUI_THM_CMT,
 	TUI_THM_LINK,
+	/* UXAB：footer cache-read（⟳）紫——进度条图形化配色 */
+	TUI_THM_CACHE,
 	TUI_THM_COUNT
 };
 

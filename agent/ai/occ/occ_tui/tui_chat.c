@@ -84,6 +84,8 @@ struct tui_chat {
 	size_t nmsgs, mcap;
 	tui_scrollback sb;
 	int width;			/* 当前渲染宽度（rewidth 同步） */
+	char assist_label[64];		/* UXAB：assistant 块头标签（空="occ"） */
+	int live_fold_idx;		/* UXAB：live 折叠行在 live_lines 的下标（-1 无） */
 	llist live_lines;		/* live 块行缓存 */
 	/* B5：定稿 reasoning 消息的折叠行 {scrollback 绝对行, msgs 下标}
 	 * ——chat_push_msg 追加（升序）、rebuild 重算；无 reasoning 消息
@@ -714,6 +716,74 @@ static void msg_render_lines(const char *text, size_t len, int width,
 
 /* ---- 消息模型 ---- */
 
+/* UXAB：消息块头 `❯ 你 · 02:15` / `◆ <label> · 02:16`——
+ * 前缀+角色标签 accent 加粗、时间戳 dim（双 attr 合成行：装载前缀
+ * gitem 后追加 dim 段，再整行回绕——列表 • 前缀同手法）。 */
+static void render_block_header(tui_chat *c, const char *mark,
+				const char *label, time_t ts, llist *ll)
+{
+	char hb[128];
+	char tb[24];
+	char tbuf[16] = "??:??";
+	struct tm tmv;
+	tui_gph_st gst = {0, 0, 0};
+	gitem *g = NULL;
+	int gn = 0, gcap = 0;
+	int hn;
+
+	localtime_r(&ts, &tmv);
+	strftime(tbuf, sizeof(tbuf), "%H:%M", &tmv);
+	hn = snprintf(hb, sizeof(hb), "%s %s ", mark, label);
+	if (hn < 0)
+		return;
+	if (hn >= (int)sizeof(hb))
+		hn = (int)sizeof(hb) - 1;
+	if (load_gitems(hb, (size_t)hn, tui_thm_accent(TUI_ST_BOLD),
+			&g, &gn, &gcap) != 0)
+		return;
+	snprintf(tb, sizeof(tb), "· %s", tbuf);
+	if (gi_append(&g, &gn, &gcap, tb, strlen(tb), tui_thm_muted(),
+		      &gst) < 0) {
+		free(g);
+		return;
+	}
+	wrap_gitems(g, gn, c->width, 1, ll);	/* 内部 free(g) */
+}
+
+/* UXAB：工具行树形化 `  ├─ ✓ bash · summary`——枝干 dim、状态符+主体
+ * 按状态着色（✓ ok 绿 / ✗ error 红 / spinner muted）。定稿与 live 共用。 */
+static void render_tool_row(tui_chat *c, const tui_toolrow *t,
+			    const char *mark, llist *ll)
+{
+	char tb[336];
+	tui_attr ta = tui_thm_attr(t->st == 1 ? TUI_THM_OK :
+				   t->st == 2 ? TUI_THM_ERROR :
+				   TUI_THM_MUTED, TUI_THM_BG, 0);
+	tui_gph_st gst = {0, 0, 0};
+	gitem *g = NULL;
+	int gn = 0, gcap = 0;
+	int tn;
+
+	tn = snprintf(tb, sizeof(tb), "%s %s · %s", mark,
+		      t->name ? t->name : "?",
+		      t->summary ? t->summary : "");
+	if (tn < 0)
+		return;
+	if (tn >= (int)sizeof(tb))
+		tn = (int)sizeof(tb) - 1;
+	if (load_gitems("  ├─ ", strlen("  ├─ "), tui_thm_muted(),
+			&g, &gn, &gcap) != 0) {
+		msg_render_lines(tb, (size_t)tn, c->width, ta,
+				 TUI_ROLE_NOTICE, ll);
+		return;
+	}
+	if (gi_append(&g, &gn, &gcap, tb, (size_t)tn, ta, &gst) < 0) {
+		free(g);
+		return;
+	}
+	wrap_gitems(g, gn, c->width, 0, ll);	/* 内部 free(g) */
+}
+
 static void msg_init(tui_msg *m, int role, time_t ts)
 {
 	memset(m, 0, sizeof(*m));
@@ -834,6 +904,10 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 		return;
 	memset(&ll, 0, sizeof(ll));
 	if (m->role == TUI_ROLE_ASSISTANT) {
+		/* UXAB：块头 ◆ label · HH:MM（label=assist_label，occ.c 供模型名） */
+		render_block_header(c, "◆",
+				    c->assist_label[0] ? c->assist_label : "occ",
+				    m->ts, &ll);
 		/* reasoning 折叠行（B5：点击展开——记 scrollback 绝对行号） */
 		if (m->reason && m->rlen) {
 			if (c->nfolds == c->foldscap) {
@@ -848,9 +922,11 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 				}
 			}
 			if (c->nfolds < c->foldscap) {
+				/* UXAB：◆ 头行先占 ll.n 行——折叠行绝对号
+				 * 随之偏移（头行可能回绕多行，按 ll.n 计） */
 				c->folds[c->nfolds].abs =
 					(long long)(c->sb.dropped +
-						    c->sb.count);
+						    c->sb.count + ll.n);
 				c->folds[c->nfolds].msg =
 					(size_t)(m - c->msgs);
 				c->nfolds++;
@@ -860,45 +936,20 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
 					 tui_thm_plain(), m->role, &ll);
-		/* 工具行 */
+		/* 工具行（UXAB 树形：枝干 ├─ dim + 状态符着色） */
 		for (i = 0; i < (int)m->nt; i++) {
-			char tb[320];
 			const char *mk = m->tools[i].st == 1 ? "✓" :
 					 m->tools[i].st == 2 ? "✗" : "•";
-			int tn = snprintf(tb, sizeof(tb), "%s %s · %s", mk,
-					  m->tools[i].name ? m->tools[i].name :
-					  "?",
-					  m->tools[i].summary ?
-					  m->tools[i].summary : "");
-			tui_attr ta = tui_thm_attr(
-				m->tools[i].st == 1 ? TUI_THM_OK :
-				m->tools[i].st == 2 ? TUI_THM_ERROR :
-				TUI_THM_MUTED, TUI_THM_BG, 0);
 
-			if (tn < 0)
-				tn = 0;
-			else if (tn >= (int)sizeof(tb))
-				tn = (int)sizeof(tb) - 1;
-			msg_render_lines(tb, (size_t)tn, c->width, ta,
-					 TUI_ROLE_NOTICE, &ll);
+			render_tool_row(c, &m->tools[i], mk, &ll);
 		}
 		if (m->has_footer && m->footer[0])
 			msg_render_lines(m->footer, strlen(m->footer),
 					 c->width, tui_thm_muted(),
 					 TUI_ROLE_NOTICE, &ll);
 	} else if (m->role == TUI_ROLE_USER) {
-		/* 角色标记+时间行 */
-		char hb[64];
-		struct tm tmv;
-		char tbuf[16] = "??:??";
-		int hn;
-
-		localtime_r(&m->ts, &tmv);
-		strftime(tbuf, sizeof(tbuf), "%H:%M", &tmv);
-		hn = snprintf(hb, sizeof(hb), "you · %s", tbuf);
-		msg_render_lines(hb, (size_t)hn, c->width,
-				 tui_thm_accent(TUI_ST_BOLD),
-				 TUI_ROLE_NOTICE, &ll);
+		/* UXAB：块头 ❯ 你 · HH:MM（accent+bold / dim 时间） */
+		render_block_header(c, "❯", "你", m->ts, &ll);
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
 					 tui_thm_attr(TUI_THM_FG,
@@ -959,6 +1010,17 @@ void tui_chat_destroy(tui_chat *c)
 	ll_free(&c->live_lines);
 	tui_sb_destroy(&c->sb);
 	free(c);
+}
+
+void tui_chat_set_assist_label(tui_chat *c, const char *label)
+{
+	if (!c)
+		return;
+	if (!label || !label[0]) {
+		c->assist_label[0] = '\0';
+		return;
+	}
+	snprintf(c->assist_label, sizeof(c->assist_label), "%.60s", label);
 }
 
 void tui_chat_add_user(tui_chat *c, const char *text, size_t len)
@@ -1212,9 +1274,16 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 	int i;
 
 	ll_reset(&c->live_lines);
+	c->live_fold_idx = -1;
 	if (!m || !m->live || m->role != TUI_ROLE_ASSISTANT)
 		return;
 	(void)now_ms;
+	/* UXAB：块头 ◆ label · HH:MM（live 块同样带头——流式开始即可见）。
+	 * 头行占位后折叠行不再是 live 首行——记录其行下标供点击命中。 */
+	render_block_header(c, "◆",
+			    c->assist_label[0] ? c->assist_label : "occ",
+			    m->ts, &c->live_lines);
+	c->live_fold_idx = (m->reason && m->rlen) ? c->live_lines.n : -1;
 	/* reasoning 折叠行（B5：点击切换展开——可见行号在 render 记 hits） */
 	if (m->reason && m->rlen)
 		render_reasoning(c, m, 1, &c->live_lines);
@@ -1222,7 +1291,6 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 		msg_render_lines(m->text, m->tlen, width, tui_thm_plain(),
 				 TUI_ROLE_ASSISTANT, &c->live_lines);
 	for (i = 0; i < (int)m->nt; i++) {
-		char tb[320];
 		const char *mk;
 
 		if (m->tools[i].st == 1)
@@ -1231,24 +1299,7 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 			mk = "✗";
 		else
 			mk = tui_thm_spinner(now_ms);
-		{
-			int tn = snprintf(tb, sizeof(tb), "%s %s · %s", mk,
-					  m->tools[i].name ?
-					  m->tools[i].name : "?",
-					  m->tools[i].summary ?
-					  m->tools[i].summary : "");
-			tui_attr ta = tui_thm_attr(
-				m->tools[i].st == 1 ? TUI_THM_OK :
-				m->tools[i].st == 2 ? TUI_THM_ERROR :
-				TUI_THM_MUTED, TUI_THM_BG, 0);
-
-			if (tn < 0)
-				tn = 0;
-			else if (tn >= (int)sizeof(tb))
-				tn = (int)sizeof(tb) - 1;
-			msg_render_lines(tb, (size_t)tn, width, ta,
-					 TUI_ROLE_NOTICE, &c->live_lines);
-		}
+		render_tool_row(c, &m->tools[i], mk, &c->live_lines);
 	}
 }
 
@@ -1340,12 +1391,16 @@ void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 		}
 	}
 	if (lm && lm->live && lm->reason && lm->rlen &&
-	    c->live_lines.n - live_h == 0 &&
+	    c->live_fold_idx >= 0 &&
 	    c->nhits < (int)(sizeof(c->hits) / sizeof(c->hits[0]))) {
-		/* live 折叠行 = live 首行（未被截尾时可见） */
-		c->hits[c->nhits].row = sb_h;
-		c->hits[c->nhits].msg = (size_t)(lm - c->msgs);
-		c->nhits++;
+		/* UXAB：live 折叠行位置=live_fold_idx（◆ 头行后）折算视口行 */
+		int off = c->live_fold_idx - (c->live_lines.n - live_h);
+
+		if (off >= 0 && off < live_h) {
+			c->hits[c->nhits].row = sb_h + off;
+			c->hits[c->nhits].msg = (size_t)(lm - c->msgs);
+			c->nhits++;
+		}
 	}
 
 	for (i = 0; i < sb_h; i++) {

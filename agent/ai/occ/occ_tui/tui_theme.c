@@ -39,13 +39,14 @@ static const int TUI_THM_DEFAULTS[TUI_THM_COUNT] = {
 	114,	/* STR */
 	179,	/* NUM */
 	244,	/* CMT */
-	75	/* LINK */
+	75,	/* LINK */
+	140	/* CACHE（UXAB：⟳ cache read 紫） */
 };
 
 static const char *const TUI_THM_NAMES[TUI_THM_COUNT] = {
 	"fg", "bg", "muted", "accent", "border", "error", "ok", "warn",
 	"user_bg", "assist_bg", "code_fg", "code_bg", "kw", "str", "num",
-	"cmt", "link"
+	"cmt", "link", "cache"
 };
 
 static int g_pal[TUI_THM_COUNT];
