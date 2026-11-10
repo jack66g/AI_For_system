@@ -2,8 +2,10 @@
 /*
  * tui_view.h - occ TUI 视图框架：布局 + 事件队列 + 30fps 主循环（T9c2）
  *
- * 结构（OCD §1）：竖排会话侧栏（22 列，宽 <60 隐藏）| 主列 =
- * 转写区（tui_chat 双段 scrollbox）/ 元数据行 / 输入框 / 状态行。
+ * 结构（OCD §1；E 方案改版后）：转写区/输入区各一圈单线框（框线
+ * 零文字）+ 全宽一行 footer；会话侧栏 ctrl+b 展开（22 列 C 形态合体
+ * 框；宽 <60 强制收起）。旧回落路径（fill_usage 缺）保留 T1 两行
+ * （元数据行/状态行）形态。tui_chat 双段 scrollbox 不变。
  *
  * 线程模型（T9C2-PROGRESS 裁定 2/3）：worker 线程跑 occ_loop_run，
  * sink 回调 → tui_view_post（互斥事件环 + 自唤醒 pipe）→ 主循环
@@ -36,8 +38,9 @@ typedef struct tui_view tui_view;
 
 /*
  * UXAB A+B：图形化 footer 供数结构（fill_usage 填充；全部字段可零）。
- * 渲染形态：`model │ ▓░ N% │ ↑in ↓out ⟳cr │ cwd`（│ dim、
- * ↑ 绿/↓ 正常/⟳ 紫槽、进度条按 tui_usage_bar 分档+水位着色）。
+ * E 渲染形态（一行流 footer）：`[ctrl+b] 会话 · model · N% ·
+ * ↑in ↓out ccr · cwd`（· dim、↑ 绿/↓ 正常/c 紫槽、水位按 tier 着色；
+ * 会话名不出现在 footer）。
  * est=1 → 百分比前缀 `~`；fallback=1 → 模型名后缀 `*`
  *（catalog 未命中语义与旧 meta 行一致——进屏 notice 注明口径不变）。
  */
@@ -46,7 +49,7 @@ struct tui_footer {
 	char cwd[160];		/* 尾段目录（空=不渲染尾段） */
 	long long in;		/* ↑ input tokens */
 	long long out;		/* ↓ output tokens */
-	long long cache_read;	/* ⟳ cache read tokens */
+	long long cache_read;	/* c cache read tokens */
 	int pct;		/* 上下文占用 %（tui_usage_pct；<0 未知） */
 	int est;		/* 1=估算（~ 前缀） */
 	int fallback;		/* 1=catalog 未命中（* 后缀） */
@@ -67,7 +70,7 @@ enum {
 	/* ---- OCC-DEBT：历史回放（进屏//sessions 切换时 occ.c 投递；主线程
 	 * 或 worker 均可 post——与 sink 事件同一队列） ---- */
 	TUI_VIEW_HIST_USER = 7,		/* 定稿 user 消息（text） */
-	TUI_VIEW_HIST_SEP = 8,		/* 「⋯ 更早 N 条」分隔行（text） */
+	TUI_VIEW_HIST_SEP = 8,		/* 「… 更早 N 条」分隔行（text） */
 	TUI_VIEW_HIST_BEGIN = 9,	/* assistant 回放块开始（live 语义） */
 	TUI_VIEW_HIST_CLEAR = 10,	/* 清空转写（切会话前旧内容） */
 	/* ---- OCC-DEBT：异步结果回投（向导验证 worker → 主循环）；

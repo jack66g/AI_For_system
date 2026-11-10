@@ -7,7 +7,7 @@
  *   1) 检索注入：occ_sme_lookup 返回 `〈记忆〉` 块（含命中段落、定界符）；
  *      经 occ_loop_run（OCC_BIND=on + 注入伪传输）后请求 system 含该块
  *      ——「AI 开口就记得」的落地路径端到端断言；
- *   2) 诚实降级：服务停掉后再查 → NULL + 状态 `✉sme:off`（不阻塞对话，
+ *   2) 诚实降级：服务停掉后再查 → NULL + 状态 `@sme:off`（不阻塞对话，
  *      环 rc 仍 OCC_LOOP_OK）；
  *   3) 写回配额：20 条写入成功、第 21 条被会话级配额挡下（读不限）；
  *   4) 开关：OCC_SME=off → 禁用且状态诚实显示 off。
@@ -292,7 +292,7 @@ int main(void)
 		OK(strstr(blk, "中文简洁") != NULL, "block-hit2");
 		free(blk);
 	}
-	OK(strcmp(occ_sme_status(), "✉sme:on") == 0, "status-on");
+	OK(strcmp(occ_sme_status(), "@sme:on") == 0, "status-on");
 	OK(g_n_search == 1, "search-request-count");
 
 	/* ---- 2) 经 occ_loop_run 的注入端到端（system 含〈记忆〉） ---- */
@@ -345,7 +345,7 @@ int main(void)
 	srv_stop();
 	blk = occ_sme_lookup("还能查到吗");
 	OK(blk == NULL, "lookup-down-null");
-	OK(strcmp(occ_sme_status(), "✉sme:off") == 0, "status-off-after-down");
+	OK(strcmp(occ_sme_status(), "@sme:off") == 0, "status-off-after-down");
 	{
 		occ_loop_result res;
 
@@ -358,7 +358,7 @@ int main(void)
 	/* ---- 5) OCC_SME=off 开关 ---- */
 	setenv("OCC_SME", "off", 1);
 	OK(occ_sme_enabled() == 0, "sme-disabled-by-env");
-	OK(strcmp(occ_sme_status(), "✉sme:off") == 0, "status-off-when-disabled");
+	OK(strcmp(occ_sme_status(), "@sme:off") == 0, "status-off-when-disabled");
 	OK(occ_sme_lookup("anything") == NULL, "lookup-disabled-null");
 	OK(occ_sme_remember("ses_x", NULL, "text") == 0, "remember-disabled-skip");
 	unsetenv("OCC_SME");

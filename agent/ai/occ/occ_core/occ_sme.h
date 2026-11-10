@@ -11,7 +11,7 @@
  *   写回：会话里程碑（用户说「记住」/AI 总结段）→ POST /memories
  *         （tags 含 occ_session，importance 0.5；**会话级 20 条配额**，
  *         读不限）。配额计数落会话侧目录 <sid>.smeq（跨进程一致）。
- *   降级：SME 不可达 → 状态 `✉sme:off` 诚实降级，不阻塞对话（绝不
+ *   降级：SME 不可达 → 状态 `@sme:off` 诚实降级，不阻塞对话（绝不
  *         静默空结果）。
  *
  * 环境开关（T9d 契约）：
@@ -53,9 +53,9 @@ int occ_sme_enabled(void);
 
 /*
  * occ_sme_status - 状态文本（ NOTICE用）：
- *   "✉sme:on"  最近一次检索/写回成功
- *   "✉sme:off" 最近一次调用失败或从未成功过（含服务不可达）
- *   "✉sme:?"   尚未发生任何调用（unknown）
+ *   "@sme:on"  最近一次检索/写回成功
+ *   "@sme:off" 最近一次调用失败或从未成功过（含服务不可达）
+ *   "@sme:?"   尚未发生任何调用（unknown）
  * 返回静态缓冲（下次调用覆盖）。
  */
 const char *occ_sme_status(void);

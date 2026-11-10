@@ -24,7 +24,8 @@ LIB_SRCS := tui_utf8.c tui_core.c tui_input.c tui_frame.c tui_chat.c \
 	    tui_usage.c tui_keymap.c tui_overlay.c
 LIB_OBJS := $(LIB_SRCS:%.c=obj/%.o)
 
-TEST_SRCS := tests/test_utf8.c tests/test_render.c tests/test_input.c \
+TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
+	     tests/test_render.c tests/test_input.c \
 	     tests/test_frame.c tests/test_pty.c tests/test_chat.c \
 	     tests/test_inputbox.c tests/test_view_pty.c \
 	     tests/test_keymap.c tests/test_themefile.c \

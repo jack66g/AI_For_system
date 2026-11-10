@@ -171,7 +171,7 @@ static int mock_command(void *ud, const char *line)
 		(void)tui_view_post(m->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
 				    NULL, 0);
 		(void)tui_view_post(m->view, TUI_VIEW_HIST_SEP,
-				    "⋯ 更早 2 条消息未回放", 0, NULL, 0);
+				    "… 更早 2 条消息未回放", 0, NULL, 0);
 		(void)tui_view_post(m->view, TUI_VIEW_HIST_USER,
 				    "HISTQ-user-line", 0, NULL, 0);
 		(void)tui_view_post(m->view, TUI_VIEW_HIST_BEGIN, NULL, 0,
@@ -373,8 +373,8 @@ static void mock_usage(void *ud, struct tui_footer *out)
 	snprintf(out->cwd, sizeof(out->cwd), "%s", "mockrepo");
 	out->in = 12300;			/* ↑12.3k */
 	out->out = 351;				/* ↓351 */
-	out->cache_read = 1600;			/* ⟳1.6k */
-	out->pct = 12;				/* ▓░ 12% */
+	out->cache_read = 1600;			/* c1.6k */
+	out->pct = 12;				/* 12% */
 	out->est = 0;
 	out->fallback = 1;			/* model* */
 }
@@ -408,7 +408,7 @@ static void mock_post_load_range(struct mock *m, int from, int to, int sep)
 
 	if (sep)
 		(void)tui_view_post(m->view, TUI_VIEW_HIST_SEP,
-				    "⋯ 更早 8 条消息未回放（尾部 20 行挂载）",
+				    "… 更早 8 条消息未回放（尾部 20 行挂载）",
 				    0, NULL, 0);
 	for (i = from; i < to; i++) {
 		char txt[32];
@@ -837,9 +837,9 @@ int main(void)
 		OK(rc == 0, "C-submit-stream");
 		OK(find_bytes(out, out_len, "MOCK_REPLY") != NULL,
 		   "C-streamed-reply-rendered");
-		/* UXAB：块头 `❯ 你 · …`（你=E4 BD A0） */
+		/* UXAB/E：块头 `▌你 · …`（▌=E2 96 8C 贴紧你=E4 BD A0） */
 		OK(find_bytes(out, out_len,
-			      "\xe2\x9d\xaf \xe4\xbd\xa0") != NULL,
+			      "\xe2\x96\x8c\xe4\xbd\xa0") != NULL,
 		   "C-user-header");
 		OK(find_bytes(out, out_len, "OCC · mock") != NULL,
 		   "C-footer");
@@ -1008,15 +1008,15 @@ int main(void)
 				  "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "J-hist-replay-render");
 		OK(find_bytes(out, out_len,
-			      "\xe2\x8b\xaf \xe6\x9b\xb4\xe6\x97\xa9 2") !=
-		   NULL, "J-hist-separator");		/* ⋯ 更早 2 */
+			      "\xe2\x80\xa6 \xe6\x9b\xb4\xe6\x97\xa9 2") !=
+		   NULL, "J-hist-separator");		/* … 更早 2 */
 		OK(find_bytes(out, out_len, "HISTQ-user-line") != NULL,
 		   "J-hist-user-line");
 		OK(find_bytes(out, out_len,
 			      "OCC \xc2\xb7 \xe5\x9b\x9e\xe6\x94\xbe") !=
 		   NULL, "J-hist-footer");
-		/* 工具行 ✓ bash（回放折叠形态=live 工具行） */
-		OK(find_bytes(out, out_len, "\xe2\x9c\x93 bash") != NULL,
+		/* 工具行 + bash（回放折叠形态=live 工具行；E 白名单） */
+		OK(find_bytes(out, out_len, "+ bash") != NULL,
 		   "J-hist-tool-row");
 	}
 
@@ -1042,9 +1042,29 @@ int main(void)
 				  exit_keys, sizeof(exit_keys) - 1,
 				  out, &out_len, 0);
 		OK(rc == 0, "K-wiz-async-cancel");
-		/* spinner 帧字节（U+2800 段 braille：e2 a0 80..bf） */
-		OK(find_bytes(out, out_len, "\xe2\xa0") != NULL,
-		   "K-busy-spinner-bytes");
+		/* spinner 帧字节（E 半块 █▌▎）：busy 窗口内（「验证中」到
+		 * 「已取消」之间）覆盖层全屏、底图静行不重绘——其间出现的
+		 * 半块帧只可能来自 busy spinner（含状态行换文案时的 sp 前缀；
+		 * ▸ U+25B8 不撞帧字节）。 */
+		{
+			const char *p1 = find_bytes(out, out_len, "验证中");
+			const char *p2 = find_bytes(out, out_len, "已取消");
+			int alive = 0;
+
+			if (p1 && p2 && p2 > p1) {
+				const char *q = p1 + 9;	/* 越过首个状态文本 */
+				int n = (int)(p2 - q);
+
+				if (n > 0)
+					alive = find_bytes(q, n,
+							   "\xe2\x96\x88") != NULL ||
+						find_bytes(q, n,
+							   "\xe2\x96\x8c") != NULL ||
+						find_bytes(q, n,
+							   "\xe2\x96\x8e") != NULL;
+			}
+			OK(alive, "K-busy-spinner-bytes");
+		}
 		/* 掩码输入（mask=1：明文 key 不得进字节流） */
 		OK(find_bytes(out, out_len, "sk-mock-key") == NULL,
 		   "K-key-not-echoed");
@@ -1140,7 +1160,7 @@ int main(void)
 		OK(rc == 0, "M2b-home-jump-top");
 	}
 
-	/* ---- M3. 点击 live ✻ thinking 折叠行：展开 → 正文进字节流；
+	/* ---- M3. 点击 live ○ thinking 折叠行：展开 → 正文进字节流；
 	 * 再点同格 → 收起（折叠头重绘，计数增加） ---- */
 	{
 		/* 24 行布局：转写区 0..20、live 折叠行=row20 → SGR y=21；
@@ -1158,8 +1178,8 @@ int main(void)
 		OK(rc == 0, "M3-fold-click-expand");
 		OK(find_bytes(out, out_len, "SECRET_THINKING_DATA") != NULL,
 		   "M3-expanded-reasoning-bytes");
-		OK(find_bytes(out, out_len, "\xe2\x8c\x83") != NULL,
-		   "M3-open-header-marker");	/* ⌃ 展开态标记 */
+		OK(find_bytes(out, out_len, "\xe2\x97\x8f") != NULL,
+		   "M3-open-header-marker");	/* ● 展开态折头 */
 		OK(count_bytes(out, out_len, "thinking") >= 2,
 		   "M3-fold-header-redrawn");	/* 折叠头至少画 2 次（展开重绘） */
 		setenv("TERM", "dumb", 1);
@@ -1245,27 +1265,25 @@ int main(void)
 		   "KT3-no-pop-bytes");
 	}
 
-	/* ---- N. UXAB A+B 新布局：顶栏/分隔线/图形 footer/水印/busy ----
-	 * MOCK_NEWUI=1 → mock 接 fill_topbar+fill_usage（慢 turn——busy 水印
-	 * 稳定可见）。断言新视觉元素全进 pty 字节流：顶栏标题+`模型 · 厂商`
-	 * 标签+dim ─ 填充、聊天/输入分隔线、footer `model* │ ▓░ 12% │
-	 * ↑12.3k ↓351 ⟳1.6k │ mockrepo`、空态水印、busy spinner 水印
-	 * （正在思考… Esc 中断）、❯ 你 / ◆ occ 块头。 */
+	/* ---- N. E 新布局：框线面板/一行 footer/水印/busy ----
+	 * MOCK_NEWUI=1 → mock 接 fill_topbar+fill_usage（E 忽略 fill_topbar：
+	 * 顶栏退役——会话名→侧栏、模型→footer，信息一职一地）。断言 E 视觉
+	 * 元素全进 pty 字节流：上框/输入框单线框（┌┐└┘）、footer
+	 * `[ctrl+b] 会话 · model* · 12% · ↑12.3k ↓351 c1.6k · mockrepo`
+	 * （· 分隔）、空态水印、busy 水印（正在思考… Esc 中断）、
+	 * ▌你 / ◆ occ 块头。 */
 	{
 		const char *needles[] = {
-			"mock-title",		/* 顶栏标题 */
-			"mock-model · prov-x",	/* 顶栏模型标签 */
-			"\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80",	/* ─── */
+			"┌",		/* 上框顶角（E 单线框） */
 			"mock-model*",		/* footer 模型+* 兜底 */
-			"\xe2\x96\x93\xe2\x96\x91",	/* ▓░（与数字间 SGR 断开） */
+			"[ctrl+b]",		/* footer 键位提示 */
+			"───",	/* 框线横线（旧顶栏填充线对齐到框线） */
 			"12%",			/* 水位数字 */
-			"\xe2\x86\x91" "12.3k",	/* ↑12.3k */
-			"\xe2\x9f\xb3" "1.6k",	/* ⟳1.6k */
-			"\xe8\xbe\x93\xe5\x85\xa5\xe6\xb6\x88\xe6\x81\xaf",
-						/* 输入消息（空态水印） */
-			"\xe2\x9d\xaf \xe4\xbd\xa0",	/* ❯ 你 */
-			"\xe6\xad\xa3\xe5\x9c\xa8\xe6\x80\x9d\xe8\x80\x83",
-						/* 正在思考（busy 水印） */
+			"↑12.3k",	/* ↑12.3k */
+			"c1.6k",		/* c cache 段（旧 ⟳ 对齐） */
+			"输入消息",		/* 空态水印 */
+			"▌你",		/* ▌你（旧 ❯ 你 对齐） */
+			"正在思考",		/* busy 水印 */
 			"SLOWTEXT",
 			"GOT_INTERRUPT"
 		};
@@ -1273,26 +1291,65 @@ int main(void)
 		char esc = 0x1b;
 
 		setenv("MOCK_NEWUI", "1", 1);
-		rc = run_scenario(keys, sizeof(keys) - 1, needles, 13, 10,
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 12, 9,
 				  &esc, 1, -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 1 /* slow */);
 		OK(rc == 0, "N-newui-all-elements");
 		/* ◆ 块头（assistant live 块——mock 未设标签=缺省 occ） */
-		OK(find_bytes(out, out_len, "\xe2\x97\x86 occ") != NULL,
+		OK(find_bytes(out, out_len, "◆ occ") != NULL,
 		   "N-assistant-header");
-		/* footer │ 分隔（E2 94 82 两侧空格） */
-		OK(find_bytes(out, out_len, " \xe2\x94\x82 ") != NULL,
+		/* footer 段间 · 分隔（sep 与 pct 同段相邻；与消息头
+		 * `· HH:MM` 时分形态不撞） */
+		OK(find_bytes(out, out_len, "· 12%") != NULL,
 		   "N-footer-sep");
-		/* 空态水印 › 提示符（E2 80 BA） */
-		OK(find_bytes(out, out_len, "\xe2\x80\xba ") != NULL,
+		/* 空态水印 ▌ 提示符（E2 96 8C；与块头 ▌你 不撞） */
+		OK(find_bytes(out, out_len, "▌ 输") != NULL,
 		   "N-watermark-mark");
 		/* ↓351（footer 输出段） */
-		OK(find_bytes(out, out_len, "\xe2\x86\x93" "351") != NULL,
+		OK(find_bytes(out, out_len, "↓351") != NULL,
 		   "N-footer-down");
+		/* E 对齐新增：框线四角 + 键位提示 + 顶栏退役 */
+		OK(find_bytes(out, out_len, "┐") != NULL, "N-box-corner-tr");
+		OK(find_bytes(out, out_len, "└") != NULL, "N-box-corner-bl");
+		OK(find_bytes(out, out_len, "┘") != NULL, "N-box-corner-br");
+		OK(find_bytes(out, out_len, "[ctrl+b] 会话 ·") != NULL,
+		   "N-footer-key-hint");
+		OK(find_bytes(out, out_len, "mock-title") == NULL,
+		   "N-topbar-retired");
 		unsetenv("MOCK_NEWUI");
 	}
 
-	/* ---- N2. T1 滚动条：新布局 + /many 超视口 → 滑块 █ + 分隔列 │ ---- */
+	/* ---- N4. E ctrl+b：会话侧栏展开（会话名→侧栏）+ 合体分隔立柱 ----
+	 * 对齐原「顶栏标题/模型标签」覆盖：mock-title 不再渲染（信息移居
+	 * 侧栏/footer），ctrl+b 后侧栏面板出 mock_sessions 的 first/second，
+	 * C 形态合体立柱 ┬┴ 进字节流。 */
+	{
+		const char *needles[] = {
+			"┌",		/* 上框顶角 */
+			"first",		/* ctrl+b 后侧栏会话标题 */
+			"second"
+		};
+		static const char keys[] = "\x02";	/* ctrl+b */
+
+		setenv("MOCK_NEWUI", "1", 1);
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 3, -1,
+				  NULL, 0, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "N4-sidebar-toggle-run");
+		OK(find_bytes(out, out_len, "first") != NULL,
+		   "N4-sidebar-title-via-ctrl-b");
+		OK(find_bytes(out, out_len, "second") != NULL,
+		   "N4-sidebar-list");
+		OK(find_bytes(out, out_len, "┬") != NULL, "N4-divider-join-top");
+		OK(find_bytes(out, out_len, "┴") != NULL,
+		   "N4-divider-join-bottom");
+		OK(find_bytes(out, out_len, "ses_aaaa") == NULL,
+		   "N4-sidebar-no-id");
+		unsetenv("MOCK_NEWUI");
+	}
+
+	/* ---- N2. T1→E 滚动条：新布局 + /many 超视口 → 滑块 █ 走框线
+	 * 右列（│ 轨道=框线本身；收起态无侧栏末列——滚动位置永远可见） ---- */
 	{
 		const char *needles[] = { "MANY-29" };
 
@@ -1318,8 +1375,9 @@ int main(void)
 				  -1, NULL, 0, "/exit\r", 6, out, &out_len,
 				  1 /* slow */);
 		OK(rc == 0, "N3-stall-scenario");
-		/* 静默期至少 ~30 帧 braille（30fps × 2.4s 量级；冻帧时只有 1-3） */
-		OK(count_bytes(out, out_len, "\xe2\xa0") >= 30,
+		/* 静默期至少 ~30 帧半块（E2 96 xx：█▌▎ spinner + 少量静态
+		 * ▎▌ 只加不减；30fps × 2.4s 量级——冻帧时只有 1-6） */
+		OK(count_bytes(out, out_len, "\xe2\x96") >= 30,
 		   "N3-spinner-keeps-ticking");
 		/* 水印带秒数（0s 起算——计时器存在且格式化正确） */
 		OK(find_bytes(out, out_len,
@@ -1335,7 +1393,7 @@ int main(void)
 	{
 		static const char home[] = "\x1b[H";
 		const char *needles[] = {
-			"⋯ 更早 8 条消息未回放",	/* 初始 SEP（到顶可见） */
+			"… 更早 8 条消息未回放",	/* 初始 SEP（到顶可见） */
 			"LOAD-m007"		/* 加载后新内容进视口顶 */
 		};
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# undo_real_drill.sh - T9b2 /undo 端到端（★真调用：deepseek 云位★）
+# undo_real_drill.sh - T9b2 /undo 端到端（*真调用：deepseek 云位*）
 #
 # 预算：3 次 LLM 调用（turn1 write / turn2 edit / 认证验证）+ 预留 1 次
 # 不用（任务书 ≤4）。每 turn 内的工具环轮次按 DB assistant 行计并打印

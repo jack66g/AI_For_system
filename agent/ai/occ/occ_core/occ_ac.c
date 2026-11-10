@@ -391,7 +391,7 @@ int occ_ac_report(const char *session_id, const char *cwd, long long tokens)
 	free(dump);
 	free(out);
 	if (rc != 0) {
-		g_ac_state = 0;		/* 不可达 → ⊙ac:off（诚实降级） */
+		g_ac_state = 0;		/* 不可达 → @ac:off（诚实降级） */
 		return -1;
 	}
 	return 0;
@@ -938,7 +938,7 @@ static int ac_run_chain(occ_ac_turn *t, int *compacted, char *err,
 	char *digest = NULL;
 	int rc;
 
-	g_ac_state = 2;			/* ⊙ac:working */
+	g_ac_state = 2;			/* @ac:working */
 	if (ac_begin_and_digest(t, err, errlen, &digest) != 0) {
 		g_ac_state = 1;
 		return -1;
@@ -965,7 +965,7 @@ static int ac_run_chain(occ_ac_turn *t, int *compacted, char *err,
 		g_ac_state = 1;
 		return -1;
 	}
-	g_ac_state = 3;			/* ⊙ac:ok */
+	g_ac_state = 3;			/* @ac:ok */
 	if (compacted)
 		*compacted = 1;
 	return 0;
@@ -985,13 +985,13 @@ int occ_ac_turn_end(occ_ac_turn *t, int *compacted, char *err,
 		return 0;
 	/* ② 水位 + 轮询（每轮结束必查——「每次大消息后」） */
 	if (occ_ac_report(t->session_id, t->cwd, t->tokens) != 0)
-		return 0;		/* 不可达 → ⊙ac:off，诚实降级不阻塞 */
+		return 0;		/* 不可达 → @ac:off，诚实降级不阻塞 */
 	if (t->force)
 		return ac_run_chain(t, compacted, err, errlen);
 	if (occ_ac_check(t->session_id, should, sizeof(should)) != 0)
 		return 0;
 	if (strcmp(should, "JUDGE") != 0) {
-		g_ac_state = 1;		/* ⊙ac:idle */
+		g_ac_state = 1;		/* @ac:idle */
 		return 0;
 	}
 	if (ac_judge(t, t->context, err, errlen, &compress_now) != 0)
@@ -1019,7 +1019,7 @@ int occ_ac_compact_now(occ_ac_turn *t, char *err, size_t errlen)
 	if (!occ_ac_enabled())
 		return 0;
 	if (occ_ac_report(tmp.session_id, tmp.cwd, tmp.tokens) != 0) {
-		snprintf(err, errlen, "compact: ac 不可达（⊙ac:off）");
+		snprintf(err, errlen, "compact: ac 不可达（@ac:off）");
 		return -1;
 	}
 	return ac_run_chain(&tmp, &compacted, err, errlen);

@@ -65,6 +65,7 @@ struct tui_view {
 	int tr_y;			/* UXAB：上帧转写区 y（顶栏占 1 行时=1） */
 	int mouse_on;			/* B5：tui_mouse_enable 成功（help 如实） */
 	int kitty_pushed;		/* B6：已发 CSI > 1 u（退出前 pop） */
+	int sb_open;			/* E：ctrl+b 会话侧栏展开（缺省收起） */
 	/* T9c3：覆盖层 + 键位表 + leader 序列 */
 	tui_overlay *ov;
 	tui_keymap *km;
@@ -347,7 +348,7 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 					     sizeof(exitb));
 	if (v->mouse_on)
 		snprintf(mline, sizeof(mline),
-			 "滚轮=滚动 · 点击 ✻ thinking/thought 行=展开/收起"
+			 "滚轮=滚动 · 点击 ○/● thinking/thought 行=展开/收起"
 			 "（SGR 1006）");
 	else
 		snprintf(mline, sizeof(mline),
@@ -360,12 +361,13 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 "/compact: 手动触发 autocondense 换窗——历史折叠为摘要、"
 		 "token 账本重置为新基线（需 OCC_AC=on、turn 空闲、已有会话）\n"
 		 "/shell: 临时退到 bash，exit 返回 occ（turn 运行中拒绝）\n"
-		 "UI: ❯/◆=消息块头（❯ 你 / ◆ 模型 · 时间 dim）· ├─=工具树"
-		 "（✓ 绿 ✗ 红）· ▓░=上下文水位（70 黄 90 红）· footer"
-		 " ↑输入 ↓输出 ⟳缓存读（色可经 ~/.occ/theme.ini 覆盖）\n"
-		 "keys: Enter=send · ctrl+n=/new · Tab=complete ·"
-		 " Esc=interrupt · PgUp/PgDn=scroll · Home/End=顶/底 ·"
-		 " exit=%s · leader=%s (2s timeout;"
+		 "UI: ▌/◆=消息块头（▌你 / ◆ 模型 · 时间 dim）· ├─=工具树"
+		 "（+ 成功 × 失败）· ○/●=thought 折叠（点击展开/收起）·"
+		 " N%%=上下文水位（70 黄 90 红）· footer ↑输入 ↓输出 c缓存读"
+		 "（色可经 ~/.occ/theme.ini 覆盖）\n"
+		 "keys: Enter=send · ctrl+b=会话侧栏 · ctrl+n=/new ·"
+		 " Tab=complete · Esc=interrupt · PgUp/PgDn=scroll ·"
+		 " Home/End=顶/底 · exit=%s · leader=%s (2s timeout;"
 		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
 		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
 		 "mouse: %s",
@@ -574,6 +576,13 @@ static void tv_exec_action(tui_view *v, const char *act, int is_exit,
 	}
 	if (!strcmp(act, "opencode.status")) {
 		tv_run_command(v, "/status");
+		return;
+	}
+	if (!strcmp(act, "sidebar.toggle")) {
+		/* E：会话侧栏展开/收起（<60 列渲染层仍强制收起——
+		 * TUI_SB_MIN_COLS 语义保留） */
+		v->sb_open = !v->sb_open;
+		v->dirty_needed = 1;
 		return;
 	}
 }
@@ -988,22 +997,29 @@ static void tv_render(tui_view *v, uint64_t now)
 	tui_screen *s = tui_renderer_front(v->ren);
 	int rows = s->rows, cols = s->cols;
 	int sbw, mx, mw;
-	int status_y, input_h, input_y, meta_y, sep_y, tr_y, tr_h;
+	int status_y, input_h, input_y, meta_y, tr_y, tr_h;
 	int cr = 0, cc = 0;
 	char buf[256];
 	tui_attr a_muted = tui_thm_muted();
 	tui_attr a_err = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
 	tui_attr a_warn = tui_thm_attr(TUI_THM_WARN, TUI_THM_BG, 0);
-	/* UXAB A+B：fill_usage 在=新布局（顶栏+分隔线+图形 footer）；
-	 * 缺=回落旧两行（元数据行+状态行）——嵌入方/旧测试零变化 */
+	/* UXAB A+B：fill_usage 在=新布局；缺=回落旧两行（元数据行+状态行）
+	 * ——嵌入方/旧测试零变化。E 方案只重排新布局（T1/T2 形态 →
+	 * B 收起 + C 线条：框线面板/ctrl+b 侧栏/一行 footer）。 */
 	int newui = v->hooks.fill_usage != NULL;
 	int topbar = v->hooks.fill_topbar != NULL;
+	/* E 几何：上框（转写/侧栏合体）+ 1 行框间空行 + 输入框 + footer */
+	int ub_h = 0;			/* 上框高（含框线）；0=不画框 */
+	int ib_y = 0;			/* 输入框顶行 */
+	int gap_rows = 0;
 
 	/* 底色填充（renderer 与 back 逐行 diff，未变行零字节） */
 	tui_screen_fill(s, tui_thm_plain());
 
-	/* 布局：侧栏 22 列（宽 <60 隐藏）| 主列 */
-	sbw = (cols >= TUI_SB_MIN_COLS) ? TUI_SB_WIDTH : 0;
+	/* 布局：E=侧栏收起缺省（ctrl+b 展开；宽 <60 强制收起）；
+	 * 旧回落=侧栏常显 22 列（宽 <60 隐藏）| 主列 */
+	sbw = (newui ? (v->sb_open && cols >= TUI_SB_MIN_COLS) :
+		       (cols >= TUI_SB_MIN_COLS)) ? TUI_SB_WIDTH : 0;
 	mx = sbw;
 	mw = cols - sbw;
 	if (mw < 8) {
@@ -1012,9 +1028,9 @@ static void tv_render(tui_view *v, uint64_t now)
 		sbw = 0;
 	}
 
-	/* 纵向（新）：顶栏(可选 1 行) / 转写区 / 分隔线 1 行 / 输入框 /
-	 * footer 1 行 = 24 行下转写区 20 行；旧：转写区 / 元数据行 / 输入 /
-	 * 状态行 */
+	/* 纵向（E）：上框（转写区±侧栏）/ 框间空行 / 输入框（含框线）/
+	 * footer 1 行——24 行+单行输入下转写区净 17 行；旧：转写区 /
+	 * 元数据行 / 输入 / 状态行 */
 	status_y = rows - 1;
 	input_h = tui_inputbox_lines(v->ib);
 	{
@@ -1031,31 +1047,56 @@ static void tv_render(tui_view *v, uint64_t now)
 		if (input_h < 1)
 			input_h = 1;
 	}
-	input_y = status_y - input_h;
-	tr_y = topbar ? 1 : 0;
 	if (newui) {
-		sep_y = input_y - 1;
+		int input_box_h = input_h + 2;
+
+		gap_rows = (rows >= 14) ? 1 : 0;
+		ib_y = status_y - input_box_h;
+		ub_h = ib_y - gap_rows;
+		if (ub_h < 3) {
+			ub_h = 0;	/* 过矮：退化裸转写（不画框） */
+			gap_rows = 0;
+		}
+		/* 转写区净区（框内） */
+		tr_y = ub_h > 0 ? 1 : 0;
+		tr_h = ub_h > 0 ? ub_h - 2 : ib_y - tr_y;
+		if (tr_h < 0)
+			tr_h = 0;
+		input_y = ib_y + 1;
 		meta_y = -1;
 	} else {
+		input_y = status_y - input_h;
+		tr_y = topbar ? 1 : 0;
 		meta_y = input_y - 1;
-		sep_y = -1;
+		tr_h = meta_y - tr_y;
+		if (tr_h < 0)
+			tr_h = 0;
 	}
-	tr_h = (newui ? sep_y : meta_y) - tr_y;
-	if (tr_h < 0)
-		tr_h = 0;
+	/* E 主列（转写区）：收起=框内全宽 [1, cols-2]；展开=右面板
+	 * [sbw, cols-2]（左侧栏 [1, sbw-2]，sbw-1 为合体分隔立柱） */
+	if (newui) {
+		mx = sbw > 0 ? sbw : 1;
+		mw = (cols - 1) - mx;
+		if (mw < 2) {
+			mx = 1;
+			mw = cols - 2;
+		}
+	}
 	v->tr_h = tr_h;
 	v->tr_x = mx;			/* B5：鼠标命中判定用（上帧几何） */
 	v->tr_w = mw;
 	v->tr_y = tr_y;
 
-	/* 侧栏 */
-	if (sbw > 0)
+	/* 侧栏（旧回落：T1 形态常显；E：框内列表，随 ctrl+b） */
+	if (sbw > 0 && !newui)
 		tui_sidebar_render(&v->sb_data, s, rows, &v->th);
 
 	/* UXAB 1. 顶栏：标题(左,截断) + dim ─ 填充 + 模型标签(右)。
 	 * 数据每帧拉取（fill_topbar 只做互斥+快照拷贝——无 IO），
-	 * 模型/会话切换天然即时反映。 */
-	if (topbar && rows > 0 && mw > 4) {
+	 * 模型/会话切换天然即时反映。
+	 * E：新布局顶栏退役（信息一职一地：会话名→侧栏、模型→footer），
+	 * 仅旧回落路径保留。 */
+	if (!newui && topbar && rows > 0 && mw > 4) {
 		char title[160], mlab[128], clip[160];
 		char fill[341 * 3];
 		int tc, mc, fc, i, c;
@@ -1099,6 +1140,17 @@ static void tv_render(tui_view *v, uint64_t now)
 					     a_muted);
 	}
 
+	/* E：上框（转写区一圈单线框；展开=左侧栏合体分隔立柱，C 形态）。
+	 * 框线零文字；字形=U+2500 系白名单（tui_frame_box 原语）。 */
+	if (newui && ub_h > 0 && cols >= 2) {
+		tui_frame_box(s, 0, 0, cols, ub_h, a_muted);
+		if (sbw > 0 && sbw < cols - 1) {
+			tui_frame_divider(s, sbw - 1, 0, ub_h, a_muted);
+			tui_sidebar_render_panel(&v->sb_data, s, 1, tr_y,
+						sbw - 2, tr_h, &v->th);
+		}
+	}
+
 	/* 转写区（chat 内部按宽度自适应 rewidth） */
 	if (tr_h > 0 && mw > 0)
 		tui_chat_render(v->chat, s, mx, tr_y, mw, tr_h, now);
@@ -1116,18 +1168,13 @@ static void tv_render(tui_view *v, uint64_t now)
 			tv_render_empty(s, mx, tr_y + 1 + nl, mw);
 	}
 
-	/* T1：侧栏末列（x=TUI_SB_WIDTH-1）分隔线 + 滚动条。
-	 * 主列仍从 TUI_SB_WIDTH 起、侧栏 22 列——总宽不变；侧栏文字已
-	 * 让出末列。可滚（内容行 > 视口行）时：轨道 dim │ + 滑块 ACCENT █
-	 * （高 = max(1, 视口²/总行)，位置按 view_top 比例）。 */
-	if (sbw > 0 && tr_h > 0 && sep_y >= 0) {
-		int scol = TUI_SB_WIDTH - 1;
+	/* T1→E：滚动条滑块改走框线右列（收起态无侧栏末列可挂——
+	 * 框线右缘 │ 作轨道 + █ 滑块；滚动位置永远可见）。 */
+	if (newui && ub_h > 0 && tr_h > 0 && cols >= 2) {
+		int scol = cols - 1;
 		int ry;
 		struct tui_chat_scrollinfo si;
 
-		for (ry = tr_y; ry < tr_y + tr_h; ry++)
-			(void)tui_screen_put(s, ry, scol, "│", strlen("│"),
-					     a_muted);
 		if (tui_chat_scroll_info(v->chat, &si) == 0 && si.rows > 0 &&
 		    si.total > si.rows) {
 			int vh = si.rows < tr_h ? si.rows : tr_h;
@@ -1155,17 +1202,10 @@ static void tv_render(tui_view *v, uint64_t now)
 		}
 	}
 
-	/* UXAB 4. 分隔线：转写区与输入区之间 dim ─ 全宽（主列） */
-	if (newui && sep_y >= 0 && mw > 0) {
-		int i;
-		int n = mw > 340 ? 340 : mw;
-		char fill[341 * 3];
-
-		for (i = 0; i < n; i++)
-			memcpy(fill + i * 3, "─", 3);
-		(void)tui_screen_put(s, sep_y, mx, fill, (size_t)(n * 3),
-				     a_muted);
-	}
+	/* E：输入框一圈单线框（全宽；框线零文字） */
+	if (newui && ib_y >= 0 && cols >= 2 &&
+	    ib_y + input_h + 2 <= status_y + 1)
+		tui_frame_box(s, 0, ib_y, cols, input_h + 2, a_muted);
 
 	/* 元数据行（旧回落路径；新布局由图形 footer 取代）：
 	 * fill_meta 给主体（含五项 usage），view 追加按水位着色的 (N%)。 */
@@ -1209,61 +1249,76 @@ static void tv_render(tui_view *v, uint64_t now)
 		}
 	}
 
-	/* 输入框（区域右缘==屏幕右缘，put 自然截断） */
-	if (input_y >= 0 && mw > 0)
-		tui_inputbox_render(v->ib, s, mx, input_y, mw, input_h,
-				    &cr, &cc);
+	/* 输入框（E：框内净区全宽 [1, cols-2]；旧：区域右缘==屏幕右缘，
+	 * put 自然截断） */
+	{
+		int ix = newui ? 1 : mx;
+		int iw = newui ? cols - 2 : mw;
 
-	/* UXAB 5/7. 输入行占位水印：空态 dim 提示；turn 运行中替换为
-	 * spinner + Esc 中断提示（braille 动画——运行中 30fps 常刷） */
-	if (input_y >= 0 && input_h >= 1 && mw > 2 &&
-	    tui_inputbox_empty(v->ib)) {
-		if (v->running) {
-			const char *sp = tui_thm_spinner(now);
-			int col = tui_screen_put(s, input_y, mx, sp,
-						 strlen(sp),
-						 tui_thm_attr(TUI_THM_FG,
-							      TUI_THM_BG,
-							      TUI_ST_BOLD));
+		if (input_y >= 0 && iw > 0)
+			tui_inputbox_render(v->ib, s, ix, input_y, iw,
+					    input_h, &cr, &cc);
 
-			if (col > mx) {
-				/* T1：计时水印（Ns——30fps 常刷已有） */
-				char hint[96];
-				char clip[96];
-				unsigned long long secs = 0;
-				int avail;
+		/* UXAB 5/7. 输入行占位水印：空态 dim 提示；turn 运行中替换为
+		 * spinner + Esc 中断提示（半块动画——运行中 30fps 常刷） */
+		if (input_y >= 0 && input_h >= 1 && iw > 2 &&
+		    tui_inputbox_empty(v->ib)) {
+			if (v->running) {
+				const char *sp = tui_thm_spinner(now);
+				int col = tui_screen_put(s, input_y, ix, sp,
+							 strlen(sp),
+							 tui_thm_attr(TUI_THM_FG,
+								      TUI_THM_BG,
+								      TUI_ST_BOLD));
 
-				if (v->run_start_ms && now >= v->run_start_ms)
-					secs = (now - v->run_start_ms) /
-					       1000u;
-				snprintf(hint, sizeof(hint),
-					 " occ 正在思考… %llus · Esc 中断",
-					 secs);
-				avail = mw - (col - mx);
-				tui_utf8_clip_cols(hint,
-						   avail > 0 ? (size_t)avail :
-								0,
-						   clip, sizeof(clip));
-				(void)tui_screen_put(s, input_y, col, clip,
-						     strlen(clip), a_muted);
+				if (col > ix) {
+					/* T1：计时水印（Ns——30fps 常刷已有） */
+					char hint[96];
+					char clip[96];
+					unsigned long long secs = 0;
+					int avail;
+
+					if (v->run_start_ms &&
+					    now >= v->run_start_ms)
+						secs = (now - v->run_start_ms) /
+						       1000u;
+					snprintf(hint, sizeof(hint),
+						 " occ 正在思考… %llus · Esc 中断",
+						 secs);
+					avail = iw - (col - ix);
+					tui_utf8_clip_cols(hint,
+							   avail > 0 ?
+								(size_t)avail : 0,
+							   clip, sizeof(clip));
+					(void)tui_screen_put(s, input_y, col,
+							     clip,
+							     strlen(clip),
+							     a_muted);
+				}
+			} else {
+				static const char wm[] =
+					"▌ 输入消息…  / 指令 · Tab 补全";
+
+				(void)tui_screen_put(s, input_y, ix, wm,
+						     sizeof(wm) - 1, a_muted);
 			}
-		} else {
-			static const char wm[] =
-				"› 输入消息…  / 指令 · Tab 补全";
-
-			(void)tui_screen_put(s, input_y, mx, wm,
-					     sizeof(wm) - 1, a_muted);
 		}
 	}
 
-	if (newui && mw > 0) {
-		/* UXAB 6. 图形化 footer（status_y 行）：
-		 * `model │ ▓░ N% │ ↑in ↓out ⟳cr │ cwd`——│ dim、
-		 * ↑绿/↓正常/⟳紫、进度条按水位 tier 着色（70/90）。窄宽
-		 * 降级：先去 cwd、再去 tokens、再去进度条（模型名最后保底）。 */
+	if (newui) {
+		/* UXAB 6/E. 一行流 footer（全宽底部，无框）：
+		 * `[ctrl+b] 会话 · model · N% · ↑in ↓out ccr · cwd`——
+		 * 会话名不出现在 footer（一职一地：会话名→侧栏、
+		 * token/计数→footer 唯一一处）；↑绿/↓正常/c紫、水位按
+		 * tier 着色（70 黄 90 红）。窄宽降级：先去 cwd、再去
+		 * tokens、再去水位、再去键位提示（模型名最后保底）。 */
 		struct tui_footer f;
-		char bar[24], sin[24], sout[24], scr[24], pctb[24];
-		char modelb[80];
+		char sin[24], sout[24], scr[24], pctb[24];
+		char modelb[80], tokb[96], hint[32];
+		int wseg[5], on[5];
+		tui_attr sega[5];
+		int i, nseg, need, col = 0;
+		static const char sep[] = " · ";
 
 		memset(&f, 0, sizeof(f));
 		v->hooks.fill_usage(v->hooks.ud, &f);
@@ -1273,117 +1328,116 @@ static void tv_render(tui_view *v, uint64_t now)
 		tui_usage_fmt(f.out > 0 ? f.out : 0, sout, sizeof(sout));
 		tui_usage_fmt(f.cache_read > 0 ? f.cache_read : 0, scr,
 			      sizeof(scr));
-		if (f.pct >= 0) {
-			tui_usage_bar(f.pct, bar, sizeof(bar));
+		if (f.pct >= 0)
 			snprintf(pctb, sizeof(pctb), "%s%d%%",
 				 f.est ? "~" : "", f.pct);
-		} else {
-			bar[0] = '\0';
+		else
 			pctb[0] = '\0';
-		}
+		snprintf(tokb, sizeof(tokb), "↑%s "
+			 "↓%s c%s", sin, sout, scr);
+		hint[0] = '\0';
 		{
-			int w_model = tv_str_cols(modelb);
-			int w_bar = tv_str_cols(bar) +
-				    (bar[0] ? 1 : 0) + tv_str_cols(pctb);
-			int w_tok = 1 + tv_str_cols(sin) + 1 +
-				    tv_str_cols(sout) + 1 + tv_str_cols(scr);
-			int w_cwd = tv_str_cols(f.cwd);
-			int show_tok = 1, show_cwd = 1;
-			int need = w_model + 3 + w_bar + 3 + w_tok + 3 + w_cwd;
+			char kb[24];
 
-			if (need > mw) {
-				show_cwd = 0;
-				need = w_model + 3 + w_bar + 3 + w_tok;
+			kb[0] = '\0';
+			if (v->km)
+				(void)tui_keymap_binding_str(v->km,
+							     "sidebar.toggle",
+							     kb, sizeof(kb));
+			if (kb[0])
+				snprintf(hint, sizeof(hint), "[%s] 会话", kb);
+			else
+				snprintf(hint, sizeof(hint), "会话");
+		}
+		/* 段表（顺序=渲染顺序）：hint / model / pct / tokens / cwd */
+		on[0] = 1;
+		wseg[0] = tv_str_cols(hint);
+		sega[0] = a_muted;
+		on[1] = 1;
+		wseg[1] = tv_str_cols(modelb);
+		sega[1] = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, TUI_ST_BOLD);
+		on[2] = pctb[0] ? 1 : 0;
+		wseg[2] = tv_str_cols(pctb);
+		sega[2] = f.pct >= 0 ?
+			  (tui_usage_tier(f.pct) == 2 ? a_err :
+			   tui_usage_tier(f.pct) == 1 ? a_warn : a_muted) :
+			  a_muted;
+		on[3] = 1;
+		wseg[3] = tv_str_cols(tokb);
+		sega[3] = a_muted;
+		on[4] = f.cwd[0] ? 1 : 0;
+		wseg[4] = tv_str_cols(f.cwd);
+		sega[4] = a_muted;
+		for (;;) {
+			need = 0;
+			nseg = 0;
+			for (i = 0; i < 5; i++) {
+				if (!on[i])
+					continue;
+				need += wseg[i];
+				nseg++;
 			}
-			if (need > mw) {
-				show_tok = 0;
-				need = w_model + 3 + w_bar;
+			if (nseg > 1)
+				need += (nseg - 1) * 3;
+			if (need <= cols)
+				break;
+			if (on[4]) {
+				on[4] = 0;
+				continue;
 			}
-			if (need > mw)
-				need = w_model;		/* 只剩模型名 */
-			{
-				static const char sep[] = " │ ";
-				int col = mx;
-
-				col = tui_screen_put(s, status_y, mx, modelb,
-						     strlen(modelb),
-						     tui_thm_attr(TUI_THM_FG,
-								  TUI_THM_BG,
-								  TUI_ST_BOLD));
-				if (col < mx)
-					col = mx;
-				if (f.pct >= 0 && need >= w_model + 3 + w_bar) {
-					int tier = tui_usage_tier(f.pct);
-					tui_attr ab = tier == 2 ? a_err :
-						      tier == 1 ? a_warn :
-						      a_muted;
-
-					col = tui_screen_put(s, status_y, col,
-							     sep,
-							     sizeof(sep) - 1,
-							     a_muted);
-					if (col < mx)
-						col = mx;
-					col = tui_screen_put(s, status_y, col,
-							     bar, strlen(bar),
-							     ab);
-					if (pctb[0] && col >= mx) {
-						col = tui_screen_put(s, status_y,
-								     col + 1,
-								     pctb,
-								     strlen(pctb),
-								     ab);
-					}
-				}
-				if (show_tok) {
-					tui_attr a_up = tui_thm_attr(TUI_THM_OK,
-								     TUI_THM_BG,
-								     0);
-					tui_attr a_dn = tui_thm_attr(TUI_THM_FG,
-								     TUI_THM_BG,
-								     0);
-					tui_attr a_ca = tui_thm_attr(
-						TUI_THM_CACHE, TUI_THM_BG, 0);
-					char piece[64];
-
-					col = tui_screen_put(s, status_y, col,
-							     sep,
-							     sizeof(sep) - 1,
-							     a_muted);
-					if (col < mx)
-						col = mx;
-					snprintf(piece, sizeof(piece), "↑%s",
-						 sin);
-					col = tui_screen_put(s, status_y, col,
-							     piece,
-							     strlen(piece),
-							     a_up);
-					snprintf(piece, sizeof(piece), " ↓%s",
-						 sout);
-					col = tui_screen_put(s, status_y, col,
-							     piece,
-							     strlen(piece),
-							     a_dn);
-					snprintf(piece, sizeof(piece), " ⟳%s",
-						 scr);
-					col = tui_screen_put(s, status_y, col,
-							     piece,
-							     strlen(piece),
-							     a_ca);
-				}
-				if (show_cwd && f.cwd[0]) {
-					col = tui_screen_put(s, status_y, col,
-							     sep,
-							     sizeof(sep) - 1,
-							     a_muted);
-					if (col >= mx)
-						(void)tui_screen_put(s, status_y,
-								     col,
-								     f.cwd,
-								     strlen(f.cwd),
-								     a_muted);
-				}
+			if (on[3]) {
+				on[3] = 0;
+				continue;
 			}
+			if (on[2]) {
+				on[2] = 0;
+				continue;
+			}
+			if (on[0]) {
+				on[0] = 0;
+				continue;
+			}
+			break;		/* 只剩模型名（put 自然截断） */
+		}
+		for (i = 0; i < 5; i++) {
+			if (!on[i])
+				continue;
+			if (col > 0)
+				col = tui_screen_put(s, status_y, col, sep,
+						     sizeof(sep) - 1, a_muted);
+			if (col < 0)
+				col = 0;
+			if (i == 3) {
+				/* tokens 三色段：↑绿 ↓正常 c紫 */
+				char piece[64];
+				tui_attr a_up = tui_thm_attr(TUI_THM_OK,
+							     TUI_THM_BG, 0);
+				tui_attr a_dn = tui_thm_attr(TUI_THM_FG,
+							     TUI_THM_BG, 0);
+				tui_attr a_ca = tui_thm_attr(TUI_THM_CACHE,
+							     TUI_THM_BG, 0);
+
+				snprintf(piece, sizeof(piece),
+					 "↑%s", sin);
+				col = tui_screen_put(s, status_y, col, piece,
+						     strlen(piece), a_up);
+				snprintf(piece, sizeof(piece),
+					 " ↓%s", sout);
+				col = tui_screen_put(s, status_y, col, piece,
+						     strlen(piece), a_dn);
+				snprintf(piece, sizeof(piece), " c%s", scr);
+				col = tui_screen_put(s, status_y, col, piece,
+						     strlen(piece), a_ca);
+			} else {
+				const char *txt = i == 0 ? hint :
+						  i == 1 ? modelb :
+						  i == 2 ? pctb : f.cwd;
+
+				col = tui_screen_put(s, status_y, col, txt,
+						     strlen(txt), sega[i]);
+			}
+			if (col < 0)
+				col = 0;
 		}
 	} else if (!newui && mw > 0) {
 		/* 状态行（旧回落）：运行中 spinner+提示；空闲 cwd:repo */

@@ -12,7 +12,7 @@
  *
  * markdown-lite 范围（取舍如实，见 T9C2-REPORT）：代码块围栏（``` 状态机
  * + 行级 naive 语法色：关键字词表/字符串/注释/数字）、行内 `code`、
- * 双星号加粗、列表（减号/星号前缀 → •）、引用（> dim 斜体）、# 标题
+ * 双星号加粗、列表（减号/星号前缀 → ·）、引用（> dim 斜体）、# 标题
  * （bold accent）、空格回绕（CJK 按宽度硬断）。不做：表格/链接渲染
  * （原文保留）、跨行 emphasis、嵌套列表、CommonMark 合规。
  */
@@ -58,7 +58,7 @@ void tui_chat_add_error(tui_chat *c, const char *text);
 void tui_chat_begin_assistant(tui_chat *c);
 void tui_chat_append_text(tui_chat *c, const char *s, size_t len);
 void tui_chat_append_reasoning(tui_chat *c, const char *s, size_t len);
-/* 工具行：start=spinner 行出现；end=按名匹配首个 running 行置 ✓/✗ */
+/* 工具行：start=spinner 行出现；end=按名匹配首个 running 行置 +/× */
 void tui_chat_tool_start(tui_chat *c, const char *name, const char *args);
 void tui_chat_tool_end(tui_chat *c, const char *name, const char *summary,
 		       int rc);
@@ -118,7 +118,7 @@ int tui_chat_notice_lines(const tui_chat *c);
 
 /* ---- B5：推理折叠区点击展开/收起 ----
  * row=转写区域内相对行（0..h-1，tui_chat_render 的 y 偏移已扣除）。
- * 命中 live 块或定稿消息的 ✻ 折叠行 → 切换展开态（定稿消息切换后
+ * 命中 live 块或定稿消息的 ○/● 折叠行 → 切换展开态（定稿消息切换后
  * 重建 scrollback，尽量保视口位置；底部 follow 保持贴底）。
  * 返回 1=命中并切换；0=未命中。仅对带 reasoning 的 assistant 块有效。 */
 int tui_chat_click(tui_chat *c, int row);

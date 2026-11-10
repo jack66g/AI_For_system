@@ -615,9 +615,9 @@ static void test_sidebar(void)
 		   "sb2-last-col-free");
 	}
 	row_text(s, 3, row, sizeof(row));
-	OK(strstr(row, "\xe2\x9c\x97") != NULL, "sb2-error-mark");	/* ✗ */
+	OK(strstr(row, "\xc3\x97") != NULL, "sb2-error-mark");	/* × */
 	row_text(s, 4, row, sizeof(row));
-	OK(strstr(row, "\xe2\x8b\xaf") != NULL, "sb2-interrupted-mark"); /* ⋯ */
+	OK(strstr(row, "\xe2\x80\xa6") != NULL, "sb2-interrupted-mark"); /* … */
 	row_text(s, 5, row, sizeof(row));
 	OK(strstr(row, "+2 \xe4\xb8\xaa") != NULL, "sb2-overflow-count");
 	OK(strstr(row, "/sessions") != NULL, "sb2-overflow-hint");

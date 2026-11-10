@@ -40,7 +40,7 @@ static const int TUI_THM_DEFAULTS[TUI_THM_COUNT] = {
 	179,	/* NUM */
 	244,	/* CMT */
 	75,	/* LINK */
-	140	/* CACHE（UXAB：⟳ cache read 紫） */
+	140	/* CACHE（UXAB：c cache read 紫） */
 };
 
 static const char *const TUI_THM_NAMES[TUI_THM_COUNT] = {

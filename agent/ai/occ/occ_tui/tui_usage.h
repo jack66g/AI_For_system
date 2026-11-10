@@ -47,10 +47,11 @@ void tui_usage_items(char *buf, size_t cap, long long in, long long out,
 		     long long cache, long long rea, int est);
 
 /*
- * UXAB：上下文占用进度条（▓/░，5 格满）。按 pct 分档：
- *   0-9 `░` · 10-19 `▓░` · 20-39 `▓▓░` · 40-59 `▓▓▓░` · 60-79 `▓▓▓▓░`
- *   · ≥80 `▓▓▓▓▓`（全满无尾 ░）。pct<0（未知）→ `░`。
- * 每档 = floor((pct+20)/20) 个 ▓ + 1 个尾 ░（80+ 无尾）。
+ * UXAB：上下文占用进度条（E 字形白名单：█ 填充/─ 尾轨，5 格满）。按 pct 分档：
+ *   0-9 `─` · 10-19 `█─` · 20-39 `██─` · 40-59 `███─` · 60-79 `████─`
+ *   · ≥80 `█████`（全满无尾轨）。pct<0（未知）→ `─`。
+ * 每档 = floor((pct+20)/20) 个 █ + 1 个尾 ─（80+ 无尾）。
+ * E 方案 footer 收敛为纯 `N%`（信息一职一地）——本函数留作回落/API。
  */
 void tui_usage_bar(int pct, char *buf, size_t cap);
 

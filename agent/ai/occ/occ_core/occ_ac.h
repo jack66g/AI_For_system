@@ -15,7 +15,7 @@
  *      新基线、occ_window 记 digest。
  *
  * 状态经 NOTICE 上报（occ_tui 禁改，状态展示走事件字符串）：
- *   ⊙ac:idle / ⊙ac:working / ⊙ac:ok / ⊙ac:off
+ *   @ac:idle / @ac:working / @ac:ok / @ac:off
  *
  * 环境开关：
  *   OCC_AC=off             禁用 ac 绑定
@@ -44,10 +44,10 @@
 #define OCC_DIGEST_PREFIX "〈会话摘要〉\n"
 
 /* ac 侧状态（NOTICE 文本） */
-#define OCC_AC_ST_OFF "⊙ac:off"
-#define OCC_AC_ST_IDLE "⊙ac:idle"
-#define OCC_AC_ST_WORKING "⊙ac:working"
-#define OCC_AC_ST_OK "⊙ac:ok"
+#define OCC_AC_ST_OFF "@ac:off"
+#define OCC_AC_ST_IDLE "@ac:idle"
+#define OCC_AC_ST_WORKING "@ac:working"
+#define OCC_AC_ST_OK "@ac:ok"
 
 /* ---- 绑定总闸（SME/ac 共用） ---- */
 

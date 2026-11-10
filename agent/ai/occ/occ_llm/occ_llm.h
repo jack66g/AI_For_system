@@ -99,7 +99,7 @@ typedef enum {
 	OCC_EV_REASONING_DELTA,		/* 思维链增量（openai reasoning_content / anthropic thinking） */
 	OCC_EV_TOOL_START,		/* idx + id/name（可分批补齐） */
 	OCC_EV_TOOL_ARGS,		/* idx + arguments 增量片段 */
-	OCC_EV_USAGE,			/* usage 回传（★ 账本钩子挂点，a3 挂账本） */
+	OCC_EV_USAGE,			/* usage 回传（* 账本钩子挂点，a3 挂账本） */
 	OCC_EV_FINISH,			/* finish 规范化（stop/tool-calls/length/content-filter/unknown） */
 	OCC_EV_ERROR,			/* err（坏块/负向检出/流内 error） */
 	OCC_EV_DONE,			/* 流终结（[DONE]/message_stop/EOF） */

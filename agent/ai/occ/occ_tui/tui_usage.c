@@ -91,11 +91,11 @@ void tui_usage_bar(int pct, char *buf, size_t cap)
 	if (fill > 5)
 		fill = 5;
 	for (i = 0; i < fill && n + 4 <= (int)cap - 1; i++) {
-		memcpy(buf + n, "▓", 3);
+		memcpy(buf + n, "█", 3);
 		n += 3;
 	}
 	if (fill < 5 && n + 4 <= (int)cap - 1) {
-		memcpy(buf + n, "░", 3);
+		memcpy(buf + n, "─", 3);
 		n += 3;
 	}
 	buf[n] = '\0';

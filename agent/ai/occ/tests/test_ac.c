@@ -12,7 +12,7 @@
  *   4) 换窗正确性（上下文级）：下一轮请求里旧事实只以摘要形式存在
  *      ——「换窗后引用旧事实仍答对」的地基；
  *   5) 手动 /compact（occ_ac_compact_now）跳过 check/judge；
- *   6) ac 不可达 → ⊙ac:off 诚实降级；OCC_AC=off → 零 HTTP；
+ *   6) ac 不可达 → @ac:off 诚实降级；OCC_AC=off → 零 HTTP；
  *   7) 绑定总闸 occ_bind_active 四象限。
  */
 #define _POSIX_C_SOURCE 200809L

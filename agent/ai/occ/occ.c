@@ -642,7 +642,7 @@ static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
 			char sep[96];
 
 			snprintf(sep, sizeof(sep),
-				 "⋯ 更早 %d 条消息未回放（尾部 %d 行挂载）",
+				 "… 更早 %d 条消息未回放（尾部 %d 行挂载）",
 				 it->rc, budget);
 			(void)tui_view_post(a->view, TUI_VIEW_HIST_SEP, sep,
 					    0, NULL, 0);
@@ -1875,7 +1875,7 @@ static int cmd_models(struct tui_app *a)
 				} \
 			} \
 			snprintf(items[n].tag, sizeof(items[n].tag), \
-				 "%s%.36s%s", f ? "★ " : "", \
+				 "%s%.36s%s", f ? "* " : "", \
 				 (RM)->provider_name[0] ? \
 				 (RM)->provider_name : (RM)->provider, \
 				 (RM)->is_chat == 0 ? " ·非对话" : ""); \
@@ -1958,7 +1958,7 @@ static int cmd_models(struct tui_app *a)
 	}
 	(void)tui_view_open_list(a->view, OV_MODELS, "models", items,
 				 (int)n, 1,
-				 "Enter=切换/接入 · ctrl+a key · ctrl+f ★ · "
+				 "Enter=切换/接入 · ctrl+a key · ctrl+f * · "
 				 "ctrl+t 非对话 · 过滤 · Esc=关闭");
 out:
 	if (rc != 0)
@@ -2867,9 +2867,9 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 		on = occ_registry_toggle_favorite(a->reg, rm->provider,
 						  rm->id);
 		(void)occ_state_save(a->reg, a->state_path);
-		(void)cmd_models(a);	/* 重开列表反映 ★（选择复位——取舍） */
+		(void)cmd_models(a);	/* 重开列表反映 *（选择复位——取舍） */
 		tui_view_overlay_status(a->view,
-					 on ? "★ 已收藏" : "已取消收藏", 0);
+					 on ? "* 已收藏" : "已取消收藏", 0);
 		return 0;
 	}
 	return 1;

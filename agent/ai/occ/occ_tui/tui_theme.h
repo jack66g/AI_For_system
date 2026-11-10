@@ -47,13 +47,16 @@ enum {
 	TUI_THM_NUM,
 	TUI_THM_CMT,
 	TUI_THM_LINK,
-	/* UXAB：footer cache-read（⟳）紫——进度条图形化配色 */
+	/* UXAB：footer cache-read（c 前缀）紫 */
 	TUI_THM_CACHE,
 	TUI_THM_COUNT
 };
 
-/* ---- spinner 帧（braille 10 帧，80ms/帧；常量，不入数据文件） ---- */
-#define TUI_THM_SPINNER "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+/* ---- spinner 帧（E 字形白名单：半块 3 帧，80ms/帧；常量，不入数据文件）
+ * E 方案字形白名单只许 box-drawing/半块/●○◆/箭头/×·… + ASCII——盲文点阵
+ * （U+2800 段）在 Noto CJK/Consolas 出豆腐，淘汰。半块帧取
+ * █(U+2588)/▌(U+258C)/▎(U+258E)，VM 已实证单列渲染（宽度探针测试钉死）。 */
+#define TUI_THM_SPINNER "█▌▎"
 #define TUI_THM_SPINNER_MS 80
 
 /* 槽位 → ini 键名（诊断/测试）；未知槽返回 NULL */
@@ -103,16 +106,16 @@ static inline tui_attr tui_thm_accent(uint16_t style)
 }
 
 /* spinner 帧字符（now_ms 驱动；返回指向静态串的指针，1 字符+NUL 视感）
- * 注：braille 每帧 3 字节 UTF-8（U+280B 起），直接返回常量。
+ * 注：半块每帧 3 字节 UTF-8（U+2588/258C/258E），直接返回常量。
  * 帧表放函数内 static——头文件级 static const 数组会在未用到的 TU 触发
  * -Wunused-const-variable（-Werror 下炸）。 */
 static inline const char *tui_thm_spinner(uint64_t now_ms)
 {
-	static const char *const frames[10] = {
-		"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
+	static const char *const frames[3] = {
+		"█", "▌", "▎"
 	};
 
-	return frames[(now_ms / TUI_THM_SPINNER_MS) % 10];
+	return frames[(now_ms / TUI_THM_SPINNER_MS) % 3];
 }
 
 #ifdef __cplusplus

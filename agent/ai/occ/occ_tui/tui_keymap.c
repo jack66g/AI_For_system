@@ -60,6 +60,8 @@ static const struct km_def KM_DEFAULTS[] = {
 	{ "session.compact", TUI_KM_CTX_BASE, "<leader>c" },
 	{ "model.list", TUI_KM_CTX_BASE, "<leader>m" },
 	{ "opencode.status", TUI_KM_CTX_BASE, "<leader>s" },
+	/* E 方案：会话侧栏展开/收起（footer `[ctrl+b] 会话` 提示同源） */
+	{ "sidebar.toggle", TUI_KM_CTX_BASE, "ctrl+b" },
 	/* OVERLAY：对话框标准键（keybind.ts:261-286）+ 模型框行内动作 */
 	{ "dialog.select.prev", TUI_KM_CTX_OVERLAY, "up,ctrl+p" },
 	{ "dialog.select.next", TUI_KM_CTX_OVERLAY, "down,ctrl+n" },

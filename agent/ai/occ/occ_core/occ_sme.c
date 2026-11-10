@@ -5,7 +5,7 @@
  * 复用 memory/sme_client.c（36 路由正典的 C 客户端，T4/T5 已 C 化）——
  * 本文件只做「何时查、查什么、怎么注入、何时写、写几条」，不重写 HTTP/
  * JSON 细节。SME 不可达 = 正常场景（记忆是增强能力，不是硬依赖）：
- * 状态转 `✉sme:off` 诚实降级，绝不阻塞对话、绝不静默空结果。
+ * 状态转 `@sme:off` 诚实降级，绝不阻塞对话、绝不静默空结果。
  */
 #define _POSIX_C_SOURCE 200809L
 #include "occ_sme.h"
@@ -50,14 +50,14 @@ int occ_sme_enabled(void)
 const char *occ_sme_status(void)
 {
 	if (!occ_sme_enabled())
-		return "✉sme:off";	/* 显式禁用也是「关」——诚实展示 */
+		return "@sme:off";	/* 显式禁用也是「关」——诚实展示 */
 	switch (g_sme_state) {
 	case 1:
-		return "✉sme:on";
+		return "@sme:on";
 	case 2:
-		return "✉sme:off";
+		return "@sme:off";
 	default:
-		return "✉sme:?";	/* 尚未发生调用（unknown） */
+		return "@sme:?";	/* 尚未发生调用（unknown） */
 	}
 }
 

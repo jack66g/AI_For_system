@@ -10,7 +10,7 @@
  *   R2 超长截断：60B 标题 → 恰 48B（ASCII 对拍）真改名
  *   R3 失败降级：mock 500（重试旋钮压到 1 次尝试）→ 诚实错误留步、
  *      「renamed」零出现（空题旧语义=不改名）
- *   R4 取消+不阻塞：mock 挂 30s → busy spinner 帧常刷（主循环活着）
+ *   R4 取消+不阻塞：mock 挂 30s → busy spinner 半块帧常刷（主循环活着）
  *      → Esc 取消 → 「已取消」留步、零改名
  * 前置：../occ 已构建（occ 顶层 make all）；未构建则诚实 skip（exit 0）。
  */
@@ -571,9 +571,30 @@ int main(void)
 			write_ctl(reqdir, "HANG=1\n");
 			rc = run_occ(tmp, port, st, 5, out, &out_len);
 			OK(rc == 0, "R4-cancel-flow");
-			/* busy spinner 帧字节（U+2800 段 braille）=主循环活 */
-			OK(find_bytes(out, out_len, "\xe2\xa0") != NULL,
-			   "R4-busy-spinner-alive");
+			/* busy spinner 帧字节（E 半块 █▌▎）=主循环活：
+			 * 「生成标题中」状态行之后出现的半块帧只可能来自
+			 * busy spinner（覆盖层全屏、底图静行不重绘；启动期
+			 * 静态 ▎▌/滑块 █ 都在其前——▸ U+25B8 不撞帧字节）。 */
+			{
+				const char *busy = find_bytes(out, out_len,
+							      "生成标题中");
+				int tail = busy ?
+					   (int)(out_len - (busy - out)) : 0;
+				int alive = 0;
+
+				if (busy && tail > 15) {
+					alive = find_bytes(busy + 15,
+							   tail - 15,
+							   "\xe2\x96\x88") != NULL ||
+						find_bytes(busy + 15,
+							   tail - 15,
+							   "\xe2\x96\x8c") != NULL ||
+						find_bytes(busy + 15,
+							   tail - 15,
+							   "\xe2\x96\x8e") != NULL;
+				}
+				OK(alive, "R4-busy-spinner-alive");
+			}
 			OK(find_bytes(out, out_len,
 				      "\xe5\xb7\xb2\xe5\x8f\x96\xe6\xb6\x88") !=
 			   NULL, "R4-cancelled-notice");

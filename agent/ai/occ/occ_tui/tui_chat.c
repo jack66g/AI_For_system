@@ -690,10 +690,10 @@ static void msg_render_lines(const char *text, size_t len, int width,
 						  TUI_ST_BOLD);
 			} else if ((ll >= 2 && ls[0] == '-' && ls[1] == ' ') ||
 				   (ll >= 2 && ls[0] == '*' && ls[1] == ' ')) {
-				/* 列表：• 前缀（muted）+ 正文（la）合成一行 */
+				/* 列表：· 前缀（muted，E 白名单）+ 正文（la）合成一行 */
 				ls += 2;
 				ll -= 2;
-				if (load_gitems("• ", strlen("• "),
+				if (load_gitems("· ", strlen("· "),
 						tui_thm_muted(),
 						&g, &gn, &gcap) == 0) {
 					tui_gph_st lgst = {0, 0, 0};
@@ -733,29 +733,25 @@ static void msg_render_lines(const char *text, size_t len, int width,
 
 /* ---- 消息模型 ---- */
 
-/* UXAB：消息块头 `❯ 你 · 02:15` / `◆ <label> · 02:16`——
- * 前缀+角色标签 accent 加粗、时间戳 dim（双 attr 合成行：装载前缀
- * gitem 后追加 dim 段，再整行回绕——列表 • 前缀同手法）。 */
-static void render_block_header(tui_chat *c, const char *mark,
-				const char *label, time_t ts, llist *ll)
+/* UXAB/E：消息块头 `▌你 · 02:15` / `◆ <label> · 02:16`——
+ * 前缀+角色标签 accent 加粗、时间戳 dim 纯文本（无 chip 底色）。
+ * head 由调用方给全（E 裁定：▌ 与「你」贴紧、◆ 与模型名留空格）；
+ * 双 attr 合成行：装载前缀 gitem 后追加 dim 段，再整行回绕。 */
+static void render_block_header(tui_chat *c, const char *head,
+				time_t ts, llist *ll)
 {
-	char hb[128];
 	char tb[24];
 	char tbuf[16] = "??:??";
 	struct tm tmv;
 	tui_gph_st gst = {0, 0, 0};
 	gitem *g = NULL;
 	int gn = 0, gcap = 0;
-	int hn;
+	size_t hn;
 
 	localtime_r(&ts, &tmv);
 	strftime(tbuf, sizeof(tbuf), "%H:%M", &tmv);
-	hn = snprintf(hb, sizeof(hb), "%s %s ", mark, label);
-	if (hn < 0)
-		return;
-	if (hn >= (int)sizeof(hb))
-		hn = (int)sizeof(hb) - 1;
-	if (load_gitems(hb, (size_t)hn, tui_thm_accent(TUI_ST_BOLD),
+	hn = strlen(head);
+	if (load_gitems(head, hn, tui_thm_accent(TUI_ST_BOLD),
 			&g, &gn, &gcap) != 0)
 		return;
 	snprintf(tb, sizeof(tb), "· %s", tbuf);
@@ -767,8 +763,9 @@ static void render_block_header(tui_chat *c, const char *mark,
 	wrap_gitems(g, gn, c->width, 1, ll);	/* 内部 free(g) */
 }
 
-/* UXAB：工具行树形化 `  ├─ ✓ bash · summary`——枝干 dim、状态符+主体
- * 按状态着色（✓ ok 绿 / ✗ error 红 / spinner muted）。定稿与 live 共用。 */
+/* UXAB/E：工具行树形化 `  ├─ + bash · summary`——枝干 dim、状态符+主体
+ * 按状态着色（+ ok 绿 / × error 红 / ○ pending muted / spinner live）。
+ * 定稿与 live 共用。 */
 static void render_tool_row(tui_chat *c, const tui_toolrow *t,
 			    const char *mark, llist *ll)
 {
@@ -933,9 +930,10 @@ static void render_reasoning(tui_chat *c, tui_msg *m, int live, llist *ll)
 	if (!rs || !rn)
 		return;
 	if (m->reason_open) {
+		/* E：展开态折头 ●（收起态 ○）——白名单字形，无 U+2303 附加符 */
 		hn = snprintf(hb, sizeof(hb), live ?
-			      "✻ thinking ⌃ (%zu chars)" :
-			      "✻ thought ⌃ · %zu chars", rn);
+			      "● thinking (%zu chars)" :
+			      "● thought · %zu chars", rn);
 		msg_render_lines(hb, (size_t)hn, c->width, tui_thm_muted(),
 				 TUI_ROLE_NOTICE, ll);
 		if (rn > RSN_CAP) {
@@ -943,7 +941,7 @@ static void render_reasoning(tui_chat *c, tui_msg *m, int live, llist *ll)
 			/* 回退到 UTF-8 边界（防切多字节） */
 			while (skip < rn && ((uint8_t)rs[skip] & 0xC0) == 0x80)
 				skip++;
-			msg_render_lines("⋯（前文省略）", strlen("⋯（前文省略）"),
+			msg_render_lines("…（前文省略）", strlen("…（前文省略）"),
 					 c->width, tui_thm_muted(),
 					 TUI_ROLE_NOTICE, ll);
 		}
@@ -952,8 +950,8 @@ static void render_reasoning(tui_chat *c, tui_msg *m, int live, llist *ll)
 		return;
 	}
 	hn = snprintf(hb, sizeof(hb), live ?
-		      "✻ thinking… (%zu chars)" :
-		      "✻ thought · %zu chars", rn);
+		      "○ thinking… (%zu chars)" :
+		      "○ thought · %zu chars", rn);
 	msg_render_lines(hb, (size_t)hn, c->width, tui_thm_muted(),
 			 TUI_ROLE_NOTICE, ll);
 }
@@ -978,10 +976,12 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 	msg_compute_id(m);
 	memset(&ll, 0, sizeof(ll));
 	if (m->role == TUI_ROLE_ASSISTANT) {
-		/* UXAB：块头 ◆ label · HH:MM（label=assist_label，occ.c 供模型名） */
-		render_block_header(c, "◆",
-				    c->assist_label[0] ? c->assist_label : "occ",
-				    m->ts, &ll);
+		/* UXAB/E：块头 ◆ label · HH:MM（label=assist_label，occ.c 供模型名） */
+		char hh[128];
+
+		snprintf(hh, sizeof(hh), "◆ %s ",
+			 c->assist_label[0] ? c->assist_label : "occ");
+		render_block_header(c, hh, m->ts, &ll);
 		/* reasoning 折叠行（B5：点击展开——记 scrollback 绝对行号） */
 		if (m->reason && m->rlen) {
 			if (c->nfolds == c->foldscap) {
@@ -1010,10 +1010,10 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
 					 tui_thm_plain(), m->role, &ll);
-		/* 工具行（UXAB 树形：枝干 ├─ dim + 状态符着色） */
+		/* 工具行（UXAB 树形：枝干 ├─ dim + 状态符着色；E 白名单） */
 		for (i = 0; i < (int)m->nt; i++) {
-			const char *mk = m->tools[i].st == 1 ? "✓" :
-					 m->tools[i].st == 2 ? "✗" : "•";
+			const char *mk = m->tools[i].st == 1 ? "+" :
+					 m->tools[i].st == 2 ? "×" : "○";
 
 			render_tool_row(c, &m->tools[i], mk, &ll);
 		}
@@ -1022,8 +1022,8 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 					 c->width, tui_thm_muted(),
 					 TUI_ROLE_NOTICE, &ll);
 	} else if (m->role == TUI_ROLE_USER) {
-		/* UXAB：块头 ❯ 你 · HH:MM（accent+bold / dim 时间） */
-		render_block_header(c, "❯", "你", m->ts, &ll);
+		/* UXAB/E：块头 ▌你 · HH:MM（accent+bold / dim 时间；▌ 贴紧） */
+		render_block_header(c, "▌你 ", m->ts, &ll);
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
 					 tui_thm_attr(TUI_THM_FG,
@@ -1033,7 +1033,7 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 			tui_attr ea = m->role == TUI_ROLE_ERROR ?
 				      tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0) :
 				      tui_thm_muted();
-			const char *pref = m->role == TUI_ROLE_ERROR ? "✗ " : "· ";
+			const char *pref = m->role == TUI_ROLE_ERROR ? "× " : "· ";
 
 			if (m->text && m->tlen) {
 				size_t plen = strlen(pref);
@@ -1355,11 +1355,15 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 	/* T1：live 块前也留空行（与上方已定稿块隔开；scrollback 空=不画） */
 	if (c->sb.count > 0 && !ll_new(&c->live_lines))
 		return;
-	/* UXAB：块头 ◆ label · HH:MM（live 块同样带头——流式开始即可见）。
+	/* UXAB/E：块头 ◆ label · HH:MM（live 块同样带头——流式开始即可见）。
 	 * 头行占位后折叠行不再是 live 首行——记录其行下标供点击命中。 */
-	render_block_header(c, "◆",
-			    c->assist_label[0] ? c->assist_label : "occ",
-			    m->ts, &c->live_lines);
+	{
+		char hh[128];
+
+		snprintf(hh, sizeof(hh), "◆ %s ",
+			 c->assist_label[0] ? c->assist_label : "occ");
+		render_block_header(c, hh, m->ts, &c->live_lines);
+	}
 	c->live_fold_idx = (m->reason && m->rlen) ? c->live_lines.n : -1;
 	/* reasoning 折叠行（B5：点击切换展开——可见行号在 render 记 hits） */
 	if (m->reason && m->rlen)
@@ -1371,9 +1375,9 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 		const char *mk;
 
 		if (m->tools[i].st == 1)
-			mk = "✓";
+			mk = "+";
 		else if (m->tools[i].st == 2)
-			mk = "✗";
+			mk = "×";
 		else
 			mk = tui_thm_spinner(now_ms);
 		render_tool_row(c, &m->tools[i], mk, &c->live_lines);
@@ -1447,8 +1451,10 @@ void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 	c->sb.rows = sb_h;
 	if (c->sb.follow)
 		tui_sb_jump_latest(&c->sb);
-	else
-		tui_sb_scroll(&c->sb, 0);	/* 钳位 */
+	else if (c->sb.view_top < c->sb.dropped ||
+		 (c->sb.count > 0 && c->sb.view_top >
+		  c->sb.dropped + c->sb.count - 1))
+		tui_sb_scroll(&c->sb, 0);	/* 越界才钳（锚点留白保留） */
 
 	/* B5：记录可见折叠行（点击命中表——render 后 click 间有效） */
 	c->nhits = 0;
@@ -1663,7 +1669,7 @@ int tui_chat_at_top(const tui_chat *c)
 }
 
 /* 当前 view_top 命中的消息 id + 相对 first_line 的偏移。
- * 只在 user/assistant 块上取锚（notice/error 文本可变——如「⋯ 更早
+ * 只在 user/assistant 块上取锚（notice/error 文本可变——如「… 更早
  * N 条」分隔行每次加载都会改写，不能当锚）。视口顶落在首条对话块
  * 之前（典型：分隔行）→ 锚到该块、偏移为负（重现「块在屏幕同一行」）。
  * 返回 0=有效；-1=无对话块/参数坏。 */
@@ -1724,12 +1730,21 @@ int tui_chat_scroll_to_msg(tui_chat *c, const char *msg_id, int line_off)
 		return -1;
 	for (i = 0; i < c->nmsgs; i++) {
 		tui_msg *m = &c->msgs[i];
+		long long top;
 
 		if (m->live || strcmp(m->id, msg_id) != 0)
 			continue;
 		c->sb.follow = 0;
-		c->sb.view_top = m->first_line + line_off;
-		tui_sb_scroll(&c->sb, 0);	/* 钳位 */
+		/* T2 锚点契约：视口首行恒=锚行（块在屏幕同一行），与视口高
+		 * 无关——锚行近内容末尾时允许越过 sb_hi 留尾白，不按
+		 * 「满屏贴底」钳位（否则转写区变矮即挤掉锚行上方内容）。 */
+		top = (long long)m->first_line + line_off;
+		if (top < (long long)c->sb.dropped)
+			top = c->sb.dropped;
+		if (c->sb.count > 0 &&
+		    top > (long long)(c->sb.dropped + c->sb.count) - 1)
+			top = (long long)(c->sb.dropped + c->sb.count) - 1;
+		c->sb.view_top = (int)top;
 		return 0;
 	}
 	return -1;

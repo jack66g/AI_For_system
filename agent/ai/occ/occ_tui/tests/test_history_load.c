@@ -389,14 +389,16 @@ int main(void)
 	   "H2-earliest-not-loaded");
 
 	/* H3：Home（已在顶）→ 增量加载（+1000 预算全量重放）→ 锚点不跳。
-	 * 加载后新可见的 MSG-0114 只可能来自更大预算（初始窗口为
-	 * MSG-0117..0119），等它出现即加载已渲染。 */
+	 * 加载后新可见的 MSG-0296 只可能来自更大预算（初始窗口为
+	 * MSG-0297..0299）——锚点契约：视口首行=锚点块上一行（0296 文本行），
+	 * 等它出现即加载已渲染。（E 布局 17 行视口下旧断言 MSG-0294 只有
+	 * 20 行满屏钳位漂移才可达，与契约不符——按契约对齐。） */
 	if (rc == 0) {
 		mark_load = have;
 		if (write_all(pt.master, "\x1b[H", 3) != 0)
 			rc = -1;
 		if (rc == 0 &&
-		    read_until(pt.master, out, OUT_CAP, &have, "MSG-0294",
+		    read_until(pt.master, out, OUT_CAP, &have, "MSG-0296",
 			       8000, NULL) != 0) {
 			printf("  dbg: load render missing (have=%d)\n", have);
 			rc = -1;

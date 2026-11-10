@@ -152,7 +152,7 @@ static void sink_emit(const occ_loop_opts *o, int kind, const char *data,
  * 状态通告可见性（契约见 occ_ac.h 文件头）：TUI 恒发；headless 只在
  * stderr 是终端时发，或 OCC_STATE_NOTICE=1 强制开（=0 强制关）。
  * 这样「headless occ -p 输出逐字节不变」的铁门在重定向/管道下成立，
- * 人跑在终端上照样看得到 `✉sme:off` / `⊙ac:off` 的诚实降级。
+ * 人跑在终端上照样看得到 `@sme:off` / `@ac:off` 的诚实降级。
  */
 static int state_notice_ok(const occ_loop_opts *o)
 {
@@ -1220,8 +1220,8 @@ fill_res:
 	/*
 	 * T9d 绑定收口（只在正常收口；中断/失败轮不做外部副作用）：
 	 *   §8.2 里程碑写回 → §9.2 /check 轮询 → 判需压缩时 §9.3 换窗
-	 *   → 状态通告（`✉sme:*` / `⊙ac:*`，见 state_notice_ok 契约）。
-	 * ac 不可达 = 诚实降级（状态 ⊙ac:off，不阻塞对话）。
+	 *   → 状态通告（`@sme:*` / `@ac:*`，见 state_notice_ok 契约）。
+	 * ac 不可达 = 诚实降级（状态 @ac:off，不阻塞对话）。
 	 */
 	if (bind && rc == OCC_LOOP_OK && !interrupted) {
 		int compacted = 0;

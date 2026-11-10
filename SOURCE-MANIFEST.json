@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T21:12:00+08:00",
+  "created": "2026-11-11T01:20:00+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -45,7 +45,8 @@
     "LT-BUG-007（LT-4.3 P2）：/ask 死接口——apic 硬编码旧 ai 入口。修=exec /usr/local/bin/occ -p（argv 直传无 shell，超时/错误人话映射）；aik-upgrade 引用同步 occ 口径。apic 三套 130+24checks+run_all 60 主会话亲跑；假 occ 钻证零真 API。",
     "LT-BUG-008（soak 首获 P1）：aistreamd parquet index 重建泄漏——out_tbl 空标签致 irows/flens/dlens/arena/blob/bas 全漏（~380KB/次，45MB/h）。修=块内 tbl_cleanup 统一释放；ASan 修前 2.38MB/1206 allocs→修后零；RSS delta 2500→128KiB；aistreamd 12 套+run_all 60 主会话亲跑。",
     "TUI-T1：/new 清屏+空态、ctrl+n、块间空行、侧栏去 id+状态标+溢出提示、分隔列+滚动条、Home/End、回放预算 1000、LT-BUG-005 显示列截断、busy 计时；顺带修代码块 CJK 碎裂与静默窗 spinner 冻帧。occ 全套+tui 13 套+差分 62/62+run_all 60 主会话亲跑。",
-    "TUI-T2：DB 增量历史加载——转写区到顶（PgUp/Home）触发更大预算重放，HIST_CLEAR→回放→HIST_ANCHOR 严格尾投还原视口（内容哈希锚，跨重放稳定；锚丢诚实通告）；滚动环 5000 行内存闸（TUI_CHAT_SB_CAP，16MiB 预算实测口径）到顶诚实提示；事件环分段 flush（每 128 项，修 TV_QMAX 满队列丢事件）；O-14 冷启动空态下移避让 notice；新增 test_history_load pty 台架 10 断言。occ 全套 20+tui 14 套+p-smoke 10+差分 62/62+run_all 60 主会话亲跑；500/1200 条钻证 14/14（三次加载到最早/四次撞内存闸诚实拒载/锚点零丢失/RSS 双 29MB 零增长）。"
+    "TUI-T2：DB 增量历史加载——转写区到顶（PgUp/Home）触发更大预算重放，HIST_CLEAR→回放→HIST_ANCHOR 严格尾投还原视口（内容哈希锚，跨重放稳定；锚丢诚实通告）；滚动环 5000 行内存闸（TUI_CHAT_SB_CAP，16MiB 预算实测口径）到顶诚实提示；事件环分段 flush（每 128 项，修 TV_QMAX 满队列丢事件）；O-14 冷启动空态下移避让 notice；新增 test_history_load pty 台架 10 断言。occ 全套 20+tui 14 套+p-smoke 10+差分 62/62+run_all 60 主会话亲跑；500/1200 条钻证 14/14（三次加载到最早/四次撞内存闸诚实拒载/锚点零丢失/RSS 双 29MB 零增长）。",
+    "TUI-E：E 方案改版（B 收起+C 线条+框线零标题）——转写/输入双单线框零栏目名（信息一职一地：会话名→侧栏、token→footer 唯一一份）；ctrl+b 侧栏开关（<60 列自动收）；字形白名单（❯✻⟳✗✓⠋▓░→▌○/●/+/×/c/█─，✉⊙★→ASCII @/*，新增 test_glyphwidth 37 断言钉宽度）；spinner→█▌▎半块 3 帧；滚动条走框线右列；顺带修 scroll_to_msg 满屏钳位挤锚 bug（视口变矮暴露，T2 契约重校准 H3=MSG-0296）。occ 20+tui 15 套+p-smoke 10+差分 62/62+run_all 60 主会话亲跑；500/1200 锚点钻证 14/14 复绿。"
   ],
   "overlay_count": 168,
   "registry": {

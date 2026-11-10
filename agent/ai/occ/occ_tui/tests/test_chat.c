@@ -3,7 +3,7 @@
  * test_chat.c - tui_chat 转写区单测（T9c2）
  *
  * 覆盖：消息模型（user/notice/live/收口）、markdown-lite 行为
- * （标题/列表/引用/行内 code/bold/围栏+语法色）、工具行 ✓✗、
+ * （标题/列表/引用/行内 code/bold/围栏+语法色）、工具行 +/×、
  * RESET 截断、dump_text/live_empty 观察口、scrollback 定稿推进。
  * 断言走 dump 文本与屏幕 cell 抽取（golden 文本），不比对 SGR 字节
  * （属性色由 test_render 的 SGR 生成单测覆盖）。
@@ -80,9 +80,9 @@ int main(void)
 	tui_chat_add_user(c, "hello tui", 9);
 	s = render_to(c, 8, 40, 1000);
 	OK(s != NULL, "render1");
-	/* UXAB：块头 `❯ 你 · HH:MM`（❯=E2 9D AF、你=E4 BD A0） */
+	/* UXAB/E：块头 `▌你 · HH:MM`（▌=E2 96 8C 贴紧你=E4 BD A0） */
 	OK(screen_row(s, 0, 0, 40, row, sizeof(row)) > 0 &&
-	   strstr(row, "\xe2\x9d\xaf \xe4\xbd\xa0 \xc2\xb7") != NULL,
+	   strstr(row, "\xe2\x96\x8c\xe4\xbd\xa0 \xc2\xb7") != NULL,
 	   "user-header");
 	OK(screen_row(s, 1, 0, 40, row, sizeof(row)) != 0 &&
 	   strcmp(row, "hello tui") == 0, "user-text");
@@ -139,7 +139,7 @@ int main(void)
 			screen_row(s, i, 0, 40, row, sizeof(row));
 			if (strstr(row, "标题") != NULL)
 				found_h = 1;
-			if (strstr(row, "• 项目一") != NULL)
+			if (strstr(row, "· 项目一") != NULL)
 				found_li = 1;
 			if (strstr(row, "引用行") != NULL)
 				found_q = 1;
@@ -199,7 +199,7 @@ int main(void)
 	}
 	tui_screen_destroy(s);
 
-	/* ---- 5. 工具行 start→end（running→✓） ---- */
+	/* ---- 5. 工具行 start→end（running→+） ---- */
 	tui_chat_begin_assistant(c);
 	tui_chat_tool_start(c, "bash", "{\"cmd\":\"ls\"}");
 	tui_chat_append_text(c, "doing", 5);
@@ -222,7 +222,7 @@ int main(void)
 
 		for (i = 0; i < 8; i++) {
 			screen_row(s, i, 0, 40, row, sizeof(row));
-			if (strstr(row, "✓") != NULL &&
+			if (strstr(row, "+") != NULL &&
 			    strstr(row, "bash") != NULL)
 				found_ok = 1;
 			/* UXAB：树形枝干 `  ├─ `（├─=E2 94 9C E2 94 80） */
@@ -311,7 +311,7 @@ int main(void)
 		OK(fold >= 0, "fold-header-rendered");
 		OK(!leaked, "fold-collapsed-no-content");
 		OK(tui_chat_fold_row(c) == fold, "fold-row-api");
-		/* 点击折叠行 → 展开：思路正文渲染 + ⌃ 标记 */
+		/* 点击折叠行 → 展开：思路正文渲染 + ● 展开态折头 */
 		OK(tui_chat_click(c, fold) == 1, "fold-click-hit");
 	}
 	tui_screen_destroy(s);
@@ -323,7 +323,7 @@ int main(void)
 			screen_row(s, i, 0, 40, row, sizeof(row));
 			if (strstr(row, "思路甲乙丙") != NULL)
 				found = 1;
-			if (strstr(row, "\xe2\x8c\x83") != NULL)	/* ⌃ */
+			if (strstr(row, "\xe2\x97\x8f") != NULL)	/* ● */
 				marker = 1;
 		}
 		OK(found, "fold-expanded-content");

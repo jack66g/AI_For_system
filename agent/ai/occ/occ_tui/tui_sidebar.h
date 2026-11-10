@@ -41,11 +41,20 @@ typedef struct tui_sb_data {
  * 渲染侧栏到 [0, 0, TUI_SB_WIDTH, rows)。
  * 标题行 `sessions` + dim 细线；会话行只显标题（21 列内裁剪，末列留给
  * 视图层分隔线/滚动条）；当前行 `▎`+FG 加粗；status=error 用 ERROR 色
- * + 行尾 ✗、interrupted 行尾 ⋯；条数溢出时末行 `⋯ +N 个（/sessions）`。
+ * + 行尾 ×、interrupted 行尾 …；条数溢出时末行 `… +N 个（/sessions）`。
  * 底部 `12.3k · 6%` 行。
  */
 void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 			const tui_theme *th);
+
+/*
+ * E 方案：框线面板内的会话列表（rect (x,y,w,h)=框内净区，框线由
+ * tui_view 原语围出）。零栏目名/零计数——只渲会话行（▎当前条 / ×error /
+ * …interrupted / 溢出 `… +N 个（/sessions）`），样式沿用 T1。
+ */
+void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
+			      int x, int y, int w, int h,
+			      const tui_theme *th);
 
 #ifdef __cplusplus
 }
