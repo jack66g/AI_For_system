@@ -1235,7 +1235,7 @@ int as_pq_update_index(const char *root, long *skipped)
 		int ok;
 
 		if (!irows || !flens || !dlens)
-			goto out_tbl;
+			goto tbl_cleanup;
 		for (size_t i = 0; i < np; i++) {
 			const char *rel = paths[i];
 			const char *slash1 = strchr(rel, '/');
@@ -1271,7 +1271,7 @@ int as_pq_update_index(const char *root, long *skipped)
 		blob = malloc((nr ? nr : 1) * 4 * sizeof(int64_t));
 		bas = malloc((nr ? nr : 1) * 2 * sizeof(*bas));
 		if (!arena || !blob || !bas)
-			goto out_tbl;
+			goto tbl_cleanup;
 		for (int c = 0; c < 4; c++)
 			cols[c] = blob + nr * (size_t)c;
 		bp[0] = bas;
@@ -1303,11 +1303,16 @@ int as_pq_update_index(const char *root, long *skipped)
 				    (int64_t *const *)cols,
 				    (const struct pq_ba *const *)bp);
 		if (ok != 0)
-			goto out_tbl;
+			goto tbl_cleanup;
+		rc = 0;
+tbl_cleanup:
+		free(irows);
+		free(flens);
+		free(dlens);
+		free(arena);
+		free(blob);
+		free(bas);
 	}
-	rc = 0;
-out_tbl:
-	;
 out:
 	if (dir)
 		closedir(dir);

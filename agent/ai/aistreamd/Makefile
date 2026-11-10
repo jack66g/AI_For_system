@@ -10,6 +10,7 @@
 #                      #          + I-10 test_outcome + T8 test_parquet
 #                      #          + SENSE 脱敏 test_sense_redact
 #                      #          + T8 遗留 test_decisions）
+#   make asan-leak    # LT-BUG-008 update_index 泄漏钻证（ASan/LSan）
 #   make clean
 #
 # 只读链接兄弟目录源码（不改它们，各自编译进本目录 obj/reuse/）：
@@ -44,7 +45,7 @@ BIN := aistreamd
 INJECT := ai_inject
 PQ_DUMP := pq_dump		# T8 差分向量驱动（仅链 snappy/parquet 库）
 
-.PHONY: all test clean
+.PHONY: all test clean asan-leak
 
 all: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP)
 
@@ -86,7 +87,7 @@ tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
 
 TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
 	 test_hotplug test_outcome test_parquet test_sense_redact \
-	 test_decisions
+	 test_decisions test_update_index_leak
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
 test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
@@ -103,7 +104,20 @@ test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
 tests/test_%: tests/test_%.c $(TEST_LIBS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(TEST_LIBS)
 
+# LT-BUG-008 泄漏钻证：ASan/LSan 构建（零 leak 报告）；需 gcc libasan
+ASAN_CFLAGS := -Wall -Wextra -Werror -std=c11 -O1 -g -fsanitize=address \
+	       -fno-omit-frame-pointer
+
+asan-leak: tests/test_update_index_leak_asan
+	ASAN_OPTIONS=detect_leaks=1 ./tests/test_update_index_leak_asan
+
+tests/test_update_index_leak_asan: tests/test_update_index_leak.c \
+				   as_parquet.c as_snappy.c
+	$(CC) $(ASAN_CFLAGS) $(INCLUDES) -o $@ tests/test_update_index_leak.c \
+		as_parquet.c as_snappy.c
+
 clean:
-	rm -rf $(OBJ_DIR) $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
+	rm -rf $(OBJ_DIR) $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) \
+		tests/test_update_index_leak_asan $(TESTS:%=tests/%)
 
 -include $(OWN_OBJS:.o=.d) $(REUSE_OBJS:.o=.d)
