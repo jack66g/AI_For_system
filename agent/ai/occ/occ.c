@@ -470,6 +470,7 @@ struct tui_app {
 	int worker_live;		/* 双线程：worker 写（尾部），主线程读 */
 	int worker_created;		/* 仅主线程（create/join 配对） */
 	int shell_req;			/* T9e /shell：退屏跑 bash 后重建 view */
+	uint64_t delete_arm;		/* O-12：/delete 双发确认窗（ms；10s 内再发生效） */
 	char *prompt;			/* 本轮输入（主线程分配，worker 用） */
 	char session_id[OCC_ID_LEN];	/* 当前会话；空=下条提交建新会话 */
 	/* UXAB：顶栏缓存（title 由 worker/切换/改名写——mu 保护；
@@ -2139,6 +2140,65 @@ static int tui_app_on_command(void *ud, const char *line)
 		a->u_est = 0;
 		pthread_mutex_unlock(&a->mu);
 		tui_view_notice(a->view, "new session（下一条消息创建新会话）");
+		return 0;
+	}
+	if (!strcmp(line, "/delete")) {
+		/* O-12：删除当前会话。双发确认门（W2 精神）：首次 /delete
+		 * 只布防，10s 内再发才真删——删除不可恢复。库层
+		 * occ_session_delete 单事务级联（消息/工具/窗口/回滚+
+		 * transcript best-effort）；删后回 /new 空态（侧栏
+		 * fill_sessions 每帧活拉，自动反映）。 */
+		int live;
+		uint64_t now = tui_now_ms();
+		char e[192];
+		char t[64];
+		occ_session_row r;
+
+		pthread_mutex_lock(&a->mu);
+		live = a->worker_live;
+		pthread_mutex_unlock(&a->mu);
+		if (live) {
+			tui_view_notice(a->view,
+				"delete: turn 运行中——Esc 中断或收口后再删");
+			return 0;
+		}
+		if (!a->session_id[0]) {
+			tui_view_notice(a->view,
+				"尚无会话——先发一条消息再 /delete");
+			return 0;
+		}
+		if (!(a->delete_arm && now - a->delete_arm <= 10000)) {
+			a->delete_arm = now;
+			tui_view_notice(a->view,
+				"确认：10 秒内再发一次 /delete 将永久删除"
+				"当前会话（不可恢复）");
+			return 0;
+		}
+		a->delete_arm = 0;
+		t[0] = '\0';
+		if (occ_session_get(a->db, a->session_id, &r, e,
+				    sizeof(e)) == 1)
+			snprintf(t, sizeof(t), "%.40s", r.title);
+		if (occ_session_delete(a->db, a->session_id, e,
+				       sizeof(e))) {
+			tui_view_notice(a->view, e);
+			return 0;
+		}
+		pthread_mutex_lock(&a->mu);
+		a->session_id[0] = '\0';
+		a->session_title[0] = '\0';
+		a->tokens_total = 0;
+		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
+		a->u_est = 0;
+		pthread_mutex_unlock(&a->mu);
+		{
+			char nb[160];
+
+			snprintf(nb, sizeof(nb),
+				 "session 已删除：%.40s（级联清消息/工具/"
+				 "窗口/回滚）——下一条消息创建新会话", t);
+			tui_view_notice(a->view, nb);
+		}
 		return 0;
 	}
 	if (!strcmp(line, "/sessions"))

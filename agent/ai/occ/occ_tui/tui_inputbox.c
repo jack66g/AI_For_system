@@ -16,9 +16,9 @@
 
 #include "tui_utf8.h"
 
-/* 14 条内置 slash 命令（OPENCODE-PLAN §5；Tab 补全与 /help 同源） */
+/* 15 条内置 slash 命令（OPENCODE-PLAN §5；Tab 补全与 /help 同源） */
 static const char *const IB_CMDS[] = {
-	"/models", "/new", "/sessions", "/rename", "/clear", "/help",
+	"/models", "/new", "/sessions", "/rename", "/delete", "/clear", "/help",
 	"/exit", "/status", "/tools", "/sandbox", "/trace", "/lease",
 	"/compact", "/shell"
 };
