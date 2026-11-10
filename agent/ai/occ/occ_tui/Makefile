@@ -29,7 +29,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_render.c tests/test_input.c \
 	     tests/test_inputbox.c tests/test_view_pty.c \
 	     tests/test_keymap.c tests/test_themefile.c \
 	     tests/test_overlay.c tests/test_usage.c \
-	     tests/test_rename_ai.c
+	     tests/test_rename_ai.c tests/test_history_load.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean

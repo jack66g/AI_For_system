@@ -22,6 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tui_chat.h"
 #include "tui_core.h"
 #include "tui_keymap.h"
 #include "tui_overlay.h"
@@ -71,7 +72,10 @@ enum {
 	TUI_VIEW_HIST_CLEAR = 10,	/* 清空转写（切会话前旧内容） */
 	/* ---- OCC-DEBT：异步结果回投（向导验证 worker → 主循环）；
 	 * rc/text 语义由 occ.c 定义（0=成功 1=失败(text=错误) 2=取消） ---- */
-	TUI_VIEW_ASYNC_RESULT = 11
+	TUI_VIEW_ASYNC_RESULT = 11,
+	/* ---- T2：增量历史加载的视口锚点（text=消息 id，rc=行偏移）。
+	 * 投递顺序契约：HIST_CLEAR → 全部回放事件 → HIST_ANCHOR（最后）。 ---- */
+	TUI_VIEW_HIST_ANCHOR = 12
 };
 
 /* occ.c 提供的钩子（全部主线程调用；on_submit/on_interrupt 例外见注） */
@@ -124,6 +128,11 @@ typedef struct {
 	/* ---- OCC-DEBT：异步 worker 结果（TUI_VIEW_ASYNC_RESULT 出队时；
 	 * rc/text 语义 occ.c 定义——向导验证 0=成功 1=失败 2=取消） ---- */
 	void (*on_async_result)(void *ud, int rc, const char *text);
+	/* ---- T2：长历史增量加载（主线程；session.page.up / scroll.top
+	 * 在转写区已到顶时调用，替代滚动）。返回 1=已发起一次加载/回放，
+	 * 0=无更多/忙/内存上限（occ.c 自行出 notice）。调用方随后自行
+	 * 投递 HIST_CLEAR → 回放事件 → TUI_VIEW_HIST_ANCHOR。 ---- */
+	int (*on_load_more)(void *ud);
 } tui_view_hooks;
 
 /* 创建视图（hooks 各回调可 NULL）。非 tty 的判定在 tui_view_run。 */
@@ -151,6 +160,12 @@ void tui_view_notice(tui_view *v, const char *text);
 
 /* 被丢弃的事件数（诊断/测试断言） */
 unsigned long tui_view_dropped(const tui_view *v);
+
+/* T2：主线程立即排空事件环（应用事件到 chat 模型，不渲染）。
+ * 供 occ.c 大批量历史回放时分段投递——回放事件数可远超队列槽位
+ * （TV_QMAX），不分段会触发 300ms/事件的满队列等待并丢弃事件。
+ * 仅主线程可调（worker/sink 线程勿用）。返回 0。 */
+int tui_view_flush(tui_view *v);
 
 /* ---- T9c3 覆盖层 API（occ.c 供数/决策；view 管键导航/渲染） ---- */
 
@@ -183,6 +198,14 @@ void tui_view_refresh_sessions(tui_view *v);
 /* UXAB：assistant 消息块头标签（`◆ <label> · HH:MM`；缺省 "occ"）。
  * occ.c 在模型解析/切换后设为模型名——每条 assistant 消息随块留档 */
 void tui_view_set_assist_label(tui_view *v, const char *label);
+
+/* ---- T2：转写区锚点/内存闸观察口（occ.c 增量加载用） ---- */
+/* 滚动指标（同 tui_chat_scroll_info；render 后取值才有本帧几何）。
+ * 返回 0=有效；-1=v 空。 */
+int tui_view_scroll_info(const tui_view *v, struct tui_chat_scrollinfo *out);
+/* 当前视口顶锚（同 tui_chat_top_anchor）。返回 0=有效；-1=无锚。 */
+int tui_view_top_anchor(const tui_view *v, char *msg_id, size_t cap,
+			int *line_off);
 
 #ifdef __cplusplus
 }

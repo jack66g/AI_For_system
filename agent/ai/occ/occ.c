@@ -34,6 +34,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -531,6 +532,20 @@ struct tui_app {
 	/* ---- OCC-DEBT：/models 非对话条目显隐（默认过滤；ctrl+t 切换） ---- */
 	int show_nonchat;
 
+	/* ---- T2：长历史增量加载（转写区到顶 → 更大行预算重放） ----
+	 * replay_budget=当前 occ_replay_plan 行预算（初值 OCC_REPLAY_LINES，
+	 * 0=显式禁用）；replay_earlier=上次成功 plan 切掉的更早可见消息数；
+	 * replay_ok=上次回放是否真跑成（busy 跳过/失败=0 → 下次到顶可补）；
+	 * replay_mem_stop=1 已达 scrollback 内存上限（不再加载）；
+	 * earliest_noticed/load_busy_noticed=提示节流（同一会话/同一 turn
+	 * 只出一次，加载成功后重置）。 */
+	int replay_budget;
+	size_t replay_earlier;
+	int replay_ok;
+	int replay_mem_stop;
+	int earliest_noticed;
+	int load_busy_noticed;
+
 	/* ---- c3：overlay 工作集（打开期间有效；换开重分配） ---- */
 	size_t *ov_map;
 	size_t ov_map_n;
@@ -577,19 +592,22 @@ static int app_replay_lines_budget(void)
 	return (int)n;
 }
 
-static void app_replay_session(struct tui_app *a, const char *sid,
-			       int clear_first)
+/* T2：回放执行（进屏/切会话/到顶增量加载共用）。budget=occ_replay_plan
+ * 行预算；成功时 *earlier_out=被切掉的更早可见消息数。返回 0=已投递
+ * 全套事件（HIST_CLEAR→回放事件）；-1=跳过（busy/禁用）或失败——失败
+ * 已出 notice（禁用静默），调用方不得更新锚点状态。 */
+static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
+			  int budget, size_t *earlier_out)
 {
 	occ_msg_row *rows = NULL;
 	occ_tc_row *tcs = NULL;
 	occ_replay_item *plan = NULL;
 	size_t n = 0, ntc = 0, nplan = 0, nearlier = 0, i;
 	char e[160];
-	int budget;
 	int live;
 
 	if (!sid || !sid[0])
-		return;
+		return -1;
 	pthread_mutex_lock(&a->mu);
 	live = a->worker_live;
 	pthread_mutex_unlock(&a->mu);
@@ -597,14 +615,13 @@ static void app_replay_session(struct tui_app *a, const char *sid,
 		tui_view_notice(a->view,
 				"replay: turn 运行中——历史回放跳过（收口后"
 				"重进 /sessions 可补）");
-		return;
+		return -1;
 	}
-	budget = app_replay_lines_budget();
-	if (budget == 0)
-		return;				/* 显式禁用（静默——配置意图） */
+	if (budget <= 0)
+		return -1;			/* 显式禁用（静默——配置意图） */
 	if (occ_msg_list(a->db, sid, &rows, &n, e, sizeof(e)) != 0) {
 		tui_view_notice(a->view, e);
-		return;
+		return -1;
 	}
 	(void)occ_toolcalls_since(a->db, sid, 0, &tcs, &ntc, NULL, 0);
 	if (occ_replay_plan(rows, n, tcs, ntc, budget, &plan, &nplan,
@@ -612,7 +629,7 @@ static void app_replay_session(struct tui_app *a, const char *sid,
 		occ_msg_rows_free(rows, n);
 		occ_tc_rows_free(tcs, ntc);
 		tui_view_notice(a->view, "replay: 规划失败（OOM）");
-		return;
+		return -1;
 	}
 	if (clear_first)
 		(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
@@ -666,10 +683,149 @@ static void app_replay_session(struct tui_app *a, const char *sid,
 		default:
 			break;
 		}
+		/* T2：分段排空事件环——一套回放事件数可远超 TV_QMAX（512），
+		 * 攒到最后会满队列等待（300ms/事件）并丢事件。每 128 个
+		 * 计划项（≤256 事件）flush 一次，主线程就地应用到 chat 模型
+		 * （不渲染；与后续事件同序）。 */
+		if ((i & 0x7f) == 0x7f)
+			(void)tui_view_flush(a->view);
 	}
+	(void)tui_view_flush(a->view);
 	free(plan);
 	occ_tc_rows_free(tcs, ntc);
 	occ_msg_rows_free(rows, n);
+	if (earlier_out)
+		*earlier_out = nearlier;
+	return 0;
+}
+
+/* 进屏/切会话：预算复位为 OCC_REPLAY_LINES 缺省；成功则记录 earlier
+ * （到顶判定「还有更早」的唯一依据）。 */
+static void app_replay_session(struct tui_app *a, const char *sid,
+			       int clear_first)
+{
+	size_t earlier = 0;
+
+	a->replay_budget = app_replay_lines_budget();
+	a->replay_ok = 0;
+	a->replay_mem_stop = 0;
+	a->earliest_noticed = 0;
+	if (app_replay_run(a, sid, clear_first, a->replay_budget,
+			   &earlier) == 0) {
+		a->replay_ok = 1;
+		a->replay_earlier = earlier;
+	}
+}
+
+/* T2 取证探针：OCC_T2_DEBUG_LOG=<path> 时追加一行加载流水（默认关、
+ * 零 UI 影响）——自检「500 条钻证」记录 budget/渲染行/锚点用。 */
+static void app_t2_dbg(const char *fmt, ...)
+{
+	const char *path = getenv("OCC_T2_DEBUG_LOG");
+	va_list ap;
+	FILE *f;
+
+	if (!path || !path[0])
+		return;
+	f = fopen(path, "a");
+	if (!f)
+		return;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fputc('\n', f);
+	fclose(f);
+}
+
+/* T2：转写区到顶 → 增量加载更早历史。
+ * 时序：取锚点（view_top 命中消息 id+偏移）→ 内存闸（渲染行折算）→
+ * CLEAR + 更大预算全套回放事件 → HIST_ANCHOR（严格最后，view 据此
+ * 还原视口）。返回 1=已发起；0=无更多/忙/内存上限/禁用（不滚动）。 */
+static int tui_app_on_load_more(void *ud)
+{
+	struct tui_app *a = ud;
+	struct tui_chat_scrollinfo si;
+	char anchor[32];
+	char nb[256];
+	int off = 0;
+	int live;
+	int budget;
+	int hard = TUI_CHAT_SB_CAP - 512;
+	size_t earlier = 0;
+	int have_anchor;
+
+	if (!a->session_id[0])
+		return 0;
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		if (!a->load_busy_noticed) {
+			a->load_busy_noticed = 1;
+			tui_view_notice(a->view,
+					"加载更早历史：turn 运行中——收口后"
+					"再按 PgUp");
+		}
+		return 0;
+	}
+	if (a->replay_budget <= 0)
+		return 0;			/* 显式禁用（静默） */
+	if (a->replay_ok && a->replay_earlier == 0) {
+		struct tui_chat_scrollinfo si;
+
+		(void)tui_view_scroll_info(a->view, &si);
+		app_t2_dbg("load budget=%d lines=%d earlier=0 result=earliest",
+			   a->replay_budget, si.total);
+		if (!a->earliest_noticed) {
+			a->earliest_noticed = 1;
+			tui_view_notice(a->view, "── 已到最早 ──");
+		}
+		return 0;
+	}
+	if (a->replay_mem_stop)
+		return 0;			/* 已提示过内存上限（节流） */
+	/* 当前逐帧几何（渲染行数/视口）——内存闸与取证流水共用 */
+	if (tui_view_scroll_info(a->view, &si) != 0)
+		memset(&si, 0, sizeof(si));
+	/* 内存闸：按当前「渲染行/预算」比折算新预算的渲染行；512 行余量
+	 * 吸收块头/footer 等未纳入 occ_replay_est_lines 的行。超线即停并
+	 * 诚实提示（更早 N 条仍可用 /sessions 看）。 */
+	budget = a->replay_ok ? a->replay_budget + 1000 : a->replay_budget;
+	if (a->replay_ok && a->replay_budget > 0 && si.total > 0) {
+		long long proj = (long long)si.total * budget /
+				 a->replay_budget;
+
+		if (proj > hard) {
+			a->replay_mem_stop = 1;
+			snprintf(nb, sizeof(nb),
+				 "── 已到内存上限（更早 %zu 条可用 "
+				 "/sessions 查看）──", a->replay_earlier);
+			tui_view_notice(a->view, nb);
+			app_t2_dbg("load budget=%d lines_before=%d "
+				   "earlier=%zu result=memcap",
+				   a->replay_budget, si.total,
+				   a->replay_earlier);
+			return 0;
+		}
+	}
+	have_anchor = tui_view_top_anchor(a->view, anchor, sizeof(anchor),
+					  &off) == 0;
+	app_t2_dbg("load budget=%d->%d lines_before=%d earlier_before=%zu "
+		   "anchor=%s off=%d",
+		   a->replay_budget, budget, si.total, a->replay_earlier,
+		   have_anchor ? anchor : "-", off);
+	if (app_replay_run(a, a->session_id, 1, budget, &earlier) != 0)
+		return 0;
+	a->replay_budget = budget;
+	a->replay_earlier = earlier;
+	a->replay_ok = 1;
+	a->earliest_noticed = 0;	/* 新内容已入 → 到底提示可再出 */
+	a->replay_mem_stop = 0;
+	app_t2_dbg("load budget=%d earlier_after=%zu result=ok",
+		   budget, earlier);
+	(void)tui_view_post(a->view, TUI_VIEW_HIST_ANCHOR,
+			    have_anchor ? anchor : "", 0, NULL, off);
+	return 1;
 }
 
 
@@ -822,6 +978,7 @@ static int tui_app_on_submit(void *ud, const char *text, size_t len)
 		pthread_join(a->worker, NULL);
 		a->worker_created = 0;
 	}
+	a->load_busy_noticed = 0;	/* T2：新 turn 可再提示一次 */
 	pthread_mutex_lock(&a->mu);
 	free(a->prompt);
 	a->prompt = strndup(text, len);
@@ -2156,6 +2313,13 @@ static int tui_app_on_command(void *ud, const char *line)
 		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
 		a->u_est = 0;
 		pthread_mutex_unlock(&a->mu);
+		/* T2：新会话重置增量加载状态（预算回缺省/无更早可加载） */
+		a->replay_budget = app_replay_lines_budget();
+		a->replay_earlier = 0;
+		a->replay_ok = 0;
+		a->replay_mem_stop = 0;
+		a->earliest_noticed = 0;
+		a->load_busy_noticed = 0;
 		/* T1：立即清屏（走事件队列——与回放切换同源；下一条消息才
 		 * 建会话的语义不变）。不发 notice：①直写 notice 会被队列里
 		 * 的 CLEAR 反序清掉；②空态面板已承担引导语。 */
@@ -2212,6 +2376,13 @@ static int tui_app_on_command(void *ud, const char *line)
 		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
 		a->u_est = 0;
 		pthread_mutex_unlock(&a->mu);
+		/* T2：删后回到无会话态——增量加载状态清零 */
+		a->replay_budget = app_replay_lines_budget();
+		a->replay_earlier = 0;
+		a->replay_ok = 0;
+		a->replay_mem_stop = 0;
+		a->earliest_noticed = 0;
+		a->load_busy_noticed = 0;
 		{
 			char nb[256];	/* tt≤120B + 固定后缀 ~78B */
 			char tt[128];
@@ -2967,6 +3138,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	app_load_catalog(&a);
 	app_resolve_ctx(&a);
 	app_update_model_prov(&a);		/* UXAB：顶栏厂商标签 */
+	a.replay_budget = app_replay_lines_budget();	/* T2：增量加载初值 */
 
 	memset(&h, 0, sizeof(h));
 	h.ud = &a;
@@ -2985,6 +3157,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	h.on_overlay_key = tui_app_on_overlay_key;
 	h.on_overlay_close = tui_app_on_overlay_close;
 	h.on_async_result = tui_app_on_async_result;	/* OCC-DEBT */
+	h.on_load_more = tui_app_on_load_more;		/* T2：到顶增量加载 */
 
 		/* T9e：view 生命周期循环——/shell 退屏跑 bash 后重建 view 续跑。
 		 * ctx_fallback 提示只在首屏发一次（每轮重发会刷屏）。 */

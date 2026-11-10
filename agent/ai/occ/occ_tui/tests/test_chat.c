@@ -442,6 +442,117 @@ int main(void)
 	}
 	tui_chat_destroy(c);
 
+	/* ---- 13. T2：长历史滚动锚点 ----
+	 * 3 条 user 消息（宽 24）→ 滚动取锚 → 清屏重放（前面多一条更早
+	 * 消息，模拟 occ 更大预算的增量加载）→ scroll_to_msg 还原到同一行
+	 * ——看屏首行内容逐字节相同（锚点不跳）。 */
+	c = tui_chat_create(NULL);
+	{
+		static const char t_alpha[] =
+			"alpha-01\nalpha-02\nalpha-03\nalpha-04\nalpha-05";
+		static const char t_bravo[] =
+			"bravo-01\nbravo-02\nbravo-03\nbravo-04\nbravo-05";
+		static const char t_charlie[] =
+			"charlie-01\ncharlie-02\ncharlie-03\ncharlie-04\n"
+			"charlie-05";
+
+		tui_chat_add_user(c, t_alpha, sizeof(t_alpha) - 1);
+		tui_chat_add_user(c, t_bravo, sizeof(t_bravo) - 1);
+		tui_chat_add_user(c, t_charlie, sizeof(t_charlie) - 1);
+	}
+	s = render_to(c, 8, 24, 1000);	/* 宽 24 / 视口 8 行（总 20 行） */
+	OK(s != NULL, "anchor-render");
+	OK(tui_chat_at_top(c) == 0, "anchor-not-at-top-init");
+	OK(tui_chat_at_top(NULL) == 0, "at-top-null");
+	tui_chat_scroll(c, 3);		/* 总 20 行/视口 8 → hi=12，top=9 */
+	OK(tui_chat_at_top(c) == 0, "anchor-not-at-top-scrolled");
+	tui_screen_destroy(s);
+	s = render_to(c, 8, 24, 1000);	/* 滚动后重画：首行=bravo-02 */
+	{
+		char id1[32], id2[32];
+		int off1 = -1, off2 = -1;
+		char before[512];
+
+		OK(screen_row(s, 0, 0, 24, row, sizeof(row)) > 0 &&
+		   strstr(row, "bravo-02") != NULL, "anchor-row-before");
+		snprintf(before, sizeof(before), "%s", row);
+		OK(tui_chat_top_anchor(c, id1, sizeof(id1), &off1) == 0,
+		   "top-anchor-ok");
+		OK(id1[0] != '\0', "top-anchor-id-nonempty");
+		OK(off1 == 3, "top-anchor-offset");
+		OK(tui_chat_scroll_to_msg(c, id1, off1) == 0,
+		   "scroll-to-msg-ok");
+		{
+			struct tui_chat_scrollinfo si;
+
+			OK(tui_chat_scroll_info(c, &si) == 0 &&
+			   si.top == 9, "scroll-to-msg-same-top");
+		}
+		OK(tui_chat_scroll_to_msg(c, "deadbeefdeadbeef", 0) == -1,
+		   "scroll-to-msg-not-found");
+		OK(tui_chat_scroll_to_msg(c, "", 0) == -1,
+		   "scroll-to-msg-empty-id");
+		OK(tui_chat_top_anchor(c, NULL, sizeof(id1), &off1) == -1,
+		   "top-anchor-null-out");
+		/* 模拟增量加载：清屏 → 前面补一条更早消息 + 原三条重放 */
+		{
+			static const char r_alpha[] =
+				"alpha-01\nalpha-02\nalpha-03\nalpha-04\n"
+				"alpha-05";
+			static const char r_bravo[] =
+				"bravo-01\nbravo-02\nbravo-03\nbravo-04\n"
+				"bravo-05";
+			static const char r_charlie[] =
+				"charlie-01\ncharlie-02\ncharlie-03\n"
+				"charlie-04\ncharlie-05";
+
+			tui_chat_clear(c);
+			tui_chat_add_user(c, "zulu-older", 10);
+			tui_chat_add_user(c, r_alpha, sizeof(r_alpha) - 1);
+			tui_chat_add_user(c, r_bravo, sizeof(r_bravo) - 1);
+			tui_chat_add_user(c, r_charlie, sizeof(r_charlie) - 1);
+			tui_screen_destroy(s);
+			s = render_to(c, 8, 24, 1000);
+			OK(s != NULL, "anchor-render2");
+			OK(tui_chat_at_top(c) == 0, "anchor-not-at-top-after");
+			OK(tui_chat_scroll_to_msg(c, id1, off1) == 0,
+			   "anchor-locate-after-replay");
+			tui_screen_destroy(s);
+			s = render_to(c, 8, 24, 1000);
+			OK(screen_row(s, 0, 0, 24, row, sizeof(row)) > 0 &&
+			   strcmp(row, before) == 0, "anchor-row-stable");
+			/* 新锚 = 同一消息同一偏移（可继续向上加载） */
+			OK(tui_chat_top_anchor(c, id2, sizeof(id2), &off2) == 0 &&
+			   strcmp(id1, id2) == 0 && off1 == off2,
+			   "anchor-roundtrip-after-replay");
+			/* 更早内容确实已加载（顶部之上有 zulu） */
+			{
+				char dump[1024];
+
+				tui_chat_dump_text(c, dump, sizeof(dump));
+				OK(strstr(dump, "zulu-older") != NULL,
+				   "anchor-earlier-content-loaded");
+			}
+		}
+	}
+	tui_chat_scroll(c, 0x7fffffff);
+	OK(tui_chat_at_top(c) == 1, "anchor-at-top");
+	tui_chat_jump_latest(c);
+	OK(tui_chat_at_top(c) == 0, "anchor-at-bottom");
+	tui_screen_destroy(s);
+	tui_chat_destroy(c);
+
+	/* ---- 14. O-14：notice-only 观察口（空态面板起始行） ---- */
+	c = tui_chat_create(NULL);
+	OK(tui_chat_notice_lines(c) == 0, "notice-lines-empty");
+	tui_chat_add_notice(c, "catalog notice");
+	OK(tui_chat_notice_lines(c) == 1, "notice-lines-one");
+	tui_chat_add_notice(c, "second notice");
+	OK(tui_chat_notice_lines(c) == 3, "notice-lines-block-gap");
+	tui_chat_add_user(c, "hi", 2);
+	OK(tui_chat_notice_lines(c) == 0, "notice-lines-with-dialog");
+	tui_chat_destroy(c);
+
 	printf("test_chat: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

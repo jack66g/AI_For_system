@@ -277,6 +277,20 @@ static int tv_drain(tui_view *v)
 		case TUI_VIEW_HIST_CLEAR:
 			tui_chat_clear(v->chat);
 			break;
+		/* T2：回放完成后的视口锚（occ.c 保证排在 CLEAR+回放全部
+		 * 事件之后——此处转写区已换成更大预算的新内容）。 */
+		case TUI_VIEW_HIST_ANCHOR:
+			if (tui_chat_scroll_to_msg(v->chat,
+						   e->text ? e->text : "",
+						   e->rc) != 0) {
+				/* 锚点丢失：退到新加载内容顶部（最旧行）并
+				 * 如实通告（不静默丢定位） */
+				tui_chat_scroll(v->chat, 0x7fffffff);
+				tui_chat_add_notice(v->chat,
+						    "锚点丢失，已跳到加载起点");
+			}
+			v->dirty_needed = 1;
+			break;
 		case TUI_VIEW_ASYNC_RESULT:
 			/* 异步 worker 结果回投主循环（occ.c 决策后续 UI） */
 			if (v->hooks.on_async_result)
@@ -291,6 +305,15 @@ static int tv_drain(tui_view *v)
 		tv_free_ev(e);
 	}
 	return n > 0;
+}
+
+int tui_view_flush(tui_view *v)
+{
+	if (!v)
+		return -1;
+	if (tv_drain(v))
+		v->dirty_needed = 1;
+	return 0;
 }
 
 unsigned long tui_view_dropped(const tui_view *v)
@@ -499,6 +522,13 @@ static void tv_exec_action(tui_view *v, const char *act, int is_exit,
 		return;
 	}
 	if (!strcmp(act, "session.page.up")) {
+		/* T2：已顶到最旧行 → 交 occ 增量加载（不滚动；钩子返回
+		 * 0=无更多/忙 时也不滚——已在顶部，滚动本身是空操作） */
+		if (tui_chat_at_top(v->chat) && v->hooks.on_load_more) {
+			(void)v->hooks.on_load_more(v->hooks.ud);
+			v->dirty_needed = 1;
+			return;
+		}
 		tui_chat_scroll(v->chat, v->tr_h > 0 ? v->tr_h : 10);
 		return;
 	}
@@ -507,8 +537,14 @@ static void tv_exec_action(tui_view *v, const char *act, int is_exit,
 		return;
 	}
 	/* T1：Home/End——视口顶/底（top 用大正值由 tui_sb_scroll 钳到最旧；
-	 * bottom=jump_latest 同时恢复 follow-latest） */
+	 * bottom=jump_latest 同时恢复 follow-latest）
+	 * T2：已在顶时 Home 与 PgUp 同义——触发增量加载，不重复滚动。 */
 	if (!strcmp(act, "session.scroll.top")) {
+		if (tui_chat_at_top(v->chat) && v->hooks.on_load_more) {
+			(void)v->hooks.on_load_more(v->hooks.ud);
+			v->dirty_needed = 1;
+			return;
+		}
 		tui_chat_scroll(v->chat, 0x7fffffff);
 		return;
 	}
@@ -1067,9 +1103,18 @@ static void tv_render(tui_view *v, uint64_t now)
 	if (tr_h > 0 && mw > 0)
 		tui_chat_render(v->chat, s, mx, tr_y, mw, tr_h, now);
 
-	/* T1：空态面板（无消息且非运行中）——新/清空会话的引导语 */
-	if (tr_h >= 5 && mw > 6 && !v->running && tui_chat_is_empty(v->chat))
-		tv_render_empty(s, mx, tr_y + 1, mw);
+	/* T1：空态面板（无对话消息且非运行中）——新/清空会话的引导语。
+	 * T2/O-14：notice-only 屏（如冷启动 catalog 提示）同样显示；
+	 * 面板起始行下移过已占的 notice 行数（不重叠），notice 行数把
+	 * 面板挤出转写区（nl+6 > tr_h）时不画。 */
+	{
+		int nl = tui_chat_notice_lines(v->chat);
+
+		if (tr_h > 0 && mw > 6 && !v->running &&
+		    (tui_chat_is_empty(v->chat) || nl > 0) &&
+		    nl + 6 <= tr_h)
+			tv_render_empty(s, mx, tr_y + 1 + nl, mw);
+	}
 
 	/* T1：侧栏末列（x=TUI_SB_WIDTH-1）分隔线 + 滚动条。
 	 * 主列仍从 TUI_SB_WIDTH 起、侧栏 22 列——总宽不变；侧栏文字已
@@ -1718,4 +1763,21 @@ void tui_view_set_assist_label(tui_view *v, const char *label)
 		return;
 	tui_chat_set_assist_label(v->chat, label);
 	v->dirty_needed = 1;
+}
+
+/* ---- T2：转写区观察口（occ.c 增量加载/内存闸） ---- */
+
+int tui_view_scroll_info(const tui_view *v, struct tui_chat_scrollinfo *out)
+{
+	if (!v)
+		return -1;
+	return tui_chat_scroll_info(v->chat, out);
+}
+
+int tui_view_top_anchor(const tui_view *v, char *msg_id, size_t cap,
+			int *line_off)
+{
+	if (!v)
+		return -1;
+	return tui_chat_top_anchor(v->chat, msg_id, cap, line_off);
 }

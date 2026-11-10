@@ -70,6 +70,13 @@ typedef struct {
 	/* RESET 截断标记（本轮起点）：boundary 后首个增量时打点 */
 	size_t text_mark, reason_mark;
 	int text_marked, reason_marked;
+	/* T2：本消息块在 scrollback 的起始绝对行（含块前空行——视口命中
+	 * 该空行也归属本块，锚点偏移恒 ≥0 且跨重放稳定；live 块不入
+	 * scrollback，恒 0）。chat_push_msg/chat_rebuild 同口径重算。 */
+	int first_line;
+	/* T2：内容稳定 id（role+文本+思维链+工具行+footer 的 FNV-1a）。
+	 * 回放重放后同一条历史消息得到同一 id——视口锚点据此还原。 */
+	char id[24];
 } tui_msg;
 
 /* B5：点击命中的折叠行（render 期间记录，click 消费） */
@@ -835,6 +842,53 @@ static void msg_append(char **buf, size_t *len, size_t *cap, const char *s,
 	(*buf)[*len] = '\0';
 }
 
+/* ---- T2：消息内容 id（FNV-1a；跨回放重放稳定） ---- */
+
+static void msg_hash_add(uint64_t *h, const void *p, size_t n)
+{
+	const unsigned char *b = p;
+
+	while (n--) {
+		*h ^= *b++;
+		*h *= 1099511628211ULL;
+	}
+}
+
+/* role+text+reason+tools(name/summary/st)+footer → 16 位十六进制。
+ * 刻意不含时间戳：回放每条消息的 ts=渲染时刻，含入即每次重放都变。
+ * 同内容消息 id 相同（滚动定位取首个匹配——同内容块视觉等价）。 */
+static void msg_compute_id(tui_msg *m)
+{
+	uint64_t h = 1469598103934665603ULL;
+	size_t i;
+	int sep = 0x1f;
+
+	msg_hash_add(&h, &m->role, sizeof(m->role));
+	msg_hash_add(&h, &sep, sizeof(sep));
+	msg_hash_add(&h, m->text ? m->text : "",
+		     m->text ? m->tlen : 0);
+	msg_hash_add(&h, &sep, sizeof(sep));
+	msg_hash_add(&h, m->reason ? m->reason : "",
+		     m->reason ? m->rlen : 0);
+	for (i = 0; i < m->nt; i++) {
+		const char *n = m->tools[i].name ? m->tools[i].name : "";
+		const char *s = m->tools[i].summary ? m->tools[i].summary : "";
+		int st = m->tools[i].st;
+
+		msg_hash_add(&h, &sep, sizeof(sep));
+		msg_hash_add(&h, n, strlen(n));
+		msg_hash_add(&h, &sep, sizeof(sep));
+		msg_hash_add(&h, s, strlen(s));
+		msg_hash_add(&h, &st, sizeof(st));
+	}
+	if (m->has_footer) {
+		msg_hash_add(&h, &sep, sizeof(sep));
+		msg_hash_add(&h, m->footer, strlen(m->footer));
+	}
+	snprintf(m->id, sizeof(m->id), "%016llx",
+		 (unsigned long long)h);
+}
+
 /* 流式中的 assistant 块：turn 中途可能有 NOTICE 插到它后面（如重试通告），
  * 按"最后一条"取会指错消息——所有 live 块操作统一用回扫定位。 */
 static tui_msg *chat_live(tui_chat *c)
@@ -909,13 +963,19 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 {
 	llist ll;
 	int i;
+	int had_sep;
 
 	if (c->width < 4)
 		return;
 	/* T1：块间空一行——非首个块前先推一条空行（定稿与回放同源：
-	 * 回放同样走 chat_push_msg，形态天然一致） */
-	if (c->sb.count > 0)
+	 * 回放同样走 chat_push_msg，形态天然一致）。
+	 * T2：块区域首行=该空行（含）——块与块区域首尾相接，视口任意
+	 * 一行都能唯一归属一个消息块（锚点偏移恒 ≥0）。 */
+	had_sep = c->sb.count > 0;
+	if (had_sep)
 		tui_sb_push(&c->sb, NULL, 0);
+	m->first_line = c->sb.dropped + c->sb.count - (had_sep ? 1 : 0);
+	msg_compute_id(m);
 	memset(&ll, 0, sizeof(ll));
 	if (m->role == TUI_ROLE_ASSISTANT) {
 		/* UXAB：块头 ◆ label · HH:MM（label=assist_label，occ.c 供模型名） */
@@ -1006,7 +1066,7 @@ tui_chat *tui_chat_create(const tui_theme *th)
 		c->th = *th;
 	else
 		tui_theme_default(&c->th);
-	tui_sb_init(&c->sb, 5000, 10);
+	tui_sb_init(&c->sb, TUI_CHAT_SB_CAP, 10);
 	c->width = 80;
 	return c;
 }
@@ -1276,7 +1336,7 @@ void tui_chat_clear(tui_chat *c)
 	c->nfolds = 0;
 	ll_reset(&c->live_lines);
 	tui_sb_destroy(&c->sb);
-	tui_sb_init(&c->sb, 5000, 10);
+	tui_sb_init(&c->sb, TUI_CHAT_SB_CAP, 10);
 }
 
 /* ---- live 块渲染 ---- */
@@ -1455,7 +1515,7 @@ static void chat_rebuild(tui_chat *c, int keep_view)
 	size_t i;
 
 	tui_sb_destroy(&c->sb);
-	tui_sb_init(&c->sb, 5000, rows > 0 ? rows : 10);
+	tui_sb_init(&c->sb, TUI_CHAT_SB_CAP, rows > 0 ? rows : 10);
 	c->nfolds = 0;			/* 折叠行绝对号随重建重算 */
 	for (i = 0; i < c->nmsgs; i++) {
 		if (c->msgs[i].live)
@@ -1589,4 +1649,105 @@ int tui_chat_scroll_info(const tui_chat *c, struct tui_chat_scrollinfo *out)
 	out->hi = c->sb.dropped + extra;	/* 贴底位（== tui_sb_scroll 上界） */
 	out->follow = c->sb.follow;
 	return 0;
+}
+
+/* ---- T2：长历史滚动锚点 ---- */
+
+/* 视口是否已顶到最旧行（含「全部内容一屏装下」的贴顶态）。空转写区
+ * 不算顶——避免空屏 PgUp 触发无谓的历史加载。 */
+int tui_chat_at_top(const tui_chat *c)
+{
+	if (!c || c->sb.count <= 0)
+		return 0;
+	return c->sb.view_top <= c->sb.dropped;
+}
+
+/* 当前 view_top 命中的消息 id + 相对 first_line 的偏移。
+ * 只在 user/assistant 块上取锚（notice/error 文本可变——如「⋯ 更早
+ * N 条」分隔行每次加载都会改写，不能当锚）。视口顶落在首条对话块
+ * 之前（典型：分隔行）→ 锚到该块、偏移为负（重现「块在屏幕同一行」）。
+ * 返回 0=有效；-1=无对话块/参数坏。 */
+int tui_chat_top_anchor(const tui_chat *c, char *msg_id, size_t cap,
+			int *line_off)
+{
+	size_t i, best = (size_t)-1;
+	int top;
+
+	if (!c || !msg_id || cap == 0)
+		return -1;
+	msg_id[0] = '\0';
+	top = c->sb.view_top;
+	for (i = 0; i < c->nmsgs; i++) {
+		const tui_msg *m = &c->msgs[i];
+
+		if (m->live)
+			break;
+		if (m->role != TUI_ROLE_USER &&
+		    m->role != TUI_ROLE_ASSISTANT)
+			continue;
+		if (m->first_line <= top)
+			best = i;
+		else
+			break;		/* first_line 升序 */
+	}
+	if (best == (size_t)-1) {
+		/* 视口顶在首条对话块之前：锚到其后首块（偏移 ≤0） */
+		for (i = 0; i < c->nmsgs; i++) {
+			const tui_msg *m = &c->msgs[i];
+
+			if (m->live)
+				break;
+			if (m->role != TUI_ROLE_USER &&
+			    m->role != TUI_ROLE_ASSISTANT)
+				continue;
+			snprintf(msg_id, cap, "%s", m->id);
+			if (line_off)
+				*line_off = top - m->first_line;
+			return 0;
+		}
+		return -1;
+	}
+	snprintf(msg_id, cap, "%s", c->msgs[best].id);
+	if (line_off)
+		*line_off = top - c->msgs[best].first_line;
+	return 0;
+}
+
+/* 找该 id 的消息块，view_top=first_line+line_off（钳位；follow 由
+ * 钳位后的位置决定——落到底即恢复贴底）。返回 0=已定位；-1=找不到
+ * （锚点丢失，调用方回退到新顶部）。 */
+int tui_chat_scroll_to_msg(tui_chat *c, const char *msg_id, int line_off)
+{
+	size_t i;
+
+	if (!c || !msg_id || !msg_id[0])
+		return -1;
+	for (i = 0; i < c->nmsgs; i++) {
+		tui_msg *m = &c->msgs[i];
+
+		if (m->live || strcmp(m->id, msg_id) != 0)
+			continue;
+		c->sb.follow = 0;
+		c->sb.view_top = m->first_line + line_off;
+		tui_sb_scroll(&c->sb, 0);	/* 钳位 */
+		return 0;
+	}
+	return -1;
+}
+
+/* O-14：notice-only 转写区（只有 notice/error、无 user/assistant、无
+ * live）返回 scrollback 已占行数——空态面板起始行=该值（不与 notice
+ * 重叠）。有对话内容/空转写区返回 0。 */
+int tui_chat_notice_lines(const tui_chat *c)
+{
+	size_t i;
+
+	if (!c)
+		return 0;
+	for (i = 0; i < c->nmsgs; i++) {
+		if (c->msgs[i].role == TUI_ROLE_USER ||
+		    c->msgs[i].role == TUI_ROLE_ASSISTANT)
+			return 0;
+	}
+	return c->sb.count;
 }

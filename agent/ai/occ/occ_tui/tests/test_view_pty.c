@@ -72,7 +72,13 @@ struct mock {
 	volatile int wiz_stop;
 	/* OCC-DEBT L：非对话显隐（模拟 occ.c 过滤态） */
 	int show_all;
+	/* T2：长历史增量加载（模拟 occ.c on_load_more 的 CLEAR→回放→
+	 * ANCHOR 时序；初始 22 条 + 「更早 8 条」分隔，加载后 30 条无分隔） */
+	int loadmore;
+	int load_calls;
 };
+
+#define LOAD_MSGS 30
 
 /* 快 turn：50ms 后跨线程 post 回复 + 收口 */
 static void *mock_fast_turn(void *arg)
@@ -394,6 +400,63 @@ static void mock_sessions(void *ud, tui_sb_data *out)
 	out->pct = 1;
 }
 
+/* T2：模拟 occ.c 回放投递——SEP? + m[from..to) 的 HIST_USER 消息。
+ * 消息文本 "LOAD-mNNN" 是锚点断言位的屏幕内容。 */
+static void mock_post_load_range(struct mock *m, int from, int to, int sep)
+{
+	int i;
+
+	if (sep)
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_SEP,
+				    "⋯ 更早 8 条消息未回放（尾部 20 行挂载）",
+				    0, NULL, 0);
+	for (i = from; i < to; i++) {
+		char txt[32];
+
+		snprintf(txt, sizeof(txt), "LOAD-m%03d", i);
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_USER, txt, 0,
+				    NULL, 0);
+	}
+}
+
+/* 进屏后 seed（O-14 notice-only / T2 长历史两场景） */
+static void mock_entered(void *ud)
+{
+	struct mock *m = ud;
+
+	if (getenv("MOCK_NOTICE")) {
+		(void)tui_view_post(m->view, TUI_VIEW_NOTICE,
+				    "catalog 未命中/不可读：context 分母兜底 "
+				    "200k（mock notice-only 场景）",
+				    0, NULL, 0);
+	}
+	if (m->loadmore) {
+		(void)tui_view_post(m->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
+				    NULL, 0);
+		mock_post_load_range(m, 8, LOAD_MSGS, 1);
+	}
+}
+
+/* T2：到顶钩子——照 occ.c 时序：取锚 → CLEAR → 全量回放 → ANCHOR。 */
+static int mock_load_more(void *ud)
+{
+	struct mock *m = ud;
+	char anchor[32] = "";
+	int off = 0;
+
+	if (!m->loadmore)
+		return 0;
+	if (m->load_calls > 0)		/* 第二次到顶：无更多（诚实 0） */
+		return 0;
+	m->load_calls++;
+	(void)tui_view_top_anchor(m->view, anchor, sizeof(anchor), &off);
+	(void)tui_view_post(m->view, TUI_VIEW_HIST_CLEAR, NULL, 0, NULL, 0);
+	mock_post_load_range(m, 0, LOAD_MSGS, 0);
+	(void)tui_view_post(m->view, TUI_VIEW_HIST_ANCHOR, anchor, 0,
+			    NULL, off);
+	return 1;
+}
+
 static void mock_shutdown(void *ud)
 {
 	struct mock *m = ud;
@@ -420,9 +483,12 @@ static int child_main(void)
 
 	memset(&m, 0, sizeof(m));
 	m.slow = getenv("MOCK_SLOW") != NULL;
+	m.loadmore = getenv("MOCK_LOADMORE") != NULL;
 	snprintf(m.model, sizeof(m.model), "mock-model");
 	memset(&h, 0, sizeof(h));
 	h.ud = &m;
+	h.on_entered = mock_entered;
+	h.on_load_more = mock_load_more;
 	h.on_submit = mock_submit;
 	h.on_interrupt = mock_interrupt;
 	h.on_command = mock_command;
@@ -1260,6 +1326,51 @@ int main(void)
 			      "\xe2\x80\xa6 0s") != NULL,
 		   "N3-timer-watermark");
 		unsetenv("MOCK_STALL");
+	}
+
+	/* ---- T2N. 长历史到顶增量加载：初始 22 条 + 「更早 8 条」→ Home
+	 * 到顶 → 再 Home 触发 on_load_more（CLEAR→30 条全量→ANCHOR）→
+	 * 视口首行=锚点块上一行（LOAD-m007，不是被顶到 LOAD-m000），
+	 * 无「锚点丢失」通告（锚点保住）。 ---- */
+	{
+		static const char home[] = "\x1b[H";
+		const char *needles[] = {
+			"⋯ 更早 8 条消息未回放",	/* 初始 SEP（到顶可见） */
+			"LOAD-m007"		/* 加载后新内容进视口顶 */
+		};
+
+		setenv("MOCK_LOADMORE", "1", 1);
+		rc = run_scenario(home, sizeof(home) - 1, needles, 2, 0,
+				  home, sizeof(home) - 1, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 0);
+		unsetenv("MOCK_LOADMORE");
+		OK(rc == 0, "T2N-loadmore-run");
+		OK(find_bytes(out, out_len, "LOAD-m007") != NULL,
+		   "T2N-earlier-content-visible");
+		OK(find_bytes(out, out_len, "LOAD-m000") == NULL,
+		   "T2N-anchor-not-at-new-top");
+		OK(find_bytes(out, out_len,
+			      "锚点丢失，已跳到加载起点") == NULL,
+		   "T2N-anchor-not-lost");
+	}
+
+	/* ---- T2O. O-14：notice-only 屏（冷启动 catalog 提示）仍显示空态
+	 * 面板——notice 占上方行、面板画在其下不重叠。 ---- */
+	{
+		const char *needles[] = {
+			"catalog 未命中/不可读",	/* 既有 notice */
+			"直接输入消息开始"	/* 空态面板提示语 */
+		};
+
+		setenv("MOCK_NOTICE", "1", 1);
+		rc = run_scenario("", 0, needles, 2, -1, NULL, 0, -1, NULL, 0,
+				  "/exit\r", 6, out, &out_len, 0);
+		unsetenv("MOCK_NOTICE");
+		OK(rc == 0, "T2O-notice-only-run");
+		OK(find_bytes(out, out_len, "catalog 未命中/不可读") != NULL,
+		   "T2O-notice-visible");
+		OK(find_bytes(out, out_len, "AIKernel \xc2\xb7 occ") != NULL,
+		   "T2O-empty-panel-visible");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

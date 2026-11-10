@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T16:28:03+08:00",
+  "created": "2026-11-10T21:12:00+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -44,7 +44,8 @@
     "LT-BUG-006（LT-1 实机 P2）：流中 Esc 中断无效——安全点语义无中途点+mbedTLS EINTR→WANT_READ 重读吞踢击。修=传输层可选取消钩子（四读循环块边界查检，缺省 NULL 零变化）+occ 侧旗标桥接（窗口内注册用后即清）+中断优先于错误（不重试不冒充网络错，落 status=interrupted 走既有管线，occ_tui 零动）。test_loop 103→112+http_headers 四组；occ 全套+tui 13+差分 62/62+run_all 60 主会话亲跑；慢流钻证 0.00s 掐断/exit 130/retry 续跑。",
     "LT-BUG-007（LT-4.3 P2）：/ask 死接口——apic 硬编码旧 ai 入口。修=exec /usr/local/bin/occ -p（argv 直传无 shell，超时/错误人话映射）；aik-upgrade 引用同步 occ 口径。apic 三套 130+24checks+run_all 60 主会话亲跑；假 occ 钻证零真 API。",
     "LT-BUG-008（soak 首获 P1）：aistreamd parquet index 重建泄漏——out_tbl 空标签致 irows/flens/dlens/arena/blob/bas 全漏（~380KB/次，45MB/h）。修=块内 tbl_cleanup 统一释放；ASan 修前 2.38MB/1206 allocs→修后零；RSS delta 2500→128KiB；aistreamd 12 套+run_all 60 主会话亲跑。",
-    "TUI-T1：/new 清屏+空态、ctrl+n、块间空行、侧栏去 id+状态标+溢出提示、分隔列+滚动条、Home/End、回放预算 1000、LT-BUG-005 显示列截断、busy 计时；顺带修代码块 CJK 碎裂与静默窗 spinner 冻帧。occ 全套+tui 13 套+差分 62/62+run_all 60 主会话亲跑。"
+    "TUI-T1：/new 清屏+空态、ctrl+n、块间空行、侧栏去 id+状态标+溢出提示、分隔列+滚动条、Home/End、回放预算 1000、LT-BUG-005 显示列截断、busy 计时；顺带修代码块 CJK 碎裂与静默窗 spinner 冻帧。occ 全套+tui 13 套+差分 62/62+run_all 60 主会话亲跑。",
+    "TUI-T2：DB 增量历史加载——转写区到顶（PgUp/Home）触发更大预算重放，HIST_CLEAR→回放→HIST_ANCHOR 严格尾投还原视口（内容哈希锚，跨重放稳定；锚丢诚实通告）；滚动环 5000 行内存闸（TUI_CHAT_SB_CAP，16MiB 预算实测口径）到顶诚实提示；事件环分段 flush（每 128 项，修 TV_QMAX 满队列丢事件）；O-14 冷启动空态下移避让 notice；新增 test_history_load pty 台架 10 断言。occ 全套 20+tui 14 套+p-smoke 10+差分 62/62+run_all 60 主会话亲跑；500/1200 条钻证 14/14（三次加载到最早/四次撞内存闸诚实拒载/锚点零丢失/RSS 双 29MB 零增长）。"
   ],
   "overlay_count": 168,
   "registry": {

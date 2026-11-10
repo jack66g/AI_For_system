@@ -32,6 +32,14 @@ extern "C" {
 
 typedef struct tui_chat tui_chat;
 
+/* T2：scrollback 环容量（tui_chat_create / chat_rebuild / clear 同口径；
+ * occ 侧「已到内存上限」门用 CAP-512 作渲染行停止线）。
+ * 内存闸口径（L1 实测）：sizeof(tui_cell)=40B、sizeof(tui_sline)=16B；
+ * tui_sb_push 按行实际长精确 malloc（无 2 次幂放大），80 列满行
+ * = 80*40+16 = 3216B → 5000 行 = 15.3MiB ≤ 16MiB 预算。更宽列（>80）
+ * 单行更贵，属已知边界。 */
+#define TUI_CHAT_SB_CAP 5000
+
 tui_chat *tui_chat_create(const tui_theme *th);
 void tui_chat_destroy(tui_chat *c);
 
@@ -88,6 +96,25 @@ struct tui_chat_scrollinfo {
 int tui_chat_scroll_info(const tui_chat *c, struct tui_chat_scrollinfo *out);
 /* 终端尺寸变化：按新宽度全量重建 scrollback 并跳回底部 */
 void tui_chat_rewidth(tui_chat *c, int width);
+
+/* ---- T2：长历史滚动锚点（增量加载更早历史时保持视口不跳） ----
+ * 每条定稿消息块在 scrollback 有 first_line（块区域首行，含块前空行）；
+ * 消息 id 由内容（role/文本/思维链/工具行/footer）哈希而来——回放重放
+ * 同一历史消息得到同一 id，故锚点可跨「清空 + 更大预算重放」还原。 */
+
+/* 视口是否已顶到最旧行（空转写区返回 0——不触发加载） */
+int tui_chat_at_top(const tui_chat *c);
+/* 取当前视口顶的锚：msg_id（写入 id，cap 至少 17）/ line_off=top-
+ * first_line（可负——视口顶在首条对话块之上）。只锚 user/assistant 块；
+ * 返回 0=有效，-1=无对话块/参数坏。 */
+int tui_chat_top_anchor(const tui_chat *c, char *msg_id, size_t cap,
+			int *line_off);
+/* 定位到该消息块 + 行偏移（view_top=first_line+line_off，钳位；
+ * follow 按钳位后位置恢复）。返回 0=定位成功；-1=锚点丢失。 */
+int tui_chat_scroll_to_msg(tui_chat *c, const char *msg_id, int line_off);
+/* O-14：notice-only（无 user/assistant/live）时返回 scrollback 已占行数
+ * ——空态面板画在其下、不重叠；有对话内容返回 0。 */
+int tui_chat_notice_lines(const tui_chat *c);
 
 /* ---- B5：推理折叠区点击展开/收起 ----
  * row=转写区域内相对行（0..h-1，tui_chat_render 的 y 偏移已扣除）。
