@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "apic/api.h"
+#include "apiocc.h"
 #include "apiredact.h"
 #include "desktop/dtcore.h"
 #include "desktop/dtjson.h"
@@ -62,9 +63,17 @@ int main(int argc, char **argv)
 	}
 	memset(&g_api, 0, sizeof(g_api));
 	home_toml_path(g_api.toml_file, sizeof(g_api.toml_file));
-	snprintf(g_api.ai_bin, sizeof(g_api.ai_bin), "%s",
-		 getenv("AIKERNEL_AI_BIN") ? getenv("AIKERNEL_AI_BIN")
-					   : API_AI_BIN_DEFAULT);
+	/* LT-BUG-007：出厂主入口 = /usr/local/bin/occ（aikernel-shell/ai 已
+	 * 随 T9e 出厂换代移除）。AIKERNEL_OCC_BIN 供测试/钻证覆盖；
+	 * AIKERNEL_AI_BIN 保留为兼容回退（旧脚本/Python 时代测试曾导出）。 */
+	{
+		const char *ob = getenv(API_OCC_BIN_ENV);
+		const char *ab = getenv("AIKERNEL_AI_BIN");
+
+		snprintf(g_api.ai_bin, sizeof(g_api.ai_bin), "%s",
+			 (ob && *ob) ? ob
+				     : (ab && *ab) ? ab : API_OCC_BIN_DEFAULT);
+	}
 	snprintf(g_api.tools_json, sizeof(g_api.tools_json), "%s",
 		 getenv("AIKERNEL_TOOLS_JSON")
 			 ? getenv("AIKERNEL_TOOLS_JSON")

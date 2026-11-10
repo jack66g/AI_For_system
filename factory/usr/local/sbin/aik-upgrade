@@ -26,6 +26,7 @@
 #   aik-upgrade status
 #   aik-upgrade install kernel <bzImage路径> <版本号，如 38>
 #   aik-upgrade install shell <二进制路径>
+#       （T9e 起安装目标 = occ；主入口 /usr/local/bin/occ，旧 ai 残留自动清理）
 #   aik-upgrade boot [--yes]          # one-shot 指向 try 项并重启
 #   aik-upgrade commit [--force]      # 健康检查通过后转正（要求 try 引导中）
 #   aik-upgrade auto-commit           # 开机提交器内部用（含等待/回退判定）
@@ -46,8 +47,11 @@ GRUBENV=/boot/grub/grubenv
 SLOT_STATE=/boot/aik-slot-state
 AUDIT_LOG=/var/log/aik-upgrade.log
 TRY_KERNEL=/boot/vmlinuz-aikernel-next
-SHELL_BIN=/usr/local/bin/ai
-SHELL_REAL=/usr/local/bin/aikernel-shell
+# T9e 口径（LT-BUG-007）：出厂主入口 = /usr/local/bin/occ；aikernel-shell
+# 与 /usr/local/bin/ai 已随出厂移除。保留 SHELL_* 变量名以兼容既有子命令/
+# 日志/审计字段，值统一指向 occ。
+SHELL_BIN=/usr/local/bin/occ
+SHELL_REAL=/usr/local/bin/occ
 SHELL_BAK_DIR=/root/w28-backup
 TRY_MENU_ID=aik-try
 TRYBOOT_MARK=ai.tryboot=1
@@ -285,27 +289,29 @@ cmd_install_shell() {
 
     local src_md5 cur_md5
     src_md5="$(md5sum "$src" | awk '{print $1}')"
-    cur_md5="$(md5sum "$SHELL_REAL" 2>/dev/null | awk '{print $1}')"
+    # occ 缺失（首装/旧镜像）时 cur_md5 为空：`|| true` 兜住 set -e + pipefail
+    cur_md5="$(md5sum "$SHELL_REAL" 2>/dev/null | awk '{print $1}' || true)"
     if [ "$src_md5" = "$cur_md5" ]; then
-        # 主入口已一致：仍收敛次入口(/usr/local/bin/ai)防止双入口漂移
-        local ai_md5
-        ai_md5="$(md5sum /usr/local/bin/ai 2>/dev/null | awk '{print $1}')"
-        if [ -e /usr/local/bin/ai ] && [ ! -L /usr/local/bin/ai ] && \
-           [ "$ai_md5" != "$src_md5" ]; then
-            local tmp0="/usr/local/bin/ai.tmp.$$"
-            install -m 755 "$src" "$tmp0"
-            mv -f "$tmp0" /usr/local/bin/ai
-            log "entry /usr/local/bin/ai drifted (md5=$ai_md5), synced to $src_md5"
-            audit "install-shell" "note=secondary-entry-synced md5=$src_md5"
+        # LT-BUG-007：/usr/local/bin/ai 是 aikernel-shell 时代次入口，已退役。
+        # 旧镜像若残留实体/软链则清理；缺失是正常态，不得报错。
+        if [ -e /usr/local/bin/ai ] || [ -L /usr/local/bin/ai ]; then
+            rm -f /usr/local/bin/ai
+            log "retired legacy entry /usr/local/bin/ai (occ is the entry)"
+            audit "install-shell" "note=legacy-entry-removed path=/usr/local/bin/ai"
         fi
         log "shell binary identical to current ($src_md5), nothing to do"
         return 0
     fi
 
     mkdir -p "$SHELL_BAK_DIR"
-    local bak="$SHELL_BAK_DIR/aikernel-shell.${cur_md5:0:8}.bak"
-    cp -p "$SHELL_REAL" "$bak"
-    log "backed up current shell -> $bak (md5=$cur_md5)"
+    local bak="$SHELL_BAK_DIR/occ.${cur_md5:0:8}.bak"
+    if [ -e "$SHELL_REAL" ]; then
+        cp -p "$SHELL_REAL" "$bak"
+        log "backed up current occ -> $bak (md5=$cur_md5)"
+    else
+        bak="(none)"
+        log "no current occ at $SHELL_REAL (first install, no backup)"
+    fi
 
     local tmp="$SHELL_REAL.tmp.$$"
     install -m 755 "$src" "$tmp"
@@ -314,22 +320,18 @@ cmd_install_shell() {
     [ "$dst_md5" = "$src_md5" ] || { rm -f "$tmp"; die "md5 mismatch after copy"; }
     mv -f "$tmp" "$SHELL_REAL"
 
-    # 双入口同步：/usr/local/bin/ai 与 aikernel-shell 同为 REPL 入口
-    # （Makefile install-ui-link 语义；B 波现役为两个独立实体文件）。
-    # 实体文件 -> 同步原子替换；软链 -> 已随 SHELL_REAL 生效，跳过。
-    if [ -L /usr/local/bin/ai ]; then
-        log "entry /usr/local/bin/ai is a symlink -> already updated"
-    elif [ -e /usr/local/bin/ai ]; then
-        local tmp2="/usr/local/bin/ai.tmp.$$"
-        install -m 755 "$src" "$tmp2"
-        mv -f "$tmp2" /usr/local/bin/ai
-        log "entry /usr/local/bin/ai synced (md5=$dst_md5)"
+    # LT-BUG-007：occ 是唯一主入口，不再维护双入口；旧 /usr/local/bin/ai
+    # 残留（实体或软链）一律清理，缺失不报错。
+    if [ -e /usr/local/bin/ai ] || [ -L /usr/local/bin/ai ]; then
+        rm -f /usr/local/bin/ai
+        log "retired legacy entry /usr/local/bin/ai (occ is the entry)"
+        audit "install-shell" "note=legacy-entry-removed path=/usr/local/bin/ai"
     fi
 
     slot_set last_shell_md5="$dst_md5" last_shell_ts="$(date +%s)"
     audit "install-shell" "md5=$dst_md5 prev=$cur_md5 backup=$bak"
-    log "installed shell: $SHELL_REAL (md5=$dst_md5)"
-    log "note: running REPL keeps old code; new REPL sessions pick up the new binary"
+    log "installed occ entry: $SHELL_REAL (md5=$dst_md5)"
+    log "note: running TUI keeps old code; new occ sessions pick up the new binary"
 }
 
 # ---------------------------------------------------------------------------

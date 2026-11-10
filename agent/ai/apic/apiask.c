@@ -5,7 +5,9 @@
  * read_pending/normalize_selection/session_lock)。
  *
  * 关键语义:
- *   - 问题经 AIKERNEL_PROMPT 传给 `ai -p -`(绝不进 argv/stdin);
+ *   - LT-BUG-007:问题作为单个 argv 直传 `occ -p <question>`(无 shell
+ *     拼接/无注入面;aikernel-shell 时代的 `ai -p -` + AIKERNEL_PROMPT
+ *     已随 T9e 出厂换代退役);
  *   - 子进程 stdin=/dev/null、stdout/stderr 全捕获、超时杀;
  *   - detail=stderr 尾 400 码点;answer=stdout.strip();
  *   - 事件只认 "AIKERNEL_EVENT <tag> " 前缀行;多行/坏 JSON=协议错误;
@@ -30,6 +32,7 @@
 #include <unistd.h>
 
 #include "apic/api.h"
+#include "apiocc.h"
 #include "desktop/dtcore.h"
 #include "desktop/dtjson.h"
 
@@ -60,6 +63,85 @@ static char *err_tail400(const char *s, size_t n)
 static int body_has(const char *s, size_t n, const char *needle)
 {
 	return s && n && memmem(s, n, needle, strlen(needle)) != NULL;
+}
+
+/* ---------------- occ 入口(LT-BUG-007) ---------------- */
+const char *api_occ_bin(void)
+{
+	const char *p = getenv(API_OCC_BIN_ENV);
+
+	if (p && *p)
+		return p;
+	if (g_api.ai_bin[0])
+		return g_api.ai_bin;
+	return API_OCC_BIN_DEFAULT;
+}
+
+/* 统一的 /ask 失败映射:构造错误体并置 status(结构与既有 _err 一致) */
+static int occ_fail(int status, const char *err, const char *msg,
+		    const char *detail, int *status_out,
+		    aik_json **fail_body)
+{
+	aik_json *b = api_err_body(err, msg);
+
+	if (detail)
+		dt_put_str(b, "detail", detail);
+	*status_out = status;
+	*fail_body = b;
+	return 1;
+}
+
+int api_run_occ(const char *question, long long timeout_s,
+		char **out, size_t *outlen, char **err, size_t *errlen,
+		int *rc_out, int *status_out, aik_json **fail_body)
+{
+	char *argv[4];
+	char m[API_CFG_PATH + 128];
+	char *detail;
+	int rc;
+
+	*out = NULL;
+	*err = NULL;
+	*outlen = 0;
+	*errlen = 0;
+	*rc_out = 0;
+	*status_out = 0;
+	*fail_body = NULL;
+	/* argv 直传:question 是单个 argv 元素,空白/元字符不参与解释,
+	 * 不经 /bin/sh -c(防注入红线);execve 绝对路径,无 PATH 搜索。 */
+	argv[0] = (char *)api_occ_bin();
+	argv[1] = (char *)"-p";
+	argv[2] = (char *)question;
+	argv[3] = NULL;
+	rc = api_run_ai(argv, NULL, timeout_s, out, outlen, err, errlen,
+			rc_out);
+	if (rc == 0 && *rc_out == 0)
+		return 0;
+	if (rc == 1) {
+		snprintf(m, sizeof(m), "occ 超时（上限 %llds）", timeout_s);
+		return occ_fail(504, "ai timeout", m, NULL, status_out,
+				fail_body);
+	}
+	if (rc == 2) {
+		snprintf(m, sizeof(m),
+			 "%.4000s 不存在（查法：ls -l %.4000s；出厂镜像应随"
+			 " occ 安装，缺失说明镜像/升级未落地 occ）",
+			 api_occ_bin(), api_occ_bin());
+		return occ_fail(502, "ai binary missing", m, NULL,
+				status_out, fail_body);
+	}
+	if (rc != 0) {
+		snprintf(m, sizeof(m), "occ 启动失败（fork/pipe 错误）");
+		return occ_fail(502, "ai failed", m, NULL, status_out,
+				fail_body);
+	}
+	/* rc==0 但退出码非 0:502 + stderr 尾 400 码点(UTF-8 安全截断) */
+	detail = err_tail400(*err, *errlen);
+	snprintf(m, sizeof(m), "occ rc=%d", *rc_out);
+	occ_fail(502, "ai failed", m, detail ? detail : "", status_out,
+		 fail_body);
+	free(detail);
+	return 1;
 }
 
 /* ---------------- session 锁表(OrderedDict LRU 近似) ---------------- */
@@ -1070,14 +1152,12 @@ int api_do_ask(struct api_http_req *req, struct api_http_resp *resp)
 	char session[160];
 	char tag[33];
 	pthread_mutex_t *lk = NULL;
-	char *argv_term[6];
-	char env_tag[80];
-	char *env_prompt = NULL;
-	const char *extra_env[3];
 	char *out = NULL, *errb = NULL;
 	size_t outlen = 0, errlen = 0;
 	int rc = 0;
 	int rc_out = 0;
+	int st = 0;
+	aik_json *fail_body = NULL;
 	int r;
 
 	if (api_auth_check(req, resp) != 0)
@@ -1146,56 +1226,13 @@ int api_do_ask(struct api_http_req *req, struct api_http_resp *resp)
 		aik_json_free(b);
 		goto out;
 	}
-	snprintf(env_tag, sizeof(env_tag), "AIKERNEL_EVENT_TAG=%s", tag);
-	env_prompt = malloc(aik_json_strlen(q) + 32);
-	if (!env_prompt)
-		goto release;
-	snprintf(env_prompt, 17 + aik_json_strlen(q) + 1, "AIKERNEL_PROMPT=%s",
-		 qs);
-	argv_term[0] = g_api.ai_bin;
-	argv_term[1] = (char *)"-p";
-	argv_term[2] = (char *)"-";
-	argv_term[3] = (char *)"-s";
-	argv_term[4] = session;
-	argv_term[5] = NULL;
-	extra_env[0] = env_tag;
-	extra_env[1] = env_prompt;
-	extra_env[2] = NULL;
-	rc = api_run_ai(argv_term, extra_env, g_api.ask_timeout, &out,
-			&outlen, &errb, &errlen, &rc_out);
-	if (rc == 1) {
-		char m[64];
-		aik_json *b;
-
-		snprintf(m, sizeof(m), "ai 超时（上限 %llds）",
-			 g_api.ask_timeout);
-		b = api_err_body("ai timeout", m);
-		api_resp_json(resp, 504, b);
-		aik_json_free(b);
-		goto release;
-	}
-	if (rc == 2) {
-		char m[API_CFG_PATH + 32];
-		aik_json *b;
-
-		snprintf(m, sizeof(m), "%s 不存在", g_api.ai_bin);
-		b = api_err_body("ai binary missing", m);
-		api_resp_json(resp, 502, b);
-		aik_json_free(b);
-		goto release;
-	}
-	if (rc_out != 0) {
-		char m[64];
-		aik_json *b = api_err_body("ai failed", "");
-		char *detail = err_tail400(errb, errlen);
-
-		aik_json_free(b);
-		snprintf(m, sizeof(m), "ai rc=%d", rc_out);
-		b = api_err_body("ai failed", m);
-		dt_put_str(b, "detail", detail ? detail : "");
-		api_resp_json(resp, 502, b);
-		aik_json_free(b);
-		free(detail);
+	/* LT-BUG-007:exec `occ -p <question>`(argv 直传,无 shell 拼接)。
+	 * 出厂镜像只有 /usr/local/bin/occ;`ai -p -`+AIKERNEL_PROMPT 已退役。 */
+	rc = api_run_occ(qs, g_api.ask_timeout, &out, &outlen, &errb,
+			 &errlen, &rc_out, &st, &fail_body);
+	if (rc != 0) {
+		api_resp_json(resp, st, fail_body);
+		aik_json_free(fail_body);
 		goto release;
 	}
 	{
@@ -1278,7 +1315,6 @@ out:
 	free(raw);
 	free(out);
 	free(errb);
-	free(env_prompt);
 	return 0;
 }
 

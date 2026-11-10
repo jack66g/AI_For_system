@@ -1,5 +1,5 @@
 {
-  "created": "2026-11-10T13:18:01+08:00",
+  "created": "2026-11-10T15:30:47+08:00",
   "kernel": "6.18.39 #62",
   "notes": [
     "no binaries, ISO, factory tar, evidence, model.toml or keys",
@@ -41,7 +41,8 @@
     "LT-BUG-001（LT-1 实机首 bug，P0）：occ 工具调用收集器把事件 idx 当槽位开槽——anthropic 流线上 content-block 序号（智谱 glm-4.6 恒 thinking@0+tool@1）≠ 工具序数，slot0 永空→每轮幻影空调用（空名报未知工具→模型重试雪崩，VM 实机复现 10 连错）。修=消费侧 loop.c idxmap append-on-START 映射（发射侧/差分/REF-PY 契约零动——62/62 无豁免）；test_loop 新增智谱形态全环回归钉（恰 1 真调用零幻影，独立会话）；mitm 双 tee 实弹复验：单真调用→read 执行→回传轮→终答 stop",
     "LT-BUG-002+003（LT-1 实机第二/三 bug）：①glob 绝对模式前导被静默当相对组件（/var/log/** 报「/root 下无匹配」）→ 以 / 为根+字面前缀锚定下钻（朴素走查无剪枝防全盘遍历）；②read_whole 按 ftell 尺寸读——procfs/sysfs 虚拟文件 size=0 读出空（/proc/1/comm 报「空文件」）→ sz==0 流式读至 EOF（read/edit/grep/bash 出读共用一处修全家）。test_tools 74→86（绝对命中/proc 读值/grep 命中六断言）；差分 62/62+run_all 60+p-smoke 全绿；VM 实弹双复验（glob 列全 /var/log 树+read 真读出 systemd）",
     "UXABO12:C3 O-12 /delete 命令接线（双发确认门+IB_CMDS 15+cmds 断言 33 ok）",
-    "LT-BUG-006（LT-1 实机 P2）：流中 Esc 中断无效——安全点语义无中途点+mbedTLS EINTR→WANT_READ 重读吞踢击。修=传输层可选取消钩子（四读循环块边界查检，缺省 NULL 零变化）+occ 侧旗标桥接（窗口内注册用后即清）+中断优先于错误（不重试不冒充网络错，落 status=interrupted 走既有管线，occ_tui 零动）。test_loop 103→112+http_headers 四组；occ 全套+tui 13+差分 62/62+run_all 60 主会话亲跑；慢流钻证 0.00s 掐断/exit 130/retry 续跑。"
+    "LT-BUG-006（LT-1 实机 P2）：流中 Esc 中断无效——安全点语义无中途点+mbedTLS EINTR→WANT_READ 重读吞踢击。修=传输层可选取消钩子（四读循环块边界查检，缺省 NULL 零变化）+occ 侧旗标桥接（窗口内注册用后即清）+中断优先于错误（不重试不冒充网络错，落 status=interrupted 走既有管线，occ_tui 零动）。test_loop 103→112+http_headers 四组；occ 全套+tui 13+差分 62/62+run_all 60 主会话亲跑；慢流钻证 0.00s 掐断/exit 130/retry 续跑。",
+    "LT-BUG-007（LT-4.3 P2）：/ask 死接口——apic 硬编码旧 ai 入口。修=exec /usr/local/bin/occ -p（argv 直传无 shell，超时/错误人话映射）；aik-upgrade 引用同步 occ 口径。apic 三套 130+24checks+run_all 60 主会话亲跑；假 occ 钻证零真 API。"
   ],
   "overlay_count": 168,
   "registry": {
@@ -63,11 +64,11 @@
     "version": "0.1.0-alpha.14.0"
   },
   "repo": {
-    "bytes": 65425285,
-    "regular_files": 1446,
-    "source_files": 1446,
+    "bytes": 65434955,
+    "regular_files": 1448,
+    "source_files": 1448,
     "symlinks": 4,
-    "tracked_files": 1450
+    "tracked_files": 1452
   },
   "schema": "aik-source-manifest/1",
   "source_tree": "/home/jack66g/linux-6.18.39",
