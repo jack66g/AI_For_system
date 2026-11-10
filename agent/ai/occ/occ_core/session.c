@@ -934,6 +934,145 @@ int occ_session_set_window_digest(occ_db *db, const char *id,
 	return run_s1(db, sql, digest_id, err, errlen);
 }
 
+/* ---- O-12：会话删除 ---- */
+
+/*
+ * 会话侧目录解析（口径同 occ_ac.c occ_sessions_dir：OCC_SESSIONS_DIR >
+ * $HOME/.occ/sessions。session.o 不链 occ_ac.o——test_session 等链接面
+ * 无该对象，就地重解析；删除路径无需建目录，失败返回 NULL）。每次现取
+ * env（无静态缓存——单测可注入 OCC_SESSIONS_DIR）。
+ */
+static const char *o12_sessions_dir(char *buf, size_t buflen)
+{
+	const char *env = getenv("OCC_SESSIONS_DIR");
+	const char *home;
+
+	if (env && *env) {
+		if (snprintf(buf, buflen, "%s", env) >= (int)buflen)
+			return NULL;
+		return buf;
+	}
+	home = getenv("HOME");
+	if (!home || !*home)
+		return NULL;
+	if (snprintf(buf, buflen, "%s/.occ/sessions", home) >= (int)buflen)
+		return NULL;
+	return buf;
+}
+
+/* 事务外 best-effort 清理 transcript（<dir>/<sid>.jsonl）与配额计数
+ * （<dir>/<sid>.smeq）：不存在=无事；其余 IO 失败不阻塞删除结果
+ * （DB 行删已 durable，残留文件不复活会话）。 */
+static void o12_unlink_transcripts(const char *session_id)
+{
+	char dirbuf[512];
+	char path[600];
+	const char *dir = o12_sessions_dir(dirbuf, sizeof(dirbuf));
+
+	if (!dir)
+		return;
+	if (snprintf(path, sizeof(path), "%s/%s.jsonl", dir, session_id) <
+	    (int)sizeof(path))
+		unlink(path);
+	if (snprintf(path, sizeof(path), "%s/%s.smeq", dir, session_id) <
+	    (int)sizeof(path))
+		unlink(path);
+}
+
+/* 事务内单条绑定 DELETE（occ_db 连接 open 时 foreign_keys=ON——删
+ * occ_message 行时 occ_toolcall 随 ON DELETE CASCADE 连删；显式删
+ * 子表行使删除不依赖连接侧 PRAGMA 状态） */
+static int o12_delete_stmt(occ_db *db, const char *sql, const char *sid,
+			   const char *what, char *err, size_t errlen)
+{
+	sqlite3_stmt *st = NULL;
+
+	if (sqlite3_prepare_v2(db->h, sql, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "delete %s: %s", what,
+			sqlite3_errmsg(db->h));
+		return -1;
+	}
+	sqlite3_bind_text(st, 1, sid, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(st) != SQLITE_DONE) {
+		set_err(err, errlen, "step %s: %s", what,
+			sqlite3_errmsg(db->h));
+		sqlite3_finalize(st);
+		return -1;
+	}
+	sqlite3_finalize(st);
+	return 0;
+}
+
+/* 事务内 COUNT 复核（存在性预检/删后验证共用）；错 -1 */
+static long long o12_count_session(occ_db *db, const char *sid)
+{
+	sqlite3_stmt *st = NULL;
+	long long n = -1;
+
+	if (sqlite3_prepare_v2(db->h, "SELECT COUNT(*) FROM occ_session"
+			       " WHERE id=?1", -1, &st, NULL) != SQLITE_OK)
+		return -1;
+	sqlite3_bind_text(st, 1, sid, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(st) == SQLITE_ROW)
+		n = sqlite3_column_int64(st, 0);
+	sqlite3_finalize(st);
+	return n;
+}
+
+int occ_session_delete(occ_db *db, const char *session_id, char *err,
+		       size_t errlen)
+{
+	long long n;
+
+	if (!db || !session_id || !session_id[0]) {
+		set_err(err, errlen, "occ_session_delete: bad args");
+		return -1;
+	}
+	/* B2 教训：写路径全链 IMMEDIATE 事务（先取写锁，等待走
+	 * busy_timeout），不裸跑 DELETE */
+	if (tx_begin(db, err, errlen))
+		return -1;
+	/* 存在性预检：不存在 → 回滚空事务 + 人话错误 */
+	n = o12_count_session(db, session_id);
+	if (n == 0) {
+		tx_rollback(db);
+		set_err(err, errlen, "会话 %s 不存在", session_id);
+		return -1;
+	}
+	if (n < 0) {
+		tx_rollback(db);
+		set_err(err, errlen, "occ_session_delete: precheck: %s",
+			sqlite3_errmsg(db->h));
+		return -1;
+	}
+	/* 级联四连删（同一事务）：occ_message 先删（occ_toolcall 随
+	 * 外键 CASCADE），再 occ_window/occ_revert，终删主表行 */
+	if (o12_delete_stmt(db, "DELETE FROM occ_message WHERE session_id=?1",
+			    session_id, "msgs", err, errlen) ||
+	    o12_delete_stmt(db, "DELETE FROM occ_window WHERE session_id=?1",
+			    session_id, "window", err, errlen) ||
+	    o12_delete_stmt(db, "DELETE FROM occ_revert WHERE session_id=?1",
+			    session_id, "revert", err, errlen) ||
+	    o12_delete_stmt(db, "DELETE FROM occ_session WHERE id=?1",
+			    session_id, "session", err, errlen)) {
+		tx_rollback(db);
+		return -1;
+	}
+	/* 删后验证：主表 COUNT 必须为 0（>0=异常残留；<0=复核语句失败） */
+	n = o12_count_session(db, session_id);
+	if (n != 0) {
+		tx_rollback(db);
+		set_err(err, errlen, "occ_session_delete: verify count=%lld"
+			" (%s)", n, sqlite3_errmsg(db->h));
+		return -1;
+	}
+	if (tx_commit(db, err, errlen))
+		return -1;
+	/* 事务外清理 transcript 文件（best-effort，失败不回滚 DB） */
+	o12_unlink_transcripts(session_id);
+	return 0;
+}
+
 /* ---- 消息（每条单事务；崩溃安全核心） ---- */
 
 static int msg_insert(occ_db *db, const char *msg_id, const char *session_id,

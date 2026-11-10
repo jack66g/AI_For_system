@@ -14,6 +14,11 @@
  * occ 单语句写（set_status）必须经 IMMEDIATE+busy_timeout 等待后
  * 成功（修前 deferred 隐式写升级瞬时 SQLITE_BUSY，不进 busy
  * handler）。多进程面由 tests/bllm_conc_drill.sh 压测钉。
+ *
+ * O-12：occ_session_delete——delete-new（删后 get=0）、delete-cascade
+ * （消息/toolcall/window/revert 行 SQL COUNT 全归零）、delete-nonexist
+ * （-1+「不存在」）、delete-current-active（list 不再列出）、transcript
+ * 文件删除（OCC_SESSIONS_DIR 注入 tmpdir 子目录实测）。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <pthread.h>
@@ -191,6 +196,52 @@ static int count_msgs(const char *sid)
 	if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
 		return -1;
 	if (sqlite3_prepare_v2(h, "SELECT COUNT(*) FROM occ_message WHERE"
+				 " session_id=?1", -1, &st, NULL) == SQLITE_OK) {
+		sqlite3_bind_text(st, 1, sid, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step(st) == SQLITE_ROW)
+			n = sqlite3_column_int(st, 0);
+		sqlite3_finalize(st);
+	}
+	sqlite3_close(h);
+	return n;
+}
+
+/* O-12：独立连接计数（occ_toolcall 无 session_id 列——JOIN occ_message；
+ * occ_window 直查。计数从 SQL COUNT 解析器出，不经 occ API 视图） */
+static int count_toolcalls(const char *sid)
+{
+	sqlite3 *h;
+	char path[256];
+	sqlite3_stmt *st;
+	int n = -1;
+
+	snprintf(path, sizeof(path), "%s/sessions.db", tmpdir);
+	if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+		return -1;
+	if (sqlite3_prepare_v2(h, "SELECT COUNT(*) FROM occ_toolcall t"
+				 " JOIN occ_message m ON m.id=t.message_id"
+				 " WHERE m.session_id=?1", -1, &st,
+			       NULL) == SQLITE_OK) {
+		sqlite3_bind_text(st, 1, sid, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step(st) == SQLITE_ROW)
+			n = sqlite3_column_int(st, 0);
+		sqlite3_finalize(st);
+	}
+	sqlite3_close(h);
+	return n;
+}
+
+static int count_windows(const char *sid)
+{
+	sqlite3 *h;
+	char path[256];
+	sqlite3_stmt *st;
+	int n = -1;
+
+	snprintf(path, sizeof(path), "%s/sessions.db", tmpdir);
+	if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+		return -1;
+	if (sqlite3_prepare_v2(h, "SELECT COUNT(*) FROM occ_window WHERE"
 				 " session_id=?1", -1, &st, NULL) == SQLITE_OK) {
 		sqlite3_bind_text(st, 1, sid, -1, SQLITE_TRANSIENT);
 		if (sqlite3_step(st) == SQLITE_ROW)
@@ -475,6 +526,105 @@ int main(void)
 			sqlite3_close(h);
 		}
 		OK(count_msgs(s5.id) == 0, "fk-cascade-delete");
+	}
+
+	/* ---- O-12：occ_session_delete（/delete 与 /sessions d 键库层） ---- */
+	{
+		occ_session_row sd;
+		occ_revert_row rrow;
+		occ_tool_call tc;
+		occ_session_row *srows = NULL;
+		size_t ns = 0, i2;
+		char amid[OCC_ID_LEN], tcid[OCC_ID_LEN];
+		char sdir[160], jp[224], qp[224];
+		FILE *f;
+		int listed;
+
+		/* 会话侧目录可控（OCC_SESSIONS_DIR → tmpdir 子目录）：
+		 * transcript 文件删除可测；结束还原 env */
+		snprintf(sdir, sizeof(sdir), "%s/sdir", tmpdir);
+		mkdir(sdir, 0755);
+		setenv("OCC_SESSIONS_DIR", sdir, 1);
+
+		/* delete-new：创建→加消息→delete→get 返回 0（不存在） */
+		OK(occ_session_create(g_db, "m", &sd, err, sizeof(err)) == 0,
+		   "del-create");
+		OK(occ_msg_add_user(g_db, sd.id, "待删", NULL, 0, err,
+				    sizeof(err)) == 0, "del-add-user");
+		/* 预置运行痕迹：<sid>.jsonl transcript + <sid>.smeq 配额 */
+		snprintf(jp, sizeof(jp), "%s/%s.jsonl", sdir, sd.id);
+		snprintf(qp, sizeof(qp), "%s/%s.smeq", sdir, sd.id);
+		f = fopen(jp, "w");
+		if (f)
+			fclose(f);
+		f = fopen(qp, "w");
+		if (f)
+			fclose(f);
+		OK(access(jp, F_OK) == 0 && access(qp, F_OK) == 0,
+		   "del-transcript-prepared");
+		OK(occ_session_delete(g_db, sd.id, err, sizeof(err)) == 0,
+		   "delete-new");
+		OK(occ_session_get(g_db, sd.id, &s2, err, sizeof(err)) == 0,
+		   "delete-get-miss");
+		OK(count_msgs(sd.id) == 0, "delete-msgs-gone");
+		OK(access(jp, F_OK) != 0, "delete-transcript-jsonl-gone");
+		OK(access(qp, F_OK) != 0, "delete-transcript-smeq-gone");
+
+		/* delete-cascade：消息+toolcall+window+revert 行全删 */
+		memset(&tc, 0, sizeof(tc));
+		tc.id = "call_del1";
+		tc.name = "bash";
+		tc.arguments = "{\"cmd\":\"true\"}";
+		OK(occ_session_create(g_db, "m", &sd, err, sizeof(err)) == 0,
+		   "del-cascade-create");
+		occ_msg_add_user(g_db, sd.id, "x", NULL, 0, err, sizeof(err));
+		OK(occ_msg_add_assistant(g_db, sd.id, "调工具", NULL, &tc, 1,
+					 &u, 0, "tool_calls", amid,
+					 sizeof(amid), err, sizeof(err)) == 0,
+		   "del-cascade-add-asst");
+		OK(occ_tool_record(g_db, sd.id, amid, "bash",
+				   "{\"cmd\":\"true\"}", "ok", 0, 3,
+				   "call_del1", NULL, 0, tcid, sizeof(tcid),
+				   err, sizeof(err)) == 0,
+		   "del-cascade-tool-record");
+		OK(occ_revert_put(g_db, sd.id, amid, amid, "[]", "[]", err,
+				  sizeof(err)) == 0, "del-cascade-revert-put");
+		/* 计数从 SQL COUNT 出：user+assistant+tool=3 消息、
+		 * 1 toolcall、1 window 行 */
+		OK(count_msgs(sd.id) == 3 && count_toolcalls(sd.id) == 1 &&
+		   count_windows(sd.id) == 1, "del-cascade-setup-counts");
+		OK(occ_revert_get(g_db, sd.id, &rrow, err, sizeof(err)) == 1,
+		   "del-cascade-revert-present");
+		occ_revert_row_free(&rrow);
+		OK(occ_session_delete(g_db, sd.id, err, sizeof(err)) == 0,
+		   "delete-cascade");
+		OK(count_msgs(sd.id) == 0, "del-cascade-msgs-0");
+		OK(count_toolcalls(sd.id) == 0, "del-cascade-toolcalls-0");
+		OK(count_windows(sd.id) == 0, "del-cascade-window-0");
+		OK(occ_revert_get(g_db, sd.id, &rrow, err, sizeof(err)) == 0,
+		   "del-cascade-revert-0");
+
+		/* delete-nonexist：-1 + err 含「不存在」 */
+		err[0] = '\0';
+		OK(occ_session_delete(g_db, "ses_nope", err, sizeof(err)) == -1,
+		   "delete-nonexist-fails");
+		OK(strstr(err, "不存在") != NULL, "delete-nonexist-msg");
+
+		/* delete-current-active：list 不再列出（其余会话不受扰） */
+		OK(occ_session_create(g_db, "m", &sd, err, sizeof(err)) == 0,
+		   "del-list-create");
+		OK(occ_session_delete(g_db, sd.id, err, sizeof(err)) == 0,
+		   "del-list-delete");
+		OK(occ_session_list(g_db, &srows, &ns, err, sizeof(err)) == 0 &&
+		   ns >= 1, "del-list-listable");
+		listed = 0;
+		for (i2 = 0; i2 < ns; i2++)
+			if (!strcmp(srows[i2].id, sd.id))
+				listed = 1;
+		free(srows);
+		OK(ns >= 1 && !listed, "delete-not-in-list");
+
+		unsetenv("OCC_SESSIONS_DIR");
 	}
 
 	/* ---- B2：写锁竞态钉（RESERVED 持有者 + occ 单语句写） ---- */

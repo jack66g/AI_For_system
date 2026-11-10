@@ -163,6 +163,25 @@ int occ_session_set_window_digest(occ_db *db, const char *id,
 				  const char *digest_id, char *err,
 				  size_t errlen);
 
+/*
+ * O-12：删除会话（级联消息+工具调用+窗口+回滚+transcript 文件）。
+ * BEGIN IMMEDIATE 单事务：存在性预检（不存在 → 人话错误
+ * 「会话 … 不存在」）→ DELETE occ_message（occ_toolcall 随外键
+ * CASCADE）→ DELETE occ_window → DELETE occ_revert → DELETE
+ * occ_session → 提交前 COUNT 复核为 0。提交后事务外 best-effort
+ * 清理会话侧文件 <OCC_SESSIONS_DIR>/<sid>.jsonl（transcript）与
+ * <sid>.smeq（配额计数；目录解析口径同 occ_ac.c occ_sessions_dir：
+ * OCC_SESSIONS_DIR > $HOME/.occ/sessions——session.o 独立解析，
+ * 不链 occ_ac）。文件清理失败不回滚 DB（删除已 durable；残留文件
+ * 不复活会话）。
+ * 返回 0=成功；-1=不存在或 DB 错。
+ *
+ * 调用方（O-12 UX 棒接线，库层不做）：occ.c 的 /delete 命令与
+ * occ_tui /sessions 面板 d 键。
+ */
+int occ_session_delete(occ_db *db, const char *session_id,
+		       char *err, size_t errlen);
+
 /* ---- 消息（每条单事务） ---- */
 
 /*
