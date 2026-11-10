@@ -54,6 +54,7 @@ struct tui_view {
 	tui_inputbox *ib;
 	tui_sb_data sb_data;
 	int running;			/* turn 进行中（submit 接受→TURN_END） */
+	uint64_t run_start_ms;		/* T1：turn 起点（水印计时；0=未计时） */
 	int interrupted;		/* 本 turn 收到过 Esc 中断请求 */
 	int quit;
 	int closing;			/* 置位后 post 拒收（shutdown 死锁防护） */
@@ -100,67 +101,14 @@ static void tv_deadline(struct timespec *ts, long ms)
 	}
 }
 
-/* ---- UXAB A+B：字符串宽度/截断（顶栏标题 CJK 安全） ---- */
-
-/* UTF-8 串显示列数（grapheme 宽度求和；非法字节按 1 列） */
+/* ---- UXAB A+B：字符串宽度（顶栏标题 CJK 安全） ----
+ * T1/LT-BUG-005：宽度/截断已提升为 tui_utf8 公共原语（occ.c 通知同源），
+ * 这里只留 int 便捷包装（布局算式用 int 计量）。 */
 static int tv_str_cols(const char *s)
 {
-	int w = 0;
-	size_t i = 0, len = s ? strlen(s) : 0;
+	size_t w = tui_utf8_cols(s);
 
-	while (i < len) {
-		uint32_t cp;
-		size_t adv = 0;
-		int gw;
-
-		if (tui_utf8_decode((const uint8_t *)s + i, len - i, &cp,
-				    &adv) != TUI_U8_OK || adv == 0)
-			adv = 1;
-		gw = tui_wcwidth(cp);
-		w += gw > 0 ? gw : 1;
-		i += adv;
-	}
-	return w;
-}
-
-/* 截到 maxw 显示列（超宽末尾 …；码点边界安全）；返回写入字节数（不含 NUL） */
-static size_t tv_clip_cols(const char *s, int maxw, char *out, size_t cap)
-{
-	size_t i = 0, o = 0;
-	int w = 0;
-	size_t len = s ? strlen(s) : 0;
-
-	if (cap == 0)
-		return 0;
-	out[0] = '\0';
-	while (s && s[i]) {
-		uint32_t cp;
-		size_t adv = 0;
-		int gw;
-
-		if (tui_utf8_decode((const uint8_t *)s + i, len - i, &cp,
-				    &adv) != TUI_U8_OK || adv == 0)
-			adv = 1;
-		gw = tui_wcwidth(cp);
-		if (gw < 0)
-			gw = 0;
-		if (w + gw > maxw - 1) {
-			if (o + 4 <= cap) {
-				memcpy(out + o, "…", 3);
-				o += 3;
-				out[o] = '\0';
-			}
-			return o;
-		}
-		if (o + adv + 1 > cap)
-			break;
-		memcpy(out + o, s + i, adv);
-		o += adv;
-		w += gw;
-		i += adv;
-	}
-	out[o] = '\0';
-	return o;
+	return w > 0x7fffffff ? 0x7fffffff : (int)w;
 }
 
 /* ---- 事件队列 ---- */
@@ -297,6 +245,7 @@ static int tv_drain(tui_view *v)
 			int cols = 80;
 
 			v->running = 0;
+			v->run_start_ms = 0;	/* T1：停表 */
 			snprintf(fb, sizeof(fb), "%s", e->text ? e->text : "");
 			if (v->ren) {
 				tui_screen *s = tui_renderer_front(v->ren);
@@ -391,8 +340,9 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 "UI: ❯/◆=消息块头（❯ 你 / ◆ 模型 · 时间 dim）· ├─=工具树"
 		 "（✓ 绿 ✗ 红）· ▓░=上下文水位（70 黄 90 红）· footer"
 		 " ↑输入 ↓输出 ⟳缓存读（色可经 ~/.occ/theme.ini 覆盖）\n"
-		 "keys: Enter=send · Tab=complete · Esc=interrupt ·"
-		 " PgUp/PgDn=scroll · exit=%s · leader=%s (2s timeout;"
+		 "keys: Enter=send · ctrl+n=/new · Tab=complete ·"
+		 " Esc=interrupt · PgUp/PgDn=scroll · Home/End=顶/底 ·"
+		 " exit=%s · leader=%s (2s timeout;"
 		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
 		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
 		 "mouse: %s",
@@ -496,6 +446,7 @@ static void tv_submit(tui_view *v)
 	tui_chat_jump_latest(v->chat);
 	tui_inputbox_clear(v->ib);
 	v->running = 1;
+	v->run_start_ms = tv_now_ms();	/* T1：水印计时起点 */
 	v->interrupted = 0;		/* 新 turn：解除 RESET 过滤 */
 	v->dirty_needed = 1;
 }
@@ -553,6 +504,16 @@ static void tv_exec_action(tui_view *v, const char *act, int is_exit,
 	}
 	if (!strcmp(act, "session.page.down")) {
 		tui_chat_scroll(v->chat, -(v->tr_h > 0 ? v->tr_h : 10));
+		return;
+	}
+	/* T1：Home/End——视口顶/底（top 用大正值由 tui_sb_scroll 钳到最旧；
+	 * bottom=jump_latest 同时恢复 follow-latest） */
+	if (!strcmp(act, "session.scroll.top")) {
+		tui_chat_scroll(v->chat, 0x7fffffff);
+		return;
+	}
+	if (!strcmp(act, "session.scroll.bottom")) {
+		tui_chat_jump_latest(v->chat);
 		return;
 	}
 	if (!strcmp(act, "session.new")) {
@@ -941,6 +902,51 @@ static void footer_degrade(char *fb, size_t cap, int cols)
 			 parts[1], parts[3]);
 }
 
+/* T1：空态面板（无消息且非运行中）——纯屏幕绘制，绝不进输入缓冲/消息
+ * 模型（LT-BUG-004 教训）。位置 (x0, y0)=转写区首行+1、主列左缘+2；
+ * 每行按剩余列宽做显示列安全裁剪（CJK 双宽不溢出）。 */
+static void tv_render_empty(tui_screen *s, int mx, int y0, int mw)
+{
+	static const char *const bodies[] = {
+		"  新对话",
+		"",
+		"  直接输入消息开始",
+		"  /help 指令 · /sessions 历史会话 · /models 模型",
+	};
+	int x0 = mx + 2;
+	int maxcols = mw - 2;
+	int i;
+
+	if (!s || maxcols < 4)
+		return;
+	if (y0 + 5 > s->rows)
+		return;
+	/* 标题行：▎ accent + 文字 FG 加粗 */
+	(void)tui_screen_put(s, y0, x0, "▎", strlen("▎"),
+			     tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0));
+	{
+		char clip[128];
+
+		tui_utf8_clip_cols(" AIKernel · occ",
+				   maxcols > 1 ? (size_t)(maxcols - 1) : 0,
+				   clip, sizeof(clip));
+		(void)tui_screen_put(s, y0, x0 + 1, clip, strlen(clip),
+				     tui_thm_attr(TUI_THM_FG, TUI_THM_BG,
+						  TUI_ST_BOLD));
+	}
+	for (i = 0; i < (int)(sizeof(bodies) / sizeof(bodies[0])); i++) {
+		char clip[256];
+		tui_attr a = i == 0 ? tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0) :
+				      tui_thm_muted();
+
+		if (!bodies[i][0])
+			continue;		/* 空行：留白 */
+		tui_utf8_clip_cols(bodies[i], (size_t)maxcols, clip,
+				   sizeof(clip));
+		(void)tui_screen_put(s, y0 + 1 + i, x0, clip, strlen(clip), a);
+	}
+}
+
 static void tv_render(tui_view *v, uint64_t now)
 {
 	tui_screen *s = tui_renderer_front(v->ren);
@@ -1025,8 +1031,10 @@ static void tv_render(tui_view *v, uint64_t now)
 		tc = title[0] ? tv_str_cols(title) : 0;
 		/* 标题可用宽 = 总宽 - 模型 - 至少 3 列填充 */
 		if (tc > mw - mc - 3) {
-			tv_clip_cols(title, mw - mc - 3 > 3 ? mw - mc - 3 : 3,
-				     clip, sizeof(clip));
+			tui_utf8_clip_cols(title,
+					   (size_t)(mw - mc - 3 > 3 ?
+						    mw - mc - 3 : 3),
+					   clip, sizeof(clip));
 			tc = tv_str_cols(clip);
 		} else {
 			snprintf(clip, sizeof(clip), "%s", title);
@@ -1058,6 +1066,49 @@ static void tv_render(tui_view *v, uint64_t now)
 	/* 转写区（chat 内部按宽度自适应 rewidth） */
 	if (tr_h > 0 && mw > 0)
 		tui_chat_render(v->chat, s, mx, tr_y, mw, tr_h, now);
+
+	/* T1：空态面板（无消息且非运行中）——新/清空会话的引导语 */
+	if (tr_h >= 5 && mw > 6 && !v->running && tui_chat_is_empty(v->chat))
+		tv_render_empty(s, mx, tr_y + 1, mw);
+
+	/* T1：侧栏末列（x=TUI_SB_WIDTH-1）分隔线 + 滚动条。
+	 * 主列仍从 TUI_SB_WIDTH 起、侧栏 22 列——总宽不变；侧栏文字已
+	 * 让出末列。可滚（内容行 > 视口行）时：轨道 dim │ + 滑块 ACCENT █
+	 * （高 = max(1, 视口²/总行)，位置按 view_top 比例）。 */
+	if (sbw > 0 && tr_h > 0 && sep_y >= 0) {
+		int scol = TUI_SB_WIDTH - 1;
+		int ry;
+		struct tui_chat_scrollinfo si;
+
+		for (ry = tr_y; ry < tr_y + tr_h; ry++)
+			(void)tui_screen_put(s, ry, scol, "│", strlen("│"),
+					     a_muted);
+		if (tui_chat_scroll_info(v->chat, &si) == 0 && si.rows > 0 &&
+		    si.total > si.rows) {
+			int vh = si.rows < tr_h ? si.rows : tr_h;
+			long long sh = ((long long)tr_h * vh) / si.total;
+			int span = si.hi - si.lo;
+			int off = 0;
+
+			if (sh < 1)
+				sh = 1;
+			if (sh > tr_h)
+				sh = tr_h;
+			if (span > 0)
+				off = (int)(((long long)(si.top - si.lo) *
+					     (tr_h - (int)sh)) / span);
+			if (off < 0)
+				off = 0;
+			if (off > tr_h - (int)sh)
+				off = tr_h - (int)sh;
+			for (ry = 0; ry < (int)sh; ry++) {
+				(void)tui_screen_put(s, tr_y + off + ry, scol,
+						     "█", strlen("█"),
+						     tui_thm_attr(TUI_THM_ACCENT,
+								  TUI_THM_BG, 0));
+			}
+		}
+	}
 
 	/* UXAB 4. 分隔线：转写区与输入区之间 dim ─ 全宽（主列） */
 	if (newui && sep_y >= 0 && mw > 0) {
@@ -1131,12 +1182,25 @@ static void tv_render(tui_view *v, uint64_t now)
 							      TUI_ST_BOLD));
 
 			if (col > mx) {
-				static const char hint[] =
-					" occ 正在思考… Esc 中断";
+				/* T1：计时水印（Ns——30fps 常刷已有） */
+				char hint[96];
+				char clip[96];
+				unsigned long long secs = 0;
+				int avail;
 
-				(void)tui_screen_put(s, input_y, col, hint,
-						     sizeof(hint) - 1,
-						     a_muted);
+				if (v->run_start_ms && now >= v->run_start_ms)
+					secs = (now - v->run_start_ms) /
+					       1000u;
+				snprintf(hint, sizeof(hint),
+					 " occ 正在思考… %llus · Esc 中断",
+					 secs);
+				avail = mw - (col - mx);
+				tui_utf8_clip_cols(hint,
+						   avail > 0 ? (size_t)avail :
+								0,
+						   clip, sizeof(clip));
+				(void)tui_screen_put(s, input_y, col, clip,
+						     strlen(clip), a_muted);
 			}
 		} else {
 			static const char wm[] =
@@ -1399,8 +1463,11 @@ int tui_view_run(tui_view *v)
 			break;
 
 		/* poll 超时：待渲染/busy 态（spinner 常刷——无事件也要按时醒）
-		 * → 帧门剩余；孤立 Esc→结算截止 */
-		if (v->dirty_needed || v->busy) {
+		 * → 帧门剩余；孤立 Esc→结算截止。
+		 * T1：running 也计入——上面渲染后 dirty 清零，若只看 dirty
+		 * 会在「等首个 token」这类无事件窗口里 poll(-1) 睡死：spinner
+		 * 冻帧、计时水印不走（T1 视觉自证实测）。 */
+		if (v->dirty_needed || v->busy || v->running) {
 			uint64_t w = tui_frame_wait_ms(&v->frame, now);
 
 			timeout = (w > 0x7ffffffu) ? 0x7fffffff : (int)w;
@@ -1420,8 +1487,7 @@ int tui_view_run(tui_view *v)
 		pf[0].fd = STDIN_FILENO;
 		pf[0].events = POLLIN;
 		pf[0].revents = 0;
-		pf[1].fd = v->wake[0];	/* 自唤醒 pipe 读端（写端=post） */
-		pf[1].events = POLLIN;
+		pf[1].fd = v->wake[0];	/* 自唤醒 pipe 读端（写端=post） */		pf[1].events = POLLIN;
 		pf[1].revents = 0;
 		n = poll(pf, 2, timeout);
 		if (n < 0) {

@@ -72,6 +72,20 @@ void tui_chat_render(tui_chat *c, tui_screen *s, int x, int y, int w, int h,
 void tui_chat_scroll(tui_chat *c, int lines);
 void tui_chat_jump_latest(tui_chat *c);
 int tui_chat_at_bottom(const tui_chat *c);
+
+/* T1：滚动指标（视图画滚动条用；render 之后取值才有本帧几何）。
+ * total=环内在行数；rows=上帧 scrollback 视口行数；top=视口首行绝对号；
+ * lo=最旧可及绝对行（dropped）；hi=贴底时视口首行绝对号；follow=贴底位。
+ * 返回 0=有效，-1=c/out 空。 */
+struct tui_chat_scrollinfo {
+	int total;
+	int rows;
+	int top;
+	int lo;
+	int hi;
+	int follow;
+};
+int tui_chat_scroll_info(const tui_chat *c, struct tui_chat_scrollinfo *out);
 /* 终端尺寸变化：按新宽度全量重建 scrollback 并跳回底部 */
 void tui_chat_rewidth(tui_chat *c, int width);
 
@@ -90,6 +104,8 @@ int tui_chat_fold_row(const tui_chat *c);
 size_t tui_chat_dump_text(const tui_chat *c, char *buf, size_t cap);
 /* live 块是否为空（无 text/reasoning/tool） */
 int tui_chat_live_empty(const tui_chat *c);
+/* T1：转写区是否全空（无任何消息，且无 live 块）——空态面板判定 */
+int tui_chat_is_empty(const tui_chat *c);
 
 #ifdef __cplusplus
 }

@@ -50,7 +50,11 @@ static const struct km_def KM_DEFAULTS[] = {
 	{ "session.interrupt", TUI_KM_CTX_BASE, "escape" },
 	{ "session.page.up", TUI_KM_CTX_BASE, "pageup" },
 	{ "session.page.down", TUI_KM_CTX_BASE, "pagedown" },
-	{ "session.new", TUI_KM_CTX_BASE, "<leader>n" },
+	/* T1：Home/End = 视口顶/底（BASE 专属；OVERLAY 的 Home/End 仍归
+	 * dialog.select.home/end——上下文隔离） */
+	{ "session.scroll.top", TUI_KM_CTX_BASE, "home" },
+	{ "session.scroll.bottom", TUI_KM_CTX_BASE, "end" },
+	{ "session.new", TUI_KM_CTX_BASE, "<leader>n,ctrl+n" },
 	{ "session.list", TUI_KM_CTX_BASE, "<leader>l" },
 	{ "session.rename", TUI_KM_CTX_BASE, "ctrl+r" },
 	{ "session.compact", TUI_KM_CTX_BASE, "<leader>c" },

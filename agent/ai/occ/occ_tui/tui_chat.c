@@ -486,6 +486,16 @@ static int load_code_line(const char *s, size_t len, tui_attr base,
 				i++;
 			if (is_kw(s + start, i - start))
 				ra = a_kw;
+		} else if ((unsigned char)s[i] >= 0x80) {
+			/* 非 ASCII（代码块里的 CJK 注释/字符串）：整段吞一个
+			 * UTF-8 序列——逐字节会喂给 gi_push 半截序列，渲染成
+			 * 一片 U+FFFD（T1 视觉自证发现） */
+			int sl = tui_utf8_seqlen((uint8_t)s[i]);
+
+			if (sl > 0 && (size_t)sl <= len - i)
+				i += (size_t)sl;
+			else
+				i++;
 		} else {
 			i++;
 		}
@@ -902,6 +912,10 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 
 	if (c->width < 4)
 		return;
+	/* T1：块间空一行——非首个块前先推一条空行（定稿与回放同源：
+	 * 回放同样走 chat_push_msg，形态天然一致） */
+	if (c->sb.count > 0)
+		tui_sb_push(&c->sb, NULL, 0);
 	memset(&ll, 0, sizeof(ll));
 	if (m->role == TUI_ROLE_ASSISTANT) {
 		/* UXAB：块头 ◆ label · HH:MM（label=assist_label，occ.c 供模型名） */
@@ -1278,6 +1292,9 @@ static void live_render(tui_chat *c, uint64_t now_ms)
 	if (!m || !m->live || m->role != TUI_ROLE_ASSISTANT)
 		return;
 	(void)now_ms;
+	/* T1：live 块前也留空行（与上方已定稿块隔开；scrollback 空=不画） */
+	if (c->sb.count > 0 && !ll_new(&c->live_lines))
+		return;
 	/* UXAB：块头 ◆ label · HH:MM（live 块同样带头——流式开始即可见）。
 	 * 头行占位后折叠行不再是 live 首行——记录其行下标供点击命中。 */
 	render_block_header(c, "◆",
@@ -1549,4 +1566,27 @@ int tui_chat_live_empty(const tui_chat *c)
 		return 1;
 	return (!m->text || !m->tlen) && (!m->reason || !m->rlen) &&
 	       m->nt == 0;
+}
+
+int tui_chat_is_empty(const tui_chat *c)
+{
+	if (!c)
+		return 1;
+	return c->nmsgs == 0;
+}
+
+int tui_chat_scroll_info(const tui_chat *c, struct tui_chat_scrollinfo *out)
+{
+	int extra;
+
+	if (!c || !out)
+		return -1;
+	extra = c->sb.count > c->sb.rows ? c->sb.count - c->sb.rows : 0;
+	out->total = c->sb.count;
+	out->rows = c->sb.rows;
+	out->top = c->sb.view_top;
+	out->lo = c->sb.dropped;
+	out->hi = c->sb.dropped + extra;	/* 贴底位（== tui_sb_scroll 上界） */
+	out->follow = c->sb.follow;
+	return 0;
 }

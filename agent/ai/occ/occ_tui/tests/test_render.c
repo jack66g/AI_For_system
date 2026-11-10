@@ -6,6 +6,8 @@
  * 与截断不撕汉字；组合符合并；clear/resize 序列；滚动视口原语。
  */
 #include "tui_core.h"
+#include "tui_sidebar.h"
+#include "tui_theme.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -537,6 +539,93 @@ static void test_theme(void)
 	   "theme-oob-default");
 }
 
+/* ---- T1：侧栏（无 id / 21 列裁剪 / 状态标记 / 溢出提示） ---- */
+
+static size_t row_text(const tui_screen *s, int row, char *buf, size_t cap)
+{
+	size_t n = 0;
+	int k;
+
+	if (!s || !buf || cap == 0 || row < 0 || row >= s->rows)
+		return 0;
+	for (k = 0; k < s->cols; k++) {
+		const tui_cell *c = &s->cells[(size_t)row * (size_t)s->cols +
+					      (size_t)k];
+
+		if (c->width == 0 || c->len == 0)
+			continue;
+		if (n + c->len + 1 > cap)
+			break;
+		memcpy(buf + n, c->utf8, c->len);
+		n += c->len;
+	}
+	buf[n] = '\0';
+	while (n > 0 && buf[n - 1] == ' ')
+		buf[--n] = '\0';
+	return n;
+}
+
+static void test_sidebar(void)
+{
+	tui_screen *s = tui_screen_create(24, TUI_SB_WIDTH);
+	tui_sb_data d;
+	char row[256];
+
+	OK(s != NULL, "sb-screen");
+	if (!s)
+		return;
+	tui_screen_fill(s, tui_attr_default());
+	memset(&d, 0, sizeof(d));
+	/* 当前行：CJK 标题超宽（必须按显示列裁剪、不留半字） */
+	snprintf(d.rows[0].title, sizeof(d.rows[0].title),
+		 "当前会话标题超长需要裁剪处理");
+	snprintf(d.rows[0].id, sizeof(d.rows[0].id), "ses_aaaaaaaa");
+	snprintf(d.rows[0].status, sizeof(d.rows[0].status), "active");
+	d.rows[0].is_current = 1;
+	snprintf(d.rows[1].title, sizeof(d.rows[1].title), "出错的会话");
+	snprintf(d.rows[1].id, sizeof(d.rows[1].id), "ses_bbbbbbbb");
+	snprintf(d.rows[1].status, sizeof(d.rows[1].status), "error");
+	snprintf(d.rows[2].title, sizeof(d.rows[2].title), "中断的会话");
+	snprintf(d.rows[2].id, sizeof(d.rows[2].id), "ses_cccccccc");
+	snprintf(d.rows[2].status, sizeof(d.rows[2].status), "interrupted");
+	d.n = 3;
+	d.total = 5;			/* 溢出：n<total，末行提示 +2 */
+	d.tokens_total = 12300;
+	d.pct = 6;
+	tui_sidebar_render(&d, s, 24, NULL);
+
+	row_text(s, 0, row, sizeof(row));
+	OK(strcmp(row, "sessions") == 0, "sb2-title-row");
+	row_text(s, 1, row, sizeof(row));
+	OK((unsigned char)row[0] == 0xe2 &&
+	   (unsigned char)row[1] == 0x94 && (unsigned char)row[2] == 0x80,
+	   "sb2-rule-row");		/* ─ 细线 */
+	row_text(s, 2, row, sizeof(row));
+	OK((unsigned char)row[0] == 0xe2 && (unsigned char)row[1] == 0x96,
+	   "sb2-current-bar");		/* ▎ 标条 */
+	OK(strstr(row, "ses_") == NULL, "sb2-no-id");
+	/* CJK 标题超宽 → 显示列安全裁剪（不留 U+FFFD 半字） */
+	OK(strstr(row, "\xef\xbf\xbd") == NULL, "sb2-no-replacement-char");
+	/* 末列（x=21）留给视图层分隔线：侧栏内容不得写入（fill 后仍是空格） */
+	{
+		const tui_cell *cc =
+			&s->cells[(size_t)2 * s->cols + (TUI_SB_WIDTH - 1)];
+
+		OK(cc->width == 1 && cc->len == 1 && cc->utf8[0] == ' ',
+		   "sb2-last-col-free");
+	}
+	row_text(s, 3, row, sizeof(row));
+	OK(strstr(row, "\xe2\x9c\x97") != NULL, "sb2-error-mark");	/* ✗ */
+	row_text(s, 4, row, sizeof(row));
+	OK(strstr(row, "\xe2\x8b\xaf") != NULL, "sb2-interrupted-mark"); /* ⋯ */
+	row_text(s, 5, row, sizeof(row));
+	OK(strstr(row, "+2 \xe4\xb8\xaa") != NULL, "sb2-overflow-count");
+	OK(strstr(row, "/sessions") != NULL, "sb2-overflow-hint");
+	row_text(s, 23, row, sizeof(row));
+	OK(strcmp(row, "12.3k \xc2\xb7 6%") == 0, "sb2-tokens-row");
+	tui_screen_destroy(s);
+}
+
 int main(void)
 {
 	test_sgr();
@@ -546,6 +635,7 @@ int main(void)
 	test_span_diff();
 	test_scrollback();
 	test_theme();
+	test_sidebar();
 	printf("test_render: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * tui_sidebar.c - occ TUI 会话侧栏实现（T9c2 最小版）
+ * tui_sidebar.c - occ TUI 会话侧栏实现（T9c2 最小版 / T1 视觉升级）
  *
- * 单行文本直接 tui_screen_put（栏宽 22 内，超长由 put 在栏缘截断——
- * 侧栏右缘==栏宽-1，put 的屏幕边缘截断不适用，这里手工截到 w 列）。
- * id 显示：ses_XXXX…（前 8 字符+…）；标题截到剩余宽。
+ * 单行文本直接 tui_screen_put（栏宽 22；T1 起正文最多占 21 列——
+ * 末列（x=21）留给视图层的分隔线/滚动条）。T1 不再显示 ses_ id：
+ * 标题占满内容宽（显示列安全裁剪，CJK 不溢出）；status=error 标题用
+ * ERROR 色 + 行尾 ✗、interrupted 行尾 ⋯；条数溢出时末行
+ * `⋯ +N 个（/sessions）`。
  */
 #define _DEFAULT_SOURCE 1
 #include "tui_sidebar.h"
@@ -25,55 +27,17 @@ static void fmt_tok(long long t, char *buf, size_t cap)
 		snprintf(buf, cap, "%lld", t);
 }
 
-/* 截字符串到 maxw 显示列（超宽末尾加 …）；返回写入字节数（含 NUL） */
-static size_t clip_cols(const char *s, int maxw, char *out, size_t cap)
-{
-	size_t i = 0;
-	int w = 0;
-	size_t o = 0;
-
-	if (cap == 0)
-		return 0;
-	out[0] = '\0';
-	while (s[i]) {
-		uint32_t cp;
-		size_t adv = 0;
-		int gw;
-
-		if (tui_utf8_decode((const uint8_t *)s + i, strlen(s + i),
-				    &cp, &adv) != TUI_U8_OK || adv == 0)
-			adv = 1;
-		gw = tui_wcwidth(cp);
-		if (gw < 0)
-			gw = 0;
-		if (w + gw > maxw - 1) {	/* 留列给 … */
-			if (o + 4 <= cap) {
-				memcpy(out + o, "…", 3);
-				o += 3;
-				out[o] = '\0';
-			}
-			return o + 1;
-		}
-		if (o + adv + 1 > cap)
-			break;
-		memcpy(out + o, s + i, adv);
-		o += adv;
-		w += gw;
-		i += adv;
-	}
-	out[o] = '\0';
-	return o + 1;
-}
-
 void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 			const tui_theme *th)
 {
 	tui_theme loc;
-	int y = 0;
 	int i;
 	char line[TUI_SB_WIDTH * 4];
+	char rule[TUI_SB_WIDTH * 3];
 	char tok[24];
-	tui_attr a_title, a_cur, a_dim, a_bottom;
+	tui_attr a_title, a_cur, a_dim, a_bottom, a_err;
+	int maxw = TUI_SB_WIDTH - 1;	/* 内容宽（末列留给分隔线） */
+	int first, avail, show, overflow;
 
 	if (!d || !s || rows < 1)
 		return;
@@ -82,39 +46,77 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 		th = &loc;
 	}
 	a_title = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, TUI_ST_BOLD);
-	/* UXAB：当前行=左标条 ▎(accent) + 亮色文字（fg 加粗）——替旧反白 */
+	/* 当前行=左标条 ▎(accent) + 亮色文字（fg 加粗） */
 	a_cur = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, TUI_ST_BOLD);
 	a_dim = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
 	a_bottom = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
+	a_err = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
 
-	/* 标题行 */
+	/* 标题行 + dim 细线（T1） */
 	(void)tui_screen_put(s, 0, 0, "sessions", 8, a_title);
-	y = 1;
+	for (i = 0; i < maxw; i++)
+		memcpy(rule + i * 3, "─", 3);
+	if (rows > 1)
+		(void)tui_screen_put(s, 1, 0, rule, (size_t)maxw * 3, a_dim);
 
-	for (i = 0; i < d->n && y < rows - 1; i++, y++) {
+	/* 会话行：y=2 .. rows-2（末行 rows-1 是 tokens 行） */
+	first = 2;
+	avail = (rows - 1) - first;
+	if (avail < 0)
+		avail = 0;
+	show = d->n < avail ? d->n : avail;
+	overflow = d->total > show;
+	if (overflow && avail > 0 && show == avail)
+		show = avail - 1;	/* 腾出末行给溢出提示 */
+
+	for (i = 0; i < show; i++) {
 		const tui_sb_row *r = &d->rows[i];
-		char id12[16];
-		char rest[TUI_SB_WIDTH * 4];
 		char title_clip[TUI_SB_WIDTH * 4];
-		int avail;
-		tui_attr a = r->is_current ? a_cur : a_dim;
+		const char *mark = NULL;
+		tui_attr a = a_dim;
+		int x = 0;
+		int tw;
 
-		/* UXAB：当前行首列画 ▎ 标条（accent）；正文右移一列 */
 		if (r->is_current) {
-			(void)tui_screen_put(s, y, 0, "▎", strlen("▎"),
+			/* 当前行首列画 ▎ 标条（accent）；正文右移一列 */
+			(void)tui_screen_put(s, first + i, 0, "▎",
+					     strlen("▎"),
 					     tui_thm_attr(TUI_THM_ACCENT,
 							  TUI_THM_BG, 0));
+			a = a_cur;
+			x = 1;
 		}
-		/* id 前 8 字符（ses_XXXX…） */
-		snprintf(id12, sizeof(id12), "%.8s", r->id);
-		avail = TUI_SB_WIDTH - 1 - (r->is_current ? 2 : 0) -
-			(int)strlen(id12) - 1;
-		if (avail < 4)
-			avail = 4;
-		clip_cols(r->title, avail, title_clip, sizeof(title_clip));
-		snprintf(rest, sizeof(rest), "%s %s", id12, title_clip);
-		(void)tui_screen_put(s, y, r->is_current ? 1 : 0, rest,
-				     strlen(rest), a);
+		if (!strcmp(r->status, "error")) {
+			mark = "✗";
+			a = a_err;
+		} else if (!strcmp(r->status, "interrupted")) {
+			mark = "⋯";
+		}
+		/* 行尾标记占末列；标题只占其左 */
+		tw = maxw - x - (mark ? 1 : 0);
+		if (tw < 1)
+			tw = 1;
+		tui_utf8_clip_cols(r->title, (size_t)tw, title_clip,
+				   sizeof(title_clip));
+		if (title_clip[0])
+			(void)tui_screen_put(s, first + i, x, title_clip,
+					     strlen(title_clip), a);
+		if (mark)
+			(void)tui_screen_put(s, first + i, maxw - 1, mark,
+					     strlen(mark), a);
+	}
+
+	/* 溢出提示（条数超显示位）：`⋯ +N 个（/sessions）` */
+	if (overflow && avail > 0) {
+		char ovf[96];
+		char clip[96];
+		int n;
+
+		n = d->total - show;
+		snprintf(ovf, sizeof(ovf), "⋯ +%d 个（/sessions）", n);
+		tui_utf8_clip_cols(ovf, (size_t)maxw, clip, sizeof(clip));
+		(void)tui_screen_put(s, first + show, 0, clip, strlen(clip),
+				     a_bottom);
 	}
 
 	/* 底部 token 水位行（倒数第 1 行；UXAB：` · ` 分隔） */

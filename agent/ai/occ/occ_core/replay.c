@@ -104,7 +104,11 @@ int occ_replay_plan(const occ_msg_row *rows, size_t n,
 
 			if (!rp_visible(r))
 				continue;
-			est = occ_replay_est_lines(r);
+			/* T1：块间空一行——渲染层每个消息块前留一空行，预算
+			 * 按每块 +1 计（尾部最旧那块也计，故整组保守多 1 行，
+			 * 不会越预算）。口径只在本函数内：occ_replay_est_lines
+			 * 的公开「消息行数」语义与既有锚点不变。 */
+			est = occ_replay_est_lines(r) + 1;
 			if (!got_tail) {
 				first = i - 1;
 				used = est;

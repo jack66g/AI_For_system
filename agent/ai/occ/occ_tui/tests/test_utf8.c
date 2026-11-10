@@ -254,6 +254,32 @@ int main(void)
 		}
 	}
 
+	/* ---- T1/LT-BUG-005：显示列安全截断 + 列宽统计 ---- */
+	{
+		char b[64];
+		size_t n;
+
+		OK(tui_utf8_cols("abc") == 3, "clip-cols-ascii");
+		OK(tui_utf8_cols("\xe4\xb8\xad\xe6\x96\x87") == 4,
+		   "clip-cols-cjk");		/* 中文 = 2×2 */
+		OK(tui_utf8_cols(NULL) == 0, "clip-cols-null");
+
+		n = tui_utf8_clip_cols("abcdef", 10, b, sizeof(b));
+		OK(n == 6 && strcmp(b, "abcdef") == 0, "clip-fits");
+		n = tui_utf8_clip_cols("abcdef", 4, b, sizeof(b));
+		OK(n == 6 && strcmp(b, "abc\xe2\x80\xa6") == 0,
+		   "clip-ellipsis");		/* abc… */
+		/* CJK 双宽：不切半个汉字（3 列只能放 1 个汉字 + …） */
+		n = tui_utf8_clip_cols("\xe4\xb8\xad\xe6\x96\x87", 3, b,
+				       sizeof(b));
+		OK(strcmp(b, "\xe4\xb8\xad\xe2\x80\xa6") == 0, "clip-cjk-safe");
+		/* cap 不足以放 … 时只截正文、不越界 */
+		n = tui_utf8_clip_cols("abcdef", 4, b, 4);
+		OK(n <= 3 && strlen(b) <= 3, "clip-cap-guard");
+		OK(tui_utf8_clip_cols("abc", 0, b, sizeof(b)) == 0 &&
+		   b[0] == '\0', "clip-zero-cols");
+	}
+
 	printf("test_utf8: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

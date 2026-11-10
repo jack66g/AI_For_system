@@ -18,6 +18,8 @@
  */
 #include "tui_utf8.h"
 
+#include <string.h>
+
 /* ---- 前导字节 → 期望长度 ---- */
 int tui_utf8_seqlen(uint8_t lead)
 {
@@ -204,6 +206,74 @@ int tui_is_combining(uint32_t cp)
 	if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
 		return 0;		/* 控制符不算组合符 */
 	return in_tbl(cp, comb_tbl, sizeof(comb_tbl) / sizeof(comb_tbl[0]));
+}
+
+/* ---- LT-BUG-005：显示列安全截断（公共原语；头注见 tui_utf8.h） ---- */
+
+size_t tui_utf8_cols(const char *s)
+{
+	size_t i = 0, len, w = 0;
+
+	if (!s)
+		return 0;
+	len = strlen(s);
+	while (i < len) {
+		uint32_t cp;
+		size_t adv = 0;
+		int gw;
+
+		if (tui_utf8_decode((const uint8_t *)s + i, len - i, &cp,
+				    &adv) != TUI_U8_OK || adv == 0)
+			adv = 1;
+		gw = tui_wcwidth(cp);
+		w += gw > 0 ? (size_t)gw : 1;
+		i += adv;
+	}
+	return w;
+}
+
+size_t tui_utf8_clip_cols(const char *src, size_t maxcols, char *dst,
+			  size_t dstcap)
+{
+	size_t i = 0, o = 0, len;
+	size_t w = 0;
+
+	if (!dst || dstcap == 0)
+		return 0;
+	dst[0] = '\0';
+	if (!src || maxcols == 0)
+		return 0;
+	len = strlen(src);
+	while (i < len) {
+		uint32_t cp;
+		size_t adv = 0;
+		int gw;
+
+		if (tui_utf8_decode((const uint8_t *)src + i, len - i, &cp,
+				    &adv) != TUI_U8_OK || adv == 0)
+			adv = 1;
+		gw = tui_wcwidth(cp);
+		if (gw < 0)
+			gw = 0;
+		if (w + (size_t)gw > maxcols - 1) {
+			/* 留末列给 …（与旧 tv_clip_cols 口径一致）；
+			 * cap 放不下 … 时只截正文（仍保证 NUL 结尾） */
+			if (o + 4 <= dstcap) {
+				memcpy(dst + o, "\xe2\x80\xa6", 3);
+				o += 3;
+			}
+			dst[o] = '\0';
+			return o;
+		}
+		if (o + adv + 1 > dstcap)
+			break;
+		memcpy(dst + o, src + i, adv);
+		o += adv;
+		w += (size_t)gw;
+		i += adv;
+	}
+	dst[o] = '\0';
+	return o;
 }
 
 /* ---- B7：简化 grapheme 续接判定（头注见 tui_utf8.h） ---- */

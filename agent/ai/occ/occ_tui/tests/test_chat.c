@@ -178,6 +178,27 @@ int main(void)
 	}
 	tui_screen_destroy(s);
 
+	/* ---- 4b. T1：代码块内 CJK（注释/字符串）不得被逐字节嚼成 U+FFFD ---- */
+	tui_chat_begin_assistant(c);
+	tui_chat_append_text(c, "```c\n/* 采样点：本轮到点后记账 */\n```",
+			     strlen("```c\n/* 采样点：本轮到点后记账 */\n```"));
+	tui_chat_end_assistant(c, "");
+	s = render_to(c, 10, 40, 1000);
+	{
+		int i, cjk = 0, fffd = 0;
+
+		for (i = 0; i < 10; i++) {
+			screen_row(s, i, 0, 40, row, sizeof(row));
+			if (strstr(row, "\xe9\x87\x87\xe6\xa0\xb7") != NULL)
+				cjk = 1;	/* 采样 */
+			if (strstr(row, "\xef\xbf\xbd") != NULL)
+				fffd = 1;
+		}
+		OK(cjk, "code-fence-cjk-intact");
+		OK(!fffd, "code-fence-no-replacement-char");
+	}
+	tui_screen_destroy(s);
+
 	/* ---- 5. 工具行 start→end（running→✓） ---- */
 	tui_chat_begin_assistant(c);
 	tui_chat_tool_start(c, "bash", "{\"cmd\":\"ls\"}");
@@ -395,6 +416,30 @@ int main(void)
 		OK(wide2, "zwj-cell-found");
 	}
 	tui_screen_destroy(s);
+	tui_chat_destroy(c);
+
+	/* ---- 12. T1：块间空一行（非首块前推一条空行）+ 空态/滚动指标 ---- */
+	c = tui_chat_create(NULL);
+	OK(tui_chat_is_empty(c) == 1, "empty-new-chat");
+	tui_chat_add_notice(c, "AAA");
+	OK(tui_chat_is_empty(c) == 0, "empty-after-first-block");
+	tui_chat_add_notice(c, "BBB");
+	s = render_to(c, 8, 40, 1000);
+	OK(screen_row(s, 0, 0, 40, row, sizeof(row)) > 0 &&
+	   strstr(row, "AAA") != NULL, "spacing-first-row");
+	OK(screen_row(s, 1, 0, 40, row, sizeof(row)) == 0,
+	   "spacing-blank-row");		/* 块间空行 */
+	OK(screen_row(s, 2, 0, 40, row, sizeof(row)) > 0 &&
+	   strstr(row, "BBB") != NULL, "spacing-second-block");
+	tui_screen_destroy(s);
+	{
+		struct tui_chat_scrollinfo si;
+
+		OK(tui_chat_scroll_info(c, &si) == 0, "scrollinfo-ok");
+		OK(si.total == 3, "scrollinfo-total-3");	/* 2 块 + 1 空行 */
+		OK(si.follow == 1, "scrollinfo-follow");
+		OK(tui_chat_scroll_info(NULL, &si) == -1, "scrollinfo-null");
+	}
 	tui_chat_destroy(c);
 
 	printf("test_chat: %d ok, %d fail\n", n_ok, n_fail);

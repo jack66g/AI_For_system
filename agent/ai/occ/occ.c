@@ -51,6 +51,7 @@
 #include "occ_llm/occ_registry.h"
 #include "occ_tui/tui_data.h"
 #include "occ_tui/tui_usage.h"
+#include "occ_tui/tui_utf8.h"
 #include "occ_tui/tui_view.h"
 
 static const char USAGE[] =
@@ -63,7 +64,7 @@ static const char USAGE[] =
 	"  occ retry --session <id>             重发最后一条 user 消息\n"
 	"  occ sessions                         会话列表\n"
 	"环境：OCC_MODEL_TOML / OCC_PROVIDER_TOML / OCC_DB / OCC_SNAPROOT 可覆盖；"
-	" 交互模式另支持 OCC_REPLAY_LINES（历史回放行数预算，缺省 200，0=禁）\n";
+	" 交互模式另支持 OCC_REPLAY_LINES（历史回放行数预算，缺省 1000，0=禁）\n";
 
 /* ---- SIGINT（T9b2；OCD §7.1 headless 版） ----
  * 第一次：置 occ_interrupt_flag——loop 在安全点（每工具后/每轮 LLM 前/
@@ -545,12 +546,20 @@ static uint64_t tui_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+/* LT-BUG-005：会话标题按显示列截断（CJK 双宽安全，不在字节中间切出
+ * U+FFFD）。通知/预填统一 40 列口径；id 段是纯 ASCII（ses_…），仍按
+ * `%.14s` 字节截断（安全）。 */
+static void app_clip_title(const char *src, char *dst, size_t cap)
+{
+	tui_utf8_clip_cols(src ? src : "", 40, dst, cap);
+}
+
 /* k/M 档：已由 tui_usage_fmt 承担（c3 同源化；fmt_tok 退役） */
 
 /* ===================== OCC-DEBT：TUI 历史回放 =====================
  * 偿还 T9C2 裁定 2（转写不回放历史）：进屏（/shell 往返）与 /sessions
  * 切换时，从 durable SQLite 读当前会话消息 → occ_replay_plan 圈尾部
- * （OCD §1.3 尾部挂载语义；行预算 OCC_REPLAY_LINES 缺省 200，0=禁）
+ * （OCD §1.3 尾部挂载语义；行预算 OCC_REPLAY_LINES 缺省 1000，0=禁）
  * → 逐条 tui_view_post 渲染进 scrollback。事件走既有队列，drain 在
  * 主循环——与 live 渲染完全同路（工具行/推理折叠/页脚形态不变）。
  * 运行中不回放（事件会插进 live 块）——诚实 notice，收口后切换可补。 */
@@ -561,10 +570,10 @@ static int app_replay_lines_budget(void)
 	char *end = NULL;
 
 	if (!v || !v[0])
-		return 200;
+		return 1000;
 	n = strtol(v, &end, 10);
 	if (!end || *end != '\0' || n < 0 || n > 1000000)
-		return 200;
+		return 1000;
 	return (int)n;
 }
 
@@ -2101,8 +2110,13 @@ static int cmd_rename(struct tui_app *a, const char *args)
 			tui_view_notice(a->view, e);
 			return 0;
 		}
-		snprintf(nb, sizeof(nb), "renamed → %.200s", args);
-		tui_view_notice(a->view, nb);
+		{
+			char tt[128];
+
+			app_clip_title(args, tt, sizeof(tt));
+			snprintf(nb, sizeof(nb), "renamed → %s", tt);
+			tui_view_notice(a->view, nb);
+		}
 		return 0;
 	}
 	/* 无参：输入覆盖层（预填现题；B5/B8 起：空回车=AI 生成标题） */
@@ -2114,9 +2128,12 @@ static int cmd_rename(struct tui_app *a, const char *args)
 			occ_session_row r;
 
 			if (occ_session_get(a->db, a->session_id, &r, e,
-					    sizeof(e)) == 1)
-				snprintf(initial, sizeof(initial), "%.100s",
-					 r.title);
+					    sizeof(e)) == 1) {
+				char tt[128];
+
+				app_clip_title(r.title, tt, sizeof(tt));
+				snprintf(initial, sizeof(initial), "%s", tt);
+			}
 		}
 		(void)tui_view_open_input(a->view, OV_RENAME, "rename",
 					  "新标题（Enter 提交；空=AI 生成）",
@@ -2139,7 +2156,11 @@ static int tui_app_on_command(void *ud, const char *line)
 		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
 		a->u_est = 0;
 		pthread_mutex_unlock(&a->mu);
-		tui_view_notice(a->view, "new session（下一条消息创建新会话）");
+		/* T1：立即清屏（走事件队列——与回放切换同源；下一条消息才
+		 * 建会话的语义不变）。不发 notice：①直写 notice 会被队列里
+		 * 的 CLEAR 反序清掉；②空态面板已承担引导语。 */
+		(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
+				    NULL, 0);
 		return 0;
 	}
 	if (!strcmp(line, "/delete")) {
@@ -2192,11 +2213,13 @@ static int tui_app_on_command(void *ud, const char *line)
 		a->u_est = 0;
 		pthread_mutex_unlock(&a->mu);
 		{
-			char nb[160];
+			char nb[256];	/* tt≤120B + 固定后缀 ~78B */
+			char tt[128];
 
+			app_clip_title(t, tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "session 已删除：%.40s（级联清消息/工具/"
-				 "窗口/回滚）——下一条消息创建新会话", t);
+				 "session 已删除：%s（级联清消息/工具/"
+				 "窗口/回滚）——下一条消息创建新会话", tt);
 			tui_view_notice(a->view, nb);
 		}
 		return 0;
@@ -2442,16 +2465,24 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 		 * 切换通告也走事件队列（在 HIST_CLEAR 之后入队）——直写
 		 * chat 会被 CLEAR 清掉；落在历史尾部恰成分隔。 */
 		if (!live) {
+			char tt[128];
+
 			app_replay_session(a, r->id, 1);
+			app_clip_title(r->title[0] ? r->title : "(untitled)",
+				       tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "── switched to %.100s (%.14s…) ──",
-				 r->title[0] ? r->title : "(untitled)", r->id);
+				 "── switched to %s (%.14s…) ──",
+				 tt, r->id);
 			(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb,
 					    strlen(nb), NULL, 0);
 		} else {
+			char tt[128];
+
+			app_clip_title(r->title[0] ? r->title : "(untitled)",
+				       tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "── switched to %.100s (%.14s…) ──",
-				 r->title[0] ? r->title : "(untitled)", r->id);
+				 "── switched to %s (%.14s…) ──",
+				 tt, r->id);
 			tui_view_notice(a->view, nb);
 			tui_view_notice(a->view,
 					"turn 运行中——历史回放待收口（重进"
@@ -2575,7 +2606,12 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		snprintf(a->session_title, sizeof(a->session_title), "%.95s",
 			 text);			/* UXAB：顶栏即时更新 */
 		pthread_mutex_unlock(&a->mu);
-		snprintf(nb, sizeof(nb), "renamed → %.200s", text);
+		{
+			char tt[128];
+
+			app_clip_title(text, tt, sizeof(tt));
+			snprintf(nb, sizeof(nb), "renamed → %s", tt);
+		}
 		tui_view_close_overlay(a->view);
 		tui_view_notice(a->view, nb);
 		return 0;
@@ -2829,6 +2865,8 @@ static void tui_app_fill_sessions(void *ud, tui_sb_data *out)
 			cur[0] && !strcmp(cur, rows[i].id);
 	}
 	out->n = (int)i;
+	/* T1：真值总数（>n 时侧栏末行显示 `⋯ +N 个（/sessions）`） */
+	out->total = n > (size_t)0x7fffffff ? 0x7fffffff : (int)n;
 	free(rows);
 }
 

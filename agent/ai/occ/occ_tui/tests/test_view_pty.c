@@ -86,12 +86,18 @@ static void *mock_fast_turn(void *arg)
 	return NULL;
 }
 
-/* 慢 turn：先发一段流式文本，然后等 stop（模拟长生成） */
+/* 慢 turn：先发一段流式文本，然后等 stop（模拟长生成）。
+ * T1：MOCK_STALL → 先静默 2.4s 再出字（回归「无事件窗口 poll(-1) 睡死」：
+ * 主循环必须按帧门继续醒，spinner/计时水印才不冻帧）。 */
 static void *mock_slow_turn(void *arg)
 {
 	struct mock *m = arg;
 	int i;
 
+	if (getenv("MOCK_STALL")) {
+		for (i = 0; i < 48 && !m->stop; i++)
+			usleep(50000);
+	}
 	(void)tui_view_post(m->view, TUI_VIEW_TEXT, "SLOWTEXT", 0, NULL, 0);
 	for (i = 0; i < 100 && !m->stop; i++)
 		usleep(50000);
@@ -580,6 +586,7 @@ static int run_scenario(const char *keys, size_t keys_len,
 	int have = 0;
 	int i;
 	int rc = 0;
+	int resize_n = 0;		/* 哨兵计数：每次换行高才必发 SIGWINCH */
 	struct winsize ws = { .ws_row = 24, .ws_col = 80 };
 
 	if (pty_open(&pt) != 0)
@@ -620,14 +627,20 @@ static int run_scenario(const char *keys, size_t keys_len,
 	}
 	for (i = 0; i < nneedles && rc == 0; i++) {
 		/* BTUI B5："\x01W" 哨兵 needle=不等流——对 master 做
-		 * TIOCSWINSZ（24→25 行）触发子进程 SIGWINCH → renderer
-		 * need_clear 全帧重绘（diff 渲染器只吐变化格——滚轮滚动的
-		 * 行只有尾数字变化，整串 needle 需全帧才可见）。 */
+		 * TIOCSWINSZ（24↔25↔26 行）触发子进程 SIGWINCH → renderer
+		 * need_clear 全帧重绘（diff 渲染器只吐变化格——滚轮/Home 滚动
+		 * 的行只有尾数字变化，整串 needle 需全帧才可见）。
+		 * T1：连续哨兵每次换行高（同尺寸 ioctl 不发 SIGWINCH），并先让
+		 * 已注入的按键被主循环处理完（poll 33ms 帧门 << 150ms）。 */
 		if (!strncmp(needles[i], "\x01W", 2)) {
-			struct winsize wz = { .ws_row = 25, .ws_col = 80 };
+			struct winsize wz = {
+				.ws_row = (unsigned short)(25 + (resize_n++ & 1)),
+				.ws_col = 80
+			};
 
+			usleep(150000);
 			(void)ioctl(pt.master, TIOCSWINSZ, &wz);
-			continue;
+			goto after_needle;	/* 哨兵也参与 after_n 注入 */
 		}
 		if (read_until_contains(pt.master, out, OUT_CAP, &have,
 					needles[i], 5000) != 0) {
@@ -636,6 +649,7 @@ static int run_scenario(const char *keys, size_t keys_len,
 			rc = -1;
 			break;
 		}
+after_needle:
 		if (keys2 && i == after_n) {
 			if (write(pt.master, keys2, keys2_len) < 0)
 				rc = -1;
@@ -699,14 +713,14 @@ int main(void)
 	int out_len = 0;
 	int rc;
 
-	/* ---- A. 进屏字节 + 初始渲染（侧栏/元数据/状态行） ---- */
+	/* ---- A. 进屏字节 + 初始渲染（侧栏/元数据/状态行/空态面板） ---- */
 	{
 		const char *needles[] = {
 			"\x1b[?1049h",		/* alt-screen enter */
 			"sessions",		/* 侧栏标题 */
 			"occ · mock-model",	/* 元数据行 */
 			"cwd:mockrepo",		/* 状态行 */
-			"ses_aaaa",		/* 会话行（侧栏 id 截 8 位） */
+			"first",		/* 会话行（T1：只显标题，无 id） */
 		};
 
 		rc = run_scenario("", 0, needles, 5, -1, NULL, 0, -1, NULL, 0,
@@ -716,6 +730,21 @@ int main(void)
 		   "A-alt-screen-bytes");
 		OK(find_bytes(out, out_len, "sessions") != NULL,
 		   "A-sidebar-rendered");
+		/* T1：侧栏不再显示 ses_ id（005 面） */
+		OK(find_bytes(out, out_len, "ses_aaaa") == NULL,
+		   "A-sidebar-no-id");
+		/* T1：空态面板（无消息且非运行中） */
+		OK(find_bytes(out, out_len,
+			      "AIKernel \xc2\xb7 occ") != NULL,
+		   "A-empty-panel-title");
+		OK(find_bytes(out, out_len,
+			      "\xe7\x9b\xb4\xe6\x8e\xa5\xe8\xbe\x93\xe5\x85\xa5"
+			      "\xe6\xb6\x88\xe6\x81\xaf\xe5\xbc\x80\xe5\xa7\x8b") !=
+		   NULL, "A-empty-panel-hint");	/* 直接输入消息开始 */
+		/* T1：侧栏头下 dim 细线（─ 连排） */
+		OK(find_bytes(out, out_len,
+			      "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+			      "\xe2\x94\x80") != NULL, "A-sidebar-rule");
 	}
 
 	/* ---- B. 输入编辑：键入 → 输入框回显进字节流 ---- */
@@ -1006,10 +1035,15 @@ int main(void)
 			unsetenv("TERM");
 	}
 
-	/* ---- M2. 滚轮上翻：/many 30 行 → 初始只显尾部；滚轮×5(15 行)
+	/* ---- M2. 滚轮上翻：/many 30 行 → 初始只显尾部；滚轮×14(42 行)
 	 * → WINCH 全帧重绘 → 头部 MANY-00 整串重现于字节流 ---- */
 	{
+		/* T1：块间空行让 30 条通告占 59 行（首条无前导空行），视口 20
+		 * 行 → 需滚 39 行才到顶；14 次滚轮(42 行) 留足余量（钳位） */
 		static const char wheel_up[] =
+			"\x1b[<64;30;10M\x1b[<64;30;10M\x1b[<64;30;10M"
+			"\x1b[<64;30;10M\x1b[<64;30;10M\x1b[<64;30;10M"
+			"\x1b[<64;30;10M\x1b[<64;30;10M\x1b[<64;30;10M"
 			"\x1b[<64;30;10M\x1b[<64;30;10M\x1b[<64;30;10M"
 			"\x1b[<64;30;10M\x1b[<64;30;10M";
 		const char *needles[] = {
@@ -1024,6 +1058,20 @@ int main(void)
 				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
 		OK(rc == 0, "M2-wheel-scroll-up");
 		setenv("TERM", "dumb", 1);
+	}
+
+	/* ---- M2b. T1 Home：/many 30 行 → Home 一跳至最早 → MANY-00 ---- */
+	{
+		/* 哨兵#1=注入 Home 前的锚点（keys2 在 after_n 处写），
+		 * 哨兵#2=Home 生效后的全帧重绘（diff 只吐变化的尾数字） */
+		static const char home[] = "\x1b[H";
+		const char *needles[] = { "MANY-29", "\x01W", "\x01W",
+					  "MANY-00" };
+
+		rc = run_scenario("/many\r", 6, needles, 4, 1,
+				  home, sizeof(home) - 1,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "M2b-home-jump-top");
 	}
 
 	/* ---- M3. 点击 live ✻ thinking 折叠行：展开 → 正文进字节流；
@@ -1176,6 +1224,42 @@ int main(void)
 		OK(find_bytes(out, out_len, "\xe2\x86\x93" "351") != NULL,
 		   "N-footer-down");
 		unsetenv("MOCK_NEWUI");
+	}
+
+	/* ---- N2. T1 滚动条：新布局 + /many 超视口 → 滑块 █ + 分隔列 │ ---- */
+	{
+		const char *needles[] = { "MANY-29" };
+
+		setenv("MOCK_NEWUI", "1", 1);
+		rc = run_scenario("/many\r", 6, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "N2-scrollbar-scenario");
+		OK(find_bytes(out, out_len, "\xe2\x96\x88") != NULL,
+		   "N2-scrollbar-thumb");	/* █ ACCENT 滑块 */
+		OK(find_bytes(out, out_len, "\xe2\x94\x82") != NULL,
+		   "N2-sep-column");		/* │ 分隔列 */
+		unsetenv("MOCK_NEWUI");
+	}
+
+	/* ---- N3. T1 计时水印：等首 token 的静默窗口里主循环照常按帧刷
+	 * （回归：只按 dirty 算 poll 超时 → poll(-1) 睡死，spinner 冻帧、
+	 * 秒数不走）。MOCK_STALL=2.4s 静默 + 慢 turn。 ---- */
+	{
+		const char *needles[] = { "SLOWTEXT" };
+
+		setenv("MOCK_STALL", "1", 1);
+		rc = run_scenario("x\r", 2, needles, 1, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len,
+				  1 /* slow */);
+		OK(rc == 0, "N3-stall-scenario");
+		/* 静默期至少 ~30 帧 braille（30fps × 2.4s 量级；冻帧时只有 1-3） */
+		OK(count_bytes(out, out_len, "\xe2\xa0") >= 30,
+		   "N3-spinner-keeps-ticking");
+		/* 水印带秒数（0s 起算——计时器存在且格式化正确） */
+		OK(find_bytes(out, out_len,
+			      "\xe2\x80\xa6 0s") != NULL,
+		   "N3-timer-watermark");
+		unsetenv("MOCK_STALL");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

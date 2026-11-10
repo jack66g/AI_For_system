@@ -97,6 +97,19 @@ int main(void)
 	   "leader-m-models");
 	OK(tui_keymap_lookup_leader(km, "x") == NULL, "leader-x-none");
 
+	/* T1：ctrl+n 开新对话（BASE；OVERLAY 的 ctrl+n 仍是 dialog 下一项） */
+	OK(strcmp(tui_keymap_lookup(km, "ctrl+n", TUI_KM_CTX_BASE),
+		  "session.new") == 0, "base-ctrl-n-new");
+	OK(strcmp(tui_keymap_lookup(km, "ctrl+n", TUI_KM_CTX_OVERLAY),
+		  "dialog.select.next") == 0, "overlay-ctrl-n-next");
+	/* T1：Home/End = 视口顶/底（BASE）；OVERLAY 的 Home/End 不变 */
+	OK(strcmp(tui_keymap_lookup(km, "home", TUI_KM_CTX_BASE),
+		  "session.scroll.top") == 0, "base-home-top");
+	OK(strcmp(tui_keymap_lookup(km, "end", TUI_KM_CTX_BASE),
+		  "session.scroll.bottom") == 0, "base-end-bottom");
+	OK(strcmp(tui_keymap_lookup(km, "home", TUI_KM_CTX_OVERLAY),
+		  "dialog.select.home") == 0, "overlay-home-kept");
+
 	/* 动作归属表（解析期校验用） */
 	OK(tui_keymap_action_ctx("app.exit") == TUI_KM_CTX_BASE,
 	   "ctx-app-exit");

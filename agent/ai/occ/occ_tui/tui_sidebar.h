@@ -20,7 +20,7 @@ extern "C" {
 #define TUI_SB_MIN_COLS 60	/* 终端宽低于此隐藏侧栏 */
 #define TUI_SB_MAX_ROWS 64
 
-/* 侧栏一行会话（id 截短显示：ses_ 前 8 位 + …） */
+/* 侧栏一行会话（T1：不再显示 id——只显标题；status 决定行尾标记/颜色） */
 typedef struct {
 	char id[44];			/* OCC_ID_LEN=40 + NUL */
 	char title[96];
@@ -31,14 +31,18 @@ typedef struct {
 
 typedef struct tui_sb_data {
 	tui_sb_row rows[TUI_SB_MAX_ROWS];
-	int n;
+	int n;				/* rows 有效条数（≤ TUI_SB_MAX_ROWS） */
+	int total;			/* 会话总数（真值；>n=列表已截断） */
 	long long tokens_total;		/* 底部 tokens 行 */
 	int pct;			/* token 水位 %；<0=未知 */
 } tui_sb_data;
 
 /*
  * 渲染侧栏到 [0, 0, TUI_SB_WIDTH, rows)。
- * 高亮当前会话（accent 反白），非当前 dim；底部 `12.3k · 6%` 行。
+ * 标题行 `sessions` + dim 细线；会话行只显标题（21 列内裁剪，末列留给
+ * 视图层分隔线/滚动条）；当前行 `▎`+FG 加粗；status=error 用 ERROR 色
+ * + 行尾 ✗、interrupted 行尾 ⋯；条数溢出时末行 `⋯ +N 个（/sessions）`。
+ * 底部 `12.3k · 6%` 行。
  */
 void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 			const tui_theme *th);

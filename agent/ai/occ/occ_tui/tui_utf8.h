@@ -45,11 +45,28 @@ size_t tui_utf8_encode(uint32_t cp, uint8_t *out);
  */
 int tui_wcwidth(uint32_t cp);
 
+/* 字符串显示列数（grapheme 宽度求和；非法字节按 1 列；NULL=0） */
+size_t tui_utf8_cols(const char *s);
+
 /* 是否组合符（零宽）——wcwidth==0 且非控制符 */
 int tui_is_combining(uint32_t cp);
 
 /* 前导字节 → 期望总长度（非法前导返回 0） */
 int tui_utf8_seqlen(uint8_t lead);
+
+/*
+ * LT-BUG-005：按**显示列**安全截断（纯绘制层公共原语）。
+ *
+ * 复制 src 的前缀到 dst，最多占 maxcols 显示列；超宽时末列写 `…`
+ * （即正文最多 maxcols-1 列），绝不切开多字节序列（CJK 双宽按 2 列
+ * 计，放不下即停）。dst 恒以 NUL 结尾（即使 dstcap==0 也不写）。
+ * 返回写入字节数（不含 NUL）。maxcols==0 / src==NULL → 空串。
+ *
+ * 口径与 tui_view 顶栏/侧栏旧私有实现逐字节相同（原 tv_clip_cols /
+ * clip_cols 已统一到本函数）。
+ */
+size_t tui_utf8_clip_cols(const char *src, size_t maxcols, char *dst,
+			  size_t dstcap);
 
 /* ---- B7：简化 grapheme 续接判定（「宁可宽一格」的 emoji 落点） ----
  *
