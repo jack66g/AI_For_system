@@ -87,7 +87,7 @@ tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
 
 TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
 	 test_hotplug test_outcome test_parquet test_sense_redact \
-	 test_decisions test_update_index_leak
+	 test_decisions test_update_index_leak test_pq_atomic
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
 test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)

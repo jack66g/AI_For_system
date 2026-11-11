@@ -25,6 +25,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -461,12 +462,19 @@ struct pq_chunk_info {
 /*
  * pq_write_table - 单表写文件（存在即覆盖）。返回 0/-1。
  * ints[]/bas[]：数值列与 BA 列按各自声明顺序供给（int64 值）。
+ *
+ * LT-BUG-009（2026-11-11 断电实证）：写盘走「<path>.tmp → fsync →
+ * rename」原子落盘。断电/崩溃最多留 *.tmp 残根（布局扫描只认
+ * "*.parquet" 后缀，天然不计），正式名永不出现 0 字节/半截文件；
+ * 失败路径 unlink 临时件并保留旧文件（旧「覆盖」语义升级为
+ * 「成功才替换」）。
  */
 static int pq_write_table(const char *path, const struct pq_coldef *cols,
 			  int ncols, int64_t nrows,
 			  int64_t *const *ints, const struct pq_ba *const *bas)
 {
 	FILE *f = NULL;
+	char tmp[PATH_MAX + 8];
 	long off = 4;
 	struct pq_chunk_info chunk[PQ_MAXCOL];
 	uint8_t *comp = NULL;
@@ -476,7 +484,9 @@ static int pq_write_table(const char *path, const struct pq_coldef *cols,
 	memset(chunk, 0, sizeof(chunk));
 	if (ncols < 1 || ncols > PQ_MAXCOL || nrows < 0)
 		return -1;
-	f = fopen(path, "wb");
+	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+		return -1;
+	f = fopen(tmp, "wb");
 	if (!f)
 		return -1;
 	if (fwrite(PQ_PAR1, 1, 4, f) != 4)
@@ -714,8 +724,15 @@ static int pq_write_table(const char *path, const struct pq_coldef *cols,
 	rc = 0;
 out:
 	free(comp);
-	if (f)
+	if (f) {
+		if (rc == 0 && (fflush(f) != 0 || fsync(fileno(f)) != 0))
+			rc = -1;
 		fclose(f);
+		if (rc == 0 && rename(tmp, path) != 0)
+			rc = -1;
+		if (rc != 0)
+			unlink(tmp);
+	}
 	return rc;
 }
 
