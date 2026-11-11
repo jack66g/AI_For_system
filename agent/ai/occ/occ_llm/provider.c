@@ -540,6 +540,59 @@ static void parse_available(const char *txt, const struct toml_sec *s,
 	free(raw);
 }
 
+/*
+ * 顶层 model = "<slot>" 兼容形（[default].model 缺失时的兜底；LT-BUG-011）：
+ * 命中写 cfg->selector，未命中留空。只认首个 model 键；model_name 等前缀
+ * 键不误吃；引号值（TOML 字符串）才收，裸值不认（选择器留空走缺省链）。
+ */
+static void parse_top_selector(const char *txt, occ_provider_config *cfg)
+{
+	const char *lp = txt;
+
+	cfg->selector[0] = '\0';
+	while (*lp) {
+		const char *le = strchr(lp, '\n');
+		size_t ln = le ? (size_t)(le - lp) : strlen(lp);
+		size_t k = 0;
+
+		while (k < ln && (lp[k] == ' ' || lp[k] == '\t'))
+			k++;
+		if (k < ln && lp[k] == '[')
+			break;		/* 首个节头：顶层结束 */
+		if (k < ln && lp[k] != '#' && ln - k >= 6 &&
+		    !strncmp(lp + k, "model", 5) &&
+		    (lp[k + 5] == ' ' || lp[k + 5] == '\t' ||
+		     lp[k + 5] == '=')) {
+			const char *eq = memchr(lp + k, '=', ln - k);
+
+			if (eq) {
+				const char *v = eq + 1;
+				const char *end = lp + ln;
+
+				while (v < end && (*v == ' ' || *v == '\t'))
+					v++;
+				if (v < end && (*v == '"' || *v == '\'')) {
+					const char *vs;
+					char q = *v++;
+
+					vs = v;
+					while (v < end && *v != q)
+						v++;
+					if (v > vs &&
+					    (size_t)(v - vs) <
+						    sizeof(cfg->selector)) {
+						memcpy(cfg->selector, vs,
+						       (size_t)(v - vs));
+						cfg->selector[v - vs] = '\0';
+					}
+				}
+			}
+			return;		/* 顶层 model 只认首个 */
+		}
+		lp = le ? le + 1 : lp + ln;
+	}
+}
+
 int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 			  const char *provider_toml)
 {
@@ -554,6 +607,19 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 	txt = read_file(model_toml, NULL);
 	if (!txt)
 		return -1;
+	{
+		/* 选择器正典：[default].model（config_manager/shell model
+		 * switch 同源）→ 顶层 model=（兼容旧形）。LT-BUG-011。 */
+		char *sel = toml_section_str(txt, "[default]", "model");
+
+		if (sel) {
+			snprintf(cfg->selector, sizeof(cfg->selector), "%s",
+				 sel);
+			free(sel);
+		} else {
+			parse_top_selector(txt, cfg);
+		}
+	}
 	nsecs = toml_split_sections(txt, secs, TOML_MAX_SECS);
 	if (nsecs > TOML_MAX_SECS) {
 		/* 超限文件拒收（写层保持可预测） */
@@ -587,6 +653,24 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 		/* provider.toml 缺/坏 → 类型表空（不影响模型槽位） */
 	}
 	return 0;
+}
+
+const char *occ_provider_default_slot(const occ_provider_config *cfg)
+{
+	size_t i;
+
+	if (!cfg)
+		return NULL;
+	if (cfg->selector[0]) {
+		for (i = 0; i < cfg->nslots; i++)
+			if (!strcmp(cfg->slots[i].id, cfg->selector))
+				return cfg->slots[i].id;
+		return NULL;	/* 选择器悬空：不静默兜底（人话错由调用方报） */
+	}
+	for (i = 0; i < cfg->nslots; i++)
+		if (!strcmp(cfg->slots[i].id, "cloud"))
+			return cfg->slots[i].id;
+	return cfg->nslots ? cfg->slots[0].id : NULL;
 }
 
 /*

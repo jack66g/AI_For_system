@@ -94,6 +94,9 @@ typedef struct occ_provider_config {
 						 * L1 ~/.aikernel/provider.toml） */
 	size_t navailable;
 	size_t malformed;
+	char selector[OCC_TOML_ID_MAX];		/* 活动槽位选择器（LT-BUG-011）：
+						 * [default].model（系统正典）→
+						 * 顶层 model=（兼容）；空=未指定 */
 } occ_provider_config;
 
 void occ_provider_config_init(occ_provider_config *cfg);
@@ -101,12 +104,21 @@ void occ_provider_config_free(occ_provider_config *cfg);
 
 /*
  * occ_provider_load_all - 解析 model.toml 全部 [models.*]/[provider.*] 段
- * + provider.toml 的 [providers] available 类型表（provider_toml 可 NULL
+ * + 活动槽位选择器（cfg->selector：[default].model → 顶层 model=）+
+ * provider.toml 的 [providers] available 类型表（provider_toml 可 NULL
  * =跳过类型表）。model_toml 不可读 → -1；其余容错（缺键段跳过计
  * malformed）。api_key 绝不落日志。
  */
 int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 			  const char *provider_toml);
+
+/*
+ * occ_provider_default_slot - 默认活动槽位（LT-BUG-011 口径）：
+ * 顶层 model = 选择器命中 → 该槽；未指定 → "cloud"（有则）→ 首槽。
+ * 选择器悬空（指向不存在的槽）→ NULL 且不静默兜底（调用方报人话错）；
+ * 无槽位亦 NULL。返回值为 cfg 内部 id 指针（随 cfg 生命周期）。
+ */
+const char *occ_provider_default_slot(const occ_provider_config *cfg);
 
 /*
  * occ_provider_resolve - 槽位 → 可调用的 occ_provider（解析 provider 引用

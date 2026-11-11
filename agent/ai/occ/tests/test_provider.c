@@ -133,6 +133,10 @@ int main(void)
 		CHECK(occ_provider_load_all(&cfg, p2path, NULL) == 0,
 		      "b3 load_all ok");
 		CHECK(cfg.nslots == 3 && cfg.nproviders == 1, "b3 sections");
+		CHECK(cfg.selector[0] == '\0' &&
+		      occ_provider_default_slot(&cfg) &&
+		      !strcmp(occ_provider_default_slot(&cfg), "cloud"),
+		      "b3 default slot = cloud (no selector)");
 
 		/* 引用式无槽位级 direct → 取 provider 段 direct */
 		memset(&rp, 0, sizeof(rp));
@@ -243,6 +247,86 @@ int main(void)
 		      "b3b legacy resolve also rejects");
 		occ_provider_config_free(&cfg);
 		unlink(p3path);
+	}
+
+	/* ---- LT-BUG-011：[default].model 选择器（系统正典）→ 默认槽位链 ---- */
+	{
+		char p4path[] = "/tmp/occ_test_model_sel_XXXXXX";
+		int fd4 = mkstemp(p4path);
+		occ_provider_config cfg;
+
+		CHECK(fd4 >= 0, "sel mkstemp fixture");
+		f = fdopen(fd4, "w");
+		fprintf(f, "# 注释里的 model = \"ghost\" 不算\n");
+		fprintf(f, "[default]\n");
+		fprintf(f, "model = \"zhipu\"\n");
+		fprintf(f, "[local]\n");
+		fprintf(f, "model = \"ignored-not-selector\"\n");
+		fprintf(f, "[models.cloud]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://cloud.example/v1\"\n");
+		fprintf(f, "api_key = \"sk-a\"\n");
+		fprintf(f, "[models.zhipu]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://zhipu.example/v1\"\n");
+		fprintf(f, "api_key = \"sk-b\"\n");
+		fclose(f);
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p4path, NULL) == 0,
+		      "sel load_all ok");
+		CHECK(!strcmp(cfg.selector, "zhipu"),
+		      "sel [default].model parsed ([local].model ignored)");
+		CHECK(occ_provider_default_slot(&cfg) &&
+		      !strcmp(occ_provider_default_slot(&cfg), "zhipu"),
+		      "sel selector wins over cloud");
+		occ_provider_config_free(&cfg);
+
+		/* 悬空选择器 → NULL（不静默兜底） */
+		f = fopen(p4path, "w");
+		fprintf(f, "[default]\nmodel = \"ghost\"\n");
+		fprintf(f, "[models.cloud]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://cloud.example/v1\"\n");
+		fclose(f);
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p4path, NULL) == 0 &&
+		      occ_provider_default_slot(&cfg) == NULL,
+		      "sel dangling selector -> NULL");
+		occ_provider_config_free(&cfg);
+
+		/* 顶层 model=（兼容旧形）→ 同样生效 */
+		f = fopen(p4path, "w");
+		fprintf(f, "model = \"zhipu\"\n");
+		fprintf(f, "[models.cloud]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://cloud.example/v1\"\n");
+		fprintf(f, "[models.zhipu]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://zhipu.example/v1\"\n");
+		fclose(f);
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p4path, NULL) == 0 &&
+		      occ_provider_default_slot(&cfg) &&
+		      !strcmp(occ_provider_default_slot(&cfg), "zhipu"),
+		      "sel top-level model= compat");
+		occ_provider_config_free(&cfg);
+
+		/* 无选择器无 cloud → 首槽 */
+		f = fopen(p4path, "w");
+		fprintf(f, "[models.first]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://f.example/v1\"\n");
+		fprintf(f, "[models.second]\n");
+		fprintf(f, "provider_type = \"openai_compatible\"\n");
+		fprintf(f, "base_url = \"https://s.example/v1\"\n");
+		fclose(f);
+		occ_provider_config_init(&cfg);
+		CHECK(occ_provider_load_all(&cfg, p4path, NULL) == 0 &&
+		      occ_provider_default_slot(&cfg) &&
+		      !strcmp(occ_provider_default_slot(&cfg), "first"),
+		      "sel fallback first slot");
+		occ_provider_config_free(&cfg);
+		unlink(p4path);
 	}
 
 	if (fails) {

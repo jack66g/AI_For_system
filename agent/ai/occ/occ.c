@@ -23,9 +23,10 @@
  *   OCC_DB           会话库（缺省 ~/.occ/sessions.db）
  *   OCC_SNAPROOT     快照根（缺省 ~/.occ/sessions… 见 occ_tools.h）
  *
- * 模型选择：a3 默认 model.toml [models.cloud] 槽位（L1 实况唯一云位，
- * dtchat 同源）；无 cloud 槽位时取首槽位。/models 切换是 c 棒（registry
- * 数据层 a2 已备）。
+ * 模型选择：model.toml `[default].model = "<slot>"` 选择器（系统正典，
+ * config_manager/shell model switch 同源；LT-BUG-011 口径）命中即用；
+ * 未指定则 [models.cloud] 槽位（dtchat 同源）；无 cloud 槽位时取首槽位。
+ * 选择器悬空=人话报错不静默兜底。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <ctype.h>
@@ -146,7 +147,7 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 			    occ_provider *p, char *err, size_t errlen)
 {
 	occ_provider_config cfg;
-	const char *slot = NULL;
+	const char *slot;
 
 	occ_provider_config_init(&cfg);
 	if (occ_provider_load_all(&cfg, model_toml, provider_toml)) {
@@ -155,16 +156,18 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 		occ_provider_config_free(&cfg);
 		return -1;
 	}
-	for (size_t i = 0; i < cfg.nslots; i++) {
-		if (!strcmp(cfg.slots[i].id, "cloud")) {
-			slot = "cloud";
-			break;
-		}
-	}
-	if (!slot && cfg.nslots > 0)
-		slot = cfg.slots[0].id;	/* 无 cloud 槽位：取首槽位 */
+	/* LT-BUG-011：默认槽位=顶层 model= 选择器 → cloud → 首槽；
+	 * 选择器悬空报人话错（不静默打到别的 provider）。 */
+	slot = occ_provider_default_slot(&cfg);
 	if (!slot) {
-		snprintf(err, errlen, "no model slots in %s", model_toml);
+		if (cfg.selector[0])
+			snprintf(err, errlen,
+				 "model.toml model = \"%s\" 指向的 "
+				 "[models.%s] 不存在", cfg.selector,
+				 cfg.selector);
+		else
+			snprintf(err, errlen, "no model slots in %s",
+				 model_toml);
 		occ_provider_config_free(&cfg);
 		return -1;
 	}
@@ -177,6 +180,10 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 				 "resolve slot `%s' failed", slot);
 			return -1;
 		}
+		if (p->api_key && !p->api_key[0])
+			fprintf(stderr,
+				"occ: 警告：[models.%s] api_key 为空，"
+				"远端可能拒绝（%s）\n", slot, model_toml);
 		return 0;
 	}
 }
