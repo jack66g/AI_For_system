@@ -85,9 +85,6 @@
 #include <linux/un.h>
 #include <net/xdp_sock_drv.h>
 #include <net/inet_dscp.h>
-#ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
-#endif
 
 #include "dev.h"
 
@@ -4542,11 +4539,6 @@ int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
 {
 	struct bpf_redirect_info *ri = bpf_net_ctx_get_ri();
 	enum bpf_map_type map_type = ri->map_type;
-
-#ifdef CONFIG_AIKERNEL_NET
-	if (!ai_net_xdp_hook(dev, xdp))
-		return -EBUSY;
-#endif
 
 	if (map_type == BPF_MAP_TYPE_XSKMAP)
 		return __xdp_do_redirect_xsk(ri, dev, xdp, xdp_prog);

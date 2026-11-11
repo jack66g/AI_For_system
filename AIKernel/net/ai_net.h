@@ -63,21 +63,9 @@ int ai_net_set_sub_rate(u16 sub, u32 rate);
 
 /*
  * ---- A 轨：AI 网络决策 Hook（ai_net.c 实现，全部 EXPORT_SYMBOL_GPL） ----
+ * nf 为观测采集钩；cong/cong_ssthresh 为 CCA 咨询钩（EXPERIMENTAL 门控）。
  * 空实现 = 原样放行（不改变内核默认行为）；决策计数经 ai_net_stats_read() 读取。
  */
-
-/**
- * ai_net_rtt_hook() - AI 修正 RTT/RTO 估计
- * @sk: 连接 socket
- * @mrtt_us: 本次 RTT 测量（us）
- * @srtt_us: 平滑 RTT（8 倍缩放，可改写）
- * @mdev_us: RTT 平均偏差（可改写）
- * @rttvar_us: RTT 方差（可改写）
- *
- * 空实现不改。调用点：tcp_input.c tcp_rtt_estimator() 出口。
- */
-void ai_net_rtt_hook(struct sock *sk, long mrtt_us,
-		     u32 *srtt_us, u32 *mdev_us, u32 *rttvar_us);
 
 /**
  * ai_net_nf_hook() - AI 包级异常/攻击检测
@@ -92,24 +80,6 @@ unsigned int ai_net_nf_hook(struct sk_buff *skb,
 			    unsigned int verdict);
 
 /**
- * ai_net_xdp_hook() - AI 决定 XDP 重定向
- * @dev: 入口设备
- * @xdp: XDP 缓冲
- *
- * 空实现返回 true（放行重定向）。调用点：filter.c xdp_do_redirect()。
- */
-bool ai_net_xdp_hook(struct net_device *dev, struct xdp_buff *xdp);
-
-/**
- * ai_net_qdisc_hook() - AI 动态调整 qdisc 参数
- * @dev: 设备
- * @sch: qdisc
- *
- * 空实现不改。调用点：sch_api.c qdisc_create() 成功后。
- */
-void ai_net_qdisc_hook(struct net_device *dev, struct Qdisc *sch);
-
-/**
  * w21 net.qdisc 运行时 graft 的 KUnit 测试钩子（实现在 ai_net.c 的
  * CONFIG_NET_SCHED && CONFIG_INET 门控段；声明同门控，避免 n 配置链接错）。
  * dryrun=true 时 net.qdisc apply 正常钳制/提交/current 更新但不调度
@@ -120,54 +90,9 @@ void ai_net_qdisc_dryrun_set(bool on);
 u8 ai_net_qdisc_pending_get(void);
 #endif
 
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
- * ai_net_neigh_hook() - AI 预测邻居条目过期
- * @n: 邻居条目
- * @refresh: 置 true 可刷新条目避免 GC 删除（AI 预测其仍活跃）
- *
- * 空实现不改（refresh 保持 false，按原 GC 判定）。调用点：neighbour.c
- * neigh_periodic_work() GC 删除前。
- */
-void ai_net_neigh_hook(struct neighbour *n, bool *refresh);
-
-/**
- * ai_net_napi_hook() - AI 调整 NAPI poll 权重
- * @n: NAPI 实例
- * @weight: 本轮 poll 预算（可改写）
- *
- * 空实现不改。调用点：dev.c __napi_poll() 入口。
- */
-void ai_net_napi_hook(struct napi_struct *n, int *weight);
-
-/**
- * ai_net_backlog_hook() - AI 自适应 listen backlog
- * @sock: 监听 socket
- * @backlog: backlog 值（可改写）
- *
- * 空实现不改。调用点：socket.c __sys_listen_socket()。
- */
-void ai_net_backlog_hook(struct socket *sock, int *backlog);
-
-/**
- * ai_net_gro_hook() - AI 决定 GRO 合并
- * @skb: 入包
- * @ret: GRO 判定结果（可改写，如强制 GRO_NORMAL 不合并）
- *
- * 空实现不改。调用点：gro.c gro_receive_skb()。
- */
-void ai_net_gro_hook(struct sk_buff *skb, gro_result_t *ret);
-
-/**
- * ai_net_conntrack_hook() - AI 优化 conntrack 表大小/GC 决策点
- * @ct: 新建的连接（不可改写）
- * @ct_count: 当前表内连接数
- *
- * 空实现不改。调用点：nf_conntrack_core.c __nf_conntrack_alloc() 成功。
- */
-void ai_net_conntrack_hook(struct nf_conn *ct, unsigned int ct_count);
-
-/**
- * ai_net_cong_hook() - AI 拥塞控制增量决策
+ * ai_net_cong_hook() - AI 拥塞控制增量决策（EXPERIMENTAL 门控）
  * @sk: 连接 socket
  * @cwnd_inc: 本 ACK 的 cwnd 增量（可改写；慢启动=acked、CA=1）
  *
@@ -176,13 +101,18 @@ void ai_net_conntrack_hook(struct nf_conn *ct, unsigned int ct_count);
 void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc);
 
 /**
- * ai_net_cong_ssthresh_hook() - AI 拥塞慢启动阈值决策
+ * ai_net_cong_ssthresh_hook() - AI 拥塞慢启动阈值决策（EXPERIMENTAL 门控）
  * @sk: 连接 socket
  * @ssthresh: 丢包后的 ssthresh（可改写；reno 默认折半）
  *
  * 空实现不改。调用点：ai_tcp_cca.c tcp_ai_ssthresh()。
  */
 void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
+/* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
+static inline void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc) { }
+static inline void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh) { }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /*
  * ---- 决策框架（占位启发式，AI 推理后续步骤替换，ai_net.c 实现） ----
@@ -206,8 +136,7 @@ u8 ai_net_classify(struct sk_buff *skb);
 void ai_net_detect_anomaly(struct sk_buff *skb, unsigned int verdict);
 
 struct ai_net_stats {
-	u64 hook_calls[11];	/* 0=rtt 1=nf 2=xdp 3=qdisc 4=neigh 5=napi
-				   6=backlog 7=gro 8=conntrack 9=cong 10=cong_ssthresh */
+	u64 hook_calls[3];	/* 0=nf 1=cong 2=cong_ssthresh */
 	u64 classify_calls;
 	u64 anomaly_syn_pkts;
 	u64 anomaly_retrans_pkts;
@@ -536,26 +465,12 @@ struct ai_net_stats;
 static inline bool ai_net_sample_take(u16 sub) { return false; }
 static inline int ai_net_set_sub_rate(u16 sub, u32 rate) { return AI_OK; }
 
-static inline void ai_net_rtt_hook(struct sock *sk, long mrtt_us,
-				   u32 *srtt_us, u32 *mdev_us, u32 *rttvar_us) { }
 static inline unsigned int ai_net_nf_hook(struct sk_buff *skb,
 					  const struct nf_hook_state *state,
 					  unsigned int verdict)
 {
 	return verdict;
 }
-static inline bool ai_net_xdp_hook(struct net_device *dev, struct xdp_buff *xdp)
-{
-	return true;
-}
-static inline void ai_net_qdisc_hook(struct net_device *dev,
-				     struct Qdisc *sch) { }
-static inline void ai_net_neigh_hook(struct neighbour *n, bool *refresh) { }
-static inline void ai_net_napi_hook(struct napi_struct *n, int *weight) { }
-static inline void ai_net_backlog_hook(struct socket *sock, int *backlog) { }
-static inline void ai_net_gro_hook(struct sk_buff *skb, gro_result_t *ret) { }
-static inline void ai_net_conntrack_hook(struct nf_conn *ct,
-					 unsigned int ct_count) { }
 static inline void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc) { }
 static inline void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh) { }
 

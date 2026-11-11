@@ -5875,8 +5875,6 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 
 #ifdef CONFIG_AIKERNEL_MM
 	ai_mode = current_is_kswapd() ? 0 : (cgroup_reclaim(sc) ? 2 : 1);
-	ai_mm_reclaim_hook(lruvec_pgdat(lruvec)->node_id, ai_mode,
-			   (u8)sc->priority, sc->nr_to_reclaim);
 #endif
 
 #ifdef CONFIG_AIKERNEL_MM

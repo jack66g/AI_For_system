@@ -1956,9 +1956,6 @@ int __sys_listen_socket(struct socket *sock, int backlog)
 	somaxconn = READ_ONCE(sock_net(sock->sk)->core.sysctl_somaxconn);
 	if ((unsigned int)backlog > somaxconn)
 		backlog = somaxconn;
-#ifdef CONFIG_AIKERNEL_NET
-	ai_net_backlog_hook(sock, &backlog);
-#endif
 
 	err = security_socket_listen(sock, backlog);
 	if (!err)

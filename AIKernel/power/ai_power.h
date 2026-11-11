@@ -4,8 +4,8 @@
  *
  * 本文件是 kernel/power/、drivers/cpufreq/、drivers/cpuidle/、drivers/thermal/
  * 全部 AI 埋点的唯一接入点：
- *   A 轨（控制）：ai_power_*_hook() 系列 —— 让 AI 参与电源管理决策，
- *                 空实现 = 原样放行（返回值不改变内核默认行为）；
+ *   A 轨（控制）：原 ai_power_*_hook() 系列决策钩已按 K0 真相表 §4 删除
+ *                 （空转纯开销；观测能力由 B 轨发射辅助承载不受影响）；
  *   B 轨（感知）：第12类 电源管理感知的 payload 结构 + 发射辅助，
  *                 全量原始零脱敏。
  *
@@ -102,12 +102,6 @@ struct ai_power_wakelock_payload {
 /* ---- 决策统计 ---- */
 
 struct ai_power_stats {
-	u64 cpufreq_hook_calls, cpufreq_hook_adjusted;
-	u64 cpuidle_hook_calls, cpuidle_hook_adjusted;
-	u64 em_hook_calls;
-	u64 thermal_hook_calls;
-	u64 qos_hook_calls;
-	u64 wakelock_hook_calls;
 	u64 emit_cpufreq, emit_cpuidle, emit_em, emit_thermal, emit_qos,
 	    emit_wakelock;
 };
@@ -115,82 +109,6 @@ struct ai_power_stats {
 #ifdef CONFIG_AIKERNEL_POWER
 
 /* ---- A 轨 Hook（实现见 ai_power.c；空实现 = 原样放行） ---- */
-
-/**
- * ai_power_cpufreq_hook() - AI 频率决策接口（aiguard governor 调用）
- * @policy: 当前 cpufreq 政策
- * @time: 本次更新时刻
- * @util: 当前 util 估算（0~SCHED_CAPACITY_SCALE）
- * @max: 当前容量
- * @freq: 出参/入参；schedutil 同款公式算出的目标频率（AI 可改写；resolve 前调用）
- *
- * 由 AIKernel/power/ai_cpufreq.c aiguard governor 频率计算后调用。空实现不改。
- */
-void ai_power_cpufreq_hook(struct cpufreq_policy *policy, u64 time,
-			   unsigned long util, unsigned long max,
-			   unsigned int *freq);
-
-/**
- * ai_power_cpuidle_hook() - AI 预测空闲时长，选 C-state
- * @cpu: 当前 CPU
- * @state_count: 可用 C-state 数
- * @latency_req_ns: 当前延迟约束
- * @predicted_ns: 出参/入参；menu 预测的空闲时长（AI 可调整）
- * @idx: 出参/入参；menu 选中的 state 索引（AI 可改写，调用点钳制边界）
- *
- * 由 drivers/cpuidle/governors/menu.c menu_select() 返回前调用。空实现不改。
- * 注意：本 Hook 在 idle 决策热路径上，实现必须零锁零分配零 printk。
- */
-void ai_power_cpuidle_hook(int cpu, int state_count, u64 latency_req_ns,
-			   u64 *predicted_ns, int *idx);
-
-/**
- * ai_power_em_hook() - AI 实时更新能耗模型参数
- * @dev: 能耗域设备
- * @table: 刚交换完成的新能耗表（AI 可调整 state[] 的 power/frequency）
- *
- * 由 kernel/power/energy_model.c em_dev_update_perf_domain() 表交换后调用。
- * 空实现不改表。
- */
-void ai_power_em_hook(struct device *dev, struct em_perf_table *table);
-
-/**
- * ai_power_thermal_hook() - AI 预测温度趋势，提前降频防过热
- * @zone: 热区名
- * @temperature: 当前温度（m°C）
- * @last_temperature: 上次温度（m°C）
- * @target_temp: 出参/入参；AI 建议的降频起始温度（空实现不改）
- *
- * 由 drivers/thermal/thermal_core.c __thermal_zone_device_update() 温度更新后调用。
- * 空实现不改。
- */
-void ai_power_thermal_hook(const char *zone, int temperature,
-			   int last_temperature, int *target_temp);
-
-/**
- * ai_power_qos_hook() - AI 评估 QoS 约束合理性
- * @qos_type: enum pm_qos_type（PM_QOS_MIN/MAX/SUM）
- * @action: enum pm_qos_req_action（ADD/UPDATE/REMOVE）
- * @prev_value: 变更前聚合值
- * @curr_value: 出参/入参；变更后聚合值（AI 可改写）
- *
- * 由 kernel/power/qos.c pm_qos_update_target() 解锁后调用。空实现不改。
- */
-void ai_power_qos_hook(int qos_type, int action, int prev_value,
-		       int *curr_value);
-
-/**
- * ai_power_wakelock_hook() - AI 预测 wakeup 事件，预唤醒
- * @name: 唤醒锁名
- * @len: 名字长度
- * @timeout_ns: 超时（0=无限）
- * @action: 1=acquire 2=release
- *
- * 由 kernel/power/wakelock.c pm_wake_lock()/pm_wake_unlock() capable 校验后调用。
- * 空实现无操作（AI 预唤醒决策预留位）。
- */
-void ai_power_wakelock_hook(const char *name, size_t len, u64 timeout_ns,
-			    u8 action);
 
 /* ---- 第12类发射辅助（实现见 ai_power.c；全部 sample_take + emit_direct） ---- */
 
@@ -226,28 +144,6 @@ void ai_power_wakeup_stats_read(bool *on, u64 *events);
 
 /* 空函数兜底：CONFIG_AIKERNEL_POWER=n 时调用点不编译，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline void ai_power_cpufreq_hook(struct cpufreq_policy *policy,
-					 u64 time, unsigned long util,
-					 unsigned long max,
-					 unsigned int *freq)
-{ }
-static inline void ai_power_cpuidle_hook(int cpu, int state_count,
-					 u64 latency_req_ns, u64 *predicted_ns,
-					 int *idx)
-{ }
-static inline void ai_power_em_hook(struct device *dev,
-				    struct em_perf_table *table)
-{ }
-static inline void ai_power_thermal_hook(const char *zone, int temperature,
-					 int last_temperature,
-					 int *target_temp)
-{ }
-static inline void ai_power_qos_hook(int qos_type, int action,
-				     int prev_value, int *curr_value)
-{ }
-static inline void ai_power_wakelock_hook(const char *name, size_t len,
-					  u64 timeout_ns, u8 action)
-{ }
 static inline void ai_telemetry_cpufreq_change(u16 cpu, u32 old_freq,
 					       u32 new_freq, u8 relation,
 					       const char *governor)

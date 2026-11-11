@@ -7654,9 +7654,6 @@ static int __napi_poll(struct napi_struct *n, bool *repoll)
 	int work, weight;
 
 	weight = n->weight;
-#ifdef CONFIG_AIKERNEL_NET
-	ai_net_napi_hook(n, &weight);
-#endif
 
 	/* This NAPI_STATE_SCHED test is for avoiding a race
 	 * with netpoll's poll_napi().  Only the entity which

@@ -2,7 +2,8 @@
 /*
  * ai_irq.c - AIKernel 中断管理核心（Prompt 09，重构计划 模块8）
  *
- * A 轨：5 个 ai_irq_*_hook()（空实现 = 原样放行，决策表待 AI 填充）；
+ * A 轨：原 5 个 ai_irq_*_hook() 决策钩已按 K0 真相表 §4 删除（空转纯
+ *       开销；观测能力由 B 轨发射辅助承载不受影响）；
  * B 轨：第9类 中断与异常感知（09.01~09.05）发射辅助，全部
  *       sample_take 采样判定 + 栈上 payload + emit_direct 直写。
  *
@@ -63,14 +64,6 @@ void ai_irq_stats_read(struct ai_irq_stats *st)
 	for_each_possible_cpu(cpu) {
 		const struct ai_irq_stats *p = per_cpu_ptr(&ai_irq_pcpu_stats, cpu);
 
-		st->affinity_hook_calls += p->affinity_hook_calls;
-		st->affinity_hook_changed += p->affinity_hook_changed;
-		st->thread_hook_calls += p->thread_hook_calls;
-		st->thread_hook_skipped += p->thread_hook_skipped;
-		st->softirq_hook_calls += p->softirq_hook_calls;
-		st->wq_hook_calls += p->wq_hook_calls;
-		st->watchdog_hook_calls += p->watchdog_hook_calls;
-		st->watchdog_threshold_adjusted += p->watchdog_threshold_adjusted;
 		st->emit_affinity += p->emit_affinity;
 		st->emit_thread += p->emit_thread;
 		st->emit_softirq += p->emit_softirq;
@@ -79,50 +72,6 @@ void ai_irq_stats_read(struct ai_irq_stats *st)
 	}
 }
 EXPORT_SYMBOL_GPL(ai_irq_stats_read);
-
-/* ==================================================================
- * A 轨：AI 中断管理 Hook（空实现 = 原样放行）
- * ==================================================================
- */
-
-int ai_irq_affinity_hook(unsigned int nvecs, struct irq_affinity *affd,
-			 struct irq_affinity_desc *masks)
-{
-	this_cpu_inc(ai_irq_pcpu_stats.affinity_hook_calls);
-	/* AI 按 CPU 负载优化分发：决策表就绪后在此调整 masks 并置 changed */
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_irq_affinity_hook);
-
-bool ai_irq_thread_hook(unsigned int irq, struct irqaction *new)
-{
-	this_cpu_inc(ai_irq_pcpu_stats.thread_hook_calls);
-	/* AI 决定哪些中断线程化：返回 false 跳过线程化（仅非强制路径） */
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_irq_thread_hook);
-
-void ai_irq_softirq_hook(u32 *pending, unsigned int *max_restart)
-{
-	this_cpu_inc(ai_irq_pcpu_stats.softirq_hook_calls);
-	/* AI 调整 softirq 顺序/批次：可改 pending 位图与 max_restart */
-}
-EXPORT_SYMBOL_GPL(ai_irq_softirq_hook);
-
-void ai_irq_wq_hook(struct worker_pool *pool, bool *create_worker)
-{
-	this_cpu_inc(ai_irq_pcpu_stats.wq_hook_calls);
-	/* AI 预测 worker 需求：可改 *create_worker 阻止/促成 worker 创建 */
-}
-EXPORT_SYMBOL_GPL(ai_irq_wq_hook);
-
-int ai_irq_watchdog_hook(unsigned long duration, unsigned long *threshold)
-{
-	this_cpu_inc(ai_irq_pcpu_stats.watchdog_hook_calls);
-	/* AI 自适应 lockup 阈值：可改 *threshold（本步近事件判定用默认值） */
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_irq_watchdog_hook);
 
 /* ==================================================================
  * B 轨：第9类 中断与异常感知发射辅助

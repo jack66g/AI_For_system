@@ -1070,10 +1070,6 @@ static void __clocksource_select(bool skipcur)
 	}
 
 found:
-#ifdef CONFIG_AIKERNEL_TIME
-	/* AI 评估时钟源质量，动态切换（空实现无操作） */
-	ai_time_clocksource_hook(best, curr_clocksource);
-#endif
 	if (curr_clocksource != best && !timekeeping_notify(best)) {
 #ifdef CONFIG_AIKERNEL_TIME
 		/* clocksource_switch 全量遥测（severity=IMPORTANT） */

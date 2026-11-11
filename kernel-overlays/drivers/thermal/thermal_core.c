@@ -646,19 +646,9 @@ void __thermal_zone_device_update(struct thermal_zone_device *tz,
 	thermal_genl_sampling_temp(tz->id, temp);
 
 #ifdef CONFIG_AIKERNEL_POWER
-	/*
-	 * AI 预测温度趋势提前降频：可改写 target_temp（AI 建议的降频起始温度）。
-	 * 空实现不改 → 热管理决策与基线一致。热区采样更新路径（周期监控），
-	 * 遥测 1/16 采样，zone/temp/last/trend 全量零脱敏。
-	 */
-	{
-		int target_temp = tz->temperature;
-
-		ai_power_thermal_hook(tz->type, temp, tz->last_temperature,
-				      &target_temp);
-		ai_telemetry_thermal_trend(tz->type, temp,
-					   tz->last_temperature);
-	}
+	/* 热区采样更新路径（周期监控），遥测 1/16 采样，
+	 * zone/temp/last/trend 全量零脱敏。 */
+	ai_telemetry_thermal_trend(tz->type, temp, tz->last_temperature);
 #endif
 
 	tz->notify_event = event;

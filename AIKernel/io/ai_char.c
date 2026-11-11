@@ -2,12 +2,12 @@
 /*
  * ai_char.c - AIKernel 字符设备核心（Prompt 05）
  *
- * A 轨：ai_io_entropy_hook()（熵源质量评估，空实现不改）、
- *       ai_io_tty_hook()（用户输入预判，空实现不改）+ 决策计数。
+ * A 轨：原 entropy/tty 决策钩已按 K0 真相表 §4 删除（无决策出口；
+ *       观测能力由 B 轨发射辅助承载，不受影响）。
  * B 轨：3.6 字符设备 I/O 事件发射辅助（sample_take + emit_direct 直写）。
  *
- * 门控：CONFIG_AIKERNEL_IO。CONFIG_AIKERNEL_TELEMETRY=n 时本文件仍编译
- * （Hook 计数 + 空放行），发射辅助退化为无操作。
+ * 门控：CONFIG_AIKERNEL_IO。CONFIG_AIKERNEL_TELEMETRY=n 时本文件仍编译，
+ * 发射辅助退化为无操作。
  *
  * 铁律：发射路径无锁、无分配、不睡眠（mix_pool_bytes 在自旋锁内调用，
  * TTY/random 读写在进程上下文）。
@@ -19,40 +19,6 @@
 #include <linux/string.h>
 
 #include "ai_char.h"
-
-/* ---- 决策计数（per-CPU，ai_io_stats_read 汇总） ---- */
-
-static DEFINE_PER_CPU(u64, ai_char_entropy_calls);
-static DEFINE_PER_CPU(u64, ai_char_tty_calls);
-
-void ai_io_char_stats_read(u64 *entropy_calls, u64 *tty_calls)
-{
-	int cpu;
-
-	*entropy_calls = 0;
-	*tty_calls = 0;
-	for_each_possible_cpu(cpu) {
-		*entropy_calls += per_cpu(ai_char_entropy_calls, cpu);
-		*tty_calls += per_cpu(ai_char_tty_calls, cpu);
-	}
-}
-EXPORT_SYMBOL_GPL(ai_io_char_stats_read);
-
-/* ==================================================================
- * A 轨：Hook 空实现（= 原样放行）
- * ================================================================== */
-
-void ai_io_entropy_hook(size_t len, unsigned int *credit_bits)
-{
-	this_cpu_inc(ai_char_entropy_calls);
-}
-EXPORT_SYMBOL_GPL(ai_io_entropy_hook);
-
-void ai_io_tty_hook(struct tty_struct *tty, u8 *prediction)
-{
-	this_cpu_inc(ai_char_tty_calls);
-}
-EXPORT_SYMBOL_GPL(ai_io_tty_hook);
 
 /* ==================================================================
  * B 轨：3.6 字符设备事件发射辅助

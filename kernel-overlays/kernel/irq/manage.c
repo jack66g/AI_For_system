@@ -1512,11 +1512,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * and the interrupt does not nest into another interrupt
 	 * thread.
 	 */
-#ifdef CONFIG_AIKERNEL_INTERRUPT
-	if (new->thread_fn && !nested && ai_irq_thread_hook(irq, new)) {
-#else
 	if (new->thread_fn && !nested) {
-#endif
 		ret = setup_irq_thread(new, irq, false);
 		if (ret)
 			goto out_mput;

@@ -69,8 +69,6 @@ struct ai_proc_info {
 struct ai_proc_stats {
 	u64 classify_count;
 	u64 exec_count;
-	u64 futex_count;
-	u64 signal_count;
 	u64 query_count;
 	u64 slot_insert, slot_update, slot_remove, slot_evict;
 };
@@ -106,33 +104,6 @@ u8 ai_proc_classify_hook(struct task_struct *p,
  * （本步按路径特征微调启发式；AI 预测后续 Prompt 替换）。
  */
 void ai_proc_exec_hook(struct task_struct *p, const char *path);
-
-/**
- * ai_proc_futex_hook() - AI 任务 futex 优先（模块14.4）
- * @p:    等待 futex 的进程
- * @addr: futex 地址
- * @val:  期望值
- *
- * 由 kernel/futex/ futex_wait() 调用。空实现 = 原逻辑放行 + 计数；
- * AI 优先级调整决策表后续 Prompt 填充。
- *
- * 返回 0 = 原逻辑。
- */
-int ai_proc_futex_hook(struct task_struct *p, u32 addr, u32 val);
-
-/**
- * ai_proc_signal_hook() - AI 评估异常信号模式（模块14.5）
- * @sig:   信号号
- * @target: 目标进程
- * @info:  信号详情（可为 NULL）
- *
- * 由 kernel/signal.c __send_signal_locked() 调用。空实现 = 放行 + 计数；
- * AI 信号过滤/降权决策表后续 Prompt 填充。
- *
- * 返回 0 = 放行。
- */
-int ai_proc_signal_hook(int sig, struct task_struct *target,
-			struct kernel_siginfo *info);
 
 /**
  * ai_proc_query() - 查询进程 AI 信息（供 Prompt 13 调度接入）
@@ -189,15 +160,6 @@ static inline u8 ai_proc_classify_hook(struct task_struct *p,
 }
 static inline void ai_proc_exec_hook(struct task_struct *p, const char *path)
 {
-}
-static inline int ai_proc_futex_hook(struct task_struct *p, u32 addr, u32 val)
-{
-	return 0;   /* 空函数兜底：原逻辑放行 */
-}
-static inline int ai_proc_signal_hook(int sig, struct task_struct *target,
-				      struct kernel_siginfo *info)
-{
-	return 0;
 }
 static inline int ai_proc_query(int pid, struct ai_proc_info *out)
 {

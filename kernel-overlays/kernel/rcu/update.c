@@ -422,10 +422,6 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
 	u64 ai_gp_start;
 	bool ai_expedite = false;
 
-	/* AI 预测回调压力，调整宽限期（空实现不改 *expedite） */
-	ai_lock_rcu_hook(n, &ai_expedite);
-	if (ai_expedite)
-		rcu_expedite_gp();
 	ai_gp_start = ktime_get_ns();
 #endif
 

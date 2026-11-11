@@ -114,23 +114,7 @@ EXPORT_SYMBOL_GPL(ai_sched_predict_timeslice);
 
 /* ---- Hook：空实现 = 原样放行 ---- */
 
-void ai_sched_pick_next_hook(struct task_struct **prev, struct task_struct **next)
-{
-	WRITE_ONCE(ai_sched_stats.pick_next_calls,
-		   READ_ONCE(ai_sched_stats.pick_next_calls) + 1);
-	/* AI 推理占位：本步不修改 prev/next */
-}
-EXPORT_SYMBOL_GPL(ai_sched_pick_next_hook);
-
-struct task_struct *ai_cfs_pick_next_hook(struct task_struct *prev,
-					  struct task_struct *next)
-{
-	WRITE_ONCE(ai_sched_stats.cfs_pick_calls,
-		   READ_ONCE(ai_sched_stats.cfs_pick_calls) + 1);
-	return next;   /* 原样返回 */
-}
-EXPORT_SYMBOL_GPL(ai_cfs_pick_next_hook);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 int ai_load_balance_hook(int src_cpu, int dst_cpu, unsigned long imbalance,
 			 bool *proceed)
 {
@@ -141,23 +125,9 @@ int ai_load_balance_hook(int src_cpu, int dst_cpu, unsigned long imbalance,
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_load_balance_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
-u64 ai_pelt_adjust_hook(u64 delta, unsigned long load)
-{
-	WRITE_ONCE(ai_sched_stats.pelt_adjust_calls,
-		   READ_ONCE(ai_sched_stats.pelt_adjust_calls) + 1);
-	return delta;   /* 原样返回 */
-}
-EXPORT_SYMBOL_GPL(ai_pelt_adjust_hook);
-
-void ai_sched_context_switch_hook(struct task_struct *prev,
-				  struct task_struct *next, int cpu)
-{
-	WRITE_ONCE(ai_sched_stats.context_switch_calls,
-		   READ_ONCE(ai_sched_stats.context_switch_calls) + 1);
-}
-EXPORT_SYMBOL_GPL(ai_sched_context_switch_hook);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 int ai_sched_rt_admission_hook(struct task_struct *p)
 {
 	/* 区分 RT/DL 调用来源（按任务策略判定） */
@@ -170,14 +140,7 @@ int ai_sched_rt_admission_hook(struct task_struct *p)
 	return 1;   /* 本步允许全部；AI 准入决策后续步骤接通 */
 }
 EXPORT_SYMBOL_GPL(ai_sched_rt_admission_hook);
-
-void ai_sched_isolate_hook(const struct cpumask *isolated, unsigned long hk_type)
-{
-	WRITE_ONCE(ai_sched_stats.isolate_hook_calls,
-		   READ_ONCE(ai_sched_stats.isolate_hook_calls) + 1);
-	/* 本步不修改隔离配置；AI 动态隔离建议后续步骤落地 */
-}
-EXPORT_SYMBOL_GPL(ai_sched_isolate_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 int ai_sched_query(u32 query_id, const void *in, size_t in_len,
 		   void *out, size_t out_len)

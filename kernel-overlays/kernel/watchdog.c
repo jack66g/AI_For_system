@@ -817,8 +817,6 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 	{
 		unsigned long ai_threshold = get_softlockup_thresh();
 
-		/* AI 自适应 lockup 阈值（空实现不改阈值） */
-		ai_irq_watchdog_hook(duration, &ai_threshold);
 		/* watchdog_lockup 近事件（≥ 阈值一半）与全量实际触发 */
 		if (unlikely(duration) && ai_threshold > 1)
 			ai_telemetry_watchdog_lockup(

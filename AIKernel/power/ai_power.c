@@ -2,7 +2,8 @@
 /*
  * ai_power.c - AIKernel 电源管理核心（Prompt 10，重构计划 模块11）
  *
- * A 轨：6 个 ai_power_*_hook()（空实现 = 原样放行，决策表待 AI 填充）；
+ * A 轨：原 6 个 ai_power_*_hook() 决策钩已按 K0 真相表 §4 删除（空转纯
+ *       开销；观测能力由 B 轨发射辅助承载不受影响）；
  * B 轨：第12类 电源管理感知（12.01~12.05）发射辅助，全部
  *       sample_take 采样判定 + 栈上 payload + emit_direct 直写。
  *
@@ -76,14 +77,6 @@ void ai_power_stats_read(struct ai_power_stats *st)
 		const struct ai_power_stats *p = per_cpu_ptr(&ai_power_pcpu_stats,
 							    cpu);
 
-		st->cpufreq_hook_calls += p->cpufreq_hook_calls;
-		st->cpufreq_hook_adjusted += p->cpufreq_hook_adjusted;
-		st->cpuidle_hook_calls += p->cpuidle_hook_calls;
-		st->cpuidle_hook_adjusted += p->cpuidle_hook_adjusted;
-		st->em_hook_calls += p->em_hook_calls;
-		st->thermal_hook_calls += p->thermal_hook_calls;
-		st->qos_hook_calls += p->qos_hook_calls;
-		st->wakelock_hook_calls += p->wakelock_hook_calls;
 		st->emit_cpufreq += p->emit_cpufreq;
 		st->emit_cpuidle += p->emit_cpuidle;
 		st->emit_em += p->emit_em;
@@ -93,63 +86,6 @@ void ai_power_stats_read(struct ai_power_stats *st)
 	}
 }
 EXPORT_SYMBOL_GPL(ai_power_stats_read);
-
-/* ==================================================================
- * A 轨：AI 电源管理 Hook（空实现 = 原样放行）
- * ==================================================================
- */
-
-void ai_power_cpufreq_hook(struct cpufreq_policy *policy, u64 time,
-			   unsigned long util, unsigned long max,
-			   unsigned int *freq)
-{
-	this_cpu_inc(ai_power_pcpu_stats.cpufreq_hook_calls);
-	/* AI 频率决策：可改写 *freq（aiguard 空实现 = schedutil 同款公式原样） */
-	if (freq && *freq == 0)
-		this_cpu_inc(ai_power_pcpu_stats.cpufreq_hook_adjusted);
-}
-EXPORT_SYMBOL_GPL(ai_power_cpufreq_hook);
-
-void ai_power_cpuidle_hook(int cpu, int state_count, u64 latency_req_ns,
-			   u64 *predicted_ns, int *idx)
-{
-	this_cpu_inc(ai_power_pcpu_stats.cpuidle_hook_calls);
-	/* AI 预测空闲时长选 C-state：可改 *predicted_ns / *idx（调用点钳制边界） */
-	if (idx && *idx < 0)
-		this_cpu_inc(ai_power_pcpu_stats.cpuidle_hook_adjusted);
-}
-EXPORT_SYMBOL_GPL(ai_power_cpuidle_hook);
-
-void ai_power_em_hook(struct device *dev, struct em_perf_table *table)
-{
-	this_cpu_inc(ai_power_pcpu_stats.em_hook_calls);
-	/* AI 实时更新能耗模型参数：可调整 table->state[]（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_power_em_hook);
-
-void ai_power_thermal_hook(const char *zone, int temperature,
-			   int last_temperature, int *target_temp)
-{
-	this_cpu_inc(ai_power_pcpu_stats.thermal_hook_calls);
-	/* AI 预测温度趋势提前降频：可改 *target_temp（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_power_thermal_hook);
-
-void ai_power_qos_hook(int qos_type, int action, int prev_value,
-		       int *curr_value)
-{
-	this_cpu_inc(ai_power_pcpu_stats.qos_hook_calls);
-	/* AI 评估 QoS 约束合理性：可改 *curr_value（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_power_qos_hook);
-
-void ai_power_wakelock_hook(const char *name, size_t len, u64 timeout_ns,
-			    u8 action)
-{
-	this_cpu_inc(ai_power_pcpu_stats.wakelock_hook_calls);
-	/* AI 预测 wakeup 事件预唤醒：决策表就绪后在此评估 */
-}
-EXPORT_SYMBOL_GPL(ai_power_wakelock_hook);
 
 /* ==================================================================
  * B 轨：第12类 电源管理感知发射辅助

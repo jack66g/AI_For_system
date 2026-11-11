@@ -3,7 +3,7 @@
  * ai_vfs_procfs.c - AIKernel /proc/ai/vfs/ VFS 决策统计（Prompt 08）
  *
  * 接口：
- *   stats      R   全部 AI VFS Hook 决策计数 + 缓存命中/未命中 + path_overflow
+ *   stats      R   inode 保留计数 + 缓存命中/未命中 + path_overflow + 子事件发射计数
  *   rates      R   24 个子事件采样率表（0=丢弃 1=全量 N=每 N 条记 1 条）
  *
  * 门控 CONFIG_AIKERNEL_VFS。节点挂载到 /proc/ai/ 根（ai_procfs.c 导出），
@@ -68,17 +68,6 @@ static int ai_vfs_stats_show(struct seq_file *m, void *v)
 
 	ai_vfs_stats_read(&st);
 
-	seq_printf(m, "dcache_hook_calls=%llu\n", st.dcache_hook_calls);
-	seq_printf(m, "dcache_ai_veto=%llu\n", st.dcache_ai_veto);
-	seq_printf(m, "inode_hook_calls=%llu\n", st.inode_hook_calls);
-	seq_printf(m, "inode_ai_veto=%llu\n", st.inode_ai_veto);
-	seq_printf(m, "path_hook_calls=%llu\n", st.path_hook_calls);
-	seq_printf(m, "writeback_hook_calls=%llu\n", st.writeback_hook_calls);
-	seq_printf(m, "writeback_ai_adjusted=%llu\n", st.writeback_ai_adjusted);
-	seq_printf(m, "epoll_hook_calls=%llu\n", st.epoll_hook_calls);
-	seq_printf(m, "aio_hook_calls=%llu\n", st.aio_hook_calls);
-	seq_printf(m, "dax_hook_calls=%llu\n", st.dax_hook_calls);
-	seq_printf(m, "rw_hook_calls=%llu\n", st.rw_hook_calls);
 	seq_printf(m, "dentry_hit=%llu\n", st.dentry_hit);
 	seq_printf(m, "dentry_miss=%llu\n", st.dentry_miss);
 	total = st.dentry_hit + st.dentry_miss;

@@ -277,8 +277,9 @@ struct ai_sec_stack_overflow_payload {
 
 /* ---- A 轨：ai_sec_* Hook（空实现 = 原样放行，语义不变） ---- */
 
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
- * ai_sec_seccomp_hook() - AI 分析进程行为，建议 seccomp 规则
+ * ai_sec_seccomp_hook() - AI 分析进程行为，建议 seccomp 规则（EXPERIMENTAL 门控）
  * @syscall_nr: 本次系统调用号
  * @sd:        seccomp 数据（可为 NULL）
  * @action:    seccomp 动作（AI 可修改，默认原样）
@@ -291,7 +292,7 @@ void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 			 u32 *action);
 
 /**
- * ai_sec_cap_hook() - AI 评估能力授予风险
+ * ai_sec_cap_hook() - AI 评估能力授予风险（EXPERIMENTAL 门控）
  * @cred: 被检查的凭证
  * @ns:   目标用户命名空间
  * @cap:  能力号
@@ -304,7 +305,7 @@ int ai_sec_cap_hook(const struct cred *cred, struct user_namespace *ns,
 		    int cap, int ret);
 
 /**
- * ai_sec_key_hook() - AI 评估密钥强度
+ * ai_sec_key_hook() - AI 评估密钥强度（EXPERIMENTAL 门控）
  * @type:    密钥类型
  * @desc:    密钥描述
  * @plen:    载荷长度
@@ -316,7 +317,7 @@ void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
 		     u8 *strength);
 
 /**
- * ai_sec_crypto_hook() - AI 按负载选择加密算法
+ * ai_sec_crypto_hook() - AI 按负载选择加密算法（EXPERIMENTAL 门控）
  * @alg_name: 算法名（AI 可改为更优算法名，默认原样）
  * @type:     算法类型
  * @mask:     类型掩码
@@ -324,6 +325,20 @@ void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
  * 由 crypto/api.c crypto_alloc_tfm_node() 调用；本步空实现不改。
  */
 void ai_sec_crypto_hook(const char **alg_name, u32 type, u32 mask);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
+/* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
+static inline void ai_sec_seccomp_hook(int syscall_nr,
+				       const struct seccomp_data *sd,
+				       u32 *action) { }
+static inline int ai_sec_cap_hook(const struct cred *cred,
+				  struct user_namespace *ns, int cap, int ret)
+{ return ret; }
+static inline void ai_sec_key_hook(const char *type, const char *desc,
+				   size_t plen, u8 *strength)
+{ if (strength) *strength = 0; }
+static inline void ai_sec_crypto_hook(const char **alg_name, u32 type,
+				      u32 mask) { }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /**
  * ai_sec_syscall_name() - 系统调用号转名称（低频事件专用）

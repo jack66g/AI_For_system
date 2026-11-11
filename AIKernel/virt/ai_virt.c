@@ -2,9 +2,8 @@
 /*
  * ai_virt.c - AIKernel 虚拟化核心（Prompt 10，重构计划 模块12）
  *
- * A 轨：5 个 ai_virt_*_hook()（空实现 = 原样放行，决策表待 AI 填充；
- *       全部标量参数——KVM 类型由 virt/kvm/、arch/x86/kvm/、drivers/virtio/、
- *       drivers/vfio/ 调用点解引用后传入，本文件零 KVM 依赖）；
+ * A 轨：原 5 个 ai_virt_*_hook() 决策钩已按 K0 真相表 §4 删除（空转纯
+ *       开销；观测能力由 B 轨发射辅助承载不受影响）；
  * B 轨：第13类 虚拟化感知（13.01~13.05）发射辅助，全部
  *       sample_take 采样判定 + 栈上 payload + emit_direct 直写。
  *
@@ -76,11 +75,6 @@ void ai_virt_stats_read(struct ai_virt_stats *st)
 		const struct ai_virt_stats *p = per_cpu_ptr(&ai_virt_pcpu_stats,
 							   cpu);
 
-		st->vcpu_hook_calls += p->vcpu_hook_calls;
-		st->mmu_hook_calls += p->mmu_hook_calls;
-		st->irq_hook_calls += p->irq_hook_calls;
-		st->balloon_hook_calls += p->balloon_hook_calls;
-		st->vfio_hook_calls += p->vfio_hook_calls;
 		st->emit_vcpu += p->emit_vcpu;
 		st->emit_vm += p->emit_vm;
 		st->emit_run += p->emit_run;
@@ -89,47 +83,6 @@ void ai_virt_stats_read(struct ai_virt_stats *st)
 	}
 }
 EXPORT_SYMBOL_GPL(ai_virt_stats_read);
-
-/* ==================================================================
- * A 轨：AI 虚拟化 Hook（空实现 = 原样放行）
- * ==================================================================
- */
-
-void ai_virt_vcpu_hook(int vcpu_id, int cpu, int pid, bool preempted)
-{
-	this_cpu_inc(ai_virt_pcpu_stats.vcpu_hook_calls);
-	/* AI 优化 vCPU pinning/调度：决策表就绪后在此评估 */
-}
-EXPORT_SYMBOL_GPL(ai_virt_vcpu_hook);
-
-void ai_virt_mmu_hook(int vcpu_id, u64 gfn, u8 level, u8 exec, bool *prefetch)
-{
-	this_cpu_inc(ai_virt_pcpu_stats.mmu_hook_calls);
-	/* AI 预测 Guest 页面访问预填充 EPT：可改 *prefetch（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_virt_mmu_hook);
-
-void ai_virt_irq_hook(int irq, int level, bool *coalesce)
-{
-	this_cpu_inc(ai_virt_pcpu_stats.irq_hook_calls);
-	/* AI 聚合中断减少 VM Exit：可改 *coalesce（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_virt_irq_hook);
-
-void ai_virt_balloon_hook(s64 diff, u32 *target_pages)
-{
-	this_cpu_inc(ai_virt_pcpu_stats.balloon_hook_calls);
-	/* AI 预测 Guest 内存需求：可改 *target_pages（空实现不改） */
-}
-EXPORT_SYMBOL_GPL(ai_virt_balloon_hook);
-
-void ai_virt_vfio_hook(dma_addr_t iova, unsigned long pfn, long npage,
-		       int prot)
-{
-	this_cpu_inc(ai_virt_pcpu_stats.vfio_hook_calls);
-	/* AI 辅助直通 DMA 映射策略：预留位 */
-}
-EXPORT_SYMBOL_GPL(ai_virt_vfio_hook);
 
 /* ==================================================================
  * B 轨：第13类 虚拟化感知发射辅助

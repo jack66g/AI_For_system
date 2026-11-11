@@ -38,9 +38,7 @@
 
 static DEFINE_PER_CPU(struct ai_io_stats, ai_io_cnt);
 
-/* ai_char.c 提供的字符设备 Hook 计数（熵源/TTY） */
-extern void ai_io_char_stats_read(u64 *entropy_calls, u64 *tty_calls);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx, struct request *rq)
 {
 	this_cpu_inc(ai_io_cnt.dispatch_hook_calls);
@@ -75,6 +73,7 @@ int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ai_io_sched_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
 
@@ -105,7 +104,6 @@ EXPORT_SYMBOL_GPL(ai_io_adjust_wbt);
 
 void ai_io_stats_read(struct ai_io_stats *st)
 {
-	u64 entropy_calls = 0, tty_calls = 0;
 	int cpu;
 
 	memset(st, 0, sizeof(*st));
@@ -120,9 +118,6 @@ void ai_io_stats_read(struct ai_io_stats *st)
 		st->disk_stats_emitted += c->disk_stats_emitted;
 		st->disk_errors_emitted += c->disk_errors_emitted;
 	}
-	ai_io_char_stats_read(&entropy_calls, &tty_calls);
-	st->entropy_hook_calls = entropy_calls;
-	st->tty_hook_calls = tty_calls;
 }
 EXPORT_SYMBOL_GPL(ai_io_stats_read);
 
@@ -622,7 +617,7 @@ static int __init ai_io_init(void)
 
 	/* 可控制参数表（数据计划 20.3 I/O 域）：io.priority 立即生效
 	 * （task 作用域，经 block/blk-ioc.c set_task_ioprio 导出符号），
-	 * io.bandwidth 接口预留（安全/记录全量生效，内核行为接线在后续步骤） */
+	 * io.bandwidth 已真接 bdi max_ratio（ai_block_bandwidth_apply 立即生效）。 */
 #ifdef CONFIG_BLOCK
 	ai_control_register("io.priority", AI_POLICY_DOMAIN_IO,
 			    AI_CTRL_F_REAL | AI_CTRL_F_TASK,

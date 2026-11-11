@@ -1714,7 +1714,6 @@ __nf_conntrack_alloc(struct net *net,
 	 */
 	refcount_set(&ct->ct_general.use, 0);
 #ifdef CONFIG_AIKERNEL_NET
-	ai_net_conntrack_hook(ct, ct_count);
 	ai_telemetry_nf_conntrack_new(ct);
 #endif
 	return ct;

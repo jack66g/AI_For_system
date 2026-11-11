@@ -2,7 +2,8 @@
 /*
  * ai_time.c - AIKernel 时间管理核心（Prompt 09，重构计划 模块10）
  *
- * A 轨：4 个 ai_time_*_hook()（空实现 = 原样放行，决策表待 AI 填充）；
+ * A 轨：原 4 个 ai_time_*_hook() 决策钩已按 K0 真相表 §4 删除（空转纯
+ *       开销；观测能力由 B 轨发射辅助承载不受影响）；
  * B 轨：第11类 时间与定时器感知（11.01~11.04）发射辅助，全部
  *       sample_take 采样判定 + 栈上 payload + emit_direct 直写。
  *
@@ -64,11 +65,6 @@ void ai_time_stats_read(struct ai_time_stats *st)
 		const struct ai_time_stats *p = per_cpu_ptr(&ai_time_pcpu_stats,
 							   cpu);
 
-		st->tick_hook_calls += p->tick_hook_calls;
-		st->tick_hook_adjusted += p->tick_hook_adjusted;
-		st->timer_hook_calls += p->timer_hook_calls;
-		st->hrtimer_hook_calls += p->hrtimer_hook_calls;
-		st->cs_hook_calls += p->cs_hook_calls;
 		st->emit_tick += p->emit_tick;
 		st->emit_timer += p->emit_timer;
 		st->emit_hrtimer += p->emit_hrtimer;
@@ -76,42 +72,6 @@ void ai_time_stats_read(struct ai_time_stats *st)
 	}
 }
 EXPORT_SYMBOL_GPL(ai_time_stats_read);
-
-/* ==================================================================
- * A 轨：AI 时间管理 Hook（空实现 = 原样放行）
- * ==================================================================
- */
-
-void ai_time_tick_hook(int cpu, ktime_t *expires)
-{
-	this_cpu_inc(ai_time_pcpu_stats.tick_hook_calls);
-	/* AI 决定 NOHZ vs 周期 tick：可改 *expires（0=保留周期 tick） */
-	if (expires && ktime_to_ns(*expires) == 0)
-		this_cpu_inc(ai_time_pcpu_stats.tick_hook_adjusted);
-}
-EXPORT_SYMBOL_GPL(ai_time_tick_hook);
-
-void ai_time_timer_hook(int cpu, unsigned long clk, unsigned long *next_expiry)
-{
-	this_cpu_inc(ai_time_pcpu_stats.timer_hook_calls);
-	/* AI 预测定时器到期，优化级联：可改 *next_expiry */
-}
-EXPORT_SYMBOL_GPL(ai_time_timer_hook);
-
-void ai_time_hrtimer_hook(struct hrtimer_cpu_base *cpu_base, ktime_t now)
-{
-	this_cpu_inc(ai_time_pcpu_stats.hrtimer_hook_calls);
-	/* AI 合并相邻定时器建议（soft 到期机制已保证零新增唤醒） */
-}
-EXPORT_SYMBOL_GPL(ai_time_hrtimer_hook);
-
-void ai_time_clocksource_hook(struct clocksource *best,
-			      struct clocksource *cur)
-{
-	this_cpu_inc(ai_time_pcpu_stats.cs_hook_calls);
-	/* AI 评估时钟源质量动态切换：决策表就绪后在此评估 */
-}
-EXPORT_SYMBOL_GPL(ai_time_clocksource_hook);
 
 /* ==================================================================
  * B 轨：第11类 时间与定时器感知发射辅助

@@ -391,19 +391,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 		}
 	}
 
-#ifdef CONFIG_AIKERNEL_POWER
-	/*
-	 * AI 预测空闲时长选 C-state：可改写 predicted_ns / idx。
-	 * idle 决策热路径：仅 1 次 per-CPU inc + 分支，零锁零分配。
-	 * 空实现不改 → idx 原样返回（与基线一致）。
-	 */
-	ai_power_cpuidle_hook(dev->cpu, drv->state_count,
-			      (u64)max_t(s64, latency_req, 0),
-			      &predicted_ns, &idx);
-	if (idx < 0 || idx >= drv->state_count)
-		idx = drv->state_count - 1;
-#endif
-
 	return idx;
 }
 

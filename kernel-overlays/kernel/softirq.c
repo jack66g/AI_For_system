@@ -597,15 +597,7 @@ static void handle_softirqs(bool ksirqd)
 	 */
 	current->flags &= ~PF_MEMALLOC;
 
-#ifdef CONFIG_AIKERNEL_INTERRUPT
-	/* AI 调整 softirq 处理顺序/批次（空实现不改任何值） */
 	pending = local_softirq_pending();
-	ai_irq_softirq_hook(&pending, (unsigned int *)&max_restart);
-	if (pending != local_softirq_pending())
-		set_softirq_pending(pending);
-#else
-	pending = local_softirq_pending();
-#endif
 
 	softirq_handle_begin();
 	in_hardirq = lockdep_softirq_start();

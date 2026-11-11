@@ -248,13 +248,8 @@ enum ai_sched_query_id {
 
 /* 决策统计（/proc/ai/sched/stats 数据源） */
 struct ai_sched_stats {
-	u64 pick_next_calls, pick_next_ai_changed;
-	u64 cfs_pick_calls, cfs_pick_ai_changed;
 	u64 lb_calls, lb_ai_veto;
-	u64 pelt_adjust_calls;
-	u64 context_switch_calls;
 	u64 rt_admission_calls, dl_admission_calls, admission_rejected;
-	u64 isolate_hook_calls;
 	u64 query_calls;
 	u64 classify[AI_SCHED_CLASS_MAX];
 };
@@ -263,25 +258,7 @@ struct ai_sched_stats {
 
 /* ---- A 轨 Hook（实现见 ai_sched.c；空实现 = 原样放行） ---- */
 
-/**
- * ai_sched_pick_next_hook() - AI 参与选下一个运行任务
- * @prev: 出参/入参，当前任务指针（AI 可替换）
- * @next: 出参/入参，候选任务指针（AI 可替换，必须为可运行任务）
- *
- * 由 __schedule() 在 pick_next_task() 之后调用。空实现不修改任何值。
- */
-void ai_sched_pick_next_hook(struct task_struct **prev, struct task_struct **next);
-
-/**
- * ai_cfs_pick_next_hook() - AI 辅助 CFS 候选排序
- * @prev: 当前任务
- * @next: CFS 选中的下一个任务
- *
- * 返回 AI 调整后的候选（空实现原样返回 @next）。
- */
-struct task_struct *ai_cfs_pick_next_hook(struct task_struct *prev,
-					  struct task_struct *next);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
  * ai_load_balance_hook() - AI 建议任务是否迁移
  * @src_cpu: 源（最忙）CPU
@@ -294,25 +271,13 @@ struct task_struct *ai_cfs_pick_next_hook(struct task_struct *prev,
  */
 int ai_load_balance_hook(int src_cpu, int dst_cpu, unsigned long imbalance,
 			 bool *proceed);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
+static inline int ai_load_balance_hook(int src_cpu, int dst_cpu,
+				       unsigned long imbalance, bool *proceed)
+{ if (proceed) *proceed = true; return AI_OK; }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
-/**
- * ai_pelt_adjust_hook() - AI 修正 PELT 衰减因子
- * @delta: 距上次更新的原始时间差（ns，已除 1024 前）
- * @load: 本次负载（load/runnable/running 综合）
- *
- * 返回调整后的 delta（空实现原样返回）。返回 0 表示 AI 要求本次不更新。
- */
-u64 ai_pelt_adjust_hook(u64 delta, unsigned long load);
-
-/**
- * ai_sched_context_switch_hook() - 上下文切换观察点
- * @prev: 切换出的任务
- * @next: 切换入的任务
- * @cpu: 当前 CPU
- */
-void ai_sched_context_switch_hook(struct task_struct *prev,
-				  struct task_struct *next, int cpu);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
  * ai_sched_rt_admission_hook() - RT/DL 任务准入控制
  * @p: 入队任务
@@ -321,15 +286,9 @@ void ai_sched_context_switch_hook(struct task_struct *prev,
  * （返回值 1=允许，为后续 AI 准入决策预留的默认值）。
  */
 int ai_sched_rt_admission_hook(struct task_struct *p);
-
-/**
- * ai_sched_isolate_hook() - AI 动态 CPU 隔离建议
- * @isolated: 当前隔离 CPU 掩码
- * @hk_type: housekeeping 类型（HK_TYPE_*）
- *
- * 由 housekeeping_init() 调用；空实现只计数/采样，不修改隔离配置。
- */
-void ai_sched_isolate_hook(const struct cpumask *isolated, unsigned long hk_type);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
+static inline int ai_sched_rt_admission_hook(struct task_struct *p) { return 1; }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /**
  * ai_sched_query() - sched_ext 可调用的 AI 辅助函数
@@ -378,21 +337,10 @@ void ai_sched_stats_read(struct ai_sched_stats *st);
 
 /* 空函数兜底：CONFIG_AIKERNEL_SCHED=n 时 kernel/sched 不包含本头文件，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline void ai_sched_pick_next_hook(struct task_struct **prev,
-					   struct task_struct **next) { }
-static inline struct task_struct *ai_cfs_pick_next_hook(struct task_struct *prev,
-							struct task_struct *next)
-{ return next; }
 static inline int ai_load_balance_hook(int src_cpu, int dst_cpu,
 				       unsigned long imbalance, bool *proceed)
 { if (proceed) *proceed = true; return AI_OK; }
-static inline u64 ai_pelt_adjust_hook(u64 delta, unsigned long load)
-{ return delta; }
-static inline void ai_sched_context_switch_hook(struct task_struct *prev,
-						struct task_struct *next, int cpu) { }
 static inline int ai_sched_rt_admission_hook(struct task_struct *p) { return 1; }
-static inline void ai_sched_isolate_hook(const struct cpumask *isolated,
-					 unsigned long hk_type) { }
 static inline int ai_sched_query(u32 query_id, const void *in, size_t in_len,
 				 void *out, size_t out_len)
 { return AI_ERR_NOT_IMPLEMENTED; }

@@ -36,9 +36,6 @@
 #include <net/tc_wrapper.h>
 
 #include <trace/events/qdisc.h>
-#ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
-#endif
 
 /*
 
@@ -1345,9 +1342,6 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 
 	qdisc_hash_add(sch, false);
 	trace_qdisc_create(ops, dev, parent);
-#ifdef CONFIG_AIKERNEL_NET
-	ai_net_qdisc_hook(dev, sch);
-#endif
 
 	return sch;
 

@@ -2179,11 +2179,7 @@ static long wb_writeback(struct bdi_writeback *wb,
 	bool queued = false;
 
 #ifdef CONFIG_AIKERNEL_VFS
-	/*
-	 * AI 回写决策：AI 决定本轮回写时机/批量（nr_pages=0 → 本轮跳过，
-	 * 其他值 → 批量上限）。空实现不改 → 原逻辑。
-	 */
-	ai_vfs_writeback_hook(wb, &work->nr_pages, work->reason);
+	/* B 轨回写遥测（writeback 子事件采样发射；K0b 删 A 轨空钩） */
 	ai_telemetry_writeback(wb, work->nr_pages, work->reason);
 #endif
 

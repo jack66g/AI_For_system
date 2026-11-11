@@ -13,9 +13,6 @@
 #include <linux/kvm_host.h>
 #include <linux/kvm_irqfd.h>
 
-#ifdef CONFIG_AIKERNEL_VIRT
-#include "../../../AIKernel/virt/ai_virt.h"
-#endif
 
 #include "hyperv.h"
 #include "ioapic.h"
@@ -248,18 +245,6 @@ int kvm_arch_set_irq_inatomic(struct kvm_kernel_irq_routing_entry *e,
 {
 	struct kvm_lapic_irq irq;
 	int r;
-
-#ifdef CONFIG_AIKERNEL_VIRT
-	/*
-	 * AI 聚合中断减少 VM Exit 决策点（空实现不改 *coalesce）。
-	 * 中断注入路径入口：仅 1 次 per-CPU inc + 分支，零锁零分配。
-	 */
-	{
-		bool coalesce = false;
-
-		ai_virt_irq_hook(irq_source_id, level, &coalesce);
-	}
-#endif
 
 	switch (e->type) {
 #ifdef CONFIG_KVM_HYPERV

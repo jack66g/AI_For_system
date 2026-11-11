@@ -6403,12 +6403,9 @@ static void kvm_sched_in(struct preempt_notifier *pn, int cpu)
 
 #ifdef CONFIG_AIKERNEL_VIRT
 	/*
-	 * AI 优化 vCPU pinning/调度决策点（空实现无操作）+ 第13类 vcpu_schedule
-	 * 遥测（1/32 采样：vcpu_id/cpu/pid/preempted 全量，preempt_notifier 路径
-	 * 每 vCPU 调度进出一次，采样后发射原子轻量）。
+	 * 第13类 vcpu_schedule 遥测（1/32 采样：vcpu_id/cpu/pid/preempted 全量，
+	 * preempt_notifier 路径每 vCPU 调度进出一次，采样后发射原子轻量）。
 	 */
-	ai_virt_vcpu_hook(vcpu->vcpu_id, cpu, task_pid_nr(current),
-			  vcpu->preempted);
 	ai_telemetry_vcpu_schedule(vcpu->vcpu_id, cpu, task_pid_nr(current),
 				   vcpu->preempted);
 #endif

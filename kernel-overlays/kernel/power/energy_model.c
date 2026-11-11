@@ -329,14 +329,6 @@ int em_dev_update_perf_domain(struct device *dev,
 
 	em_cpufreq_update_efficiencies(dev, new_table->state);
 
-#ifdef CONFIG_AIKERNEL_POWER
-	/*
-	 * AI 实时更新能耗模型参数：可调整 new_table->state[]（power/frequency）。
-	 * 空实现不改 → 表原样（与基线一致）。随 CONFIG_ENERGY_MODEL 编译。
-	 */
-	ai_power_em_hook(dev, new_table);
-#endif
-
 	em_table_free(old_table);
 
 	mutex_unlock(&em_pd_mutex);

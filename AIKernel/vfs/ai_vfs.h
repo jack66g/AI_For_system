@@ -91,13 +91,6 @@ enum ai_vfs_sub_event {
 	AI_VFS_SUB_MAX,
 };
 
-/* ---- 驱逐路径操作类型（ai_vfs_dcache_hook op 参数） ---- */
-
-enum ai_vfs_evict_op {
-	AI_VFS_EVICT_DENTRY = 1,	/* dput() 引用计数归零驱逐（可干预） */
-	AI_VFS_EVICT_LRU,		/* shrink 路径 LRU 驱逐（本步观察点，输出仅记录） */
-};
-
 /* ---- fs 错误类型（ai_telemetry_fs_error error_type 参数） ---- */
 
 enum ai_vfs_fs_err_type {
@@ -325,17 +318,6 @@ struct ai_vfs_fs_corruption_payload {
  * ================================================================== */
 
 struct ai_vfs_stats {
-	u64 dcache_hook_calls;
-	u64 dcache_ai_veto;		/* AI 保留 dentry 次数 */
-	u64 inode_hook_calls;
-	u64 inode_ai_veto;
-	u64 path_hook_calls;
-	u64 writeback_hook_calls;
-	u64 writeback_ai_adjusted;
-	u64 epoll_hook_calls;
-	u64 aio_hook_calls;
-	u64 dax_hook_calls;
-	u64 rw_hook_calls;
 	u64 dentry_hit, dentry_miss;	/* dcache 查找命中/未命中 */
 	u64 inode_hit, inode_miss;	/* inode 哈希查找命中/未命中 */
 	u64 path_overflow;		/* 超长路径整条丢弃计数 */
@@ -346,105 +328,11 @@ struct ai_vfs_stats {
 
 /* ---- A 轨：推理/控制 Hook（ai_vfs.c 实现，全部 EXPORT_SYMBOL_GPL） ---- */
 
-/**
- * ai_vfs_dcache_hook() - AI 决定 dentry 缓存驱逐
- * @dentry: 待驱逐的 dentry
- * @op:     驱逐路径（AI_VFS_EVICT_DENTRY=dput 引用归零，可干预；
- *          AI_VFS_EVICT_LRU=shrink LRU 驱逐，本步仅观察记录不干预）
- *
- * 返回 true=允许驱逐（默认，原逻辑）；false=保留（仅 DENTRY 路径生效：
- * 走 retain 路径放回 LRU 并置 DCACHE_REFERENCED，不改变 LRU 顺序语义；
- * 若条目本身不可保留（DONTCACHE/submount）则仍按原逻辑回收，防止死循环）。
- */
-bool ai_vfs_dcache_hook(struct dentry *dentry, int op);
-
-/**
- * ai_vfs_inode_hook() - AI 决定 inode 缓存驱逐
- * @inode: 待回收的 inode
- *
- * 返回 true=继续回收（默认，原逻辑）；false=保留（走 LRU 缓存路径，
- * 本步为决策点框架：实际保留动作由 iput_final 的 LRU 分支承载，AI 后续填充）。
- */
-bool ai_vfs_inode_hook(struct inode *inode);
-
-/**
- * ai_vfs_path_hook() - AI 预测下一步路径（预取建议）
- * @parent: 当前组件父 dentry
- * @last:   当前组件名
- * @flags:  解析标志（LOOKUP_*）
- *
- * 返回 0=不改（默认）；AI 预取/路径预测建议预留位。
- */
-int ai_vfs_path_hook(struct dentry *parent, const struct qstr *last,
-		     unsigned int flags);
-
-/**
- * ai_vfs_writeback_hook() - AI 决定回写时机/批量
- * @wb:        bdi 回写单元
- * @nr_pages:  本轮计划回写页数（AI 可改：0=本轮跳过，N=批量上限）
- * @reason:    回写原因（enum wb_reason）
- *
- * 空实现不改（原逻辑）。
- */
-void ai_vfs_writeback_hook(struct bdi_writeback *wb, long *nr_pages,
-			   int reason);
-
 struct eventpoll;	/* fs/eventpoll.c 私有类型，前向声明 */
-
-/**
- * ai_vfs_epoll_hook() - AI 重排 epoll 就绪事件优先级
- * @ep:        eventpoll 实例
- * @maxevents: 本轮最大事件数（AI 可改）
- *
- * 返回 0=默认遍历（原逻辑）；AI 重排建议预留位。
- */
-int ai_vfs_epoll_hook(struct eventpoll *ep, int maxevents);
 
 struct kioctx;		/* fs/aio.c 私有类型，前向声明 */
 
-/**
- * ai_vfs_aio_hook() - AI 聚合 AIO 异步 I/O 请求
- * @ctx:  kioctx 上下文
- * @iocb: 待提交请求（调用点 const）
- * @rw:   1=写 0=读
- *
- * 返回 0=放行（默认）；AI 批处理建议预留位。
- */
-int ai_vfs_aio_hook(struct kioctx *ctx, const struct iocb *iocb, int rw);
-
-/**
- * ai_vfs_dax_hook() - AI 预测 PMEM 访问模式
- * @iocb:     DAX I/O 控制块
- * @iter:     I/O 迭代器
- * @prefetch: 预取建议输出（AI 可置 true 建议预取）
- *
- * 空实现不改（原逻辑）。
- */
-void ai_vfs_dax_hook(struct kiocb *iocb, struct iov_iter *iter,
-		     bool *prefetch);
-
-/**
- * ai_vfs_rw_hook() - AI 读写控制通道（预留）
- * @file:   目标文件
- * @rw:     1=写 0=读
- * @offset: 当前偏移
- * @count:  请求字节数（AI 可改）
- *
- * 返回 true=放行（默认）；false=本次拒绝（返回 -EPERM 语义由调用方处理）。
- */
-bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset,
-		    size_t *count);
-
 /* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
-
-/**
- * ai_vfs_predict_dentry_reuse() - dentry 未来访问概率预测
- * @dentry:    目标 dentry
- * @out_score: 输出 0~100 访问概率分
- *
- * 占位启发式：按 d_name 哈希访问频次表（64 槽 EWMA）。
- */
-int ai_vfs_predict_dentry_reuse(struct dentry *dentry, u8 *out_score);
 
 /**
  * ai_vfs_stats_read() - 决策统计读取
@@ -519,12 +407,6 @@ void ai_vfs_dcache_lookup(bool hit);
  */
 void ai_vfs_inode_lookup(bool hit);
 
-/**
- * ai_vfs_inode_veto_note() - 记录一次不可执行的 inode 保留决策
- *
- * AI 建议保留但 superblock 已不活跃（保留不可行）时由 fs/inode.c 调用。
- */
-void ai_vfs_inode_veto_note(void);
 void ai_telemetry_mount(const char *dev_name, const struct path *mnt_point,
 			const char *fs_type, unsigned long flags,
 			const char *options);
@@ -548,25 +430,6 @@ void ai_telemetry_fs_corruption(struct super_block *sb, u64 ino,
 /* 空函数兜底：CONFIG_AIKERNEL_VFS=n 时 fs/ 不包含本头文件，
  * 此处兜底仅防御性提供（保证任何遗留引用编译通过且零开销）。 */
 
-static inline bool ai_vfs_dcache_hook(struct dentry *dentry, int op)
-{ return true; }
-static inline bool ai_vfs_inode_hook(struct inode *inode) { return true; }
-static inline int ai_vfs_path_hook(struct dentry *parent,
-				   const struct qstr *last,
-				   unsigned int flags) { return 0; }
-static inline void ai_vfs_writeback_hook(struct bdi_writeback *wb,
-					 long *nr_pages, int reason) { }
-static inline int ai_vfs_epoll_hook(struct eventpoll *ep, int maxevents)
-{ return 0; }
-static inline int ai_vfs_aio_hook(struct kioctx *ctx,
-				  const struct iocb *iocb, int rw) { return 0; }
-static inline void ai_vfs_dax_hook(struct kiocb *iocb, struct iov_iter *iter,
-				   bool *prefetch) { }
-static inline bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset,
-				  size_t *count) { return true; }
-static inline int ai_vfs_predict_dentry_reuse(struct dentry *dentry,
-					      u8 *out_score)
-{ if (out_score) *out_score = 50; return AI_OK; }
 static inline void ai_vfs_stats_read(struct ai_vfs_stats *st)
 { if (st) memset(st, 0, sizeof(*st)); }
 static inline bool ai_vfs_sample_take(u16 sub) { return false; }
@@ -600,7 +463,6 @@ static inline void ai_telemetry_path_lookup(const struct path *path,
 static inline void ai_telemetry_path_lookup_cache(void) { }
 static inline void ai_vfs_dcache_lookup(bool hit) { }
 static inline void ai_vfs_inode_lookup(bool hit) { }
-static inline void ai_vfs_inode_veto_note(void) { }
 static inline void ai_telemetry_mount(const char *dev_name,
 				      const struct path *mnt_point,
 				      const char *fs_type, unsigned long flags,

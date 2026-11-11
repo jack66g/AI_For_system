@@ -5265,11 +5265,6 @@ static int __lock_acquire(struct lockdep_map *lock, unsigned int subclass,
 	if (!validate_chain(curr, hlock, chain_head, chain_key))
 		return 0;
 
-#ifdef CONFIG_AIKERNEL_LOCK
-	/* AI 分析锁依赖图预测死锁（空实现无操作） */
-	ai_lock_lockdep_hook(curr, depth);
-#endif
-
 	/* For lock_sync(), we are done here since no actual critical section */
 	if (hlock->sync)
 		return 1;

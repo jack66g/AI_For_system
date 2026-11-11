@@ -218,11 +218,6 @@ int pm_wake_lock(const char *buf)
 	if (!capable(CAP_BLOCK_SUSPEND))
 		return -EPERM;
 
-#ifdef CONFIG_AIKERNEL_POWER
-	/* AI 预测 wakeup 事件预唤醒决策点（空实现无操作） */
-	ai_power_wakelock_hook(buf, strcspn(buf, " \n"), timeout_ns, 1);
-#endif
-
 	while (*str && !isspace(*str))
 		str++;
 

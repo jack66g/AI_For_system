@@ -913,7 +913,8 @@ static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
 };
 
 /* ==================================================================
- * ai_sec_* Hook（AI 决策接入点，空实现 = 原样放行）
+ * ai_sec_* Hook（AI 决策接入点，空实现 = 原样放行；以下四钩经
+ * CONFIG_AIKERNEL_EXPERIMENTAL 门控，默认 n）
  *
  * 注意：ai_sec_seccomp_hook 只在任务已挂 seccomp 过滤器时被
  * kernel/seccomp.c __seccomp_filter() 调用，且当前调用点不消费 action
@@ -922,6 +923,7 @@ static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
  * 执行面，只作行为模型计数观测点。sec.seccomp 已降级 reserved。
  * ================================================================== */
 
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 			 u32 *action)
 {
@@ -967,6 +969,7 @@ void ai_sec_crypto_hook(const char **alg_name, u32 type, u32 mask)
 {
 	/* AI 负载选算法为空：不改算法名 */
 }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 void ai_sec_syscall_name(int nr, char *buf, size_t size)
 {
@@ -1840,7 +1843,8 @@ static int ai_sec_ws_label_apply(struct ai_control_param *p, s32 pid,
 }
 
 /* ---- 可控制参数表（数据计划 20.3 安全域）：全部立即生效 ----
- * 独立 late_initcall：不依赖 lsm= 启用 'ai'，control 表 23 参数全量可见；
+ * 独立 late_initcall：不依赖 lsm= 启用 'ai'，control 表 28 参数全量可见
+ * （含 sec.seccomp 等诚实降级为 [reserved] 的参数）；
  * lsm=ai 双启用时安全（本处为唯一注册点，无重名冲突）。
  * sec.audit 默认 1（采集默认开，与既有行为一致）。 */
 static int __init ai_sec_control_init(void)

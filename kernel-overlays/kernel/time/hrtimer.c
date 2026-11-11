@@ -1829,11 +1829,6 @@ static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
 	struct hrtimer_clock_base *base;
 	unsigned int active = cpu_base->active_bases & active_mask;
 
-#ifdef CONFIG_AIKERNEL_TIME
-	/* AI 合并相邻定时器建议（空实现无操作；soft 到期机制已保证零新增唤醒） */
-	ai_time_hrtimer_hook(cpu_base, now);
-#endif
-
 	for_each_active_base(base, cpu_base, active) {
 		struct timerqueue_node *node;
 		ktime_t basenow;

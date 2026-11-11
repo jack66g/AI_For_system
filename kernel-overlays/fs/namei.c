@@ -2480,7 +2480,6 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		name = hash_name(nd, name, &lastword);
 #ifdef CONFIG_AIKERNEL_VFS
 		ai_components++;
-		ai_vfs_path_hook(nd->path.dentry, &nd->last, nd->flags);
 #endif
 
 		switch(lastword) {

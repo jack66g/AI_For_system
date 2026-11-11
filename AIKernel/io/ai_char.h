@@ -3,8 +3,8 @@
  * ai_char.h - AIKernel 字符设备核心统一接口头（Prompt 05）
  *
  * 字符设备层 AI 埋点（重构计划 模块4 任务 4.8~4.10）：
- *   A 轨（控制）：ai_io_entropy_hook() 熵源质量评估（drivers/char/random.c）、
- *                 ai_io_tty_hook() 用户输入预判（drivers/tty/tty_io.c）；
+ *   A 轨（控制）：原 entropy/tty 决策钩已按 K0 真相表 §4 删除（无决策
+ *                 出口；观测由 B 轨发射承载，不受影响）；
  *   B 轨（感知）：第3类 3.6 字符设备 I/O 事件（char_dev_open/read/write）
  *                 + entropy 子事件，全量原始零脱敏（device_name/bytes/pid/comm）。
  *
@@ -67,37 +67,6 @@ struct ai_char_entropy_payload {
 
 #ifdef CONFIG_AIKERNEL_IO
 
-/* ---- A 轨：推理/控制 Hook（ai_char.c 实现，EXPORT_SYMBOL_GPL） ---- */
-
-/**
- * ai_io_char_stats_read() - 字符设备 Hook 决策计数读取
- * @entropy_calls: 熵源 Hook 调用次数
- * @tty_calls:     TTY Hook 调用次数
- *
- * 由 ai_io_stats_read()（ai_block.c）汇总进 ai_io_stats。
- */
-void ai_io_char_stats_read(u64 *entropy_calls, u64 *tty_calls);
-
-/**
- * ai_io_entropy_hook() - AI 辅助熵源质量评估
- * @len:         本次混入池的字节数
- * @credit_bits: 建议的熵位数（AI 可修改；空实现不改）
- *
- * 在 random.c mix_pool_bytes() 调用；空实现不干预。
- */
-void ai_io_entropy_hook(size_t len, unsigned int *credit_bits);
-
-struct tty_struct;	/* linux/tty.h，前向声明 */
-
-/**
- * ai_io_tty_hook() - AI 预判用户输入
- * @tty:        终端设备
- * @prediction: 预判结果输出（0=无预判；非 0=AI 预判有输入）
- *
- * 在 tty_io.c tty_read() 入口调用；空实现不改（恒 0）。
- */
-void ai_io_tty_hook(struct tty_struct *tty, u8 *prediction);
-
 /* ---- B 轨：发射辅助（ai_char.c 实现，EXPORT_SYMBOL_GPL） ---- */
 
 void ai_io_emit_char_open(const char *device_name);
@@ -110,17 +79,6 @@ void ai_io_emit_entropy(const char *device_name, size_t len,
 
 /* 空函数兜底：防御性提供，零开销 */
 
-static inline void ai_io_char_stats_read(u64 *entropy_calls, u64 *tty_calls)
-{
-	if (entropy_calls)
-		*entropy_calls = 0;
-	if (tty_calls)
-		*tty_calls = 0;
-}
-static inline void ai_io_entropy_hook(size_t len,
-				      unsigned int *credit_bits) { }
-static inline void ai_io_tty_hook(struct tty_struct *tty,
-				  u8 *prediction) { }
 static inline void ai_io_emit_char_open(const char *device_name) { }
 static inline void ai_io_emit_char_read(const char *device_name,
 					u32 bytes) { }

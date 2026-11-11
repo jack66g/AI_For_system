@@ -254,19 +254,6 @@ void ai_proc_exec_hook(struct task_struct *p, const char *path)
 	ai_slot_put(task_pid_nr(p), cls, true, path);
 }
 
-int ai_proc_futex_hook(struct task_struct *p, u32 addr, u32 val)
-{
-	ai_proc_stats_core.futex_count++;
-	return 0;   /* 原逻辑放行；AI 优先级调整决策表后续 Prompt 填充 */
-}
-
-int ai_proc_signal_hook(int sig, struct task_struct *target,
-			struct kernel_siginfo *info)
-{
-	ai_proc_stats_core.signal_count++;
-	return 0;   /* 原逻辑放行；AI 信号过滤/降权决策表后续 Prompt 填充 */
-}
-
 int ai_proc_query(int pid, struct ai_proc_info *out)
 {
 	struct ai_proc_slot slot;

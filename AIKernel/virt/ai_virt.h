@@ -4,8 +4,8 @@
  *
  * 本文件是 virt/kvm/、arch/x86/kvm/、drivers/virtio/、drivers/vfio/ 全部 AI
  * 埋点的唯一接入点：
- *   A 轨（控制）：ai_virt_*_hook() 系列 —— 让 AI 参与虚拟化决策，
- *                 空实现 = 原样放行（不改变任何内核默认行为）；
+ *   A 轨（控制）：原 ai_virt_*_hook() 系列决策钩已按 K0 真相表 §4 删除
+ *                 （空转纯开销；观测能力由 B 轨发射辅助承载不受影响）；
  *   B 轨（感知）：第13类 虚拟化感知的 payload 结构 + 发射辅助，
  *                 全量原始零脱敏。
  *
@@ -89,74 +89,12 @@ struct ai_virt_balloon_payload {
 /* ---- 决策统计 ---- */
 
 struct ai_virt_stats {
-	u64 vcpu_hook_calls;
-	u64 mmu_hook_calls;
-	u64 irq_hook_calls;
-	u64 balloon_hook_calls;
-	u64 vfio_hook_calls;
 	u64 emit_vcpu, emit_vm, emit_run, emit_ept, emit_balloon;
 };
 
 #ifdef CONFIG_AIKERNEL_VIRT
 
 /* ---- A 轨 Hook（实现见 ai_virt.c；空实现 = 原样放行，全标量参数） ---- */
-
-/**
- * ai_virt_vcpu_hook() - AI 优化 vCPU pinning/调度
- * @vcpu_id: vCPU 编号（用户态创建时给定）
- * @cpu: vCPU 线程被调度到的 CPU
- * @pid: vCPU 线程 pid
- * @preempted: 该 vCPU 此前是否曾被抢占
- *
- * 由 virt/kvm/kvm_main.c kvm_sched_in() 调用。空实现无操作。
- */
-void ai_virt_vcpu_hook(int vcpu_id, int cpu, int pid, bool preempted);
-
-/**
- * ai_virt_mmu_hook() - AI 预测 Guest 页面访问，预填充 EPT
- * @vcpu_id: vCPU 编号
- * @gfn: Guest 页帧号
- * @level: 页表层级
- * @exec: 是否可执行
- * @prefetch: 出参/入参；AI 建议预填充大页（空实现不改，默认 false）
- *
- * 由 arch/x86/kvm/mmu/mmu.c direct_page_fault() direct_map() 前调用。
- * 空实现不改 *prefetch（本步调用点仅预留位）。
- */
-void ai_virt_mmu_hook(int vcpu_id, u64 gfn, u8 level, u8 exec,
-		      bool *prefetch);
-
-/**
- * ai_virt_irq_hook() - AI 聚合中断，减少 VM Exit
- * @irq: 中断源标识
- * @level: 中断电平
- * @coalesce: 出参/入参；AI 建议聚合（空实现不改，默认 false）
- *
- * 由 arch/x86/kvm/irq.c kvm_arch_set_irq_inatomic() 入口调用。空实现不改。
- */
-void ai_virt_irq_hook(int irq, int level, bool *coalesce);
-
-/**
- * ai_virt_balloon_hook() - AI 预测 Guest 内存需求，智能调节气球
- * @diff: 当前偏离目标量
- * @target_pages: 出参/入参；气球目标页数（AI 可改写）
- *
- * 由 drivers/virtio/virtio_balloon.c update_balloon_size_func() 调用。
- * 空实现不改 *target_pages。
- */
-void ai_virt_balloon_hook(s64 diff, u32 *target_pages);
-
-/**
- * ai_virt_vfio_hook() - AI 辅助直通 DMA 映射策略（预留）
- * @iova: DMA 地址
- * @pfn: 物理页帧号
- * @npage: 页数
- * @prot: 映射保护位
- *
- * 由 drivers/vfio/vfio_iommu_type1.c vfio_iommu_map() 入口调用。空实现无操作。
- */
-void ai_virt_vfio_hook(dma_addr_t iova, unsigned long pfn, long npage,
-		       int prot);
 
 /* ---- 第13类发射辅助（实现见 ai_virt.c；全部 sample_take + emit_direct） ---- */
 
@@ -179,19 +117,6 @@ bool ai_virt_sample_take(u32 rate);
 
 /* 空函数兜底：CONFIG_AIKERNEL_VIRT=n 时调用点不编译，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline void ai_virt_vcpu_hook(int vcpu_id, int cpu, int pid,
-				     bool preempted)
-{ }
-static inline void ai_virt_mmu_hook(int vcpu_id, u64 gfn, u8 level, u8 exec,
-				    bool *prefetch)
-{ }
-static inline void ai_virt_irq_hook(int irq, int level, bool *coalesce)
-{ }
-static inline void ai_virt_balloon_hook(s64 diff, u32 *target_pages)
-{ }
-static inline void ai_virt_vfio_hook(dma_addr_t iova, unsigned long pfn,
-				     long npage, int prot)
-{ }
 static inline void ai_telemetry_vcpu_schedule(u32 vcpu_id, u16 cpu, u32 pid,
 					      u8 preempted)
 { }

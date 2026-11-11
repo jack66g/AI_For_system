@@ -4,8 +4,8 @@
  *
  * 本文件是 kernel/irq/ + kernel/softirq.c + kernel/workqueue.c +
  * kernel/watchdog.c 全部 AI 埋点的唯一接入点：
- *   A 轨（控制）：ai_irq_*_hook() 系列 —— 让 AI 参与中断管理决策，
- *                 空实现 = 原样放行（返回值不改变内核默认行为）；
+ *   A 轨（控制）：原 ai_irq_*_hook() 系列决策钩已按 K0 真相表 §4 删除
+ *                 （空转纯开销；观测能力由 B 轨发射辅助承载不受影响）；
  *   B 轨（感知）：第9类 中断与异常感知的 payload 结构 + 发射辅助，
  *                 全量原始零脱敏（irq 号/全位图/worker 统计全保留）。
  *
@@ -101,68 +101,12 @@ struct ai_irq_watchdog_payload {
 /* ---- 决策统计（/proc 数据源预留；本步经 ai_irq_stats_read 读取） ---- */
 
 struct ai_irq_stats {
-	u64 affinity_hook_calls, affinity_hook_changed;
-	u64 thread_hook_calls, thread_hook_skipped;
-	u64 softirq_hook_calls;
-	u64 wq_hook_calls;
-	u64 watchdog_hook_calls, watchdog_threshold_adjusted;
 	u64 emit_affinity, emit_thread, emit_softirq, emit_wq, emit_watchdog;
 };
 
 #ifdef CONFIG_AIKERNEL_INTERRUPT
 
 /* ---- A 轨 Hook（实现见 ai_irq.c；空实现 = 原样放行） ---- */
-
-/**
- * ai_irq_affinity_hook() - AI 参与多队列中断亲和性掩码生成
- * @nvecs: 总向量数
- * @affd:  亲和性需求描述
- * @masks: 已填充的亲和性掩码数组（AI 可调整）
- *
- * 由 irq_create_affinity_masks() 掩码填充后调用。空实现不改掩码。
- * 返回 0（预留：AI 返回非 0 表示已调整）。
- */
-int ai_irq_affinity_hook(unsigned int nvecs, struct irq_affinity *affd,
-			 struct irq_affinity_desc *masks);
-
-/**
- * ai_irq_thread_hook() - AI 决定中断是否线程化
- * @irq: 中断号
- * @new: 待注册的 irqaction
- *
- * 由 __setup_irq() 在创建 handler 线程前调用。空实现返回 true=按原逻辑
- * 创建线程；返回 false=AI 建议跳过线程化（仅非强制路径，IRQF_FORCE_THREAD
- * 与嵌套线程不受影响）。
- */
-bool ai_irq_thread_hook(unsigned int irq, struct irqaction *new);
-
-/**
- * ai_irq_softirq_hook() - AI 调整 softirq 处理顺序/批次
- * @pending: 待处理软中断位图（AI 可调整处理顺序）
- * @max_restart: 最大重启次数（AI 可调整批次大小）
- *
- * 由 handle_softirqs() 入口调用。空实现不改任何值。
- */
-void ai_irq_softirq_hook(u32 *pending, unsigned int *max_restart);
-
-/**
- * ai_irq_wq_hook() - AI 预测 worker 需求
- * @pool: 目标 worker 池
- * @create_worker: 出参；true=继续按原逻辑创建 worker（默认）
- *
- * 由 manage_workers() 在 maybe_create_worker() 前调用。空实现不改。
- */
-void ai_irq_wq_hook(struct worker_pool *pool, bool *create_worker);
-
-/**
- * ai_irq_watchdog_hook() - AI 自适应 lockup 检测阈值
- * @duration: 本次计算的超时时长（秒）
- * @threshold: 出参；当前生效阈值（AI 可调，空实现不改）
- *
- * 由 watchdog_timer_fn() 判定后调用。空实现不改阈值。
- * 返回 0。
- */
-int ai_irq_watchdog_hook(unsigned long duration, unsigned long *threshold);
 
 /* ---- 第9类发射辅助（实现见 ai_irq.c；全部 sample_take + emit_direct） ---- */
 
@@ -189,20 +133,6 @@ bool ai_irq_sample_take(u32 rate);
 
 /* 空函数兜底：CONFIG_AIKERNEL_INTERRUPT=n 时调用点不编译，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline int ai_irq_affinity_hook(unsigned int nvecs,
-				       struct irq_affinity *affd,
-				       struct irq_affinity_desc *masks)
-{ return 0; }
-static inline bool ai_irq_thread_hook(unsigned int irq,
-				      struct irqaction *new)
-{ return true; }
-static inline void ai_irq_softirq_hook(u32 *pending,
-				       unsigned int *max_restart) { }
-static inline void ai_irq_wq_hook(struct worker_pool *pool,
-				  bool *create_worker) { }
-static inline int ai_irq_watchdog_hook(unsigned long duration,
-				       unsigned long *threshold)
-{ return 0; }
 static inline void ai_telemetry_irq_affinity_create(unsigned int nvecs,
 						    struct irq_affinity *affd)
 { }

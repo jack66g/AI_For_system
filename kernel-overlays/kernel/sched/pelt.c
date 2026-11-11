@@ -201,10 +201,6 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 * Use 1024ns as the unit of measurement since it's a reasonable
 	 * approximation of 1us and fast to compute.
 	 */
-#ifdef CONFIG_AIKERNEL_SCHED
-	/* AI 修正 PELT 衰减（空实现返回 delta 原值；返回 0 则本次不更新） */
-	delta = ai_pelt_adjust_hook(delta, load);
-#endif
 	delta >>= 10;
 	if (!delta)
 		return 0;

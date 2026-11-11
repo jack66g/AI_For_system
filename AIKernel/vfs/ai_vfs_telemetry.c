@@ -592,11 +592,6 @@ void ai_vfs_inode_lookup(bool hit)
 }
 EXPORT_SYMBOL_GPL(ai_vfs_inode_lookup);
 
-void ai_vfs_inode_veto_note(void)
-{
-	this_cpu_inc(ai_vfs_inode_veto);
-}
-EXPORT_SYMBOL_GPL(ai_vfs_inode_veto_note);
 
 void ai_telemetry_path_lookup_cache(void)
 {

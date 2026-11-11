@@ -3186,18 +3186,7 @@ static bool manage_workers(struct worker *worker)
 	pool->flags |= POOL_MANAGER_ACTIVE;
 	pool->manager = worker;
 
-#ifdef CONFIG_AIKERNEL_INTERRUPT
-	{
-		bool create_worker = true;
-
-		/* AI 预测 worker 需求（空实现不改 *create_worker） */
-		ai_irq_wq_hook(pool, &create_worker);
-		if (create_worker)
-			maybe_create_worker(pool);
-	}
-#else
 	maybe_create_worker(pool);
-#endif
 
 	pool->manager = NULL;
 	pool->flags &= ~POOL_MANAGER_ACTIVE;

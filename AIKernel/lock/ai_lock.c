@@ -2,7 +2,8 @@
 /*
  * ai_lock.c - AIKernel 同步与锁优化核心（Prompt 09，重构计划 模块9）
  *
- * A 轨：5 个 ai_lock_*_hook()（空实现 = 原样放行，决策表待 AI 填充）；
+ * A 轨：ai_lock_spin_hook/_done（真观测：1/256 采样计时争用时长，保留）；
+ *       原 mutex/rwsem/rcu/lockdep 决策钩已按 K0 真相表 §4 删除（空转纯开销）；
  * B 轨：第10类 锁竞争与同步感知（10.01~10.04）发射辅助，全部
  *       sample_take 采样判定 + 栈上 payload + emit_direct 直写。
  *
@@ -61,12 +62,6 @@ void ai_lock_stats_read(struct ai_lock_stats *st)
 
 		st->spin_hook_calls += p->spin_hook_calls;
 		st->spin_sampled += p->spin_sampled;
-		st->mutex_hook_calls += p->mutex_hook_calls;
-		st->mutex_hook_skip_spin += p->mutex_hook_skip_spin;
-		st->rwsem_hook_calls += p->rwsem_hook_calls;
-		st->rcu_hook_calls += p->rcu_hook_calls;
-		st->rcu_hook_expedite += p->rcu_hook_expedite;
-		st->lockdep_hook_calls += p->lockdep_hook_calls;
 		st->emit_contention += p->emit_contention;
 		st->emit_spin += p->emit_spin;
 		st->emit_rwsem += p->emit_rwsem;
@@ -113,37 +108,6 @@ void ai_lock_spin_hook_done(raw_spinlock_t *lock)
 	ai_telemetry_lock_spin((unsigned long)lock, ktime_get_ns() - t0);
 }
 EXPORT_SYMBOL_GPL(ai_lock_spin_hook_done);
-
-bool ai_lock_mutex_hook(struct mutex *lock, bool *try_spin)
-{
-	this_cpu_inc(ai_lock_pcpu_stats.mutex_hook_calls);
-	/* AI 竞争预测：改 *try_spin=false 跳过乐观自旋直接入队（悲观路径） */
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_lock_mutex_hook);
-
-void ai_lock_rwsem_hook(struct rw_semaphore *sem, int kind)
-{
-	this_cpu_inc(ai_lock_pcpu_stats.rwsem_hook_calls);
-	/* AI 读写偏向：后续可在此调整 reader/writer 优先级 */
-}
-EXPORT_SYMBOL_GPL(ai_lock_rwsem_hook);
-
-void ai_lock_rcu_hook(int n, bool *expedite)
-{
-	this_cpu_inc(ai_lock_pcpu_stats.rcu_hook_calls);
-	/* AI 预测回调压力：置 *expedite=true 建议 expedited 宽限期 */
-	if (expedite && *expedite)
-		this_cpu_inc(ai_lock_pcpu_stats.rcu_hook_expedite);
-}
-EXPORT_SYMBOL_GPL(ai_lock_rcu_hook);
-
-void ai_lock_lockdep_hook(struct task_struct *curr, int depth)
-{
-	this_cpu_inc(ai_lock_pcpu_stats.lockdep_hook_calls);
-	/* AI 分析锁依赖图预测死锁：决策表就绪后在此分析 */
-}
-EXPORT_SYMBOL_GPL(ai_lock_lockdep_hook);
 
 /* ==================================================================
  * B 轨：第10类 锁竞争与同步感知发射辅助

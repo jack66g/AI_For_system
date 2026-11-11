@@ -873,10 +873,6 @@ static struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	if (!cma || !cma->count)
 		return page;
 
-#ifdef CONFIG_AIKERNEL_MM
-	count = ai_mm_cma_hook(cma, count);
-#endif
-
 	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
 		(void *)cma, cma->name, count, align);
 

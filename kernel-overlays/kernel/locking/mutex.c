@@ -574,7 +574,6 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	unsigned long flags;
 	int ret;
 #ifdef CONFIG_AIKERNEL_LOCK
-	bool try_spin = true;
 	u64 ai_wait_start = 0;
 	u32 ai_waiter_count = 0;
 #endif
@@ -608,15 +607,8 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	mutex_acquire_nest(&lock->dep_map, subclass, 0, nest_lock, ip);
 
 	trace_contention_begin(lock, LCB_F_MUTEX | LCB_F_SPIN);
-#ifdef CONFIG_AIKERNEL_LOCK
-	/* AI 竞争预测：乐观（自旋）vs 悲观（直接入队）；空实现不改 */
-	ai_lock_mutex_hook(lock, &try_spin);
-	if (__mutex_trylock(lock) ||
-	    (try_spin && mutex_optimistic_spin(lock, ww_ctx, NULL))) {
-#else
 	if (__mutex_trylock(lock) ||
 	    mutex_optimistic_spin(lock, ww_ctx, NULL)) {
-#endif
 		/* got the lock, yay! */
 		lock_acquired(&lock->dep_map, ip);
 		if (ww_ctx)

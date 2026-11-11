@@ -177,14 +177,9 @@ int ai_mm_predict_fragmentation(struct zone *zone)
 }
 EXPORT_SYMBOL_GPL(ai_mm_predict_fragmentation);
 
-int ai_mm_predict_ksm_benefit(struct page *page)
-{
-	return 0;   /* 占位：本步不做强制合并建议 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_predict_ksm_benefit);
-
 /* ---- Hook：空实现 = 原样放行 ---- */
 
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type)
 {
 	WRITE_ONCE(ai_mm_stats.fault_hook_calls,
@@ -192,6 +187,7 @@ void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type)
 	/* AI 推理占位：本步不修改 vmf */
 }
 EXPORT_SYMBOL_GPL(ai_mm_fault_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 				   unsigned long nr_to_read,
@@ -226,15 +222,7 @@ unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 }
 EXPORT_SYMBOL_GPL(ai_mm_readahead_hook);
 
-void ai_mm_reclaim_hook(int nid, u8 mode, u8 priority,
-			unsigned long nr_to_reclaim)
-{
-	WRITE_ONCE(ai_mm_stats.reclaim_hook_calls,
-		   READ_ONCE(ai_mm_stats.reclaim_hook_calls) + 1);
-	/* AI 推理占位：本步不修改扫描参数 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_reclaim_hook);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 bool ai_mm_workingset_hook(struct folio *folio, void *shadow, bool activate)
 {
 	WRITE_ONCE(ai_mm_stats.workingset_hook_calls,
@@ -260,30 +248,7 @@ void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address, u8 *decision)
 		*decision = 0;   /* 本步不干预 */
 }
 EXPORT_SYMBOL_GPL(ai_mm_thp_hook);
-
-int ai_mm_ksm_hook(struct page *page, unsigned long address)
-{
-	WRITE_ONCE(ai_mm_stats.ksm_hook_calls,
-		   READ_ONCE(ai_mm_stats.ksm_hook_calls) + 1);
-	return 0;   /* 本步不干预合并决策 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_ksm_hook);
-
-int ai_mm_oom_hook(struct oom_control *oc)
-{
-	WRITE_ONCE(ai_mm_stats.oom_hook_calls,
-		   READ_ONCE(ai_mm_stats.oom_hook_calls) + 1);
-	return 0;   /* 本步接受内核选择；AI 换人建议后续步骤接通 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_oom_hook);
-
-unsigned long ai_mm_cma_hook(struct cma *cma, unsigned long count)
-{
-	WRITE_ONCE(ai_mm_stats.cma_hook_calls,
-		   READ_ONCE(ai_mm_stats.cma_hook_calls) + 1);
-	return count;   /* 原样返回 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_cma_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ==================================================================
  * 初始化：默认采样率（热路径事件采样，低频事件全量）

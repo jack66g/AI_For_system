@@ -736,11 +736,6 @@ int futex_wait(u32 __user *uaddr, unsigned int flags, u32 val, ktime_t *abs_time
 	struct restart_block *restart;
 	int ret;
 
-#ifdef CONFIG_AIKERNEL_RUNTIME
-	/* A 轨 14.4：AI 任务 futex 优先（空实现=原逻辑+计数） */
-	ai_proc_futex_hook(current, (u32)(unsigned long)uaddr, val);
-#endif
-
 	to = futex_setup_timer(abs_time, &timeout, flags,
 			       current->timer_slack_ns);
 

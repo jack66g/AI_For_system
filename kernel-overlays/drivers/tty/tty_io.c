@@ -910,16 +910,6 @@ static ssize_t tty_read(struct kiocb *iocb, struct iov_iter *to)
 	struct tty_ldisc *ld;
 	ssize_t ret;
 
-#ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：用户输入预判（空实现不改 prediction；tty 设备层埋点，
-	 * 第5类字符级全量输入感知由对应 Prompt 落地） */
-	{
-		u8 pred = 0;
-
-		ai_io_tty_hook(tty, &pred);
-	}
-#endif
-
 	if (tty_paranoia_check(tty, inode, "tty_read"))
 		return -EIO;
 	if (!tty || tty_io_error(tty))

@@ -5363,9 +5363,6 @@ static __always_inline struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next, struct rq_flags *rf)
 {
-#ifdef CONFIG_AIKERNEL_SCHED
-	ai_sched_context_switch_hook(prev, next, cpu_of(rq));
-#endif
 	prepare_task_switch(rq, prev, next);
 
 	/*
@@ -6966,10 +6963,6 @@ static void __sched notrace __schedule(int sched_mode)
 pick_again:
 	next = pick_next_task(rq, rq->donor, &rf);
 	rq_set_donor(rq, next);
-#ifdef CONFIG_AIKERNEL_SCHED
-	/* AI 参与选下一个运行任务（空实现 = 原逻辑） */
-	ai_sched_pick_next_hook(&prev, &next);
-#endif
 	if (unlikely(task_is_blocked(next))) {
 		next = find_proxy_task(rq, next, &rf);
 		if (!next)

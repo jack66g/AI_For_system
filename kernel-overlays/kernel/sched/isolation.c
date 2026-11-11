@@ -103,10 +103,6 @@ void __init housekeeping_init(void)
 	for_each_set_bit(type, &housekeeping.flags, HK_TYPE_MAX) {
 		/* We need at least one CPU to handle housekeeping work */
 		WARN_ON_ONCE(cpumask_empty(housekeeping.cpumasks[type]));
-#ifdef CONFIG_AIKERNEL_SCHED
-		/* AI 动态 CPU 隔离建议（空实现只计数，不修改隔离配置） */
-		ai_sched_isolate_hook(housekeeping.cpumasks[type], type);
-#endif
 	}
 }
 

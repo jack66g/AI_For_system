@@ -102,8 +102,6 @@ irq_create_affinity_masks(unsigned int nvecs, struct irq_affinity *affd)
 		masks[i].is_managed = 1;
 
 #ifdef CONFIG_AIKERNEL_INTERRUPT
-	/* AI 按 CPU 负载优化中断分发（空实现不改掩码） */
-	ai_irq_affinity_hook(nvecs, affd, masks);
 	ai_telemetry_irq_affinity_create(nvecs, affd);
 #endif
 

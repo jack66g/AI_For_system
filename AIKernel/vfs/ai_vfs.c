@@ -71,23 +71,6 @@ static DEFINE_PER_CPU(u32, ai_vfs_sub_cnt[AI_VFS_SUB_MAX]);
  * 决策统计（per-CPU，ai_vfs_stats_read 汇总）
  * ================================================================== */
 
-enum ai_vfs_hook_id {
-	AI_VFS_HOOK_DCACHE = 0,
-	AI_VFS_HOOK_INODE,
-	AI_VFS_HOOK_PATH,
-	AI_VFS_HOOK_WB,
-	AI_VFS_HOOK_EPOLL,
-	AI_VFS_HOOK_AIO,
-	AI_VFS_HOOK_DAX,
-	AI_VFS_HOOK_RW,
-	AI_VFS_HOOK_MAX,
-};
-
-static DEFINE_PER_CPU(u64, ai_vfs_hook_cnt[AI_VFS_HOOK_MAX]);
-static DEFINE_PER_CPU(u64, ai_vfs_dcache_veto);
-/* ai_vfs_inode_veto_note()（拆分至 ai_vfs_telemetry.c）递增本变量，须跨文件可见 */
-DEFINE_PER_CPU(u64, ai_vfs_inode_veto);
-static DEFINE_PER_CPU(u64, ai_vfs_wb_adjusted);
 DEFINE_PER_CPU(u64, ai_vfs_dentry_hit);
 DEFINE_PER_CPU(u64, ai_vfs_dentry_miss);
 DEFINE_PER_CPU(u64, ai_vfs_inode_hit);
@@ -95,153 +78,12 @@ DEFINE_PER_CPU(u64, ai_vfs_inode_miss);
 DEFINE_PER_CPU(u64, ai_vfs_path_overflow);
 DEFINE_PER_CPU(u64, ai_vfs_emitted[AI_VFS_SUB_MAX]);
 
-/* ==================================================================
- * dentry 复用预测表（64 槽，d_name 哈希，EWMA 访问记录）
- * ================================================================== */
-
-#define AI_VFS_REUSE_SZ	64
-
-struct ai_vfs_reuse_ent {
-	u32 hash;
-	u32 count;			/* 近窗访问次数（封顶 10） */
-	u64 last_ms;			/* 最近访问时间戳（ms） */
-};
-
-static struct ai_vfs_reuse_ent ai_vfs_reuse_tab[AI_VFS_REUSE_SZ];
-
-static void ai_vfs_reuse_note(struct dentry *dentry)
-{
-	u32 h = full_name_hash(dentry, dentry->d_name.name,
-			       dentry->d_name.len);
-	struct ai_vfs_reuse_ent *e = &ai_vfs_reuse_tab[h % AI_VFS_REUSE_SZ];
-	u64 now = ktime_get_boot_fast_ns() / NSEC_PER_MSEC;
-
-	if (e->hash != h) {
-		e->hash = h;
-		e->count = 1;
-	} else if (now - e->last_ms > 60000) {
-		e->count = 1;		/* 超过 60s 窗口重置 */
-	} else if (e->count < 10) {
-		e->count++;
-	}
-	e->last_ms = now;
-}
-
-/* ==================================================================
- * A 轨：AI Hook（空实现 = 原样放行）
- * ================================================================== */
-
-bool ai_vfs_dcache_hook(struct dentry *dentry, int op)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_DCACHE]);
-	ai_vfs_reuse_note(dentry);
-	/* AI 决策表本步为空：默认允许驱逐（不改变 LRU 顺序/驱逐行为）。
-	 * AI 后续经预测分/决策表返回 false 时，调用方走 retain 路径。 */
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_dcache_hook);
-
-bool ai_vfs_inode_hook(struct inode *inode)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_INODE]);
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_inode_hook);
-
-int ai_vfs_path_hook(struct dentry *parent, const struct qstr *last,
-		     unsigned int flags)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_PATH]);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_path_hook);
-
-void ai_vfs_writeback_hook(struct bdi_writeback *wb, long *nr_pages,
-			   int reason)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_WB]);
-	/* AI 决策：本步空实现不改 nr_pages */
-}
-EXPORT_SYMBOL_GPL(ai_vfs_writeback_hook);
-
-int ai_vfs_epoll_hook(struct eventpoll *ep, int maxevents)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_EPOLL]);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_epoll_hook);
-
-int ai_vfs_aio_hook(struct kioctx *ctx, const struct iocb *iocb,
-			   int rw)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_AIO]);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_aio_hook);
-
-void ai_vfs_dax_hook(struct kiocb *iocb, struct iov_iter *iter,
-		     bool *prefetch)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_DAX]);
-}
-EXPORT_SYMBOL_GPL(ai_vfs_dax_hook);
-
-bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset, size_t *count)
-{
-	this_cpu_inc(ai_vfs_hook_cnt[AI_VFS_HOOK_RW]);
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_rw_hook);
-
-/* ---- 决策框架 ---- */
-
-int ai_vfs_predict_dentry_reuse(struct dentry *dentry, u8 *out_score)
-{
-	u32 h;
-	struct ai_vfs_reuse_ent *e;
-	u64 age;
-	u8 score;
-
-	if (!out_score)
-		return AI_ERR_INVALID_ARG;
-
-	h = full_name_hash(dentry, dentry->d_name.name, dentry->d_name.len);
-	e = &ai_vfs_reuse_tab[h % AI_VFS_REUSE_SZ];
-	age = ktime_get_boot_fast_ns() / NSEC_PER_MSEC - e->last_ms;
-
-	if (e->hash == h && e->count) {
-		/* 占位启发式：近 10s 访问 ≥3 次 → 高复用概率 */
-		if (age < 10000 && e->count >= 3)
-			score = 80 + min(20u, e->count * 4);
-		else if (age < 60000)
-			score = 40 + min(40u, e->count * 8);
-		else
-			score = 5;
-	} else {
-		score = 5;
-	}
-	*out_score = score;
-	return AI_OK;
-}
-EXPORT_SYMBOL_GPL(ai_vfs_predict_dentry_reuse);
-
 void ai_vfs_stats_read(struct ai_vfs_stats *st)
 {
 	int cpu, i;
 
 	memset(st, 0, sizeof(*st));
 	for_each_possible_cpu(cpu) {
-		st->dcache_hook_calls += per_cpu(ai_vfs_hook_cnt[0], cpu);
-		st->inode_hook_calls += per_cpu(ai_vfs_hook_cnt[1], cpu);
-		st->path_hook_calls += per_cpu(ai_vfs_hook_cnt[2], cpu);
-		st->writeback_hook_calls += per_cpu(ai_vfs_hook_cnt[3], cpu);
-		st->epoll_hook_calls += per_cpu(ai_vfs_hook_cnt[4], cpu);
-		st->aio_hook_calls += per_cpu(ai_vfs_hook_cnt[5], cpu);
-		st->dax_hook_calls += per_cpu(ai_vfs_hook_cnt[6], cpu);
-		st->rw_hook_calls += per_cpu(ai_vfs_hook_cnt[7], cpu);
-		st->dcache_ai_veto += per_cpu(ai_vfs_dcache_veto, cpu);
-		st->inode_ai_veto += per_cpu(ai_vfs_inode_veto, cpu);
-		st->writeback_ai_adjusted += per_cpu(ai_vfs_wb_adjusted, cpu);
 		st->dentry_hit += per_cpu(ai_vfs_dentry_hit, cpu);
 		st->dentry_miss += per_cpu(ai_vfs_dentry_miss, cpu);
 		st->inode_hit += per_cpu(ai_vfs_inode_hit, cpu);

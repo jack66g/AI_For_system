@@ -1793,19 +1793,6 @@ static int ep_send_events(struct eventpoll *ep,
 	poll_table pt;
 	int res = 0;
 
-#ifdef CONFIG_AIKERNEL_VFS
-	/*
-	 * AI 事件优先级决策：AI 可调整本轮最大事件数（重排就绪队列为
-	 * 后续 Prompt 的 AI 实现位）。返回 0 = 默认遍历（原逻辑）。
-	 */
-	{
-		int ai_ret = ai_vfs_epoll_hook(ep, maxevents);
-
-		if (ai_ret > 0 && ai_ret < maxevents)
-			maxevents = ai_ret;
-	}
-#endif
-
 	/*
 	 * Always short-circuit for fatal signals to allow threads to make a
 	 * timely exit without the chance of finding more events available and

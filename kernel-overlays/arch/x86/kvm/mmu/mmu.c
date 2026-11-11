@@ -4822,19 +4822,12 @@ static int direct_page_fault(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 
 #ifdef CONFIG_AIKERNEL_VIRT
 	/*
-	 * AI 预测 Guest 页面访问预填充 EPT（空实现不改 *prefetch）+ 第13类
-	 * ept_prefetch 遥测（1/64：gfn/level/exec/write 全量零脱敏）。
+	 * 第13类 ept_prefetch 遥测（1/64：gfn/level/exec/write 全量零脱敏）。
 	 * 本路径为 shadow/direct 页表路径；TDP 默认路径见 kvm_tdp_page_fault()。
 	 */
-	{
-		bool prefetch = false;
-
-		ai_virt_mmu_hook(vcpu->vcpu_id, fault->gfn, fault->goal_level,
-				 fault->exec, &prefetch);
-		ai_telemetry_ept_prefetch(vcpu->vcpu_id, fault->gfn,
-					  fault->goal_level, fault->exec,
-					  fault->write);
-	}
+	ai_telemetry_ept_prefetch(vcpu->vcpu_id, fault->gfn,
+				 fault->goal_level, fault->exec,
+				 fault->write);
 #endif
 
 	r = direct_map(vcpu, fault);
@@ -4938,18 +4931,12 @@ int kvm_tdp_page_fault(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
 #ifdef CONFIG_AIKERNEL_VIRT
 	/*
 	 * EPT 缺页公共入口（TDP 默认路径，x86_64 且 CONFIG_KVM_TDP_MMU=y 时
-	 * 所有 EPT violation 汇聚于此）：AI Hook + ept_prefetch 遥测，
+	 * 所有 EPT violation 汇聚于此）：ept_prefetch 遥测，
 	 * 与 direct_page_fault() 内埋点互补（两路径互斥，同一缺页只走其一）。
 	 */
-	{
-		bool prefetch = false;
-
-		ai_virt_mmu_hook(vcpu->vcpu_id, fault->gfn, fault->goal_level,
-				 fault->exec, &prefetch);
-		ai_telemetry_ept_prefetch(vcpu->vcpu_id, fault->gfn,
-					  fault->goal_level, fault->exec,
-					  fault->write);
-	}
+	ai_telemetry_ept_prefetch(vcpu->vcpu_id, fault->gfn,
+				 fault->goal_level, fault->exec,
+				 fault->write);
 #endif
 
 #ifdef CONFIG_X86_64

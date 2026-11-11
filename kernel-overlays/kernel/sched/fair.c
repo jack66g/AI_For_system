@@ -9101,12 +9101,6 @@ again:
 	p = pick_task_fair(rq);
 	if (!p)
 		goto idle;
-#ifdef CONFIG_AIKERNEL_SCHED
-	/* AI 辅助 CFS 候选排序（空实现原样返回） */
-	p = ai_cfs_pick_next_hook(prev, p);
-	if (!p)
-		goto idle;
-#endif
 	se = &p->se;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED

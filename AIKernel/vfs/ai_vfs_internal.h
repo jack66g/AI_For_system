@@ -22,7 +22,6 @@ DECLARE_PER_CPU(u64, ai_vfs_dentry_hit);
 DECLARE_PER_CPU(u64, ai_vfs_dentry_miss);
 DECLARE_PER_CPU(u64, ai_vfs_inode_hit);
 DECLARE_PER_CPU(u64, ai_vfs_inode_miss);
-DECLARE_PER_CPU(u64, ai_vfs_inode_veto);
 DECLARE_PER_CPU(u64, ai_vfs_path_overflow);
 DECLARE_PER_CPU(u64, ai_vfs_emitted[AI_VFS_SUB_MAX]);
 

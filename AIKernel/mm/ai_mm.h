@@ -358,19 +358,16 @@ struct ai_mm_kfence_report_payload {
 struct ai_mm_stats {
 	u64 fault_hook_calls, fault_ai_changed;
 	u64 readahead_hook_calls, readahead_ai_changed;
-	u64 reclaim_hook_calls, reclaim_ai_changed;
 	u64 workingset_hook_calls, workingset_ai_changed;
 	u64 alloc_hook_calls, alloc_ai_changed;
 	u64 thp_hook_calls, thp_ai_changed;
-	u64 ksm_hook_calls, ksm_ai_changed;
-	u64 oom_hook_calls, oom_ai_changed;
-	u64 cma_hook_calls, cma_ai_changed;
 };
 
 #ifdef CONFIG_AIKERNEL_MM
 
 /* ---- A 轨 Hook（实现见 ai_mm.c；空实现 = 原样放行） ---- */
 
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
  * ai_mm_fault_hook() - AI 参与缺页处理决策
  * @vmf: 缺页上下文
@@ -379,6 +376,9 @@ struct ai_mm_stats {
  * 由 do_anonymous_page()/do_fault() 调用。空实现只计数，不修改任何值。
  */
 void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
+static inline void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type) { }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /**
  * ai_mm_readahead_hook() - AI 决定预读窗口大小
@@ -392,18 +392,7 @@ unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 				   unsigned long nr_to_read,
 				   unsigned long lookahead_size);
 
-/**
- * ai_mm_reclaim_hook() - AI 建议回收优先级/扫描方向
- * @nid: 节点
- * @mode: 0=kswapd 1=direct 2=memcg
- * @priority: 扫描优先级（0~DEF_PRIORITY，值越小越激进）
- * @nr_to_reclaim: 目标回收页数
- *
- * 由 shrink_lruvec() 调用。空实现只计数，不修改扫描参数。
- */
-void ai_mm_reclaim_hook(int nid, u8 mode, u8 priority,
-			unsigned long nr_to_reclaim);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
  * ai_mm_workingset_hook() - AI 增强工作集重故障激活判断
  * @folio: 重故障的 folio
@@ -435,33 +424,17 @@ int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
  * 由 khugepaged_scan_mm_slot() 调用。空实现只计数。
  */
 void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address, u8 *decision);
-
-/**
- * ai_mm_ksm_hook() - AI 预测 KSM 合并收益
- * @page: 待扫描页
- * @address: 页地址
- *
- * 返回收益等级（0=不干预；>0 建议优先合并）。空实现返回 0。
- */
-int ai_mm_ksm_hook(struct page *page, unsigned long address);
-
-/**
- * ai_mm_oom_hook() - AI 辅助 OOM 目标选择
- * @oc: OOM 控制结构（oc->chosen 为当前选中的受害者）
- *
- * 返回 0=接受内核选择；>0=AI 建议换人（AI 推理后续步骤接通）。
- * 空实现返回 0（不改变内核默认行为）。本函数禁止分配内存。
- */
-int ai_mm_oom_hook(struct oom_control *oc);
-
-/**
- * ai_mm_cma_hook() - AI 预测设备内存需求
- * @cma: CMA 区域
- * @count: 请求页数
- *
- * 返回 AI 调整后的请求页数（空实现原样返回 @count）。
- */
-unsigned long ai_mm_cma_hook(struct cma *cma, unsigned long count);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
+static inline bool ai_mm_workingset_hook(struct folio *folio, void *shadow,
+					 bool activate)
+{ return activate; }
+static inline int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
+				   gfp_t gfp_flags, int migratetype)
+{ return migratetype; }
+static inline void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address,
+				  u8 *decision)
+{ if (decision) *decision = 0; }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ---- 决策框架（实现见 ai_mm.c；占位启发式，AI 推理后续步骤替换） ---- */
 
@@ -481,14 +454,6 @@ int ai_mm_predict_page_access(unsigned long address, u8 fault_type);
  * 返回建议迁移类型：0=不干预；1=建议 MIGRATE_MOVABLE。占位启发式。
  */
 int ai_mm_predict_fragmentation(struct zone *zone);
-
-/**
- * ai_mm_predict_ksm_benefit() - KSM 合并收益预测
- * @page: 待判断页
- *
- * 返回收益等级（0~3，0=不建议）。占位返回 0。
- */
-int ai_mm_predict_ksm_benefit(struct page *page);
 
 /**
  * ai_mm_stats_read() - 决策统计读取
@@ -559,8 +524,6 @@ static inline unsigned long ai_mm_readahead_hook(struct readahead_control *ractl
 						 unsigned long nr_to_read,
 						 unsigned long lookahead_size)
 { return nr_to_read; }
-static inline void ai_mm_reclaim_hook(int nid, u8 mode, u8 priority,
-				      unsigned long nr_to_reclaim) { }
 static inline bool ai_mm_workingset_hook(struct folio *folio, void *shadow,
 					 bool activate)
 { return activate; }
@@ -570,15 +533,9 @@ static inline int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
 static inline void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address,
 				  u8 *decision)
 { if (decision) *decision = 0; }
-static inline int ai_mm_ksm_hook(struct page *page, unsigned long address)
-{ return 0; }
-static inline int ai_mm_oom_hook(struct oom_control *oc) { return 0; }
-static inline unsigned long ai_mm_cma_hook(struct cma *cma, unsigned long count)
-{ return count; }
 static inline int ai_mm_predict_page_access(unsigned long address, u8 fault_type)
 { return 0; }
 static inline int ai_mm_predict_fragmentation(struct zone *zone) { return 0; }
-static inline int ai_mm_predict_ksm_benefit(struct page *page) { return 0; }
 static inline void ai_mm_stats_read(struct ai_mm_stats *st)
 { if (st) memset(st, 0, sizeof(*st)); }
 static inline void ai_mm_emit_page_alloc(u8 o, gfp_t g, u8 m) { }

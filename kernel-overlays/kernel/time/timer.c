@@ -2368,8 +2368,6 @@ static inline void __run_timers(struct timer_base *base)
 		return;
 
 #ifdef CONFIG_AIKERNEL_TIME
-	/* AI 预测定时器到期，优化级联（空实现不改 *next_expiry） */
-	ai_time_timer_hook(smp_processor_id(), jiffies, &base->next_expiry);
 	ai_start_count = __this_cpu_read(ai_timer_batch_count);
 	if (ai_sampled)
 		ai_start_ns = ktime_get_ns();

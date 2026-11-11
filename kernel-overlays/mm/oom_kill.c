@@ -1071,11 +1071,6 @@ static void oom_kill_process(struct oom_control *oc, const char *message)
 	}
 	task_unlock(victim);
 
-#ifdef CONFIG_AIKERNEL_MM
-	/* AI 辅助 OOM 目标选择（本步空实现返回 0 = 接受内核选择） */
-	ai_mm_oom_hook(oc);
-#endif
-
 	if (__ratelimit(&oom_rs)) {
 		dump_header(oc);
 		dump_oom_victim(oc, victim);

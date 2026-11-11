@@ -218,8 +218,6 @@ struct ai_io_stats {
 	u64 wbt_hook_calls;
 	u64 throttle_hook_calls;
 	u64 sched_hook_calls;
-	u64 entropy_hook_calls;
-	u64 tty_hook_calls;
 	u64 disk_stats_emitted;
 	u64 disk_errors_emitted;
 };
@@ -228,8 +226,12 @@ struct ai_io_stats {
 
 /* ---- A 轨：推理/控制 Hook（ai_block.c 实现，全部 EXPORT_SYMBOL_GPL） ---- */
 
+struct rq_wb;	/* block/blk-wbt.h 内部类型，前向声明 */
+struct throtl_grp;	/* block/blk-throttle.h 内部类型，前向声明 */
+
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
- * ai_io_dispatch_hook() - AI 优化请求分发顺序
+ * ai_io_dispatch_hook() - AI 优化请求分发顺序（EXPERIMENTAL 门控）
  * @hctx: 硬件队列
  * @rq:   待分发请求
  *
@@ -238,7 +240,7 @@ struct ai_io_stats {
 bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx, struct request *rq);
 
 /**
- * ai_io_merge_hook() - AI 判断请求是否合并
+ * ai_io_merge_hook() - AI 判断请求是否合并（EXPERIMENTAL 门控）
  * @req:  目标请求
  * @bio:  待合并 bio
  * @back: 1=后向合并 0=前向合并
@@ -247,10 +249,8 @@ bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx, struct request *rq);
  */
 bool ai_io_merge_hook(struct request *req, struct bio *bio, int back);
 
-struct rq_wb;	/* block/blk-wbt.h 内部类型，前向声明 */
-
 /**
- * ai_io_wbt_hook() - AI 调整写回节流决策
+ * ai_io_wbt_hook() - AI 调整写回节流决策（EXPERIMENTAL 门控）
  * @rwb:    wbt 状态
  * @status: 当前 latency 判定（LAT_OK/EXCEEDED/UNKNOWN*）
  *
@@ -258,10 +258,8 @@ struct rq_wb;	/* block/blk-wbt.h 内部类型，前向声明 */
  */
 int ai_io_wbt_hook(struct rq_wb *rwb, int status);
 
-struct throtl_grp;	/* block/blk-throttle.h 内部类型，前向声明 */
-
 /**
- * ai_io_throttle_hook() - AI 动态调整 I/O 限制
+ * ai_io_throttle_hook() - AI 动态调整 I/O 限制（EXPERIMENTAL 门控）
  * @tg:         cgroup 节流组
  * @bio:        当前 bio
  * @bps_limit:  字节限制（AI 可修改）
@@ -273,13 +271,27 @@ void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
 			 u64 *bps_limit, unsigned long *iops_limit);
 
 /**
- * ai_io_sched_hook() - AI I/O 调度器决策接口
+ * ai_io_sched_hook() - AI I/O 调度器决策接口（EXPERIMENTAL 门控）
  * @hctx: 硬件队列
  * @dir:  建议的下一个分发方向（0=读 1=写）
  *
  * 返回 0 表示不改（按 deadline 默认决策）；返回非 0 表示采纳建议方向。
  */
 int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir);
+#else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
+/* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
+static inline bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx,
+				       struct request *rq) { return true; }
+static inline bool ai_io_merge_hook(struct request *req, struct bio *bio,
+				    int back) { return true; }
+static inline int ai_io_wbt_hook(struct rq_wb *rwb, int status)
+{ return status; }
+static inline void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
+				       u64 *bps_limit, unsigned long *iops_limit)
+{ }
+static inline int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir)
+{ return 0; }
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
 

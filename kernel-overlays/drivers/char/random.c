@@ -658,15 +658,9 @@ static void mix_pool_bytes(const void *buf, size_t len)
 	spin_lock_irqsave(&input_pool.lock, flags);
 	_mix_pool_bytes(buf, len);
 #ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：熵源质量评估（空实现不改 credit_bits）
-	 * + AI 遥测：熵源质量采样（第3类 3.6 entropy 子事件；
+	/* AI 遥测：熵源质量采样（第3类 3.6 entropy 子事件；
 	 * 自旋锁内调用 —— emit 无锁无分配） */
-	{
-		unsigned int bits = input_pool.init_bits;
-
-		ai_io_entropy_hook(len, &bits);
-		ai_io_emit_entropy("random", len, bits);
-	}
+	ai_io_emit_entropy("random", len, input_pool.init_bits);
 #endif
 	spin_unlock_irqrestore(&input_pool.lock, flags);
 }

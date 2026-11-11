@@ -141,12 +141,8 @@ int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 	trace_pm_qos_update_target(action, prev_value, curr_value);
 
 #ifdef CONFIG_AIKERNEL_POWER
-	/*
-	 * AI 评估 QoS 约束合理性：可改写 curr_value（空实现不改 → 聚合值原样，
-	 * 通知链语义与基线一致）。qos_constraint 遥测全量（type/action/prev/curr）。
-	 * 位于 pm_qos_lock 外（Hook 内禁止加锁/睡眠）。
-	 */
-	ai_power_qos_hook(c->type, action, prev_value, &curr_value);
+	/* qos_constraint 遥测全量（type/action/prev/curr）。
+	 * 位于 pm_qos_lock 外（发射 ring 写无锁）。 */
 	ai_telemetry_qos_constraint(c->type, action, prev_value, curr_value);
 #endif
 

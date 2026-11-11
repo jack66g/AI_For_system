@@ -96,16 +96,12 @@ struct ai_lock_lockdep_payload {
 
 struct ai_lock_stats {
 	u64 spin_hook_calls, spin_sampled;
-	u64 mutex_hook_calls, mutex_hook_skip_spin;
-	u64 rwsem_hook_calls;
-	u64 rcu_hook_calls, rcu_hook_expedite;
-	u64 lockdep_hook_calls;
 	u64 emit_contention, emit_spin, emit_rwsem, emit_rcu, emit_deadlock;
 };
 
 #ifdef CONFIG_AIKERNEL_LOCK
 
-/* ---- A 轨 Hook（实现见 ai_lock.c；空实现 = 原样放行） ---- */
+/* ---- A 轨 Hook（实现见 ai_lock.c；spin 为真观测采样，其余空钩已按 K0 删） ---- */
 
 /**
  * ai_lock_spin_hook() - AI 自适应 spin 策略（采样窗口开始）
@@ -123,44 +119,6 @@ void ai_lock_spin_hook(raw_spinlock_t *lock);
  * 由 _raw_spin_lock 家族在锁后调用。空实现无操作。
  */
 void ai_lock_spin_hook_done(raw_spinlock_t *lock);
-
-/**
- * ai_lock_mutex_hook() - AI 竞争预测，乐观/悲观路径选择
- * @lock: 目标 mutex
- * @try_spin: 出参；true=继续尝试乐观自旋（默认），false=AI 建议直接入队
- *
- * 由 __mutex_lock_common() 入口调用。空实现不改 *try_spin。
- * 返回 true=放行继续（默认）。
- */
-bool ai_lock_mutex_hook(struct mutex *lock, bool *try_spin);
-
-/**
- * ai_lock_rwsem_hook() - AI 动态调整 reader/writer 偏向
- * @sem: 目标读写信号量
- * @kind: 1=读慢路径入口 2=写慢路径入口
- *
- * 由 rwsem_down_read_slowpath()/rwsem_down_write_slowpath() 入口调用。
- * 空实现无操作（AI 偏向决策预留位）。
- */
-void ai_lock_rwsem_hook(struct rw_semaphore *sem, int kind);
-
-/**
- * ai_lock_rcu_hook() - AI 预测回调压力，调整宽限期
- * @n: 本次等待的宽限期数量
- * @expedite: 出参；true=建议 expedited 宽限期（默认 false=正常路径）
- *
- * 由 __wait_rcu_gp() 入口调用。空实现不改 *expedite。
- */
-void ai_lock_rcu_hook(int n, bool *expedite);
-
-/**
- * ai_lock_lockdep_hook() - AI 分析锁依赖图，预测死锁
- * @curr: 当前任务
- * @depth: 当前锁深度
- *
- * 由 __lock_acquire() 链校验通过后调用。空实现无操作。
- */
-void ai_lock_lockdep_hook(struct task_struct *curr, int depth);
 
 /* ---- 第10类发射辅助（实现见 ai_lock.c；全部 sample_take + emit_direct） ---- */
 
@@ -185,12 +143,6 @@ bool ai_lock_sample_take(u32 rate);
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
 static inline void ai_lock_spin_hook(raw_spinlock_t *lock) { }
 static inline void ai_lock_spin_hook_done(raw_spinlock_t *lock) { }
-static inline bool ai_lock_mutex_hook(struct mutex *lock, bool *try_spin)
-{ return true; }
-static inline void ai_lock_rwsem_hook(struct rw_semaphore *sem, int kind) { }
-static inline void ai_lock_rcu_hook(int n, bool *expedite) { }
-static inline void ai_lock_lockdep_hook(struct task_struct *curr, int depth)
-{ }
 static inline void ai_telemetry_lock_contention(u64 lock_addr,
 						u32 waiter_count)
 { }

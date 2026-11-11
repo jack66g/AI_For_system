@@ -51,18 +51,11 @@ static int ai_sched_stats_show(struct seq_file *m, void *v)
 
 	ai_sched_stats_read(&st);
 
-	seq_printf(m, "pick_next_calls=%llu\n", st.pick_next_calls);
-	seq_printf(m, "pick_next_ai_changed=%llu\n", st.pick_next_ai_changed);
-	seq_printf(m, "cfs_pick_calls=%llu\n", st.cfs_pick_calls);
-	seq_printf(m, "cfs_pick_ai_changed=%llu\n", st.cfs_pick_ai_changed);
 	seq_printf(m, "load_balance_calls=%llu\n", st.lb_calls);
 	seq_printf(m, "load_balance_ai_veto=%llu\n", st.lb_ai_veto);
-	seq_printf(m, "pelt_adjust_calls=%llu\n", st.pelt_adjust_calls);
-	seq_printf(m, "context_switch_calls=%llu\n", st.context_switch_calls);
 	seq_printf(m, "rt_admission_calls=%llu\n", st.rt_admission_calls);
 	seq_printf(m, "dl_admission_calls=%llu\n", st.dl_admission_calls);
 	seq_printf(m, "admission_rejected=%llu\n", st.admission_rejected);
-	seq_printf(m, "isolate_hook_calls=%llu\n", st.isolate_hook_calls);
 	seq_printf(m, "query_calls=%llu\n", st.query_calls);
 	seq_printf(m, "classify:\n");
 	for (cls = 0; cls < AI_SCHED_CLASS_MAX; cls++)

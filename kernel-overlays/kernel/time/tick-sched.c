@@ -1236,11 +1236,6 @@ void tick_nohz_idle_stop_tick(void)
 	else
 		return;
 
-#ifdef CONFIG_AIKERNEL_TIME
-	/* AI 决定 NOHZ vs 周期 tick（空实现不改 *expires） */
-	ai_time_tick_hook(cpu, &expires);
-#endif
-
 	ts->idle_calls++;
 
 	if (expires > 0LL) {

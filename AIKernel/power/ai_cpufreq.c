@@ -15,7 +15,7 @@
  *      （= schedutil get_capacity_ref_freq 在本树的等价形式，arch_scale_freq_ref
  *       为弱实现返回 0，走的正是此分支）；
  *   4. freq = map_util_freq(util, ref, arch_scale_cpu_capacity(cpu))；
- *   5. AI 决策接口 ai_power_cpufreq_hook()：空实现不改 → 原样；
+ *   5. （K0b）原第 5 步 AI 决策咨询钩已按 K0 真相表 §4 删除；
  *   6. cpufreq_driver_resolve_freq() 收敛；fast-switch 直写或 irq_work+kthread 慢路径
  *      （schedutil 同款机制，自包含实现）。
  *
@@ -222,8 +222,6 @@ static unsigned int aiguard_get_next_freq(struct aiguard_policy *sg_policy,
 
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
-
-	ai_power_cpufreq_hook(policy, time, util, max, &freq);
 
 	sg_policy->cached_raw_freq = freq;
 	return cpufreq_driver_resolve_freq(policy, freq);

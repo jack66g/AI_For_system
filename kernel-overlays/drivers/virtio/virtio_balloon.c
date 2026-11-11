@@ -566,13 +566,8 @@ static void update_balloon_size_func(struct work_struct *work)
 	diff = towards_target(vb);
 
 #ifdef CONFIG_AIKERNEL_VIRT
-	/*
-	 * AI 预测 Guest 内存需求智能调节气球：可改写 vb->num_pages 目标
-	 * （空实现不改 → diff 原样，气球行为与基线一致）。virtio_balloon_adjust
-	 * 遥测全量（target/num_pages/diff/update_reason）——workqueue 路径
-	 * 非热路径，每轮调整一次。
-	 */
-	ai_virt_balloon_hook(diff, &vb->num_pages);
+	/* virtio_balloon_adjust 遥测全量（target/num_pages/diff/update_reason）
+	 * ——workqueue 路径非热路径，每轮调整一次。 */
 	ai_telemetry_virtio_balloon(vb->num_pages, vb->num_pages - diff, diff,
 				    0);
 #endif

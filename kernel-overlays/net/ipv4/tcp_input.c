@@ -1103,7 +1103,6 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 		tcp_bpf_rtt(sk, mrtt_us, srtt);
 	}
 #ifdef CONFIG_AIKERNEL_NET
-	ai_net_rtt_hook(sk, mrtt_us, &srtt, &tp->mdev_us, &tp->rttvar_us);
 	ai_telemetry_tcp_rtt_update(srtt >> 3, tp->rttvar_us,
 				    jiffies_to_usecs(inet_csk(sk)->icsk_rto));
 #endif

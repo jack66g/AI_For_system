@@ -1002,11 +1002,6 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 	struct rwsem_waiter waiter;
 	DEFINE_WAKE_Q(wake_q);
 
-#ifdef CONFIG_AIKERNEL_LOCK
-	/* AI 读写偏向：读慢路径入口（空实现无操作） */
-	ai_lock_rwsem_hook(sem, 1);
-#endif
-
 	/*
 	 * To prevent a constant stream of readers from starving a sleeping
 	 * writer, don't attempt optimistic lock stealing if the lock is
@@ -1138,11 +1133,6 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 {
 	struct rwsem_waiter waiter;
 	DEFINE_WAKE_Q(wake_q);
-
-#ifdef CONFIG_AIKERNEL_LOCK
-	/* AI 读写偏向：写慢路径入口（空实现无操作） */
-	ai_lock_rwsem_hook(sem, 2);
-#endif
 
 	/* do optimistic spinning and steal lock if possible */
 	if (rwsem_can_spin_on_owner(sem) && rwsem_optimistic_spin(sem)) {

@@ -40,9 +40,6 @@
 #include <linux/mm_inline.h>
 #include <linux/overflow.h>
 
-#ifdef CONFIG_AIKERNEL_VIRT
-#include "../../AIKernel/virt/ai_virt.h"
-#endif
 
 #include "vfio.h"
 
@@ -1561,14 +1558,6 @@ static int vfio_iommu_map(struct vfio_iommu *iommu, dma_addr_t iova,
 {
 	struct vfio_domain *d;
 	int ret;
-
-#ifdef CONFIG_AIKERNEL_VIRT
-	/*
-	 * AI 辅助直通 DMA 映射策略（预留）：iova/pfn/npage/prot 全量入参。
-	 * 空实现无操作 → DMA 映射行为与基线一致。随 CONFIG_VFIO_IOMMU_TYPE1 编译。
-	 */
-	ai_virt_vfio_hook(iova, pfn, npage, prot);
-#endif
 
 	list_for_each_entry(d, &iommu->domain_list, next) {
 		ret = iommu_map(d->domain, iova, (phys_addr_t)pfn << PAGE_SHIFT,

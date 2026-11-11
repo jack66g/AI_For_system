@@ -1727,15 +1727,6 @@ dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
 	if (!iomi.len)
 		return 0;
 
-#ifdef CONFIG_AIKERNEL_VFS
-	{
-		bool ai_prefetch = false;
-
-		/* AI 预测 PMEM 访问模式（预取建议）；空实现不改 */
-		ai_vfs_dax_hook(iocb, iter, &ai_prefetch);
-	}
-#endif
-
 	if (iov_iter_rw(iter) == WRITE) {
 		lockdep_assert_held_write(&iomi.inode->i_rwsem);
 		iomi.flags |= IOMAP_WRITE;

@@ -169,13 +169,13 @@ AI 从下表"接管点"列处接管决策。
 
 | 上游文件（行数） | 埋点函数 / 钩子 | 为什么不物理拆分 | AI 从哪里接管决策 |
 |---|---|---|---|
-| kernel/sched/core.c（11010） | `ai_sched_context_switch_hook` / `ai_sched_pick_next_hook` / `ai_telemetry_sched_*`（switch/wakeup/latency…） | 调度核心是主线改动最频繁文件之一；埋点为单行调用插入 | `ai_sched_pick_next_hook` 的 pick_next 决策点（空实现=原选核逻辑；AI 预测替换占位启发式） |
-| mm/vmscan.c（8001） | `ai_mm_reclaim_hook` / `ai_vmscan_swappiness_get/set` / `ai_mm_emit_kswapd_wake` / `ai_mm_emit_direct_reclaim` / `ai_mm_emit_shrink_lru` / `ai_mm_emit_page_cache_evict` | 回收路径主线重构频繁（MBPF/multigen LRU 演进）；埋点保持插入式 | `ai_mm_reclaim_hook`（扫描参数建议，空实现=不修改）；`ai_vmscan_swappiness_set`（swappiness 立即生效，真实生效路径） |
+| kernel/sched/core.c（11010） | `ai_telemetry_sched_*`（switch/wakeup/latency…） | 调度核心是主线改动最频繁文件之一；埋点为单行调用插入 | 仅遥测（K0b 已删 pick_next/context_switch 空钩；决策点在 fair.c VRUNTIME/WAKEUP 真钩 + load_balance 门控位） |
+| mm/vmscan.c（8001） | `ai_vmscan_swappiness_get/set` / `ai_mm_emit_kswapd_wake` / `ai_mm_emit_direct_reclaim` / `ai_mm_emit_shrink_lru` / `ai_mm_emit_page_cache_evict` | 回收路径主线重构频繁（MBPF/multigen LRU 演进）；埋点保持插入式 | `ai_vmscan_swappiness_set`（swappiness 立即生效，真实生效路径）；回收决策注入= vmscan.c AI_HOOK_MM_RECLAIM 真决策挂点（K0b 已删空钩双挂点） |
 | kernel/fork.c（3304） | `ai_proc_classify_hook` / `ai_telemetry_process_fork` / `ai_telemetry_process_kthread` / `ai_telemetry_ns_change` / `ai_telemetry_cgroup_attach` | copy_process 是生命周期核心，行级重组会毒化所有 fork 相关补丁 | `ai_proc_classify_hook` 返回值写入分类槽表（fork 插入；分类即调度/资源策略输入） |
 | fs/exec.c（2246） | `ai_proc_exec_hook` / `ai_telemetry_exec_command` / `ai_telemetry_shell_command` / `ai_telemetry_script_exec` / `ai_telemetry_app_launch` / `ai_telemetry_user_active` 等 | exec 路径与 LSM/binfmt 交织，属于安全敏感高频修改区 | `ai_proc_exec_hook`（按新程序路径特征更新分类 + app 启动记录；AI 预测后续替换占位启发式） |
 | kernel/exit.c | `ai_proc_slot_remove` / `ai_proc_slot_get` / `ai_telemetry_process_exit` / `ai_telemetry_app_lifetime` | do_exit 涉及锁顺序语义，保持最小插入 | 槽表删除时机（进程分类生命周期收口） |
-| kernel/signal.c | `ai_proc_signal_hook` / `ai_telemetry_signal_generate/deliver/abnormal` / `ai_telemetry_app_crash` | `__send_signal_locked` 热路径且信号语义 delicate | `ai_proc_signal_hook` 返回 0=放行（AI 信号过滤/降权决策表预留接管点） |
-| kernel/futex/waitwake.c | `ai_proc_futex_hook` / `ai_telemetry_futex_wait/wake` | futex 队列逻辑精细，行级改动风险高 | `ai_proc_futex_hook` 返回 0=原逻辑（AI 任务 futex 优先级调整预留接管点） |
+| kernel/signal.c | `ai_telemetry_signal_generate/deliver/abnormal` / `ai_telemetry_app_crash` | `__send_signal_locked` 热路径且信号语义 delicate | 仅遥测（K0b 已删 A 轨 14.5 空钩） |
+| kernel/futex/waitwake.c | `ai_telemetry_futex_wait/wake` | futex 队列逻辑精细，行级改动风险高 | 仅遥测（K0b 已删 A 轨 14.4 空钩） |
 | arch/x86/entry/syscall_64.c | `ai_telemetry_syscall_entry` / `ai_telemetry_syscall_exit` | 系统调用入口是全内核最热路径，汇编相邻、绝对性能敏感；采样判定（默认 1/256）已在被调函数内 | 采样命中 → 全量参数留痕；频率/序列/错误簇统计供 AI 行为建模 |
 | drivers/input/input.c（2769） | `ai_proc_input_event` | input_handle_event 是所有输入设备汇聚点，逐字节热路径 | per-CPU 输入状态机（键盘序列/组合键/鼠标/触摸）驱动用户行为感知 |
 | drivers/tty/n_tty.c | `ai_proc_tty_input_focus` / `ai_telemetry_tty_input` / `ai_telemetry_tty_output` | tty 缓冲路径紧贴行规程语义 | 8 槽 tty 焦点窗口表 → user_focus_window 事件（前台应用识别） |
@@ -194,8 +194,8 @@ AI 从下表"接管点"列处接管决策。
 
 所有 AI 决策点在内核内只留**签名 + 空实现**：函数体只做
 "计数 + 原样放行"（返回值不改变内核默认行为）。
-例：`ai_sched_pick_next_hook` 原样返回默认选核结果；
-`ai_proc_futex_hook` 返回 0；`ai_mm_reclaim_hook` 不修改扫描参数；
+例：`ai_proc_classify_hook` 分类入槽（真行为）；
+`ai_mm_readahead_hook` 调预读窗口（真决策路径）；
 `ai_sec_seccomp_hook` 不改 action。W49 复核：该调用点只在任务已挂
 seccomp 过滤器时执行且不消费 action，无法给任意任务强装过滤器（seccomp
 只允许进程自装/clone 继承/同线程组 TSYNC）→ `sec.seccomp` 参数已如实

@@ -1032,17 +1032,7 @@ static void neigh_periodic_work(struct work_struct *work)
 			     !time_in_range_open(jiffies, n->used,
 						 n->used + NEIGH_VAR(n->parms, GC_STALETIME)))) {
 #ifdef CONFIG_AIKERNEL_NET
-				{
-					bool refresh = false;
-
-					ai_net_neigh_hook(n, &refresh);
-					if (refresh) {
-						n->used = jiffies;
-						write_unlock(&n->lock);
-						continue;
-					}
-					ai_telemetry_neigh_expire(n);
-				}
+				ai_telemetry_neigh_expire(n);
 #endif
 				hlist_del_rcu(&n->hash);
 				hlist_del_rcu(&n->dev_list);

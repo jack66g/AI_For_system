@@ -650,7 +650,6 @@ gro_result_t gro_receive_skb(struct gro_node *gro, struct sk_buff *skb)
 	ret = gro_skb_finish(gro, skb, dev_gro_receive(gro, skb));
 	trace_napi_gro_receive_exit(ret);
 #ifdef CONFIG_AIKERNEL_NET
-	ai_net_gro_hook(skb, &ret);
 	ai_telemetry_gro_receive(skb->dev ? skb->dev->name : "?", ret);
 	if (ret == GRO_MERGED)
 		ai_telemetry_gro_merge(skb->dev ? skb->dev->name : "?", ret);

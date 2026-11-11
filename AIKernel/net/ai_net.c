@@ -2,9 +2,9 @@
 /*
  * ai_net.c - AIKernel 网络核心（Prompt 06）
  *
- * A 轨：AI 网络决策框架（流量分类/攻击检测/参数建议）+ 9 个 Hook 空实现 + CCA 咨询点
- *       （ai_net_rtt/nf/xdp/qdisc/neigh/napi/backlog/gro/conntrack/cong/cong_ssthresh_hook，
- *       空实现 = 原样放行，不改变内核默认行为）；
+ * A 轨：AI 网络决策框架（流量分类/攻击检测/参数建议）+ nf 观测钩 +
+ *       CCA 咨询钩（ai_net_cong/cong_ssthresh_hook，经 CONFIG_AIKERNEL_EXPERIMENTAL
+ *       门控；空实现 = 原样放行，不改变内核默认行为）；
  * B 轨：第4类 10 子类 26 事件发射（复杂解析在这里做，简单事件为 ai_net.h static inline）
  *       + 子事件采样门控（ai_net_sample_take，per-CPU 无锁；分级策略见设计文档 2.4 定稿）
  *       + socket 生命周期字节计数表（socket_close 的 bytes_sent/recv 数据源）。
@@ -157,7 +157,7 @@ EXPORT_SYMBOL_GPL(ai_net_set_sub_rate);
  * ---- 决策计数 / 异常检测统计（per-CPU，无锁） ----
  */
 
-static DEFINE_PER_CPU(u64, ai_net_hook_cnt[11]);
+static DEFINE_PER_CPU(u64, ai_net_hook_cnt[3]);
 static DEFINE_PER_CPU(u64, ai_net_classify_cnt);
 static DEFINE_PER_CPU(u64, ai_net_anom_syn);
 static DEFINE_PER_CPU(u64, ai_net_anom_retrans);
@@ -167,77 +167,29 @@ static DEFINE_PER_CPU(u64, ai_net_anom_samples);
  * ---- A 轨：Hook 空实现（原样放行） + 决策框架占位 ----
  */
 
-void ai_net_rtt_hook(struct sock *sk, long mrtt_us,
-		     u32 *srtt_us, u32 *mdev_us, u32 *rttvar_us)
-{
-	this_cpu_inc(ai_net_hook_cnt[0]);
-}
-EXPORT_SYMBOL_GPL(ai_net_rtt_hook);
-
 unsigned int ai_net_nf_hook(struct sk_buff *skb,
 			    const struct nf_hook_state *state,
 			    unsigned int verdict)
 {
-	this_cpu_inc(ai_net_hook_cnt[1]);
+	this_cpu_inc(ai_net_hook_cnt[0]);
 	ai_net_detect_anomaly(skb, verdict);
 	return verdict;
 }
 EXPORT_SYMBOL_GPL(ai_net_nf_hook);
 
-bool ai_net_xdp_hook(struct net_device *dev, struct xdp_buff *xdp)
-{
-	this_cpu_inc(ai_net_hook_cnt[2]);
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_net_xdp_hook);
-
-void ai_net_qdisc_hook(struct net_device *dev, struct Qdisc *sch)
-{
-	this_cpu_inc(ai_net_hook_cnt[3]);
-}
-EXPORT_SYMBOL_GPL(ai_net_qdisc_hook);
-
-void ai_net_neigh_hook(struct neighbour *n, bool *refresh)
-{
-	this_cpu_inc(ai_net_hook_cnt[4]);
-}
-EXPORT_SYMBOL_GPL(ai_net_neigh_hook);
-
-void ai_net_napi_hook(struct napi_struct *n, int *weight)
-{
-	this_cpu_inc(ai_net_hook_cnt[5]);
-}
-EXPORT_SYMBOL_GPL(ai_net_napi_hook);
-
-void ai_net_backlog_hook(struct socket *sock, int *backlog)
-{
-	this_cpu_inc(ai_net_hook_cnt[6]);
-}
-EXPORT_SYMBOL_GPL(ai_net_backlog_hook);
-
-void ai_net_gro_hook(struct sk_buff *skb, gro_result_t *ret)
-{
-	this_cpu_inc(ai_net_hook_cnt[7]);
-}
-EXPORT_SYMBOL_GPL(ai_net_gro_hook);
-
-void ai_net_conntrack_hook(struct nf_conn *ct, unsigned int ct_count)
-{
-	this_cpu_inc(ai_net_hook_cnt[8]);
-}
-EXPORT_SYMBOL_GPL(ai_net_conntrack_hook);
-
+#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc)
 {
-	this_cpu_inc(ai_net_hook_cnt[9]);
+	this_cpu_inc(ai_net_hook_cnt[1]);
 }
 EXPORT_SYMBOL_GPL(ai_net_cong_hook);
 
 void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh)
 {
-	this_cpu_inc(ai_net_hook_cnt[10]);
+	this_cpu_inc(ai_net_hook_cnt[2]);
 }
 EXPORT_SYMBOL_GPL(ai_net_cong_ssthresh_hook);
+#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 u8 ai_net_classify(struct sk_buff *skb)
 {
@@ -296,7 +248,7 @@ void ai_net_stats_read(struct ai_net_stats *st)
 	for_each_possible_cpu(cpu) {
 		u64 *cnt = per_cpu_ptr(ai_net_hook_cnt, cpu);
 
-		for (i = 0; i < 11; i++)
+		for (i = 0; i < 3; i++)
 			st->hook_calls[i] += cnt[i];
 		st->classify_calls += per_cpu(ai_net_classify_cnt, cpu);
 		st->anomaly_syn_pkts += per_cpu(ai_net_anom_syn, cpu);

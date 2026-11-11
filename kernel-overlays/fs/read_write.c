@@ -565,17 +565,6 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	if (unlikely(!access_ok(buf, count)))
 		return -EFAULT;
 
-#ifdef CONFIG_AIKERNEL_VFS
-	{
-		size_t ai_count = count;
-
-		/* AI 读写控制通道（预留）：空实现返回 true 放行 */
-		if (!ai_vfs_rw_hook(file, 0, pos ? *pos : 0, &ai_count))
-			return -EPERM;
-		count = ai_count;
-	}
-#endif
-
 	ret = rw_verify_area(READ, file, pos, count);
 	if (ret)
 		return ret;
@@ -692,17 +681,6 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		return -EINVAL;
 	if (unlikely(!access_ok(buf, count)))
 		return -EFAULT;
-
-#ifdef CONFIG_AIKERNEL_VFS
-	{
-		size_t ai_count = count;
-
-		/* AI 读写控制通道（预留）：空实现返回 true 放行 */
-		if (!ai_vfs_rw_hook(file, 1, pos ? *pos : 0, &ai_count))
-			return -EPERM;
-		count = ai_count;
-	}
-#endif
 
 	ret = rw_verify_area(WRITE, file, pos, count);
 	if (ret)

@@ -1909,22 +1909,6 @@ static void iput_final(struct inode *inode)
 		return;
 	}
 
-#ifdef CONFIG_AIKERNEL_VFS
-	/*
-	 * AI 回收决策：AI 预测该 inode 将被复用 → 强制走 LRU 缓存路径
-	 * （与原生 iput 保留分支等价：仅当 superblock 仍活跃时可保留，
-	 * 否则按原逻辑回收，防止悬挂）。空实现返回 true = 原逻辑。
-	 */
-	if (!ai_vfs_inode_hook(inode)) {
-		if (sb->s_flags & SB_ACTIVE) {
-			__inode_add_lru(inode, true);
-			spin_unlock(&inode->i_lock);
-			return;
-		}
-		ai_vfs_inode_veto_note();
-	}
-#endif
-
 	state = inode->i_state;
 	if (!drop) {
 		WRITE_ONCE(inode->i_state, state | I_WILL_FREE);
