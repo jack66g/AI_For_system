@@ -435,15 +435,6 @@ void ai_vfs_dax_hook(struct kiocb *iocb, struct iov_iter *iter,
 bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset,
 		    size_t *count);
 
-/**
- * ai_vfs_exec_command_hook() - exec 命令行感知钩子（预留）
- * @bprm: exec 二进制参数块（含完整 argv/envp）
- *
- * B 轨第5类 exec_command（完整命令行）的预留钩子：本步仅声明+空实现，
- * 实际接入 fs/exec.c 与命令行采集由后续 Prompt 落地。
- */
-void ai_vfs_exec_command_hook(struct linux_binprm *bprm);
-
 /* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
 
 /**
@@ -573,7 +564,6 @@ static inline void ai_vfs_dax_hook(struct kiocb *iocb, struct iov_iter *iter,
 				   bool *prefetch) { }
 static inline bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset,
 				  size_t *count) { return true; }
-static inline void ai_vfs_exec_command_hook(struct linux_binprm *bprm) { }
 static inline int ai_vfs_predict_dentry_reuse(struct dentry *dentry,
 					      u8 *out_score)
 { if (out_score) *out_score = 50; return AI_OK; }

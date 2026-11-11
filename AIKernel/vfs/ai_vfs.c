@@ -193,13 +193,6 @@ bool ai_vfs_rw_hook(struct file *file, int rw, loff_t offset, size_t *count)
 }
 EXPORT_SYMBOL_GPL(ai_vfs_rw_hook);
 
-void ai_vfs_exec_command_hook(struct linux_binprm *bprm)
-{
-	/* B 轨第5类 exec_command（完整命令行）预留钩子：
-	 * 本步空实现，fs/exec.c 接入由后续 Prompt 落地。 */
-}
-EXPORT_SYMBOL_GPL(ai_vfs_exec_command_hook);
-
 /* ---- 决策框架 ---- */
 
 int ai_vfs_predict_dentry_reuse(struct dentry *dentry, u8 *out_score)
