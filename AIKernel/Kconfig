@@ -27,6 +27,17 @@ config AIKERNEL
 
 	  If unsure, say N.
 
+config AIKERNEL_EXPERIMENTAL
+	bool "AIKernel experimental hooks (gated decision points)"
+	depends on AIKERNEL
+	default n
+	help
+	  WP-K0 truth table section 5: 17 reserved decision points
+	  (sched 2 / mm 4 / net 2 / io 5 / sec 4).  When disabled every
+	  one degrades to a static inline no-op stub, same zero-cost
+	  semantics as the master switch.  Enable only for development
+	  or evaluation builds.
+
 config AIKERNEL_RUNTIME
 	bool "AIKernel Runtime 核心"
 	depends on AIKERNEL
