@@ -128,10 +128,17 @@ int main(void)
 	char day_now[16], day_old[16];
 	char path[192];
 
-	/* 当日/前一日 ts（同 REF 换算：墙钟-btime→单调 ns；day 由
-	 * as_pq_day_from_ts 动态算——午夜竞态免疫） */
-	ts_now_ns = (int64_t)(wall_ms - btime * 1000) * 1000000LL;
-	ts_old_ns = ts_now_ns - 86400LL * 1000000000LL;
+	/* 时间对取「现在」与「+24h」（同 REF 换算：墙钟-btime→单调
+	 * ns；day 由 as_pq_day_from_ts 动态算——午夜竞态免疫）：恒 ≥0、
+	 * 恒相差一个 UTC 日，任意 uptime/时刻成立。原夹具「now−24h」
+	 * 在开机不足 24h 时为负 ts，落进 as_pq_day_from_ts 的离谱 ts
+	 * 钳位（负 ts 钳到 boot 时刻——REF 会崩我们钳的防御性差异），
+	 * 两日并一日、场景 5 必假（LT-BUG-010，2026-11-11 重启后
+	 * uptime 2h 实证）。断言值零改动，只换夹具时间方向。 */
+	ts_old_ns = (int64_t)(wall_ms - btime * 1000) * 1000000LL;
+	if (ts_old_ns < 0)
+		ts_old_ns = 0;	/* 时钟回拨防御：钳到 boot 时刻 */
+	ts_now_ns = ts_old_ns + 86400LL * 1000000000LL;
 	as_pq_day_from_ts(ts_now_ns, btime, day_now);
 	as_pq_day_from_ts(ts_old_ns, btime, day_old);
 
@@ -341,7 +348,7 @@ int main(void)
 		dec_file_stats(day_old, &f_old);
 		dec_file_stats(day_now, &f_now);
 		CHECK(f_old.num_rows == 2, "old day file rows=2");
-		CHECK(f_now.num_rows == 1, "today file rows=1");
+		CHECK(f_now.num_rows == 1, "later day file rows=1");
 	}
 	CHECK(d.n == 3, "batch retained (no drop-after-write)");
 	/* 晚到同日行不丢（冒烟教训回归）：追加旧日新 id=4 → 重写含全部旧日组 */
@@ -358,7 +365,7 @@ int main(void)
 		dec_file_stats(day_now, &f_now);
 		CHECK(f_old.num_rows == 3,
 		      "old day file rewritten full (no clobber)");
-		CHECK(f_now.num_rows == 1, "today file unchanged");
+		CHECK(f_now.num_rows == 1, "later day file unchanged");
 	}
 	as_decisions_close(&d);
 
