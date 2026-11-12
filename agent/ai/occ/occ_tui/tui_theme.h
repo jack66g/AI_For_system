@@ -121,4 +121,17 @@ static inline const char *tui_thm_spinner(uint64_t now_ms)
 #ifdef __cplusplus
 }
 #endif
+/* ---- T4 /theme：内嵌预置 ---- */
+struct tui_theme_preset {
+	const char *name;
+	const char *desc;
+	int slots[TUI_THM_COUNT];
+};
+const struct tui_theme_preset *tui_theme_preset_find(const char *name);
+const struct tui_theme_preset *tui_theme_preset_at(int idx);
+int tui_theme_write_ini(const char *path,
+			const struct tui_theme_preset *p);
+int tui_theme_current_preset(const char *path,
+			char *name, size_t nlen);
+
 #endif /* OCC_TUI_THEME_H */

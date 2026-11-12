@@ -343,6 +343,7 @@ int main(void)
 		/* 尾部挂载预算压到 10 行：120 条消息必然被切割出
 		 * 「⋯ 更早 N 条」；增量加载 +1000 一次覆盖全部 */
 		setenv("OCC_REPLAY_LINES", "10", 1);
+		setenv("AIK_CONSOLE_GATE_SKIP", "1", 1);
 		execl("../occ", "occ", (char *)NULL);
 		_exit(127);
 	}

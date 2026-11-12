@@ -51,6 +51,112 @@ static const char *const TUI_THM_NAMES[TUI_THM_COUNT] = {
 
 static int g_pal[TUI_THM_COUNT];
 
+/* ---- T4 /theme：内嵌预置主题（顺序=TUI_THM_NAMES 18 槽） ---- */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define TUI_THEME_PRESET_N 5
+
+static const struct tui_theme_preset
+tui_theme_presets[TUI_THEME_PRESET_N] = {
+	{ "default", "出厂青（编译期默认）",
+	  { 252, 235, 242, 81, 238, 203, 114, 214, 236, 234,
+	    186, 236, 81, 114, 179, 244, 75, 140 } },
+	{ "amber", "琥珀暖调",
+	  { 252, 235, 243, 214, 237, 196, 150, 214, 236, 234,
+	    222, 236, 208, 186, 215, 245, 180, 179 } },
+	{ "green", "磷光绿",
+	  { 250, 233, 241, 84, 236, 196, 84, 227, 234, 232,
+	    194, 234, 84, 157, 149, 244, 120, 143 } },
+	{ "paper", "纸面浅色（高对比）",
+	  { 238, 253, 244, 25, 250, 160, 28, 130, 251, 254,
+	    236, 251, 25, 28, 94, 249, 31, 97 } },
+	{ "mono", "极简灰阶（错误/警告保留着色）",
+	  { 250, 234, 243, 255, 237, 196, 255, 252, 236, 235,
+	    252, 236, 255, 250, 243, 243, 252, 245 } },
+};
+
+const struct tui_theme_preset *tui_theme_preset_find(const char *name)
+{
+	int i;
+
+	if (!name || !name[0])
+		return NULL;
+	for (i = 0; i < TUI_THEME_PRESET_N; i++)
+		if (strcmp(tui_theme_presets[i].name, name) == 0)
+			return &tui_theme_presets[i];
+	return NULL;
+}
+
+const struct tui_theme_preset *tui_theme_preset_at(int idx)
+{
+	if (idx < 0 || idx >= TUI_THEME_PRESET_N)
+		return NULL;
+	return &tui_theme_presets[idx];
+}
+
+int tui_theme_write_ini(const char *path, const struct tui_theme_preset *p)
+{
+	char tmp[600];
+	FILE *f;
+	int i;
+
+	if (!path || !path[0] || !p)
+		return -1;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f)
+		return -1;
+	fprintf(f, "# preset: %s (%s)\n", p->name, p->desc);
+	for (i = 0; i < TUI_THM_COUNT; i++)
+		fprintf(f, "%s = %d\n", TUI_THM_NAMES[i], p->slots[i]);
+	if (fflush(f) != 0 || fclose(f) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	chmod(tmp, 0644);
+	if (rename(tmp, path) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+int tui_theme_current_preset(const char *path, char *name, size_t nlen)
+{
+	FILE *f;
+	char line[256];
+
+	if (!path || !name || nlen == 0)
+		return -1;
+	name[0] = '\0';
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "# preset: ", 10) == 0) {
+			char *nl = strchr(line + 10, ' ');
+
+			if (nl)
+				*nl = '\0';
+			snprintf(name, nlen, "%s", line + 10);
+			fclose(f);
+			return 0;
+		}
+		if (line[0] != '#' && line[0] != '\n' && line[0] != '\0') {
+			/* 已是手改文件（无 preset 头）——视为自定义 */
+			fclose(f);
+			snprintf(name, nlen, "%s", "custom");
+			return 0;
+		}
+	}
+	fclose(f);
+	return -1;
+}
+
 const char *tui_thm_slot_name(int slot)
 {
 	if (slot < 0 || slot >= TUI_THM_COUNT)

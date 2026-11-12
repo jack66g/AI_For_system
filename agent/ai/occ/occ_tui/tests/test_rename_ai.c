@@ -250,6 +250,7 @@ static int run_occ(const char *tmpdir, int port,
 		setenv("TERM", "dumb", 1);
 		/* 重试旋钮压到最快（失败路径毫秒级收口） */
 		setenv("OCC_LLM_RETRY_MAX", "1", 1);
+		setenv("AIK_CONSOLE_GATE_SKIP", "1", 1);
 		setenv("OCC_LLM_RETRY_TIMEOUT_MAX", "1", 1);
 		setenv("OCC_LLM_RETRY_BASE_MS", "50", 1);
 		setenv("OCC_LLM_RETRY_CAP_MS", "100", 1);

@@ -1,0 +1,464 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* tui_gate.c - T4 控制台登录门：crypt 凭据 + 独立 tui_screen 登录/向导 UI */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+
+static int gate_term_restore;
+static struct termios gate_term_orig;
+
+#include <crypt.h>
+
+#include "tui_core.h"
+#include "tui_input.h"
+#include "tui_theme.h"
+#include "tui_gate.h"
+
+#define GATE_USER "admin"
+#define GATE_PW_MAX 64
+#define GATE_MAX_FAIL 3
+#define GATE_COOLDOWN_SEC 10
+
+const char *tui_gate_path(void)
+{
+	const char *env = getenv("AIK_CONSOLE_GATE");
+
+	if (env && env[0])
+		return env;
+	return "/etc/aikernel/console-gate";
+}
+
+int tui_gate_skipboot_path(const char *cmdline_path)
+{
+	FILE *f;
+	char buf[4096];
+	size_t n;
+
+	f = fopen(cmdline_path, "r");
+	if (!f)
+		return 0;
+	n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	return strstr(buf, "ai.skipgate=1") != NULL;
+}
+
+int tui_gate_skipboot(void)
+{
+	return tui_gate_skipboot_path("/proc/cmdline");
+}
+
+int tui_gate_read(const char *path, char hash[128], long long *ts)
+{
+	FILE *f;
+	char line[256];
+	char *p1, *p2;
+
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	if (!fgets(line, sizeof(line), f)) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	p1 = strchr(line, ':');
+	if (!p1)
+		return -1;
+	*p1++ = '\0';
+	p2 = strchr(p1, ':');
+	if (!p2)
+		return -1;
+	*p2++ = '\0';
+	if (strcmp(line, GATE_USER) != 0)
+		return -1;
+	if (strncmp(p1, "$6$", 3) != 0 || strlen(p1) >= 128)
+		return -1;
+	strcpy(hash, p1);
+	if (ts)
+		*ts = strtoll(p2, NULL, 10);
+	return 0;
+}
+
+int tui_gate_hash(const char *pw, char out[128])
+{
+	static const char cs[] =
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	char salt[32];
+	unsigned char rnd[8];
+	int fd, i;
+	char *res;
+
+	if (!pw || !*pw || strlen(pw) > GATE_PW_MAX)
+		return -1;
+	fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0 || read(fd, rnd, sizeof(rnd)) != (ssize_t)sizeof(rnd)) {
+		if (fd >= 0)
+			close(fd);
+		return -1;
+	}
+	close(fd);
+	for (i = 0; i < 8; i++)
+		salt[i] = cs[rnd[i] % (sizeof(cs) - 1)];
+	salt[8] = '\0';
+	snprintf(out, 128, "$6$%.8s$", salt);
+	res = crypt(pw, out);
+	if (!res || strlen(res) >= 128)
+		return -1;
+	snprintf(out, 128, "%s", res);
+	return 0;
+}
+
+int tui_gate_verify(const char *pw, const char *hash)
+{
+	const char *res;
+	const volatile unsigned char *a, *b;
+	size_t la, lb, i;
+	unsigned char d = 0;
+
+	if (!pw || !hash || strncmp(hash, "$6$", 3) != 0)
+		return 0;
+	res = crypt(pw, hash);
+	if (!res)
+		return 0;
+	a = (const volatile unsigned char *)res;
+	b = (const volatile unsigned char *)hash;
+	la = strlen(res);
+	lb = strlen(hash);
+	d |= (unsigned char)(la ^ lb);
+	for (i = 0; i < la && i < lb; i++)
+		d |= (unsigned char)(a[i] ^ b[i]);
+	return d == 0;
+}
+
+int tui_gate_write(const char *path, const char *hash)
+{
+	char tmp[512];
+	FILE *f;
+
+	if (!path || !path[0] || !hash || strncmp(hash, "$6$", 3) != 0)
+		return -1;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f)
+		return -1;
+	fprintf(f, "%s:%s:%lld\n", GATE_USER, hash, (long long)time(NULL));
+	if (fflush(f) != 0 || fclose(f) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	chmod(tmp, 0600);
+	if (rename(tmp, path) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+/* ---- UI ---- */
+
+struct gate_field {
+	char buf[GATE_PW_MAX];
+	int len;
+};
+
+static void draw_center(tui_screen *s, int row, int cols,
+			const char *txt, tui_attr a)
+{
+	int c = (cols - (int)strlen(txt)) / 2;
+
+	if (c < 0)
+		c = 0;
+	tui_screen_puts(s, row, c + 1, txt, a);
+}
+
+static void draw_masked(tui_screen *s, int row, int cols,
+			const struct gate_field *f, int active)
+{
+	char stars[GATE_PW_MAX + 3];
+	int i, c;
+	tui_attr a = tui_thm_attr(TUI_THM_FG, TUI_THM_USER_BG, 0);
+
+	for (i = 0; i < f->len; i++)
+		stars[i] = '*';
+	stars[f->len] = active ? '_' : ' ';
+	stars[f->len + 1] = '\0';
+	c = (cols - 40) / 2;
+	if (c < 1)
+		c = 1;
+	tui_screen_puts(s, row, c, "                                      ", a);
+	tui_screen_puts(s, row, c, stars, a);
+}
+
+static void box_frame(tui_screen *s, int rows, int cols)
+{
+	int r0 = rows / 2 - 6, r1 = rows / 2 + 5;
+	int c0 = (cols - 44) / 2, c1 = c0 + 43, r, c;
+	tui_attr border = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
+	tui_attr bg = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0);
+
+	if (r0 < 0)
+		r0 = 0;
+	if (c0 < 0)
+		c0 = 0;
+	for (c = c0; c <= c1 && c < cols; c++) {
+		tui_screen_puts(s, r0, c, c == c0 ? "+" :
+				(c == c1 ? "+" : "-"), border);
+		tui_screen_puts(s, r1, c, c == c0 ? "+" :
+				(c == c1 ? "+" : "-"), border);
+	}
+	for (r = r0 + 1; r < r1 && r < rows; r++) {
+		tui_screen_puts(s, r, c0, "|", border);
+		tui_screen_puts(s, r, c1, "|", border);
+	}
+	(void)bg;
+}
+
+#define GATE_MODE_SETUP 0
+#define GATE_MODE_LOGIN 1
+
+static int gate_field_input(tui_input *in, struct gate_field *f, int *done,
+			    int *quit)
+{
+	tui_event ev;
+
+	*done = 0;
+	*quit = 0;
+	if (tui_input_next(in, &ev) <= 0)
+		return 0;
+	if (ev.type != TUI_EV_KEY)
+		return 0;
+	if (ev.key == TUI_KEY_CHAR) {
+		if ((ev.mods & TUI_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
+			*quit = 1;
+			return 0;
+		}
+		if (ev.ch >= 32 && ev.ch < 127 && f->len < GATE_PW_MAX - 1)
+			f->buf[f->len++] = (char)ev.ch;
+		return 0;
+	}
+	if (ev.key == TUI_KEY_RETURN) {
+		*done = 1;
+		return 0;
+	}
+	if (ev.key == TUI_KEY_BACKSPACE) {
+		if (f->len > 0)
+			f->len--;
+		return 0;
+	}
+	if (ev.key == TUI_KEY_ESCAPE)
+		*quit = 1;
+	return 0;
+}
+
+static int gate_run_ui(int mode, int *unlocked)
+{
+	tui_sink sink;
+	tui_renderer *ren;
+	tui_input in;
+	tui_screen *s;
+	int rows, cols, rc = 1;
+	struct gate_field f1, f2;
+	int stage = 0;		/* setup: 0=首次输入 1=确认输入 */
+	int fails = 0;
+	char hash[128];
+	tui_attr title_a = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
+	tui_attr txt_a = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0);
+	tui_attr mut_a = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
+	tui_attr err_a = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
+
+	*unlocked = 0;
+	/* T4 勘误（实机抓获）：tty 默认 ECHO+ICANON 会把密码明文回显到屏上
+	 * （gate 自绘掩码之外的第二份）——进 UI 前关回显转 raw（同 occ 主
+	 * TUI 口径），退出恢复。 */
+	{
+		struct termios orig, raw;
+
+		if (tcgetattr(STDIN_FILENO, &orig) == 0) {
+			raw = orig;
+			raw.c_lflag &= ~(unsigned)(ECHO | ICANON | ISIG);
+			raw.c_iflag &= ~(unsigned)(IXON | ICRNL);
+			raw.c_cc[VMIN] = 1;
+			raw.c_cc[VTIME] = 0;
+			tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+			gate_term_restore = 1;
+			gate_term_orig = orig;
+		}
+	}
+	if (tui_term_get_size(STDIN_FILENO, &rows, &cols) != 0) {
+		rows = 24;
+		cols = 80;
+	}
+	tui_sink_init_fd(&sink, STDOUT_FILENO);
+	ren = tui_renderer_create(rows, cols, sink);
+	if (!ren)
+		return 1;
+	s = tui_renderer_front(ren);
+	tui_input_init(&in);
+
+	memset(&f1, 0, sizeof(f1));
+	memset(&f2, 0, sizeof(f2));
+	for (;;) {
+		int done, quit;
+		char msg[160] = "";
+		const char *status;
+		static char status_buf[160];
+
+		tui_screen_fill(s, tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0));
+		box_frame(s, rows, cols);
+		if (mode == GATE_MODE_SETUP) {
+			draw_center(s, rows / 2 - 4, cols,
+				    "AIKernel 初始化", title_a);
+			draw_center(s, rows / 2 - 3, cols,
+				    "首次使用：设置 admin 密码（≥6 位）", mut_a);
+			draw_center(s, rows / 2 - 2, cols,
+				    stage == 0 ? "设置密码：" : "确认密码：",
+				    txt_a);
+			draw_masked(s, rows / 2 - 1, cols,
+				    stage == 0 ? &f1 : &f2, 1);
+			status = status_buf;
+			draw_center(s, rows / 2 + 1, cols, status,
+				    status[0] ? err_a : txt_a);
+			draw_center(s, rows / 2 + 3, cols,
+				    "配置云端模型：解锁后 /models", mut_a);
+			draw_center(s, rows / 2 + 4, cols,
+				    "本地模型：/models 选 ollama", mut_a);
+		} else {
+			draw_center(s, rows / 2 - 4, cols,
+				    "AIKernel · alpha", title_a);
+			draw_center(s, rows / 2 - 3, cols,
+				    "用户：admin", txt_a);
+			draw_center(s, rows / 2 - 2, cols, "密码：", txt_a);
+			draw_masked(s, rows / 2 - 1, cols, &f1, 1);
+			snprintf(status_buf, sizeof(status_buf), "%s", msg);
+			status = status_buf;
+			draw_center(s, rows / 2 + 1, cols, status,
+				    status[0] ? err_a : txt_a);
+			draw_center(s, rows / 2 + 3, cols,
+				    "Enter 登录 · Ctrl-C 退出", mut_a);
+		}
+		tui_renderer_flush(ren, rows / 2 - 1, cols / 2);
+
+		if (mode == GATE_MODE_SETUP) {
+			gate_field_input(&in, stage == 0 ? &f1 : &f2,
+					 &done, &quit);
+			if (quit) {
+				rc = 1;
+				break;
+			}
+			if (done) {
+				if (stage == 0) {
+					if (f1.len < 6) {
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 "密码至少 6 位，重输");
+						memset(&f1, 0, sizeof(f1));
+					} else {
+						stage = 1;
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 "再输入一次确认");
+					}
+				} else {
+					if (strcmp(f1.buf, f2.buf) != 0) {
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 "两次不一致，重新设置");
+						memset(&f1, 0, sizeof(f1));
+						memset(&f2, 0, sizeof(f2));
+						stage = 0;
+					} else if (tui_gate_hash(f1.buf,
+								 hash) == 0 &&
+						   tui_gate_write(
+							   tui_gate_path(),
+							   hash) == 0) {
+						*unlocked = 1;
+						rc = 0;
+						break;
+					} else {
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 "写入失败（权限？）");
+						memset(&f2, 0, sizeof(f2));
+					}
+				}
+			}
+			continue;
+		}
+		/* LOGIN */
+		if (fails >= GATE_MAX_FAIL) {
+			/* 冷却倒计时（阻塞 1s 步进重绘） */
+			int left = GATE_COOLDOWN_SEC;
+
+			while (left > 0) {
+				snprintf(status_buf, sizeof(status_buf),
+					 "尝试过多，冷却 %d 秒…", left);
+				/* 重绘状态行即可 */
+				draw_center(s, rows / 2 + 1, cols,
+					    status_buf, err_a);
+				tui_renderer_flush(ren, rows / 2 - 1,
+						   cols / 2);
+				sleep(1);
+				left--;
+			}
+			fails = 0;
+			memset(&f1, 0, sizeof(f1));
+			snprintf(status_buf, sizeof(status_buf), "%s", "");
+			continue;
+		}
+		gate_field_input(&in, &f1, &done, &quit);
+		if (quit) {
+			rc = 1;
+			break;
+		}
+		if (done) {
+			if (tui_gate_read(tui_gate_path(), hash, NULL) != 0) {
+				/* 文件消失（管理员删除=复位）→ 转向导 */
+				mode = GATE_MODE_SETUP;
+				memset(&f1, 0, sizeof(f1));
+				stage = 0;
+				continue;
+			}
+			if (f1.len > 0 && tui_gate_verify(f1.buf, hash)) {
+				*unlocked = 1;
+				rc = 0;
+				break;
+			}
+			fails++;
+			snprintf(msg, sizeof(msg), "密码不正确（%d/%d）",
+				 fails, GATE_MAX_FAIL);
+			memset(&f1, 0, sizeof(f1));
+		}
+	}
+	if (gate_term_restore)
+		tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
+	tui_renderer_destroy(ren);
+	return rc;
+}
+
+int tui_gate_enter(void)
+{
+	char hash[128];
+	long long ts;
+	int unlocked;
+
+	/* 旁路：引导参数（ISO 烟测）或环境标记（pty 集成测试注入；
+	 * 物理接触者本可旁路，非漏洞） */
+	if (tui_gate_skipboot())
+		return 0;
+	{
+		const char *e = getenv("AIK_CONSOLE_GATE_SKIP");
+		if (e && e[0] && strcmp(e, "0") != 0)
+			return 0;
+	}
+	if (tui_gate_read(tui_gate_path(), hash, &ts) != 0)
+		return gate_run_ui(GATE_MODE_SETUP, &unlocked);
+	return gate_run_ui(GATE_MODE_LOGIN, &unlocked);
+}

@@ -52,7 +52,7 @@ STORE_LIB := ../store/libaikstore.a
 SQLITE_LIB := ../store/libsqlite3.a
 SQLITE_INC := -I../third_party/sqlite3
 
-LDLIBS := -lm -lpthread
+LDLIBS := -lm -lpthread -lcrypt
 
 # occ_llm 库对象（llm_call.o 依赖 http_client.h，仅在链传输的程序使用）
 # retry.c（T9b2）：重试参数族/分级/退避——纯计算，单测 test_retry 直链
@@ -93,7 +93,7 @@ TUI_SRCS := occ_tui/tui_utf8.c occ_tui/tui_core.c occ_tui/tui_input.c \
 	    occ_tui/tui_frame.c occ_tui/tui_chat.c occ_tui/tui_inputbox.c \
 	    occ_tui/tui_sidebar.c occ_tui/tui_view.c occ_tui/tui_theme.c \
 	    occ_tui/tui_usage.c occ_tui/tui_keymap.c occ_tui/tui_overlay.c \
-	    occ_tui/tui_data.c
+	    occ_tui/tui_data.c occ_tui/tui_gate.c occ_zoomrc.c
 TUI_OBJS := $(TUI_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # 纯协议程序（不含传输）：单测 + 构造/回放驱动
@@ -116,7 +116,7 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 #     + test_telemetry（§9.6 会话遥测落 T8 parquet + footer 读回）
 # OCC-DEBT：test_replay（回放规划器——纯规划 + mock db 夹具两相）
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
-	     tests/test_tools tests/test_revert tests/test_retry \
+	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
 	     tests/test_ac tests/test_telemetry tests/test_replay
 
@@ -135,7 +135,7 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_sse_anthropic tests/test_catalog \
 		  tests/test_registry tests/test_session \
 		  tests/test_tokens tests/test_loop tests/test_tools \
-		  tests/test_revert tests/test_retry tests/test_sink \
+		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay; do \
 		./$$t || exit 1; \
@@ -309,6 +309,10 @@ tests/test_telemetry: tests/test_telemetry.c $(OBJ_DIR)/occ_core/occ_telemetry.o
 
 # revert（T9b2）：/undo 三段式 + schema v1→v2 迁移 + 快照回滚（链
 # tools 对象——mangle/快照与执行同口径）
+# T4 /zoom：fbtermrc 编辑器单测（纯函数）
+tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
+
 tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		   $(STORE_LIB) $(SQLITE_LIB)

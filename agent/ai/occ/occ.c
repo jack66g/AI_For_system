@@ -55,6 +55,8 @@
 #include "occ_tui/tui_usage.h"
 #include "occ_tui/tui_utf8.h"
 #include "occ_tui/tui_view.h"
+#include "occ_tui/tui_gate.h"
+#include "occ_zoomrc.h"
 
 static const char USAGE[] =
 	"occ — AIKernel 编码助手（headless，T9a3+b2）\n"
@@ -2308,6 +2310,125 @@ static int cmd_rename(struct tui_app *a, const char *args)
 
 /* ---- slash 命令分派 ---- */
 
+/* T4：/theme 热重载请求 + /zoom 退出码 70（外层包装重启 fbterm+occ） */
+static int g_t4_theme_req;
+static int g_t4_exit_code;
+
+/* T4 /theme：列出/切换内嵌预置主题（写 theme.ini + 重建 view 热重载） */
+static int cmd_theme(struct tui_app *a, const char *arg)
+{
+	char path[512], name[64], msg[512];
+	const char *home = getenv("HOME");
+	const char *env = getenv("OCC_THEME");
+	const struct tui_theme_preset *p;
+	int i, n, off;
+
+	if (env && env[0])
+		snprintf(path, sizeof(path), "%s", env);
+	else
+		snprintf(path, sizeof(path), "%s/.occ/theme.ini",
+			 home && home[0] ? home : "/root");
+	while (*arg == ' ')
+		arg++;
+	if (!*arg) {
+		if (tui_theme_current_preset(path, name, sizeof(name)) != 0)
+			snprintf(name, sizeof(name), "default");
+		off = snprintf(msg, sizeof(msg), "当前主题：%s。可选：", name);
+		for (i = 0; off > 0 && off < (int)sizeof(msg) - 40; i++) {
+			p = tui_theme_preset_at(i);
+			if (!p)
+				break;
+			n = snprintf(msg + off, sizeof(msg) - off, " %s(%s)",
+				     p->name, p->desc);
+			if (n < 0 || (size_t)(off + n) >= sizeof(msg) - 4)
+				break;
+			off += n;
+		}
+		tui_view_notice(a->view, msg);
+		return 0;
+	}
+	p = tui_theme_preset_find(arg);
+	if (!p) {
+		snprintf(msg, sizeof(msg), "未知主题「%s」——/theme 查看可选", arg);
+		tui_view_notice(a->view, msg);
+		return 0;
+	}
+	if (tui_theme_write_ini(path, p) != 0) {
+		tui_view_notice(a->view, "写 theme.ini 失败（权限/磁盘）");
+		return 0;
+	}
+	g_t4_theme_req = 1;
+	snprintf(msg, sizeof(msg), "主题已切换：%s——界面重载中…", p->name);
+	tui_view_notice(a->view, msg);
+	tui_view_quit(a->view);
+	return 0;
+}
+
+/* T4 /zoom：fbterm 字号（FBTERM 环境内）；退出码 70=外层重启应用新字号 */
+static int cmd_zoom(struct tui_app *a, const char *arg)
+{
+	char path[512], line[256], err[128], msg[256];
+	const char *home = getenv("HOME");
+	const char *fb = getenv("FBTERM");
+	int cur = 16, idx, size;
+	FILE *f;
+
+	if (!fb || !fb[0]) {
+		tui_view_notice(a->view,
+				"当前控制台不支持缩放（需图形控制台 fbterm；"
+				"串口/SSH 不适用）");
+		return 0;
+	}
+	snprintf(path, sizeof(path), "%s/.fbtermrc",
+		 home && home[0] ? home : "/root");
+	f = fopen(path, "r");
+	if (f) {
+		while (fgets(line, sizeof(line), f))
+			if (sscanf(line, "font-size=%d", &cur) == 1)
+				break;
+		fclose(f);
+	}
+	while (*arg == ' ')
+		arg++;
+	if (!*arg) {
+		snprintf(msg, sizeof(msg),
+			 "当前字号 %dpx。/zoom in|out|reset|<12|16|20|24|28|32|40>",
+			 cur);
+		tui_view_notice(a->view, msg);
+		return 0;
+	}
+	if (!strcmp(arg, "reset"))
+		idx = occ_zoom_index(16);
+	else if (!strcmp(arg, "in"))
+		idx = occ_zoom_step(cur, 1);
+	else if (!strcmp(arg, "out"))
+		idx = occ_zoom_step(cur, -1);
+	else {
+		int v = atoi(arg);
+
+		idx = v > 0 ? occ_zoom_index(v) : -1;
+		if (idx < 0) {
+			tui_view_notice(a->view, "无效字号——级表 "
+					"12/16/20/24/28/32/40");
+			return 0;
+		}
+	}
+	size = occ_zoom_size(idx);
+	err[0] = '\0';
+	if (occ_zoom_edit_fbtermrc(path, size, err, sizeof(err)) != 0) {
+		snprintf(msg, sizeof(msg), "应用失败：%s",
+			 err[0] ? err : "未知");
+		tui_view_notice(a->view, msg);
+		return 0;
+	}
+	g_t4_exit_code = 70;
+	snprintf(msg, sizeof(msg), "应用新字号 %dpx——界面自动重启（会话保留）…",
+		 size);
+	tui_view_notice(a->view, msg);
+	tui_view_quit(a->view);
+	return 0;
+}
+
 static int tui_app_on_command(void *ud, const char *line)
 {
 	struct tui_app *a = ud;
@@ -2402,6 +2523,10 @@ static int tui_app_on_command(void *ud, const char *line)
 		}
 		return 0;
 	}
+	if (!strcmp(line, "/theme") || !strncmp(line, "/theme ", 7))
+		return cmd_theme(a, line + 6);
+	if (!strcmp(line, "/zoom") || !strncmp(line, "/zoom ", 6))
+		return cmd_zoom(a, line + 5);
 	if (!strcmp(line, "/sessions"))
 		return cmd_sessions_overlay(a);
 	if (!strcmp(line, "/status")) {
@@ -3147,6 +3272,16 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	app_update_model_prov(&a);		/* UXAB：顶栏厂商标签 */
 	a.replay_budget = app_replay_lines_budget();	/* T2：增量加载初值 */
 
+	/* T4 登录门：仅交互 TUI 形态走到此处（-p/headless 不经 run_interactive）；
+	 * 旁路 ai.skipgate=1；未解锁返回=occ 退出（外层包装重启仍锁定） */
+	if (tui_gate_enter() != 0) {
+		occ_provider_config_free(&a.cfg);
+		free(a.cat);
+		occ_provider_free(&a.p);
+		pthread_mutex_destroy(&a.mu);
+		return 1;
+	}
+
 	memset(&h, 0, sizeof(h));
 	h.ud = &a;
 	h.on_entered = tui_app_on_entered;
@@ -3224,8 +3359,15 @@ static int run_interactive(occ_db *db, const char *model_toml,
 					a.ren_thread_live = 0;
 					pthread_mutex_unlock(&a.mu);
 				}
-				if (rc != 0 || !a.shell_req)
+				if (g_t4_exit_code)
 					break;
+				if ((rc != 0 || !a.shell_req) && !g_t4_theme_req)
+					break;
+				/* T4 /theme：热重载=重建 view 重读 theme.ini */
+				if (g_t4_theme_req) {
+					g_t4_theme_req = 0;
+					continue;
+				}
 				/* /shell：fork 交互 bash（继承 tty；bash 自管 termios），
 				 * exit 后回到循环重建 view——plan §1.9 /shell→bash→occ */
 				a.shell_req = 0;
@@ -3258,7 +3400,9 @@ static int run_interactive(occ_db *db, const char *model_toml,
 		free(a.cat);
 		occ_provider_config_free(&a.cfg);
 		pthread_mutex_destroy(&a.mu);
-		occ_provider_free(&a.p);
+			occ_provider_free(&a.p);
+		if (g_t4_exit_code)
+			return g_t4_exit_code;
 		return (rc < 0) ? 1 : rc;
 	}
 
@@ -3313,6 +3457,54 @@ int main(int argc, char **argv)
 	if (want_tui) {
 		rc = run_interactive(db, model_toml, provider_toml);
 		goto out;
+	}
+	/* T4：观感 CLI（脚本/键盘受限环境的可靠通道；与 TUI /theme /zoom 同源） */
+	if (!strcmp(argv[1], "theme") && argc == 3) {
+		const struct tui_theme_preset *p = tui_theme_preset_find(argv[2]);
+		char path[512];
+		const char *home = getenv("HOME");
+		const char *env = getenv("OCC_THEME");
+
+		if (!p) {
+			fprintf(stderr, "occ: unknown theme '%s' "
+				"(default/amber/green/paper/mono)\n", argv[2]);
+			return 2;
+		}
+		if (env && env[0])
+			snprintf(path, sizeof(path), "%s", env);
+		else
+			snprintf(path, sizeof(path), "%s/.occ/theme.ini",
+				 home && home[0] ? home : "/root");
+		if (tui_theme_write_ini(path, p) != 0) {
+			fprintf(stderr, "occ: write %s failed\n", path);
+			return 1;
+		}
+		printf("theme written: %s -- active on next occ start\n",
+		       p->name);
+		return 0;
+	}
+	if (!strcmp(argv[1], "zoom") && argc == 3) {
+		int v = atoi(argv[2]);
+		int idx = v > 0 ? occ_zoom_index(v) : -1;
+		char path[512], err[128];
+		const char *home = getenv("HOME");
+
+		if (idx < 0) {
+			fprintf(stderr, "occ: bad size "
+				"(levels: 12/16/20/24/28/32/40)\n");
+			return 2;
+		}
+		snprintf(path, sizeof(path), "%s/.fbtermrc",
+			 home && home[0] ? home : "/root");
+		err[0] = '\0';
+		if (occ_zoom_edit_fbtermrc(path, occ_zoom_size(idx),
+					   err, sizeof(err)) != 0) {
+			fprintf(stderr, "occ: %s\n", err[0] ? err : "write failed");
+			return 1;
+		}
+		printf("font-size written: %dpx -- takes effect on fbterm "
+		       "console restart\n", occ_zoom_size(idx));
+		return 0;
 	}
 	if (!strcmp(argv[1], "sessions")) {
 		rc = cmd_sessions(db);

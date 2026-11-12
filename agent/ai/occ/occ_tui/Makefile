@@ -21,7 +21,7 @@ INCLUDES := -I.
 #（全屏覆盖层）——全 libc。tui_data（aik_json）刻意不入本库（头注不变）。
 LIB_SRCS := tui_utf8.c tui_core.c tui_input.c tui_frame.c tui_chat.c \
 	    tui_inputbox.c tui_sidebar.c tui_view.c tui_theme.c \
-	    tui_usage.c tui_keymap.c tui_overlay.c
+	    tui_usage.c tui_keymap.c tui_overlay.c tui_gate.c
 LIB_OBJS := $(LIB_SRCS:%.c=obj/%.o)
 
 TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
@@ -30,7 +30,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_inputbox.c tests/test_view_pty.c \
 	     tests/test_keymap.c tests/test_themefile.c \
 	     tests/test_overlay.c tests/test_usage.c \
-	     tests/test_rename_ai.c tests/test_history_load.c
+	     tests/test_gate.c tests/test_rename_ai.c tests/test_history_load.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
@@ -50,8 +50,12 @@ obj/%.o: %.c
 # tui_view 事件环用 pthread——链 -lpthread，tui_view 的自唤醒 pipe 依赖它；
 # B8 test_rename_ai exec 真 ../occ 二进制 + 本地 python3 mock（tests/
 # mock_title_llm.py，127.0.0.1）——../occ 未构建时诚实 skip）
+# T4 登录门纯逻辑测试（tui_gate.o 需 -lcrypt）
+tests/test_gate: tests/test_gate.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_gate.c $(LIB_OBJS) -lpthread -lcrypt
+
 tests/%: tests/%.c $(LIB_OBJS)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LIB_OBJS) -lpthread
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LIB_OBJS) -lpthread -lcrypt
 
 clean:
 	rm -rf obj $(TEST_BINS)
