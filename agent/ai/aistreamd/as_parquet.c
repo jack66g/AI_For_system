@@ -322,7 +322,7 @@ static int phys_type(enum pq_ph ph)
 
 /* ---- schema 三套（列名/物理类型/逻辑宽度/顺序逐字段对齐 REF） ---- */
 
-static const struct pq_coldef tel_cols[9] = {
+static const struct pq_coldef tel_cols[11] = {
 	{ "timestamp_ns",	PQ_INT64,	PQ_LG_I64 },
 	{ "pid",		PQ_INT32,	PQ_LG_I32 },
 	{ "tgid",		PQ_INT32,	PQ_LG_I32 },
@@ -332,9 +332,11 @@ static const struct pq_coldef tel_cols[9] = {
 	{ "severity",		PQ_INT32,	PQ_LG_I8 },
 	{ "data_len",		PQ_INT32,	PQ_LG_I16 },
 	{ "data",		PQ_BYTE_ARRAY,	PQ_LG_NONE },
+	{ "trace_hi",		PQ_INT64,	PQ_LG_I64 },	/* K1 v2 */
+	{ "trace_lo",		PQ_INT64,	PQ_LG_I64 },
 };
 
-static const struct pq_coldef dec_cols[23] = {
+static const struct pq_coldef dec_cols[31] = {
 	{ "decision_id",	PQ_INT64,	PQ_LG_I64 },
 	{ "trigger_ts",		PQ_INT64,	PQ_LG_I64 },
 	{ "trigger_event_id",	PQ_INT64,	PQ_LG_I64 },
@@ -358,6 +360,15 @@ static const struct pq_coldef dec_cols[23] = {
 	{ "source",		PQ_INT32,	PQ_LG_I8 },
 	{ "executed",		PQ_INT32,	PQ_LG_I8 },
 	{ "safety_clamped",	PQ_INT32,	PQ_LG_I8 },
+	/* K1 D10 append-only v2 尾 8 列（顺序=REF schema_decision） */
+	{ "trace_hi",		PQ_INT64,	PQ_LG_I64 },
+	{ "trace_lo",		PQ_INT64,	PQ_LG_I64 },
+	{ "intent_id",		PQ_INT64,	PQ_LG_I64 },
+	{ "parent_id",		PQ_INT64,	PQ_LG_I64 },
+	{ "agent_id",		PQ_INT32,	PQ_LG_I32 },
+	{ "expected",		PQ_INT64,	PQ_LG_I64 },
+	{ "cost_ns",		PQ_INT64,	PQ_LG_I64 },
+	{ "side_effect_mask",	PQ_INT32,	PQ_LG_I32 },
 };
 
 static const struct pq_coldef idx_cols[6] = {
@@ -369,10 +380,10 @@ static const struct pq_coldef idx_cols[6] = {
 	{ "end_ts",		PQ_INT64,	PQ_LG_I64 },
 };
 
-#define TEL_NCOL	9
-#define DEC_NCOL	23
+#define TEL_NCOL	11		/* K1 D10 v2：9->11 */
+#define DEC_NCOL	31		/* K1 D10 v2：23->31 */
 #define IDX_NCOL	6
-#define PQ_MAXCOL	24
+#define PQ_MAXCOL	32
 
 /* 数值窄化到逻辑宽度（符号语义保持；编码按物理宽度） */
 static int64_t narrow(enum pq_lg lg, int64_t v)
@@ -1021,8 +1032,8 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 			size_t clen = cnt - i < chunk_max ? cnt - i : chunk_max;
 			long seq = next_seq(dir, prefix);
 			char path[600];
-			int64_t *cols[8];
-			int64_t *blob = malloc(clen * 8 * sizeof(int64_t));
+			int64_t *cols[10];
+			int64_t *blob = malloc(clen * 10 * sizeof(int64_t));
 			struct pq_ba *ba = malloc(clen * sizeof(*ba));
 			struct pq_ba *bp[1];
 			int bad = 0;
@@ -1034,7 +1045,7 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 				free(idx);
 				goto out;
 			}
-			for (int c = 0; c < 8; c++)
+			for (int c = 0; c < 10; c++)
 				cols[c] = blob + clen * (size_t)c;
 			for (size_t r = 0; r < clen; r++) {
 				const struct pq_tel_row *tr = &grp[idx[i + r]];
@@ -1047,6 +1058,8 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 				cols[5][r] = tr->event_type;
 				cols[6][r] = tr->severity;
 				cols[7][r] = tr->data_len;
+				cols[8][r] = tr->trace_hi;
+				cols[9][r] = tr->trace_lo;
 				ba[r].p = tr->data;
 				ba[r].n = (size_t)(tr->data_len < 0 ?
 						   0 : tr->data_len);
@@ -1116,6 +1129,8 @@ static int write_dec_table(const char *root, const struct pq_dec_row *rows,
 			d->exec_ts, d->outcome_ts, d->outcome,
 			d->metric_delta, d->model_version, d->confidence,
 			d->domain, d->source, d->executed, d->safety_clamped,
+			d->trace_hi, d->trace_lo, d->intent_id, d->parent_id,
+			d->agent_id, d->expected, d->cost_ns, d->side_effect_mask,
 		};
 
 		for (int c = 0; c < DEC_NCOL; c++)

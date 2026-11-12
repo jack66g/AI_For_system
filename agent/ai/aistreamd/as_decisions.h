@@ -11,14 +11,20 @@
  *      ai_proc_decisions_show：ring 最新在前；行格式 23 字段，
  *      id/trig_ts/trig_evid(0x%04x)/dec_ts/type/data=8 段冒号/exec_ts/
  *      outcome_ts/outcome/delta/ver/conf/domain/src/executed/
- *      safety_clamped——解析 sscanf 与 as_outcome.c 反查同源对齐）。
+ *      safety_clamped——解析 sscanf 与 as_outcome.c 反查同源对齐；
+ *      行尾 append-only 尾巴（K1 D4：pre= 之后 trace=/cost= 恒渲染，
+ *      intent=/parent=/agent=/expected=/se= 非零才渲染——老行无尾
+ *      对应列 0，不坏行，未知 token 忽略=oc_parse_pre 容忍口径）。
  *   2) 去重：decision_id 单调递增（同 boot 内），游标=已摄取最大 id，
  *      仅摄取 id>游标 的行；ring 回绕/重启使可见最大 id<游标 →
  *      rebases 计数 + journal（如实：无法区分回绕与重启，boot 级
  *      重接线留 qemu 轮拍板，见 K 轨移交）。
- *   3) 落盘：T8 parquet 链 decisions 行（as_pq_write_decisions，
- *      23 列 schema 与 T8/aikd_lib 逐字段一致——本消费面零 schema
- *      改动）。批语义：有界日批累积（按 id 去重、decision_ts 升序保序，批保留不剪——
+ *   3) 落盘：T8 parquet 链 decisions 行（as_pq_write_decisions）。
+ *      K1 D10 append-only v2：23 列 -> 31 列（追加 trace_hi/
+ *      trace_lo/intent_id/parent_id i64、agent_id i32、expected
+ *      i64、cost_ns i64、side_effect_mask i32），与 REF aikd_lib
+ *      schema_decision 逐字段一致；老行（无尾巴）新列恒 0——v1
+ *      向量/老样本继续通过=兼容证明。批语义：有界日批累积（按 id 去重、decision_ts 升序保序，批保留不剪——
  *      晚到同日行并入下次重写，无覆盖丢行窗口）+ 每次写=
  *      decisions/<UTC日>/decisions.parquet 同名覆盖（= REF
  *      write_decisions 语义）；跨日分组各写各的日文件；
@@ -31,8 +37,8 @@
  *      ——ai_telemetry.h 18.01 AI_EV_AI_DECISION「决策记录回写 ring」
  *      的守护侧对应物；event_type=0=aistreamd 归一化行专用，
  *      与 outcome 合成事件同口径）+ SME 记忆路（配额/去重自然约束）。
- *      T8 telemetry 9 列 / decision 23 列 schema 均不变（兼容性：
- *      仅按既有 category/event_type 口径新增行，不加列不改类型）。
+ *      K1 D10：telemetry 9->11 列（trace_hi/trace_lo，环境事件 0）、
+ *      decision 23->31 列 append-only v2（老行零列值，见点 3）。
  *   5) 诚实降级：无内核面（L1 无 AIKernel）→ ENOENT/EACCES 计数
  *      noiface_polls + journal 限频告警，进程不退；坏行跳过计数
  *      bad_lines；id 空洞计 gaps（ring 两轮间覆盖丢失的行）。
@@ -125,8 +131,26 @@ struct as_dec_row {
 	unsigned outcome;
 	long long delta;
 	unsigned ver, conf, domain, src, executed, safety_clamped;
+	/* K1（D3/D4/D10）行尾 append-only 尾巴（老行/缺字段=0） */
+	unsigned long long trace_hi;
+	unsigned long long trace_lo;
+	unsigned long long cost_ns;
+	unsigned long long intent_id;
+	unsigned long long parent_id;
+	unsigned agent_id;
+	long long expected;
+	unsigned side_effect_mask;
 };
 
 int as_dec_parse_line(const char *line, struct as_dec_row *out);
+
+/*
+ * as_dec_parse_tail - K1 D4 行尾尾巴解析（独立助手便于单测）：
+ * trace=0x<hex>:0x<hex>（无 0x 前缀亦可）/cost=<u64> 恒渲染；
+ * intent=/parent=（0x 十六进制或十进制）/agent=%u/expected=%lld/
+ * se=0x%08x 非零才渲染。未知 token（pre= 等）忽略不坏行——老行
+ * 全零列。只填 as_dec_row 尾部 8 字段，其余不动。
+ */
+void as_dec_parse_tail(const char *line, struct as_dec_row *out);
 
 #endif /* _AS_DECISIONS_H */

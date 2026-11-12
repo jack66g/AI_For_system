@@ -14,6 +14,8 @@
  *                   REF 内核记录为 1..103）
  *   severity     ← info=0 warn=1 error=2（as_event severity 字符串）
  *   data_len/data← ev->line 全文（[kern] 前缀起，零脱敏，all-ai 原则）
+ *   trace_hi/lo  ← ev->trace_hi/trace_lo（K1 D10 v2 尾 2 列；环境
+ *                   事件/聚合行 0）
  *
  * 采样点：去重窗口之后（首条+聚合记录都落盘；与 SME 配额独立——
  * 磁盘增长由 PARQUET_MAX_GB 保留策略约束，不受记忆配额影响）。
@@ -54,6 +56,8 @@ struct as_pq_sink {
 		int8_t severity;
 		uint16_t dlen;
 		char data[AS_PQ_LINE_MAX];
+		int64_t trace_hi;	/* K1 D10：ev->trace_hi/lo 透传（0:0=无） */
+		int64_t trace_lo;
 	} *buf;
 	size_t n, cap;
 };

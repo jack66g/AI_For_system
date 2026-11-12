@@ -15,6 +15,9 @@
  *   data=%llu:…:%llu exec_ts=%llu outcome_ts=%llu outcome=%u
  *   delta=%lld ver=%u conf=%u domain=%u src=%u executed=%u
  *   safety_clamped=%u
+ * K1 D4 行尾 append-only 尾巴（pre= 之后）：trace=0x%016llx:0x%016llx
+ * cost=%llu 恒渲染；intent=/parent=/agent=/expected=/se= 非零才
+ * 渲染（见 as_decisions.h as_dec_parse_tail；老行零列不坏行）。
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -72,10 +75,54 @@ int as_dec_parse_line(const char *line, struct as_dec_row *out)
 	out->src = src;
 	out->executed = exec;
 	out->safety_clamped = sc;
+	/* K1 D4/D10：23 字段全中后扫行尾尾巴（老行=零列，未知 token
+	 * 忽略——oc_parse_pre 容忍口径；坏行判定不受尾巴影响） */
+	as_dec_parse_tail(line, out);
 	return 0;
 }
 
-/* ---- 行结构 → pq_dec_row（23 列 1:1；u64→i64 同宽不截断） ---- */
+/* K1 D4：行尾尾巴解析（独立助手，单测冻结口径；详见头注） */
+void as_dec_parse_tail(const char *line, struct as_dec_row *out)
+{
+	char copy[512];
+	char *save = NULL;
+	char *tok;
+
+	if (!line || !out)
+		return;
+	snprintf(copy, sizeof(copy), "%s", line);
+	for (tok = strtok_r(copy, " \t\r\n", &save); tok;
+	     tok = strtok_r(NULL, " \t\r\n", &save)) {
+		unsigned long long hi, lo, v;
+		long long sv;
+		unsigned u;
+
+		if (sscanf(tok, "trace=0x%16llx:0x%16llx", &hi, &lo) == 2 ||
+		    sscanf(tok, "trace=%16llx:%16llx", &hi, &lo) == 2) {
+			out->trace_hi = hi;
+			out->trace_lo = lo;
+		} else if (sscanf(tok, "cost=%llu", &v) == 1) {
+			out->cost_ns = v;
+		} else if (sscanf(tok, "intent=0x%16llx", &v) == 1 ||
+			   sscanf(tok, "intent=%16llx", &v) == 1) {
+			out->intent_id = v;
+		} else if (sscanf(tok, "parent=0x%16llx", &v) == 1 ||
+			   sscanf(tok, "parent=%16llx", &v) == 1) {
+			out->parent_id = v;
+		} else if (sscanf(tok, "agent=%u", &u) == 1) {
+			out->agent_id = u;
+		} else if (sscanf(tok, "expected=%lld", &sv) == 1) {
+			out->expected = sv;
+		} else if (sscanf(tok, "se=0x%8x", &u) == 1 ||
+			   sscanf(tok, "se=%8x", &u) == 1) {
+			out->side_effect_mask = u;
+		}
+		/* 未知 token（pre=<…> 等 23 头字段）：忽略（不坏行） */
+	}
+}
+
+/* ---- 行结构 → pq_dec_row（23 列 1:1 + K1 尾 8 列；u64→i64 同宽
+ * 不截断；老行尾巴字段恒 0 落零值列） ---- */
 static void dec_to_pq(const struct as_dec_row *r, struct pq_dec_row *w)
 {
 	memset(w, 0, sizeof(*w));
@@ -96,6 +143,15 @@ static void dec_to_pq(const struct as_dec_row *r, struct pq_dec_row *w)
 	w->source = (int8_t)r->src;
 	w->executed = (int8_t)r->executed;
 	w->safety_clamped = (int8_t)r->safety_clamped;
+	/* K1 D10 append-only v2 尾 8 列 */
+	w->trace_hi = (int64_t)r->trace_hi;
+	w->trace_lo = (int64_t)r->trace_lo;
+	w->intent_id = (int64_t)r->intent_id;
+	w->parent_id = (int64_t)r->parent_id;
+	w->agent_id = (int32_t)r->agent_id;
+	w->expected = r->expected;
+	w->cost_ns = (int64_t)r->cost_ns;
+	w->side_effect_mask = (int32_t)r->side_effect_mask;
 }
 
 int as_decisions_init(struct as_decisions *d, struct as_conf *c,
@@ -197,7 +253,8 @@ static void dec_emit_event(struct as_decisions *d,
 	if (!d->emit || !d->conf->decisions_write_sme)
 		return;
 	as_event_decision(&ev, r->id, r->type, r->domain, r->executed,
-			  r->safety_clamped, r->outcome, r->delta);
+			  r->safety_clamped, r->outcome, r->delta,
+			  r->trace_hi, r->trace_lo);
 	d->emit(&ev, d->emit_ud);
 	d->stats->dec.events++;
 }

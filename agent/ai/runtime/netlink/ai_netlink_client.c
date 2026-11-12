@@ -20,8 +20,10 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -341,6 +343,148 @@ int ai_nl_send_act(struct ai_nl_client *cli,
     ack_rx = (const struct ai_nl_act_ack *)data;
     memcpy(ack, ack_rx, sizeof(*ack));
     return AI_OK;
+}
+
+/* ---- AI_CMD_ACT2（K1 D1：nlattr 载荷；v1 AI_CMD_ACT 原样不动） ---- */
+
+/*
+ * nla_append - 追加一个 nlattr（手写编码：u16 nla_len/u16 nla_type +
+ * payload，NLA_ALIGN(4) 补零）。返回推进后的游标；容量不足返回 NULL。
+ */
+static unsigned char *nla_append(unsigned char *p, unsigned char *end,
+                                 __u16 type, const void *payload, size_t len)
+{
+    size_t total = (size_t)NLA_HDRLEN + len;
+    struct nlattr *nla;
+
+    if (total > (size_t)(end - p))
+        return NULL;
+    memset(p, 0, NLA_ALIGN(total));
+    nla = (struct nlattr *)p;
+    nla->nla_len = (__u16)total;
+    nla->nla_type = type;
+    memcpy(p + NLA_HDRLEN, payload, len);
+    return p + NLA_ALIGN(total);
+}
+
+int ai_nl_send_act2(struct ai_nl_client *cli,
+                    const struct ai_nl_act2_req *req,
+                    struct ai_nl_act2_ack *ack,
+                    int *kern_err)
+{
+    /* 最坏 attr 流 220B：DOMAIN 8+TYPE 8+PARAM 28+DATA 68+CONF 8+
+     * VER 8+EVID 12+TRACE_HI/LO/INTENT/PARENT 12×4+AGENT 8+EXPECTED 12 */
+    unsigned char reqbuf[NLMSG_HDRLEN + 232];
+    unsigned char attrs[232];
+    unsigned char *p = attrs, *end = attrs + sizeof(attrs);
+    const unsigned char *data;
+    const struct ai_nl_act2_ack *ack_rx;
+    const struct nlmsghdr *nlh = NULL;
+    size_t plen, param_len, attr_len;
+    __u8 u8v;
+    __u32 u32v;
+    __u64 u64v;
+    __s64 s64v;
+    __u32 seq;
+    int rc;
+
+    if (!cli || cli->fd < 0 || !req || !ack)
+        return AI_ERR_INVALID_ARG;
+
+    /* 与内核端 ai_nl_act() 同口径预校验（domain/confidence 上限）+
+     * ACT2 必备 PARAM：非空且在 param[] 内 NUL 结尾（≤23 字节） */
+    if (req->domain > AI_NL_DOMAIN_MAX || req->confidence > 100)
+        return AI_ERR_INVALID_ARG;
+    param_len = strnlen(req->param, sizeof(req->param));
+    if (param_len == 0 || param_len >= sizeof(req->param))
+        return AI_ERR_INVALID_ARG;
+
+    /* 必备属性（DOMAIN u8 / TYPE u32 / PARAM 字符串带 NUL） */
+    u8v = req->domain;
+    p = nla_append(p, end, AI_DEC_ATTR_DOMAIN, &u8v, sizeof(u8v));
+    u32v = req->decision_type;
+    p = nla_append(p, end, AI_DEC_ATTR_TYPE, &u32v, sizeof(u32v));
+    p = nla_append(p, end, AI_DEC_ATTR_PARAM, req->param, param_len + 1);
+    /* 可选属性恒携带（零值=显式缺省，内核缺省同零；消息形状恒定）：
+     * DATA=64B 定长，数值型 attr 直接 u64/u32/u8/s64 载荷 */
+    p = nla_append(p, end, AI_DEC_ATTR_DATA, req->data, sizeof(req->data));
+    u8v = req->confidence;
+    p = nla_append(p, end, AI_DEC_ATTR_CONFIDENCE, &u8v, sizeof(u8v));
+    u32v = req->model_version;
+    p = nla_append(p, end, AI_DEC_ATTR_MODEL_VER, &u32v, sizeof(u32v));
+    u64v = req->trig_evid;
+    p = nla_append(p, end, AI_DEC_ATTR_TRIG_EVID, &u64v, sizeof(u64v));
+    u64v = req->trace_hi;
+    p = nla_append(p, end, AI_DEC_ATTR_TRACE_HI, &u64v, sizeof(u64v));
+    u64v = req->trace_lo;
+    p = nla_append(p, end, AI_DEC_ATTR_TRACE_LO, &u64v, sizeof(u64v));
+    u64v = req->intent_id;
+    p = nla_append(p, end, AI_DEC_ATTR_INTENT, &u64v, sizeof(u64v));
+    u64v = req->parent_id;
+    p = nla_append(p, end, AI_DEC_ATTR_PARENT, &u64v, sizeof(u64v));
+    u32v = req->agent;
+    p = nla_append(p, end, AI_DEC_ATTR_AGENT, &u32v, sizeof(u32v));
+    s64v = req->expected;
+    p = nla_append(p, end, AI_DEC_ATTR_EXPECTED, &s64v, sizeof(s64v));
+    if (!p)
+        return AI_ERR_INVALID_ARG;  /* 容量不足：编码防御（220<232） */
+
+    attr_len = (size_t)(p - attrs);
+    seq = cli->next_seq++;
+    ai_nl_build_req(reqbuf, AI_CMD_ACT2, attrs, attr_len, seq, cli->portid);
+
+    rc = ai_nl_send_req(cli, reqbuf, NLMSG_HDRLEN + attr_len);
+    if (rc != AI_OK)
+        return rc;
+
+    rc = ai_nl_recv_match(cli, (__u16)AI_CMD_ACT2, seq, &nlh, kern_err);
+    if (rc != AI_OK)
+        return rc;
+
+    plen = (size_t)nlh->nlmsg_len - NLMSG_HDRLEN;
+    if (plen < sizeof(struct ai_nl_act2_ack))
+        return AI_ERR_PARSE;
+
+    data = (const unsigned char *)NLMSG_DATA(nlh);
+    ack_rx = (const struct ai_nl_act2_ack *)data;
+    memcpy(ack, ack_rx, sizeof(*ack));
+    return AI_OK;
+}
+
+void ai_nl_trace_mint(__u64 *hi, __u64 *lo)
+{
+    /* 进程级一次铸造（D9）：hi 恒非零且进程内恒定；lo 原子递增 */
+    static __u64 base;
+    static unsigned long long seq;
+
+    if (!hi || !lo)
+        return;
+    if (__atomic_load_n(&base, __ATOMIC_RELAXED) == 0) {
+        __u64 r = 0, expect = 0;
+        int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+        if (fd >= 0) {
+            ssize_t n = read(fd, &r, sizeof(r));
+
+            close(fd);
+            if (n != (ssize_t)sizeof(r))
+                r = 0;
+        }
+        if (r == 0) {
+            /* 退路：time^pid（D9 允许口径；秒级时钟+nspid 混淆熵） */
+            struct timespec ts;
+
+            clock_gettime(CLOCK_REALTIME, &ts);
+            r = ((__u64)ts.tv_sec << 20) ^ (__u64)ts.tv_nsec ^
+                (__u64)getpid();
+        }
+        r |= 1;     /* 恒非零（D2：trace 全决策恒非零） */
+        /* 并发首次铸造：CAS 定胜负，败者采用赢者的 base（进程级恒定） */
+        __atomic_compare_exchange_n(&base, &expect, r, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
+    *hi = __atomic_load_n(&base, __ATOMIC_RELAXED);
+    *lo = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
 }
 
 /* ---- AI_CMD_REG ---- */

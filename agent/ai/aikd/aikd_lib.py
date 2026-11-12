@@ -128,7 +128,7 @@ def parse_decision_line(line: str):
     data = [int(x) for x in data_raw]
     while len(data) < 8:
         data.append(0)
-    return {
+    d = {
         "decision_id": int(g[0]),
         "trigger_ts": int(g[1]),
         "trigger_event_id": int(g[2], 16),
@@ -147,7 +147,34 @@ def parse_decision_line(line: str):
         "source": int(g[13]),
         "executed": int(g[14]),
         "safety_clamped": int(g[15]),
+        # K1 D4/D10：行尾 append-only 尾巴（老行恒零值；DECISION_RE
+        # 保持无 $ 锚——finditer/前缀匹配语义不变）
+        "trace_hi": 0, "trace_lo": 0, "cost_ns": 0,
+        "intent_id": 0, "parent_id": 0, "agent_id": 0,
+        "expected": 0, "side_effect_mask": 0,
     }
+    for tok in line.strip()[m.end():].split():
+        try:
+            if tok.startswith("trace="):
+                a, _, b = tok[6:].partition(":")
+                d["trace_hi"] = int(a, 16)
+                d["trace_lo"] = int(b, 16)
+            elif tok.startswith("cost="):
+                d["cost_ns"] = int(tok[5:], 10)
+            elif tok.startswith("intent="):
+                d["intent_id"] = int(tok[7:], 16)
+            elif tok.startswith("parent="):
+                d["parent_id"] = int(tok[7:], 16)
+            elif tok.startswith("agent="):
+                d["agent_id"] = int(tok[6:], 10)
+            elif tok.startswith("expected="):
+                d["expected"] = int(tok[9:], 10)
+            elif tok.startswith("se="):
+                d["side_effect_mask"] = int(tok[3:], 16)
+            # 未知 token（pre= 等）：忽略不坏行（oc_parse_pre 容忍口径）
+        except ValueError:
+            pass
+    return d
 
 
 # ---- Parquet schema（固定，AI 训练直接消费；文档见 README.md） ----
@@ -164,6 +191,9 @@ def schema_telemetry():
         pa.field("severity", pa.int8()),
         pa.field("data_len", pa.int16()),
         pa.field("data", pa.binary()),          # 原始数据全量零脱敏
+        # K1 D10 append-only v2 尾 2 列（老向量/环境事件=0）
+        pa.field("trace_hi", pa.int64()),
+        pa.field("trace_lo", pa.int64()),
     ])
 
 
@@ -189,6 +219,15 @@ def schema_decision():
         pa.field("source", pa.int8()),
         pa.field("executed", pa.int8()),
         pa.field("safety_clamped", pa.int8()),
+        # K1 D10 append-only v2 尾 8 列（老行/proc 行无尾巴=0）
+        pa.field("trace_hi", pa.int64()),
+        pa.field("trace_lo", pa.int64()),
+        pa.field("intent_id", pa.int64()),
+        pa.field("parent_id", pa.int64()),
+        pa.field("agent_id", pa.int32()),
+        pa.field("expected", pa.int64()),
+        pa.field("cost_ns", pa.int64()),
+        pa.field("side_effect_mask", pa.int32()),
     ])
 
 
@@ -298,6 +337,9 @@ def write_telemetry(root: str, records):
                 "severity": [h["severity"] for h, _ in chunk],
                 "data_len": [h["data_len"] for h, _ in chunk],
                 "data": [p for _, p in chunk],
+                # K1 v2：dict 缺键=0（harness 驱动的老向量/内核记录）
+                "trace_hi": [h.get("trace_hi", 0) for h, _ in chunk],
+                "trace_lo": [h.get("trace_lo", 0) for h, _ in chunk],
             }, schema=schema_telemetry())
             path = os.path.join(d, "%s_%04d.parquet" % (prefix, seq))
             pq.write_table(table, path, compression="snappy")
@@ -316,7 +358,8 @@ def write_decisions(root: str, decisions):
     import pyarrow.parquet as pq
 
     d = _day_dir(root, "decisions", _ts_to_day(decisions[0]["decision_ts"]))
-    table = pa.table({k: [x[k] for x in decisions]
+    # K1 v2：缺键补 0（老调用方/差分 harness 驱动的 23 字段 dict）
+    table = pa.table({k: [x.get(k, 0) for x in decisions]
                       for k in schema_decision().names},
                      schema=schema_decision())
     path = os.path.join(d, "decisions.parquet")
@@ -333,7 +376,8 @@ def write_chains(root: str, chains):
 
     dt = _ts_to_day(chains[0]["trigger_ts"])
     d = _day_dir(root, "decisions", dt)
-    table = pa.table({k: [x[k] for x in chains]
+    # K1 v2：缺键补 0（同 write_decisions）
+    table = pa.table({k: [x.get(k, 0) for x in chains]
                       for k in schema_decision().names},
                      schema=schema_decision())
     path = os.path.join(d, "chains_%s.parquet" % dt.strftime("%Y-%m-%d"))

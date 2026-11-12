@@ -9,6 +9,10 @@
  *                  对应决策域策略（ai_policy_execute）；v2 载荷尾部携带
  *                  定向参数名 param（非空=按参数名定向 apply，空/旧 88B
  *                  消息=按 domain 广播，向后兼容）
+ *   AI_CMD_ACT2  - 下发决策指令（K1，KERNEL-K1-DESIGN D1/§3）：nlattr
+ *                  载荷（AI_DEC_ATTR_*，必备 DOMAIN+TYPE+PARAM，可携带
+ *                  统一 trace/intent/expected）；ack 回带 decision_id+
+ *                  trace（struct ai_nl_act2_ack）
  *   AI_CMD_REG   - 注册/注销异步事件推送（登记发起方 portid）
  *   AI_CMD_EVENT - 内核 → 用户异步事件推送（策略执行/模型生命周期）
  *
@@ -411,6 +415,136 @@ static int ai_nl_act(struct sk_buff *skb, const struct nlmsghdr *nlh)
 	return 0;
 }
 
+/* ---- AI_CMD_ACT2（K1：nlattr 载荷，KERNEL-K1-DESIGN §3/D1） ---- */
+
+/*
+ * ACT2 属性 policy 表：长度/范围全在表内（PARAM ≤24 含 NUL；
+ * DATA 恰 64B=8×u64（EXACT_LEN）；CONFIDENCE 0-100（RANGE）；
+ * 数值属性定长）。EXPECTED 用 NLA_S64（负值合法：恶化预期）。
+ */
+static const struct nla_policy ai_nl_act2_policy[AI_DEC_ATTR_MAX + 1] = {
+	[AI_DEC_ATTR_DOMAIN]	= { .type = NLA_U8 },
+	[AI_DEC_ATTR_TYPE]	= { .type = NLA_U32 },
+	[AI_DEC_ATTR_PARAM]	= { .type = NLA_NUL_STRING,
+	/* K1 勘误（真机 KUnit 抓获）：NLA_NUL_STRING 的 .len=不含尾 NUL
+	 * 的最大字符数——.len=24 放行 24 字符+NUL(25B)，与 v1 param[24]
+	 * 及 uapi 注释（≤23 字符+NUL）不符，收紧为 23。 */
+				   .len = AI_NL_ACT_PARAM_LEN - 1 },
+	[AI_DEC_ATTR_DATA]	= NLA_POLICY_EXACT_LEN(64),
+	[AI_DEC_ATTR_CONFIDENCE]	= NLA_POLICY_RANGE(NLA_U8, 0, 100),
+	[AI_DEC_ATTR_MODEL_VER]	= { .type = NLA_U32 },
+	[AI_DEC_ATTR_TRIG_EVID]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_TRACE_HI]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_TRACE_LO]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_INTENT]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_PARENT]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_AGENT]	= { .type = NLA_U32 },
+	[AI_DEC_ATTR_EXPECTED]	= { .type = NLA_S64 },
+};
+
+/**
+ * ai_nl_act2_parse() - ACT2 nlattr 载荷解析（可测助手，K1）
+ * @head: attr 区起点（nlmsg_attrdata(nlh, 0)，无 family 头）
+ * @rem: attr 区长度（nlmsg_attrlen(nlh, 0)）
+ * @ctx: 输出——全零基线 + attr 字段；trigger_ts/source 由调用方补
+ *
+ * 必备 DOMAIN+TYPE+PARAM，缺任一 -EINVAL；畸形 attr 由 policy 表全拒
+ * （长度/范围违规，负错误码）。测试直调：ai_netlink_test.c。
+ */
+int ai_nl_act2_parse(const struct nlattr *head, int rem,
+		     struct ai_policy_ctx *ctx)
+{
+	struct nlattr *tb[AI_DEC_ATTR_MAX + 1];
+	int err;
+
+	memset(ctx, 0, sizeof(*ctx));
+
+	/* K1 勘误2（真机 KUnit :249 抓获）：deprecated 校验不强制定宽属性
+	 * 载荷长度（NLA_U8 带 4B 载荷被放行）。ACT2 是新 ABI，一律走
+	 * 严格校验 nla_parse()（NL_VALIDATE_STRICT，genl 现行口径）。 */
+	err = nla_parse(tb, AI_DEC_ATTR_MAX, head, rem,
+			   ai_nl_act2_policy, NULL);
+	if (err)
+		return err;
+
+	/* 必备三元组：缺任一拒绝（不静默缺省；PARAM 空串合法=广播） */
+	if (!tb[AI_DEC_ATTR_DOMAIN] || !tb[AI_DEC_ATTR_TYPE] ||
+	    !tb[AI_DEC_ATTR_PARAM])
+		return -EINVAL;
+
+	ctx->domain = (enum ai_policy_domain)nla_get_u8(
+				tb[AI_DEC_ATTR_DOMAIN]);
+	ctx->decision_type = (u8)nla_get_u32(tb[AI_DEC_ATTR_TYPE]);
+	if (strscpy(ctx->param, nla_data(tb[AI_DEC_ATTR_PARAM]),
+		    sizeof(ctx->param)) < 0)
+		return -EINVAL;   /* 防御：policy 已限长，恒不触发 */
+	if (tb[AI_DEC_ATTR_DATA])
+		memcpy(ctx->decision_data, nla_data(tb[AI_DEC_ATTR_DATA]),
+		       sizeof(ctx->decision_data));
+	if (tb[AI_DEC_ATTR_CONFIDENCE])
+		ctx->confidence = nla_get_u8(tb[AI_DEC_ATTR_CONFIDENCE]);
+	if (tb[AI_DEC_ATTR_MODEL_VER])
+		ctx->model_version = nla_get_u32(tb[AI_DEC_ATTR_MODEL_VER]);
+	if (tb[AI_DEC_ATTR_TRIG_EVID])
+		ctx->trigger_event_id = (u32)nla_get_u64(
+				tb[AI_DEC_ATTR_TRIG_EVID]);
+	if (tb[AI_DEC_ATTR_TRACE_HI])
+		ctx->trace_hi = nla_get_u64(tb[AI_DEC_ATTR_TRACE_HI]);
+	if (tb[AI_DEC_ATTR_TRACE_LO])
+		ctx->trace_lo = nla_get_u64(tb[AI_DEC_ATTR_TRACE_LO]);
+	if (tb[AI_DEC_ATTR_INTENT])
+		ctx->intent_id = nla_get_u64(tb[AI_DEC_ATTR_INTENT]);
+	if (tb[AI_DEC_ATTR_PARENT])
+		ctx->parent_id = nla_get_u64(tb[AI_DEC_ATTR_PARENT]);
+	if (tb[AI_DEC_ATTR_AGENT])
+		ctx->agent_id = nla_get_u32(tb[AI_DEC_ATTR_AGENT]);
+	if (tb[AI_DEC_ATTR_EXPECTED])
+		ctx->expected = nla_get_s64(tb[AI_DEC_ATTR_EXPECTED]);
+	return 0;
+}
+
+/*
+ * ACT2 处理器：与 v1 同闸（startup enabled + CAP_SYS_ADMIN +
+ * domain 钳制；confidence 已由 RANGE policy 拒 101+）。attrs→ctx
+ * （trigger_ts=ktime_get_ns、source=NETLINK）→ ai_policy_execute_trace
+ * （可写 ctx：铸造结果回读）→ ack 单播（decision_id+trace 回带）。
+ * 本路径 outcome 恒未知（同 v1 ACT，结果观测由 AI 外层上报）。
+ */
+static int ai_nl_act2(struct sk_buff *skb, const struct nlmsghdr *nlh)
+{
+	struct ai_nl_act2_ack ack;
+	struct ai_policy_ctx ctx;
+	int executed;
+	int err;
+
+	if (!ai_startup_get_enabled())
+		return -EPERM;   /* AI_ERR_DISABLED */
+	if (!netlink_net_capable(skb, CAP_SYS_ADMIN))
+		return -EACCES;
+
+	err = ai_nl_act2_parse(nlmsg_attrdata(nlh, 0),
+			       nlmsg_attrlen(nlh, 0), &ctx);
+	if (err)
+		return err;
+	if (ctx.domain > AI_POLICY_DOMAIN_PROC)
+		return -EINVAL;   /* 与 v1 同闸：domain 钳制 */
+
+	ctx.trigger_ts = ktime_get_ns();
+	ctx.source = AI_DEC_SRC_NETLINK;
+
+	executed = ai_policy_execute_trace(&ctx, NULL);
+
+	ack.executed = executed > 0 ?
+		(u8)min_t(int, executed, U8_MAX) : 0;
+	ack.hit = executed > 0 ? 1 : 0;
+	ack.ai_err = executed < 0 ? executed : AI_OK;
+	ack.decision_id = ctx.decision_id;   /* execute 内补铸回读 */
+	ack.trace_hi = ctx.trace_hi;
+	ack.trace_lo = ctx.trace_lo;
+	ai_nl_reply(skb, AI_CMD_ACT2, &ack, sizeof(ack));
+	return 0;
+}
+
 /* ---- AI_CMD_REG ---- */
 
 static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
@@ -461,13 +595,22 @@ static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
  * - GFP_ATOMIC + MSG_DONTWAIT：允许从策略执行/遥测等可能处于原子上下文
  *   的调用点进入。
  */
-int ai_netlink_push_event(u32 category, u32 severity, u64 event_id,
-			  s32 code, const char *param)
+/*
+ * K1 D7：推送统一核心——56B 基础载荷（struct ai_nl_event）+ 可选 16B
+ * trace 尾巴（struct ai_nl_event_tail）= 72B。policy 事件带记录 trace；
+ * 环境事件（model/hotplug）不带尾巴 = 56B 原样（trace 0:0 = 无意图
+ * 归属，诚实零），两个导出壳见下。逐 portid 单播骨架（w63 生命周期 /
+ * 死端口惰性摘除）与原实现逐行保持。
+ */
+static int ai_nl_push_event_common(u32 category, u32 severity, u64 event_id,
+				   s32 code, const char *param,
+				   const struct ai_nl_event_tail *tail)
 {
 	struct ai_nl_event ev;
 	u32 portids[AI_NL_REG_MAX];
 	unsigned int n, i;
 	unsigned long flags;
+	size_t payload_len = sizeof(ev) + (tail ? sizeof(*tail) : 0);
 	struct sock *sk;
 
 	if (!ai_startup_get_enabled())
@@ -496,16 +639,19 @@ int ai_netlink_push_event(u32 category, u32 severity, u64 event_id,
 		struct sk_buff *skb;
 		int rc;
 
-		skb = nlmsg_new(sizeof(ev), GFP_ATOMIC);
+		skb = nlmsg_new(payload_len, GFP_ATOMIC);
 		if (!skb)
 			break;   /* 内存压力：丢弃本事件（注册者仍可轮询 SENSE） */
 
-		nlh = nlmsg_put(skb, 0, 0, AI_CMD_EVENT, sizeof(ev), 0);
+		nlh = nlmsg_put(skb, 0, 0, AI_CMD_EVENT, payload_len, 0);
 		if (!nlh) {
 			kfree_skb(skb);
 			continue;
 		}
 		memcpy(nlmsg_data(nlh), &ev, sizeof(ev));
+		if (tail)
+			memcpy((u8 *)nlmsg_data(nlh) + sizeof(ev), tail,
+			       sizeof(*tail));
 
 		rc = netlink_unicast(sk, skb, portids[i],
 				     MSG_DONTWAIT);
@@ -520,7 +666,34 @@ int ai_netlink_push_event(u32 category, u32 severity, u64 event_id,
 	ai_nl_sock_put(sk);
 	return AI_OK;
 }
+
+/* K1 D7：薄壳——56B 原样（符号不碎；model/hotplug 调用者零改动） */
+int ai_netlink_push_event(u32 category, u32 severity, u64 event_id,
+			  s32 code, const char *param)
+{
+	return ai_nl_push_event_common(category, severity, event_id, code,
+				       param, NULL);
+}
 EXPORT_SYMBOL_GPL(ai_netlink_push_event);
+
+/**
+ * ai_netlink_push_event_trace() - 同 push_event，载荷带 trace 尾（72B）
+ * @trace_hi/@trace_lo: 统一 trace（policy 事件=决策记录的 trace；
+ * 环境事件请继续用 ai_netlink_push_event()，56B 原样）。
+ */
+int ai_netlink_push_event_trace(u32 category, u32 severity, u64 event_id,
+				s32 code, const char *param,
+				u64 trace_hi, u64 trace_lo)
+{
+	struct ai_nl_event_tail tail = {
+		.trace_hi = trace_hi,
+		.trace_lo = trace_lo,
+	};
+
+	return ai_nl_push_event_common(category, severity, event_id, code,
+				       param, &tail);
+}
+EXPORT_SYMBOL_GPL(ai_netlink_push_event_trace);
 
 #ifdef CONFIG_AIKERNEL_KUNIT_TEST
 /*
@@ -568,6 +741,8 @@ static int ai_netlink_handle(struct sk_buff *skb, struct nlmsghdr *nlh,
 		return ai_nl_sense(skb, nlh);
 	case AI_CMD_ACT:
 		return ai_nl_act(skb, nlh);
+	case AI_CMD_ACT2:
+		return ai_nl_act2(skb, nlh);
 	case AI_CMD_REG:
 		return ai_nl_reg(skb, nlh);
 	default:

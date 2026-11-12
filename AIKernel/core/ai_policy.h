@@ -80,6 +80,17 @@ struct ai_policy_ctx {
 			  * 空 = 按 domain 广播全部已启用动作（v1 语义，
 			  * think/sysfs 路径保持为空）；非空 = 只执行动作名
 			  * 全等或末段匹配（'.' 后缀）的那一条 */
+	/* K1（KERNEL-K1-DESIGN D3/D8）：决策环扩展 8 字段——与
+	 * struct ai_decision_record 尾部一一对应（三层 uapi→ctx→rec
+	 * 手工同步，_Static_assert + KUnit 全链用例防 drift）。 */
+	u64  trace_hi;           /* 统一 trace 高 64 位（0:0=未携带→铸） */
+	u64  trace_lo;           /* 统一 trace 低 64 位（=decision_id） */
+	u64  intent_id;          /* 意图 ID（0=未供给） */
+	u64  parent_id;          /* 父决策 ID（0=无父） */
+	u32  agent_id;           /* enum ai_agent_id（uapi ai_netlink.h） */
+	s64  expected;           /* 调用方预期 delta（0=未供给，D5） */
+	u64  cost_ns;            /* 决策+执行耗时（record_write 算定） */
+	u32  side_effect_mask;   /* AI_SE_* 位（execute 聚合） */
 };
 
 /* ---- 策略回调 ---- */
@@ -123,7 +134,24 @@ struct ai_decision_record {
 	u8   source;                /* AI_DEC_SRC_* */
 	u8   executed;              /* 实际执行的策略数（命中数） */
 	u8   safety_clamped;        /* 1=被安全边界限制（幅度/范围 clamp） */
+	/* ---- K1 决策环扩展（D3）：尾部追加 56B，127→183B packed。
+	 * 手工累加：旧 8+4+8+1+64+8+8+1+8+4+1+8+1+1+1+1 = 127；
+	 * 新 8+8+8+8+4+8+8+4 = 56；合计 183（ai_policy.c 钉死）。
+	 * 与 struct ai_policy_ctx 尾部字段一一对应（D8 防线）。 ---- */
+	u64  trace_hi;              /* 统一 trace 高 64 位（per-boot cookie） */
+	u64  trace_lo;              /* 统一 trace 低 64 位（=decision_id） */
+	u64  intent_id;             /* 意图 ID（0=未供给） */
+	u64  parent_id;             /* 父决策 ID（0=无父） */
+	u32  agent_id;              /* enum ai_agent_id（0=KERNEL） */
+	s64  expected;              /* 调用方预期 delta（0=未供给） */
+	u64  cost_ns;               /* 决策+执行耗时 ns（D5 公式见 record_write） */
+	u32  side_effect_mask;      /* AI_SE_* 位（0=无副作用登记） */
 } __attribute__((packed));
+
+/* K1 D2：统一 trace per-boot 随机 cookie（ai_policy.c init 处
+ * get_random_u64() 一次赋值；跨 boot 由 hi 区分，lo=decision_id
+ * 同 boot 单调——顺带补「回绕与重启不可分」的半个洞） */
+extern u64 ai_trace_boot_cookie;
 
 /* ---- AI 自我观测遥测 payload（第18类，AI_CAT_AI） ---- */
 
@@ -199,6 +227,18 @@ int ai_policy_unregister(const char *action);
  * 返回已执行动作数（>=0）或负错误码。
  */
 int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg);
+
+/**
+ * ai_policy_execute_trace() - 同 ai_policy_execute，但 ctx 可写（K1 D2）
+ * @ctx: 决策上下文；decision_id 补铸与统一 trace 铸造结果回写到
+ *        调用方 ctx（ACT2 ack 回读决策关联键用；hi/lo 任一非零
+ *        即采用显式携带，内核不改写）
+ * @arg: 透传给动作回调的私有参数（NULL 时用注册时的 priv）
+ *
+ * v1 调用方（think/sysfs/旧 ACT）继续走 const 版 ai_policy_execute，
+ * 行为/ABI 不变（零进零铸）。
+ */
+int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg);
 
 /**
  * ai_policy_outcome_update() - 回写决策结果（决策闭环第 4 步）
@@ -312,6 +352,10 @@ static inline int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 {
 	return 0;
 }
+static inline int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg)
+{
+	return 0;
+}
 static inline int ai_policy_outcome_update(u64 id, u8 outcome, s64 delta)
 {
 	return AI_OK;
@@ -350,5 +394,11 @@ static inline int ai_policy_record_heuristic(u8 domain, u8 hook_id,
 }
 
 #endif /* CONFIG_AIKERNEL_RUNTIME */
+
+#ifdef CONFIG_AIKERNEL_KUNIT_TEST
+/* K1 p99 微基准钩子（实现于 ai_policy.c；测试：ai_policy_test.c）：
+ * 直调内部 ai_policy_record_write（cost_ns 就地算定） */
+void ai_policy_test_record_write(struct ai_decision_record *rec);
+#endif
 
 #endif /* _AIKERNEL_AI_POLICY_H */

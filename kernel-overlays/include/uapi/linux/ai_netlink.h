@@ -30,6 +30,7 @@
 #define AI_CMD_ACT		17	/* 下发决策指令 */
 #define AI_CMD_REG		18	/* 注册/注销异步事件推送（CAP_SYS_ADMIN） */
 #define AI_CMD_EVENT		19	/* 内核 → 用户异步事件通知（推送，非请求） */
+#define AI_CMD_ACT2		20	/* K1：下发决策指令（nlattr，D1） */
 
 /* ---- 常量 ---- */
 
@@ -93,6 +94,59 @@ struct ai_nl_act_ack {
 	__u32 reserved;
 };
 
+/* ---- ACT2 请求载荷（K1，KERNEL-K1-DESIGN §3/D1/D3/D6） ----
+ *
+ * v1 ACT（定长 struct + 88/112B 长度轨）原封不动；ACT2 为新命令 =
+ * nlattr 载荷，天然为 K2 批量事务（重复 PARAM 元组）铺路。
+ * 必备 DOMAIN+TYPE+PARAM，缺任一内核拒收（-EINVAL）；其余可选，
+ * DATA 缺省零数组。TRACE 显式携带（hi/lo 任一非零即采用，不改写）。 */
+enum {
+	AI_DEC_ATTR_UNSPEC,
+	AI_DEC_ATTR_DOMAIN,	/* u8：决策域（enum ai_policy_domain，0~12） */
+	AI_DEC_ATTR_TYPE,	/* u32：决策类型 */
+	AI_DEC_ATTR_PARAM,	/* NUL 结尾字符串：≤23 字符+NUL（含 NUL ≤24） */
+	AI_DEC_ATTR_DATA,	/* 二进制 64B = 8×u64 决策参数（缺省零数组） */
+	AI_DEC_ATTR_CONFIDENCE,	/* u8：模型置信度 0-100 */
+	AI_DEC_ATTR_MODEL_VER,	/* u32：决策模型版本 */
+	AI_DEC_ATTR_TRIG_EVID,	/* u64：触发事件 ID（AI_EVENT_ID，可为 0） */
+	AI_DEC_ATTR_TRACE_HI,	/* u64：统一 trace 高 64 位 */
+	AI_DEC_ATTR_TRACE_LO,	/* u64：统一 trace 低 64 位 */
+	AI_DEC_ATTR_INTENT,	/* u64：意图 ID（0=未供给） */
+	AI_DEC_ATTR_PARENT,	/* u64：父决策 ID（0=无父） */
+	AI_DEC_ATTR_AGENT,	/* u32：发起方（enum ai_agent_id） */
+	AI_DEC_ATTR_EXPECTED,	/* s64：调用方预期 delta（0=未供给） */
+
+	__AI_DEC_ATTR_MAX,
+	AI_DEC_ATTR_MAX = __AI_DEC_ATTR_MAX - 1,
+};
+
+/* ACT2 应答载荷：决策关联键回带（铸造发生在 ai_policy_execute 内） */
+struct ai_nl_act2_ack {
+	__u8  executed;		/* 执行到的策略数（钳 U8_MAX） */
+	__u8  hit;		/* 命中（executed>0 即 1） */
+	__s32 ai_err;		/* AI_OK 或负 AI 错误码 */
+	__u64 decision_id;	/* 本决策 ID */
+	__u64 trace_hi;		/* 统一 trace 高 64 位（回读铸造结果） */
+	__u64 trace_lo;		/* 统一 trace 低 64 位 */
+};
+
+/* K1 D6：决策发起方小枚举（防自由数；与 source（决策来源通道）正交） */
+enum ai_agent_id {
+	AI_AGENT_KERNEL		= 0,	/* 内核自身（heuristic/think 闭环） */
+	AI_AGENT_OCC_CLI	= 1,	/* occ CLI 手工下发 */
+	AI_AGENT_OCC_AI		= 2,	/* occ AI 会话（executor 工具轨） */
+	AI_AGENT_AISTREAMD	= 3,	/* aistreamd 采集/回填 */
+	AI_AGENT_APIC		= 4,	/* aikernel-api HTTP 网关 */
+	AI_AGENT_TOOL		= 5,	/* 其它工具进程 */
+	AI_AGENT_OTHER		= 255,	/* 未登记发起方 */
+};
+
+/* K1 D6：side_effect_mask 诚实三位（v1 只放真实发生的；
+ * 按 handler 细分位留给 K2/K4 做深时扩，不预冒充） */
+#define AI_SE_PARAM_WRITTEN	(1U << 0)	/* executed>0：至少写一参数 */
+#define AI_SE_SAFETY_CLAMPED	(1U << 1)	/* 被安全边界限幅（clamp） */
+#define AI_SE_ROLLED_BACK	(1U << 2)	/* 失败回退内核默认行为 */
+
 /* ---- REG 请求载荷 ---- */
 
 #define AI_NL_REG_F_UNREG	(1U << 0)	/* 置位=注销（默认 0=注册） */
@@ -136,5 +190,28 @@ struct ai_nl_event {
 	__u32 reserved;
 	char  param[AI_NL_ACT_PARAM_LEN];	/* 关联参数名/模型名（NUL 结尾） */
 };
+
+/* K1 D7：EVENT 72B 形态的尾巴（policy 事件带记录 trace；环境事件
+ * 不带 = 56B 原样，trace 0:0 = 无意图归属，诚实零） */
+struct ai_nl_event_tail {
+	__u64 trace_hi;		/* 统一 trace 高 64 位（0=无归属） */
+	__u64 trace_lo;		/* 统一 trace 低 64 位 */
+};
+
+/* K1 D8：三层同步防线——冻结长度轨钉死（drift 即编译失败）。
+ * ai_nl_act 112B（v2 全量）/ AI_NL_ACT_V1_LEN 88B（v1 旧布局）双轨；
+ * act2_ack=32B（1+1+4pad+8+8+8 自然对齐）；event=56B、tail=16B。 */
+_Static_assert(sizeof(struct ai_nl_act) == 112,
+	       "ai_nl_act v2 布局漂移（冻结契约）");
+_Static_assert(AI_NL_ACT_V1_LEN == 88,
+	       "ai_nl_act v1 长度轨漂移（冻结契约）");
+_Static_assert(sizeof(struct ai_nl_act_ack) == 16,
+	       "ai_nl_act_ack 布局漂移");
+_Static_assert(sizeof(struct ai_nl_act2_ack) == 32,
+	       "ai_nl_act2_ack 布局漂移");
+_Static_assert(sizeof(struct ai_nl_event) == 56,
+	       "ai_nl_event 布局漂移（as_streams 56B 定长契约）");
+_Static_assert(sizeof(struct ai_nl_event_tail) == 16,
+	       "ai_nl_event_tail 布局漂移");
 
 #endif /* _UAPI_LINUX_AI_NETLINK_H */

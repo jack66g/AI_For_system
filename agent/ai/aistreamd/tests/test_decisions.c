@@ -212,6 +212,126 @@ int main(void)
 			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
 			      "executed=1 safety_clamped=0 pre=garbage\n", &r) == 0,
 		      "U66 malformed pre tail still 23-field good line");
+
+		/* ---- U-T1（K1 D4/D10）：行尾 trace/cost/… append-only 尾巴
+		 * 形态：v2 全参 / 仅 trace+cost / 无 0x 前缀 trace / 老行零列 /
+		 * pre=garbage 畸形尾随 trace / lt-vm 16.3 活体 3 行逐字节
+		 * （tests/fixtures/proc_decisions_v1.golden 留档，此处内嵌
+		 * 更稳——文件不参与编译）。 */
+		CHECK(as_dec_parse_line(
+			      "id=21 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=1 delta=-7 ver=1 conf=2 domain=3 src=4 "
+			      "executed=2 safety_clamped=0 pre=0 "
+			      "trace=0x00deadbeefcafe01:0x0000000000000042 "
+			      "cost=512000 intent=0x00000000000000ab "
+			      "parent=0x00000000000000cd agent=2 "
+			      "expected=-1500000 se=0x00000003\n", &r) == 0 &&
+		      r.id == 21 && r.delta == -7 &&
+		      r.trace_hi == 0x00deadbeefcafe01ULL &&
+		      r.trace_lo == 0x42ULL && r.cost_ns == 512000ULL &&
+		      r.intent_id == 0xabULL && r.parent_id == 0xcdULL &&
+		      r.agent_id == 2 && r.expected == -1500000LL &&
+		      r.side_effect_mask == 3,
+		      "U-T1 v2 full tail parsed 1:1");
+		CHECK(as_dec_parse_line(
+			      "id=22 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=1 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=none "
+			      "trace=0x0000000000000001:0x0000000000000002 "
+			      "cost=1\n", &r) == 0 &&
+		      r.id == 22 && r.trace_hi == 1 && r.trace_lo == 2 &&
+		      r.cost_ns == 1 && r.intent_id == 0 &&
+		      r.parent_id == 0 && r.agent_id == 0 &&
+		      r.expected == 0 && r.side_effect_mask == 0,
+		      "U-T1 trace+cost only, rest zero");
+		CHECK(as_dec_parse_line(
+			      "id=23 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=0 "
+			      "trace=dead:beef\n", &r) == 0 &&
+		      r.id == 23 && r.trace_hi == 0xdeadULL &&
+		      r.trace_lo == 0xbeefULL,
+		      "U-T1 bare-hex trace form");
+		mkline(buf, sizeof(buf), 24, 123456789ULL, 2, 1, -15);
+		CHECK(as_dec_parse_line(buf, &r) == 0 &&
+		      r.id == 24 && r.trace_hi == 0 && r.trace_lo == 0 &&
+		      r.cost_ns == 0 && r.intent_id == 0 && r.parent_id == 0 &&
+		      r.agent_id == 0 && r.expected == 0 &&
+		      r.side_effect_mask == 0,
+		      "U-T1 old line (no tail) -> zero cols, not bad");
+		CHECK(as_dec_parse_line(
+			      "id=25 trig_ts=2 trig_evid=0x1 dec_ts=3 type=4 "
+			      "data=1:2:3:4:5:6:7:8 exec_ts=9 outcome_ts=10 "
+			      "outcome=0 delta=0 ver=1 conf=2 domain=3 src=4 "
+			      "executed=1 safety_clamped=0 pre=garbage "
+			      "trace=0x0000000000000009:0x000000000000000a "
+			      "unknown_tok=zz cost=7\n", &r) == 0 &&
+		      r.id == 25 && r.trace_hi == 9 && r.trace_lo == 0xa &&
+		      r.cost_ns == 7,
+		      "U-T1 garbage pre + trace tail tolerated");
+		{
+			static const char *golden[3] = {
+				"id=3 trig_ts=35280998880556 trig_evid=0x0000 "
+				"dec_ts=35280998948514 type=0 "
+				"data=15127:7:0:0:0:0:0:0 "
+				"exec_ts=35281001075817 outcome_ts=0 outcome=1 "
+				"delta=0 ver=0 conf=90 domain=1 src=0 executed=1 "
+				"safety_clamped=0 pre=0\n",
+				"id=2 trig_ts=28764832022138 trig_evid=0x0000 "
+				"dec_ts=28764832026354 type=0 "
+				"data=8755:1:0:0:0:0:0:0 "
+				"exec_ts=28764832430796 outcome_ts=0 outcome=0 "
+				"delta=0 ver=0 conf=90 domain=1 src=0 executed=0 "
+				"safety_clamped=0 pre=0\n",
+				"id=1 trig_ts=28702101868988 trig_evid=0x0000 "
+				"dec_ts=28702101975735 type=0 "
+				"data=8754:5:0:0:0:0:0:0 "
+				"exec_ts=28702104164427 outcome_ts=0 outcome=1 "
+				"delta=0 ver=0 conf=90 domain=1 src=0 executed=1 "
+				"safety_clamped=0 pre=0\n",
+			};
+			unsigned long long ids[3] = { 3, 2, 1 };
+			unsigned long long d0[3] = { 15127, 8755, 8754 };
+			unsigned long long d1[3] = { 7, 1, 5 };
+			unsigned ex[3] = { 1, 0, 1 };
+
+			for (int i = 0; i < 3; i++) {
+				CHECK(as_dec_parse_line(golden[i], &r) == 0 &&
+				      r.id == ids[i] &&
+				      r.data[0] == d0[i] &&
+				      r.data[1] == d1[i] &&
+				      r.executed == ex[i] && r.conf == 90 &&
+				      r.domain == 1 && r.trig_evid == 0 &&
+				      r.trace_hi == 0 && r.trace_lo == 0 &&
+				      r.cost_ns == 0,
+				      "U-T1 lt-vm golden line (id)");
+			}
+		}
+		/* 冻结事件行：trace_id 恒渲染（D10；0:0=无） */
+		{
+			struct as_event ev;
+
+			as_event_decision(&ev, 7, 1, 2, 2, 1, 1, -15,
+					   0x00deadbeefcafe01ULL, 0x42ULL);
+			CHECK(strcmp(ev.line,
+				      "[kern] event decision decision_id=7 "
+				      "type=1 domain=2 executed=2 "
+				      "safety_clamped=1 outcome=1 delta=-15 "
+				      "trace_id=0x00deadbeefcafe01:"
+				      "0x0000000000000042") == 0,
+			      "U-T1 decision event line with trace_id");
+			CHECK(ev.trace_hi == 0x00deadbeefcafe01ULL &&
+			      ev.trace_lo == 0x42ULL,
+			      "U-T1 event carries trace fields");
+			as_event_decision(&ev, 8, 0, 1, 1, 0, 1, 0, 0, 0);
+			CHECK(strstr(ev.line,
+				      " trace_id=0x0000000000000000:"
+				      "0x0000000000000000") != NULL,
+			      "U-T1 zero trace renders 0:0 (=none)");
+		}
 	}
 
 	/* ---- 1) 首轮摄取：ring 最新在前 → 升序入批 + 事件 + 落盘 ---- */
@@ -236,9 +356,12 @@ int main(void)
 	CHECK(st.dec.bad_lines == 0, "no bad lines");
 	CHECK(d.cursor == 3 && d.n == 3, "cursor/batch=3");
 	CHECK(ev_count == 3, "3 synthetic events");
+		/* K1 D10：行尾恒带 trace_id（此处老行夹具=0:0） */
 	CHECK(strncmp(ev_last_line,
 		      "[kern] event decision decision_id=", 34) == 0,
 	      "event line format frozen");
+		CHECK(strstr(ev_last_line, " trace_id=0x") != NULL,
+	      "event line carries trace_id tail");
 	CHECK(ev_last_id == 3, "event carries decision_id");
 	CHECK(st.dec.dup_skip == 0 && st.dec.gaps == 0, "no dup/gap first");
 	/* flush（flush_sec=1s：now=1000 → last_flush=0 已超时） */

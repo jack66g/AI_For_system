@@ -64,6 +64,20 @@ struct as_ai_nl_event {
 
 _Static_assert(sizeof(struct as_ai_nl_event) == 56, "ai_nl_event layout");
 
+/* K1（D7）：EVENT 72B 形态 = 56B 事件 + 16B trace 尾。policy 事件
+ * push_event_trace 发 72B（带记录的 trace）；model/hotplug 走 56B
+ * 薄壳——环境事件 trace=0:0=无意图归属（诚实零）。 */
+struct as_ai_nl_event_tail {
+	uint64_t trace_hi;
+	uint64_t trace_lo;
+};
+
+_Static_assert(sizeof(struct as_ai_nl_event_tail) == 16,
+	       "ai_nl_event_tail layout");
+_Static_assert(sizeof(struct as_ai_nl_event) +
+	       sizeof(struct as_ai_nl_event_tail) == 72,
+	       "ai_nl_event 72B form");
+
 /* ====================================================================
  * 通用 netlink socket（抽取自 ai_streams.c nl_open：组加入双保险——
  * 组号 1..31 走 bind 位掩码 + setsockopt 成员加入）
@@ -194,6 +208,69 @@ static int setup_ai(struct as_streams *sp)
 	}
 }
 
+/*
+ * as_streams_decode_ai_event - AI_CMD_EVENT 消息 -> 规范化事件（纯
+ * 函数，无 socket/stats 依赖；非 static：test_event.c 直测 56B/72B
+ * 双长度）。返回 0=成功（*out 填充；POLICY 事件 event_id=decision_id
+ * 原样透传且 out->trace_hi/lo 带尾——透传到 sink telemetry trace
+ * 列）；-1=非 EVENT 或长度不足。
+ * K1（D7）：nlmsg_len >= 72 读 16B trace 尾；56..71B 旧形态
+ * trace=0:0（环境事件无意图归属，诚实零）。
+ */
+int as_streams_decode_ai_event(struct nlmsghdr *nh, struct as_event *out)
+{
+	struct as_ai_nl_event *ev;
+	const char *sev;
+	char param[25];
+	uint64_t thi = 0, tlo = 0;
+
+	if (!nh || !out)
+		return -1;
+	if (nh->nlmsg_type != AI_CMD_EVENT)
+		return -1;
+	if (nh->nlmsg_len < NLMSG_HDRLEN + (int)sizeof(struct as_ai_nl_event))
+		return -1;
+	ev = (struct as_ai_nl_event *)NLMSG_DATA(nh);
+	if (nh->nlmsg_len >= NLMSG_HDRLEN + 72) {
+		const struct as_ai_nl_event_tail *t =
+			(const struct as_ai_nl_event_tail *)
+				((const unsigned char *)NLMSG_DATA(nh) +
+				 sizeof(struct as_ai_nl_event));
+
+		thi = t->trace_hi;
+		tlo = t->trace_lo;
+	}
+	sev = ev->severity == 2 ? "error" :
+	      ev->severity == 1 ? "warn" : "info";
+	memcpy(param, ev->param, sizeof(ev->param));
+	param[sizeof(ev->param)] = '\0';
+	if (ev->category == AI_NL_EV_POLICY) {
+		/* decision_id = event_id，原样透传 */
+		as_event_ai_policy(out, ev->event_id, ev->code, sev, param);
+		out->trace_hi = thi;
+		out->trace_lo = tlo;
+	} else if (ev->category == AI_NL_EV_MODEL) {
+		as_event_ai_model(out, ev->event_id, ev->code, param);
+	} else if (ev->category == AS_AI_NL_EV_DEVICE) {
+		/* K3d-2：16.01 对齐（code 0=probe 1=remove，param=dev） */
+		as_event_ai_device(out, ev->code != 0, param);
+	} else if (ev->category == AS_AI_NL_EV_CPU_HOTPLUG) {
+		/* K3d-2：01.07 对齐（code=online 位，param=cpu 号） */
+		as_event_ai_cpu(out, ev->code != 0, atoi(param));
+	} else if (ev->category == AS_AI_NL_EV_HW_ERROR) {
+		/* K3d-2：16.03 对齐（param="cpu,bank"） */
+		int mc = -1, mb = -1;
+
+		sscanf(param, "%d,%d", &mc, &mb);
+		as_event_ai_mce(out, mc, mb, sev);
+	} else {
+		as_event_mk(out, as_stream_idx(AS_STREAM_EVENT), "other", sev,
+			    "event_id=%llu category=%u",
+			    (unsigned long long)ev->event_id, ev->category);
+	}
+	return 0;
+}
+
 static void parse_ai_msg(struct as_streams *sp, struct nlmsghdr *nh)
 {
 	int idx = as_stream_idx(AS_STREAM_EVENT);
@@ -207,47 +284,12 @@ static void parse_ai_msg(struct as_streams *sp, struct nlmsghdr *nh)
 					  e->error);
 		return;
 	}
-	if (nh->nlmsg_type != AI_CMD_EVENT)
-		return;
-	if (nh->nlmsg_len < NLMSG_HDRLEN + (int)sizeof(struct as_ai_nl_event))
-		return;
 	{
-		struct as_ai_nl_event *ev =
-			(struct as_ai_nl_event *)NLMSG_DATA(nh);
 		struct as_event out;
-		const char *sev = ev->severity == 2 ? "error" :
-				  ev->severity == 1 ? "warn" : "info";
-		char param[25];
 
-		memcpy(param, ev->param, sizeof(ev->param));
-		param[sizeof(ev->param)] = '\0';
-
+		if (as_streams_decode_ai_event(nh, &out) != 0)
+			return;
 		as_stats_received(sp->stats, idx);
-		if (ev->category == AI_NL_EV_POLICY) {
-			/* decision_id = event_id，原样透传 */
-			as_event_ai_policy(&out, ev->event_id, ev->code, sev,
-					   param);
-		} else if (ev->category == AI_NL_EV_MODEL) {
-			as_event_ai_model(&out, ev->event_id, ev->code,
-					  param);
-		} else if (ev->category == AS_AI_NL_EV_DEVICE) {
-			/* K3d-2：16.01 对齐（code 0=probe 1=remove，param=dev） */
-			as_event_ai_device(&out, ev->code != 0, param);
-		} else if (ev->category == AS_AI_NL_EV_CPU_HOTPLUG) {
-			/* K3d-2：01.07 对齐（code=online 位，param=cpu 号） */
-			as_event_ai_cpu(&out, ev->code != 0, atoi(param));
-		} else if (ev->category == AS_AI_NL_EV_HW_ERROR) {
-			/* K3d-2：16.03 对齐（param="cpu,bank"） */
-			int mc = -1, mb = -1;
-
-			sscanf(param, "%d,%d", &mc, &mb);
-			as_event_ai_mce(&out, mc, mb, sev);
-		} else {
-			as_event_mk(&out, idx, "other", sev,
-				    "event_id=%llu category=%u",
-				    (unsigned long long)ev->event_id,
-				    ev->category);
-		}
 		sp->on_event(&out, sp->ud);
 	}
 }

@@ -39,6 +39,19 @@ int ai_nl_send_act(struct ai_nl_client *cli, const struct ai_nl_act *req,
 	return -1;
 }
 
+int ai_nl_send_act2(struct ai_nl_client *cli,
+		    const struct ai_nl_act2_req *req,
+		    struct ai_nl_act2_ack *ack, int *kern_err)
+{
+	(void)cli; (void)req; (void)ack; (void)kern_err;
+	return -1;                      /* K1：ACT2 同口径 stub */
+}
+
+void ai_nl_trace_mint(unsigned long long *hi, unsigned long long *lo)
+{
+	(void)hi; (void)lo;             /* stub：不铸 */
+}
+
 int ai_nl_send_sense(struct ai_nl_client *cli,
 		     __u32 cpu, __u32 max_records, __u32 format,
 		     struct ai_nl_sense_ack *ack,

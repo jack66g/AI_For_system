@@ -24,6 +24,8 @@
 #include <linux/sort.h>
 #include <linux/ktime.h>
 #include <linux/atomic.h>
+#include <linux/random.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include "ai_policy.h"
@@ -33,6 +35,11 @@
 #include "ai_causal.h"
 #include "../net/ai_netlink.h"
 
+/* K1 D3/D8：决策记录尾部扩 8 字段，127→183B packed（drift 即编译
+ * 失败；字段与 struct ai_policy_ctx 尾部一一对应，注释锚见 .h） */
+_Static_assert(sizeof(struct ai_decision_record) == 183,
+	       "ai_decision_record 必须为 183B（K1 D3）");
+
 #define AI_POLICY_MAX_COUNT  64   /* 注册表容量 */
 
 static struct ai_policy *ai_policy_table[AI_POLICY_MAX_COUNT];
@@ -40,6 +47,30 @@ static unsigned int ai_policy_count;
 static DEFINE_MUTEX(ai_policy_lock);
 
 static atomic64_t ai_decision_seq = ATOMIC64_INIT(0);
+
+/* K1 D2：统一 trace per-boot 随机 cookie——init 一次 get_random_u64()
+ * （非零保证），跨 boot 由 hi 区分；lo=decision_id 同 boot 单调。 */
+u64 ai_trace_boot_cookie;
+
+static int __init ai_policy_trace_init(void)
+{
+	do {
+		ai_trace_boot_cookie = get_random_u64();
+	} while (!ai_trace_boot_cookie);   /* 退化 0（2^-64）重摇 */
+	return 0;
+}
+subsys_initcall(ai_policy_trace_init);
+
+/* K1 D2：trace 铸造——hi/lo 任一非零 = 显式携带（ACT2），不改写；
+ * 双零（v1 ACT/think/heuristic 零进）→ 铸 {hi: boot cookie,
+ * lo: decision_id}，全决策恒非零（lo 单调 ≥1）。 */
+static void ai_trace_mint(u64 decision_id, u64 *hi, u64 *lo)
+{
+	if (!*hi && !*lo) {
+		*hi = ai_trace_boot_cookie;
+		*lo = decision_id;
+	}
+}
 
 /* ---- 决策记录 ring + ID 定位缓存 ---- */
 
@@ -151,13 +182,21 @@ static int ai_policy_cmp(const void *a, const void *b)
 	return (pb->priority > pa->priority) - (pb->priority < pa->priority);
 }
 
-/* 决策记录写入 ring + 统计累计（同一临界区；调用方不得持 ai_policy_lock 之外锁） */
-static void ai_policy_record_write(const struct ai_decision_record *rec,
-				   u64 lat)
+/* 决策记录写入 ring + 统计累计（同一临界区；调用方不得持 ai_policy_lock 之外锁）。
+ * K1 D5：cost_ns 统一在本函数算定（唯一落笔点，execute/heuristic
+ * 两入口共用）：executed>0 ? exec_ts-trig_ts : dec_ts-trig_ts；
+ * 时间戳异常（时钟同拍/乱序）退 0，防御恒非负。 */
+static void ai_policy_record_write(struct ai_decision_record *rec, u64 lat)
 {
 	unsigned long flags;
 	unsigned int slot;
 
+	if (rec->executed > 0 && rec->execute_ts > rec->trigger_ts)
+		rec->cost_ns = rec->execute_ts - rec->trigger_ts;
+	else if (rec->decision_ts > rec->trigger_ts)
+		rec->cost_ns = rec->decision_ts - rec->trigger_ts;
+	else
+		rec->cost_ns = 0;
 	spin_lock_irqsave(&ai_dec_lock, flags);
 	slot = ai_dec_head & AI_DEC_MASK;
 	ai_dec_ring[slot] = *rec;
@@ -208,6 +247,8 @@ int ai_policy_record_heuristic(u8 domain, u8 hook_id,
 	rec.domain = domain;
 	rec.source = AI_DEC_SRC_HEURISTIC;
 	rec.executed = 1;
+	/* K1 D2：heuristic 入口同理铸 trace（零进零铸，id 已取号） */
+	ai_trace_mint(rec.decision_id, &rec.trace_hi, &rec.trace_lo);
 	ai_policy_record_write(&rec, 0);
 	return AI_OK;
 }
@@ -231,16 +272,17 @@ static bool ai_policy_param_match(const char *action, const char *param)
 	return last_dot && strcmp(last_dot + 1, param) == 0;
 }
 
-int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
+static int __ai_policy_execute(struct ai_policy_ctx *ctx, void *arg)
 {
 	struct ai_policy *match[AI_POLICY_MAX_COUNT];
 	struct ai_decision_record rec;
 	struct ai_tp_decision tp;
-	struct ai_policy_ctx ctx_v;   /* K2b：handler 用可写副本（见下） */
 	unsigned int i, n = 0;
 	int executed = 0;
 	int failed = 0;
 	int clamped = 0;
+	int rolled_back = 0;        /* K1 D6：AI_SE_ROLLED_BACK 登记源 */
+	u32  side_effect_mask = 0; /* K1 D6：AI_SE_* 聚合 */
 	u64 t0, t1, lat;
 
 	if (!ctx)
@@ -255,13 +297,15 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 	 * 落决策快照（ai_policy_safety_snapshot_save 拒绝 id=0），原实现
 	 * id 在全部 handler 之后才分配、且 ctx 为 const 无法回填 → 快照
 	 * 从未真正保存，rollback 恒空转（abnice A/B 实测：rollback all 后
-	 * sched.nice 停 5 不回 0、affinity 原样不动、rc=0）。此处先取
-	 * 副本并预分配 id 再传给 handler；接口签名与全部调用方不变，
-	 * id 序列仍与 ai_decision_seq 同源单调（每决策一次自增不变）。 */
-	ctx_v = *ctx;
-	if (!ctx_v.decision_id)
-		ctx_v.decision_id = ai_policy_next_decision_id();
-	ctx = &ctx_v;
+	 * sched.nice 停 5 不回 0、affinity 原样不动、rc=0）。K1 起核心
+	 * __ai_policy_execute 直吃可写 ctx（const 壳/trace 壳见文件尾），
+	 * id 预分配语义不变；接口签名与全部调用方不变，id 序列仍与
+	 * ai_decision_seq 同源单调（每决策一次自增不变）。 */
+	if (!ctx->decision_id)
+		ctx->decision_id = ai_policy_next_decision_id();
+	/* K1 D2：统一 trace 铸造（双零 → 铸；ACT2 显式携带不改写）。
+	 * ACT2 ack 经 ai_policy_execute_trace 从调用方 ctx 回读结果 */
+	ai_trace_mint(ctx->decision_id, &ctx->trace_hi, &ctx->trace_lo);
 
 	t0 = ktime_get_ns();
 	mutex_lock(&ai_policy_lock);
@@ -300,8 +344,10 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 			executed++;
 		} else {
 			failed++;
-			if (pol->rollback)
+			if (pol->rollback) {
 				pol->rollback(ctx, arg ? arg : pol->private_data);
+				rolled_back++;   /* K1 D6：SE_ROLLED_BACK 登记锚 */
+			}
 		}
 
 		/*
@@ -342,6 +388,22 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 	rec.safety_clamped = clamped ? 1 : 0;
 	rec.confidence = ctx->confidence;
 	rec.model_version = ctx->model_version;
+	/* K1 D3/D6：新 8 字段 ctx→rec 透传（cost_ns 由 record_write
+	 * 统一算定）；副作用三位单点位聚合（executed>0 写参数 / clamp /
+	 * 失败回退），互斥清晰不重复置位 */
+	if (executed > 0)
+		side_effect_mask |= AI_SE_PARAM_WRITTEN;
+	if (clamped)
+		side_effect_mask |= AI_SE_SAFETY_CLAMPED;
+	if (rolled_back)
+		side_effect_mask |= AI_SE_ROLLED_BACK;
+	rec.trace_hi = ctx->trace_hi;
+	rec.trace_lo = ctx->trace_lo;
+	rec.intent_id = ctx->intent_id;
+	rec.parent_id = ctx->parent_id;
+	rec.agent_id = ctx->agent_id;
+	rec.expected = ctx->expected;
+	rec.side_effect_mask = side_effect_mask;
 	if (executed == 0)
 		rec.outcome = AI_OUTCOME_UNKNOWN;
 	else if (failed == 0)
@@ -371,16 +433,42 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
 
 	/* W49 ai-6/7：决策结果异步推送（已注册 NETLINK_AI 的 AI 主体免轮询）。
 	 * 协议族未创建/无注册者时为廉价空操作；GFP_ATOMIC 路径不睡眠。 */
-	ai_netlink_push_event(AI_NL_EV_POLICY,
+	ai_netlink_push_event_trace(AI_NL_EV_POLICY,
 		rec.outcome == AI_OUTCOME_FAILED ? AI_NL_EV_SEV_ERROR :
 		rec.outcome == AI_OUTCOME_PARTIAL ? AI_NL_EV_SEV_WARN :
 		AI_NL_EV_SEV_INFO,
 		rec.decision_id, executed,
-		ctx->param[0] ? ctx->param : NULL);
+		ctx->param[0] ? ctx->param : NULL,
+		rec.trace_hi, rec.trace_lo);   /* K1 D7：72B 带 trace 尾 */
 
 	return executed;
 }
+
+/* K1 D2：const 壳（v1 调用方行为/ABI 不变；零进零铸语义同旧）。 */
+int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg)
+{
+	struct ai_policy_ctx ctx_v;
+
+	if (!ctx)
+		return AI_ERR_INVALID_ARG;
+	ctx_v = *ctx;
+	return __ai_policy_execute(&ctx_v, arg);
+}
 EXPORT_SYMBOL_GPL(ai_policy_execute);
+
+/**
+ * ai_policy_execute_trace() - 同 ai_policy_execute，但 ctx 可写：
+ * decision_id 补铸与统一 trace 铸造（K1 D2）结果回写调用方 ctx，
+ * 供 ACT2 ack 回读决策关联键（decision_id/trace_hi/trace_lo）。
+ * 显式携带（hi/lo 任一非零）原样带回，内核不改写。
+ */
+int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg)
+{
+	if (!ctx)
+		return AI_ERR_INVALID_ARG;
+	return __ai_policy_execute(ctx, arg);
+}
+EXPORT_SYMBOL_GPL(ai_policy_execute_trace);
 
 /* 按 decision_id 定位 ring 槽（先查缓存，未命中线性扫；持 ai_dec_lock 调用） */
 static struct ai_decision_record *ai_policy_ring_find_locked(u64 decision_id)
@@ -580,3 +668,15 @@ int ai_policy_decision_read(void *buf, size_t cap,
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_policy_decision_read);
+
+#ifdef CONFIG_AIKERNEL_KUNIT_TEST
+/* K1 p99 微基准钩子（测试：ai_policy_test.c）：直调内部
+ * ai_policy_record_write（cost_ns 就地算定）；纯测试面，
+ * 不进任何生产调用链。 */
+void ai_policy_test_record_write(struct ai_decision_record *rec)
+{
+	if (!rec)
+		return;
+	ai_policy_record_write(rec, 0);
+}
+#endif /* CONFIG_AIKERNEL_KUNIT_TEST */

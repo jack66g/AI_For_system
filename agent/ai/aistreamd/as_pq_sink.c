@@ -115,6 +115,8 @@ void as_pq_sink_feed(struct as_pq_sink *s, const struct as_event *ev)
 	memcpy(row->data, ev->line, len);
 	row->data[len] = '\0';
 	row->dlen = (uint16_t)len;
+	row->trace_hi = (int64_t)ev->trace_hi;
+	row->trace_lo = (int64_t)ev->trace_lo;
 	if (s->stats) {
 		s->stats->pq.fed++;
 		s->stats->pq.buffered = (long long)s->n;
@@ -461,6 +463,8 @@ void as_pq_sink_flush(struct as_pq_sink *s)
 			r->category = b->category;
 			r->event_type = 0;
 			r->severity = b->severity;
+			r->trace_hi = b->trace_hi;
+			r->trace_lo = b->trace_lo;
 			r->data_len = (int16_t)b->dlen;
 			r->data = (const uint8_t *)b->data;
 		}

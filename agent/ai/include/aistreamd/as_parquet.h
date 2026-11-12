@@ -4,7 +4,13 @@
  *
  * 对齐 REF agent/ai/aikd/aikd_lib.py（alpha.11，只读参考）：
  *   - schema 三套逐字段一致（列名/物理类型/逻辑宽度/顺序）：
- *       telemetry 9 列 / decision 23 列 / index 6 列（见 .c 的 *_cols 表）
+ *       telemetry 11 列 / decision 31 列 / index 6 列（见 .c 的 *_cols 表）
+ *       K1 D10 append-only v2：telemetry 9->11（尾加 trace_hi/
+ *       trace_lo i64，环境事件 0）、decision 23->31（尾加 trace_hi/
+ *       trace_lo/intent_id/parent_id i64、agent_id i32、expected i64、
+ *       cost_ns i64、side_effect_mask i32）——老行零列值，v1 向量
+ *       继续通过=兼容证明（原「零 schema 改动」冻结契约由 K1 升级
+ *       为 append-only v2，与 REF aikd_lib.py 双侧同步）。
  *   - 落盘布局：
  *       telemetry/YYYY-MM-DD/<cat>_NNNN.parquet（序号扫描现有文件递增，
  *       同 REF _next_seq 的 glob 语义）+ telemetry/index.parquet（重建式）
@@ -46,6 +52,8 @@ struct pq_tel_row {
 	int8_t severity;
 	int16_t data_len;
 	const uint8_t *data;	/* 原始字节全量零脱敏（可为 NULL=len0） */
+	int64_t trace_hi;	/* K1 D10：统一 trace 高 64 位（环境事件 0） */
+	int64_t trace_lo;
 };
 
 struct pq_dec_row {
@@ -65,6 +73,15 @@ struct pq_dec_row {
 	int8_t source;
 	int8_t executed;
 	int8_t safety_clamped;
+	/* K1 D10 append-only v2 尾 8 列（老行/无尾巴=0） */
+	int64_t trace_hi;
+	int64_t trace_lo;
+	int64_t intent_id;
+	int64_t parent_id;
+	int32_t agent_id;
+	int64_t expected;
+	int64_t cost_ns;
+	int32_t side_effect_mask;
 };
 
 /* 落盘产物统计（字节按写后 st_size 累计） */

@@ -161,6 +161,11 @@ static const struct kv_rule telemetry_rules[] = {
 static const struct kv_rule chains_rules[] = {
 	{ "id",		API_R_PASS,  API_R_PASS },	/* decision_id 例外：
 							 * K3-DESIGN §K3c */
+	{ "trace",	API_R_PASS,  API_R_PASS },	/* trace_id 例外：id
+							 * 类不脱敏（K1 D10，
+							 * decision_id
+							 * 同待遇；/proc 行尾键为
+							 * trace=0x<hi>:0x<lo>） */
 	{ "trig_ts",	API_R_PASS,  API_R_PASS },
 	{ "trig_evid",	API_R_PASS,  API_R_PASS },
 	{ "dec_ts",	API_R_PASS,  API_R_PASS },

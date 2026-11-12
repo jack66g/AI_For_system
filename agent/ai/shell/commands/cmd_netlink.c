@@ -8,6 +8,11 @@
  *       - AI_CMD_SENSE：拉取内核 AI 遥测记录（无权限要求）
  *   netlink act <domain> <decision_type> [confidence] [hexdata]
  *       - AI_CMD_ACT：下发决策指令（需 CAP_SYS_ADMIN，交互确认）
+ *   netlink act2 <domain> <decision_type> [confidence] [hexdata] [k=v ...]
+ *       - AI_CMD_ACT2（K1 D1）：nlattr 载荷，携带统一 trace_id/intent
+ *         等元数据（需 CAP_SYS_ADMIN，交互确认）。k: param=<参数名>（
+ *         必填）、trace_id=0x<hex>:0x<hex>（键名 trace/trace_id 等价）、
+ *         intent= parent= agent= expected= ver= trig_evid=
  *   netlink reg
  *       - AI_CMD_REG：登记本进程 portid（需 CAP_SYS_ADMIN，内核幂等去重）
  *
@@ -45,6 +50,14 @@ static void netlink_usage(void)
     printf("%s", tr(TR_NL_HELP_SENSE));
     printf("  netlink act <domain> <decision_type> [confidence] [hexdata]\n");
     printf("%s", tr(TR_NL_HELP_ACT));
+    printf("  netlink act2 <domain> <decision_type> [confidence] [hexdata]"
+           " [k=v ...]\n");
+    printf("                                                  下发决策指令"
+           " v2：nlattr 载荷（需 CAP_SYS_ADMIN）\n");
+    printf("                                                  k: param=<内核"
+           "参数名>(必填) trace_id=0x<hex>:0x<hex>\n"
+           "                                                  "
+           "intent= parent= agent= expected= ver= trig_evid=\n");
     printf("%s", tr(TR_NL_HELP_REG));
     printf("\n");
     printf("domain: 0=general 1=sched 2=mm 3=io 4=net 5=security 6=power\n");
@@ -366,6 +379,236 @@ static int netlink_act_cmd(int argc, char **argv)
     return rc;
 }
 
+/*
+ * parse_trace_arg - 解析统一 trace_id 参数 "0x<hex>:0x<hex>" 或
+ * "<hex>:<hex>"（两段 16 进制）。注：occ 对外文案一律写 trace_id 全称
+ * ——裸 "trace" 一词已被训练轨迹命令（cmd_trace）占用（D9）。
+ */
+static int parse_trace_arg(const char *s, __u64 *hi, __u64 *lo)
+{
+    const char *colon;
+    char buf[96];
+    char *end;
+    unsigned long long a, b;
+
+    if (!s || !hi || !lo || !*s || strlen(s) >= sizeof(buf))
+        return AI_ERR_INVALID_ARG;
+    snprintf(buf, sizeof(buf), "%s", s);
+    colon = strchr(buf, ':');
+    if (!colon || !colon[1])
+        return AI_ERR_INVALID_ARG;
+    *(char *)colon = '\0';
+    errno = 0;
+    a = strtoull(buf, &end, 16);
+    if (errno != 0 || end == buf || *end != '\0')
+        return AI_ERR_INVALID_ARG;
+    errno = 0;
+    b = strtoull(colon + 1, &end, 16);
+    if (errno != 0 || end == colon + 1 || *end != '\0')
+        return AI_ERR_INVALID_ARG;
+    *hi = (__u64)a;
+    *lo = (__u64)b;
+    return AI_OK;
+}
+
+/* 解析有符号 64 位整数参数（0 进制，支持 0x 前缀；全串消费） */
+static int parse_s64_arg(const char *s, long long *out)
+{
+    char *end;
+    long long v;
+
+    if (!s || !*s)
+        return AI_ERR_INVALID_ARG;
+    errno = 0;
+    v = strtoll(s, &end, 0);
+    if (errno != 0 || end == s || *end != '\0')
+        return AI_ERR_INVALID_ARG;
+    *out = v;
+    return AI_OK;
+}
+
+/*
+ * netlink act2 <domain> <decision_type> [confidence] [hexdata] [k=v ...]
+ * K1 D1/D9：nlattr 载荷决策指令；param 必填（定向参数名单源），
+ * trace_id 缺省=内核铸造（D2，ack 回读）。
+ */
+static int netlink_act2_cmd(int argc, char **argv)
+{
+    struct ai_nl_client cli;
+    struct ai_nl_act2_req req;
+    struct ai_nl_act2_ack ack;
+    __u32 val;
+    size_t data_bytes = 0;
+    int have_param = 0;
+    int kern_err = 0;
+    int rc, i;
+    char confirm[16];
+
+    if (argc < 2 || argc > 4 + 8) {
+        netlink_usage();
+        return AI_ERR_INVALID_ARG;
+    }
+
+    memset(&req, 0, sizeof(req));
+
+    rc = parse_u32_arg(argv[0], AI_NL_DOMAIN_MAX, &val);
+    if (rc != AI_OK) {
+        printf("Invalid domain: %s (0~%d)\n", argv[0], AI_NL_DOMAIN_MAX);
+        netlink_usage();
+        return rc;
+    }
+    req.domain = (__u8)val;
+
+    rc = parse_u32_arg(argv[1], 255, &val);
+    if (rc != AI_OK) {
+        printf("Invalid decision_type: %s (0~255)\n", argv[1]);
+        netlink_usage();
+        return rc;
+    }
+    req.decision_type = val;
+
+    if (argc >= 3) {
+        rc = parse_u32_arg(argv[2], 100, &val);
+        if (rc != AI_OK) {
+            printf("Invalid confidence: %s (0~100)\n", argv[2]);
+            netlink_usage();
+            return rc;
+        }
+        req.confidence = (__u8)val;
+    } else {
+        req.confidence = 50;
+    }
+
+    i = 3;
+    /* [hexdata] 位置槽只吃非 k=v token（含 = 视为键值对起点——
+     * act2 允许省略 hexdata 直接给 k=v） */
+    if (argc >= 4 && !strchr(argv[3], '=')) {
+        rc = parse_hex_data(argv[3], req.data, &data_bytes);
+        if (rc != AI_OK) {
+            printf("Invalid hexdata: %s\n", argv[3]);
+            netlink_usage();
+            return rc;
+        }
+        i = 4;
+    }
+
+    req.agent = AI_AGENT_OCC_CLI;   /* 手工 occ 命令（D6） */
+
+    for (; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq = strchr(arg, '=');
+        long long v64;
+
+        if (!eq || eq == arg || !eq[1]) {
+            printf("Invalid key=value: %s (k: param= trace_id= intent= "
+                   "parent= agent= expected= ver= trig_evid=)\n", arg);
+            netlink_usage();
+            return AI_ERR_INVALID_ARG;
+        }
+        if (strncmp(arg, "param=", 6) == 0) {
+            if (strlen(eq + 1) >= sizeof(req.param)) {
+                printf("Invalid param: %s (length must be < %d)\n",
+                       eq + 1, (int)sizeof(req.param));
+                return AI_ERR_INVALID_ARG;
+            }
+            snprintf(req.param, sizeof(req.param), "%s", eq + 1);
+            have_param = 1;
+            continue;
+        } else if (strncmp(arg, "trace_id=", 9) == 0 ||
+                   strncmp(arg, "trace=", 6) == 0) {
+            rc = parse_trace_arg(eq + 1, &req.trace_hi, &req.trace_lo);
+        } else if (strncmp(arg, "intent=", 7) == 0) {
+            rc = parse_s64_arg(eq + 1, &v64);
+            if (rc == AI_OK)
+                req.intent_id = (__u64)v64;
+        } else if (strncmp(arg, "parent=", 7) == 0) {
+            rc = parse_s64_arg(eq + 1, &v64);
+            if (rc == AI_OK)
+                req.parent_id = (__u64)v64;
+        } else if (strncmp(arg, "agent=", 6) == 0) {
+            rc = parse_u32_arg(eq + 1, 255, &val);
+            if (rc == AI_OK)
+                req.agent = val;
+        } else if (strncmp(arg, "expected=", 9) == 0) {
+            rc = parse_s64_arg(eq + 1, &v64);
+            if (rc == AI_OK)
+                req.expected = v64;
+        } else if (strncmp(arg, "ver=", 4) == 0) {
+            rc = parse_u32_arg(eq + 1, 0xFFFFFFFFul, &val);
+            if (rc == AI_OK)
+                req.model_version = val;
+        } else if (strncmp(arg, "trig_evid=", 10) == 0) {
+            rc = parse_s64_arg(eq + 1, &v64);
+            if (rc == AI_OK)
+                req.trig_evid = (__u64)v64;
+        } else {
+            printf("Unknown key: %s (k: param= trace_id= intent= parent= "
+                   "agent= expected= ver= trig_evid=)\n", arg);
+            netlink_usage();
+            return AI_ERR_INVALID_ARG;
+        }
+        if (rc != AI_OK) {
+            printf("Invalid value for %s\n", arg);
+            netlink_usage();
+            return rc;
+        }
+    }
+
+    if (!have_param) {
+        printf("act2 requires param=<内核参数名>（定向参数名单源，"
+               "与 AI 工具执行器同口径）\n");
+        netlink_usage();
+        return AI_ERR_INVALID_ARG;
+    }
+
+    /* 与 act 同闸：直接影响系统行为且需 CAP_SYS_ADMIN，先确认再下发 */
+    printf("%s", tr(TR_NL_ACT_CONFIRM1));
+    printf(tr(TR_NL_ACT_CONFIRM2),
+           req.domain, domain_name(req.domain),
+           req.decision_type, req.confidence, data_bytes);
+    printf("%s", tr(TR_NL_ACT_CONFIRM3));
+    fflush(stdout);
+    if (!fgets(confirm, sizeof(confirm), stdin) ||
+        (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("%s", tr(TR_NL_CANCELLED));
+        return AI_OK;
+    }
+
+    rc = ai_nl_client_open(&cli);
+    if (rc != AI_OK) {
+        netlink_print_open_fail(rc);
+        return rc;
+    }
+
+    rc = ai_nl_send_act2(&cli, &req, &ack, &kern_err);
+    if (rc != AI_OK) {
+        netlink_print_error(rc, kern_err);
+    } else {
+        printf("\n=== NETLINK_AI ACT2 ===\n\n");
+        printf("Domain:        %u (%s)\n",
+               req.domain, domain_name(req.domain));
+        printf("Decision type: %u\n", req.decision_type);
+        printf("Confidence:    %u\n", req.confidence);
+        printf("Param:         %s\n", req.param);
+        printf("Executed:      %u\n", (unsigned)ack.executed);
+        printf("Hit:           %s\n", ack.hit ? "yes" : "no");
+        printf("Decision id:   %llu\n",
+               (unsigned long long)ack.decision_id);
+        printf("trace_id:      0x%016llx:0x%016llx%s\n",
+               (unsigned long long)ack.trace_hi,
+               (unsigned long long)ack.trace_lo,
+               (ack.trace_hi || ack.trace_lo) ? "" : " (kernel mint)");
+        if (ack.ai_err != 0)
+            printf(tr(TR_NL_ACK_AIERR), ack.ai_err);
+        if (ack.executed == 0 && ack.ai_err == 0)
+            printf("%s", tr(TR_NL_ACK_NO_POLICY));
+        printf("\n");
+    }
+
+    ai_nl_client_close(&cli);
+    return rc;
+}
+
 /* netlink reg */
 static int netlink_reg_cmd(void)
 {
@@ -410,6 +653,8 @@ int cmd_netlink(void *shell_ptr, int argc, char **argv)
         return netlink_sense_cmd(argc - 2, argv + 2);
     if (strcmp(argv[1], "act") == 0)
         return netlink_act_cmd(argc - 2, argv + 2);
+    if (strcmp(argv[1], "act2") == 0)
+        return netlink_act2_cmd(argc - 2, argv + 2);
     if (strcmp(argv[1], "reg") == 0) {
         if (argc > 2) {
             printf("%s", tr(TR_NL_REG_NOARGS));

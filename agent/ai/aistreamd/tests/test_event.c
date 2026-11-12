@@ -10,8 +10,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <linux/netlink.h>
+
 #include "as_event.h"
 #include "as_util.h"
+
+/* as_streams.c 内部解码器（非 static：56B/72B 双长度直测，K1 D7） */
+int as_streams_decode_ai_event(struct nlmsghdr *nh, struct as_event *out);
 
 static int fails;
 
@@ -83,6 +88,80 @@ int main(void)
 
 	as_event_ai_model(&ev, 5, 1, "vmp-logic-v3");
 	CHECK_LINE(&ev, "[kern] event model id=5 op=load name=vmp-logic-v3");
+
+	/* ---- K1 D7：EVENT 56B/72B 双长度解码（兼容轨；payload 长度，
+	 * nlmsg_len=NLMSG_LENGTH(payload)） ---- */
+	{
+		struct {
+			struct nlmsghdr nh;
+			unsigned char body[72];
+		} msg;
+		struct as_event ev2;
+		unsigned long long eid = 4711;
+		unsigned long long thi = 0x00deadbeefcafe01ULL, tlo = 0x42ULL;
+		unsigned int cat = 1;
+		int code = 2;
+
+		memset(&msg, 0, sizeof(msg));
+		msg.nh.nlmsg_type = 19;		/* AI_CMD_EVENT */
+		memcpy(msg.body + 8, &eid, 8);	/* event_id */
+		memcpy(msg.body + 16, &cat, 4);	/* category=POLICY */
+		memcpy(msg.body + 24, &code, 4);
+		memcpy(msg.body + 32, "mm.swappiness", 14);
+
+		/* 56B 旧形态：trace=0:0（诚实零） */
+		msg.nh.nlmsg_len = NLMSG_LENGTH(56);
+		CHECK(as_streams_decode_ai_event(&msg.nh, &ev2) == 0,
+		      "decode 56B form");
+		CHECK_LINE(&ev2,
+			   "[kern] event policy decision_id=4711 executed=2 "
+			   "param=mm.swappiness");
+		CHECK(ev2.trace_hi == 0 && ev2.trace_lo == 0,
+		      "56B form trace=0:0");
+		CHECK(ev2.has_decision_id == 1 && ev2.decision_id == 4711,
+		      "56B form decision_id passthrough");
+
+		/* 72B：56B 事件 + 16B trace 尾 */
+		msg.nh.nlmsg_len = NLMSG_LENGTH(72);
+		memcpy(msg.body + 56, &thi, 8);
+		memcpy(msg.body + 64, &tlo, 8);
+		CHECK(as_streams_decode_ai_event(&msg.nh, &ev2) == 0,
+		      "decode 72B form");
+		CHECK_LINE(&ev2,
+			   "[kern] event policy decision_id=4711 executed=2 "
+			   "param=mm.swappiness");
+		CHECK(ev2.trace_hi == 0x00deadbeefcafe01ULL &&
+		      ev2.trace_lo == 0x42ULL,
+		      "72B form trace tail read");
+
+		/* 太短（<56B payload）：拒 */
+		msg.nh.nlmsg_len = NLMSG_LENGTH(48);
+		CHECK(as_streams_decode_ai_event(&msg.nh, &ev2) != 0,
+		      "short event rejected");
+		/* 56..71B payload：旧形态（不读尾、不坏消息） */
+		msg.nh.nlmsg_len = NLMSG_LENGTH(60);
+		CHECK(as_streams_decode_ai_event(&msg.nh, &ev2) == 0 &&
+		      ev2.trace_hi == 0 && ev2.trace_lo == 0,
+		      "56..71B treated as legacy (trace=0:0)");
+		/* 非 EVENT 类型：拒 */
+		msg.nh.nlmsg_type = 17;
+		msg.nh.nlmsg_len = NLMSG_LENGTH(72);
+		CHECK(as_streams_decode_ai_event(&msg.nh, &ev2) != 0,
+		      "non-EVENT type rejected");
+	}
+
+	/* K1 D10：decision 行 trace_id 恒渲染（0:0=无） */
+	as_event_decision(&ev, 4711, 1, 2, 1, 0, 1, -15,
+			  0x00deadbeefcafe01ULL, 0x42ULL);
+	CHECK_LINE(&ev,
+		   "[kern] event decision decision_id=4711 type=1 domain=2 "
+		   "executed=1 safety_clamped=0 outcome=1 delta=-15 "
+		   "trace_id=0x00deadbeefcafe01:0x0000000000000042");
+	as_event_decision(&ev, 8, 0, 1, 0, 0, 0, 0, 0, 0);
+	CHECK_LINE(&ev,
+		   "[kern] event decision decision_id=8 type=0 domain=1 "
+		   "executed=0 safety_clamped=0 outcome=0 delta=0 "
+		   "trace_id=0x0000000000000000:0x0000000000000000");
 
 	as_event_net_link(&ev, 1, 2, "lo", 0x10049);
 	CHECK_LINE(&ev, "[kern] net newlink if=2 name=lo flags=0x10049");

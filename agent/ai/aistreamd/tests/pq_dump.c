@@ -7,12 +7,18 @@
  *   BTIME <sec>                          单调→墙钟基准（两例同值）
  *   T <ts_ns> <pid> <tgid> <cpu> <cat> <evt> <sev> <hex|->
  *                                        遥测行（hex=payload 十六进制，
- *                                        -=空 payload）
+ *                                        -=空 payload）；K1 v2 可选
+ *                                        尾 2 列 <trace_hi> <trace_lo>
+ *                                        （缺省 0）
  *   GEN <n> <base_ts_ns> <cat> <evt> <payload_len>
  *                                        确定性生成 n 行：ts=base+i*1000000,
  *                                        pid=tgid=i%100000, cpu=i%8,
  *                                        sev=i%3, payload[j]=(i+j)&0xff
- *   D <23 字段，决策 schema 列序>         决策行
+ *   D <23|31 字段，决策 schema 列序>       决策行（K1 v2：23=老行
+ *                                        新列补零；31=尾 8 列
+ *                                        trace_hi trace_lo intent_id
+ *                                        parent_id agent_id expected
+ *                                        cost_ns side_effect_mask）
  *   C <同 D>                             因果链行
  *   FLUSH-T | FLUSH-D | FLUSH-C          触发对应 write_*（清该类缓冲）
  *   SEED ...                             由 harness 处理（驱动忽略）
@@ -100,11 +106,21 @@ int main(int argc, char **argv)
 			long long ts, pid, tgid, cpu, cat, evt, sev;
 			char hex[4096];
 
-			if (sscanf(line, "%*s %lld %lld %lld %lld %lld %lld %lld %4095s",
-				   &ts, &pid, &tgid, &cpu, &cat, &evt, &sev,
-				   hex) != 8) {
-				fprintf(stderr, "bad T line: %s\n", line);
-				return 2;
+			{
+				long long thi = 0, tlo = 0;
+				int got = sscanf(line,
+					"%*s %lld %lld %lld %lld %lld %lld %lld "
+					"%4095s %lld %lld",
+					&ts, &pid, &tgid, &cpu, &cat, &evt, &sev,
+					hex, &thi, &tlo);
+
+				if (got != 8 && got != 10) {
+					fprintf(stderr, "bad T line (%d): %s\n",
+						got, line);
+					return 2;
+				}
+				trows[tn].trace_hi = thi;
+				trows[tn].trace_lo = tlo;
 			}
 			{
 				uint8_t *pl;
@@ -159,6 +175,8 @@ int main(int argc, char **argv)
 				trows[tn].event_type = (int8_t)evt;
 				trows[tn].severity = (int8_t)(i % 3);
 				trows[tn].data_len = (int16_t)plen;
+				trows[tn].trace_hi = 0;	/* K1 v2：GEN 不带 trace */
+				trows[tn].trace_lo = 0;
 				trows[tn].data = pl;
 				tn++;
 				if (tn >= MAXROWS) {
@@ -168,26 +186,28 @@ int main(int argc, char **argv)
 			}
 		} else if (strcmp(op, "D") == 0 || strcmp(op, "C") == 0) {
 			struct pq_dec_row r;
-			long long v[23];
+			long long v[31];
+			int got;
 
-			{
-				int got = sscanf(line,
-					"%*s %lld %lld %lld %lld %lld %lld "
-					"%lld %lld %lld %lld %lld %lld %lld "
-					"%lld %lld %lld %lld %lld %lld %lld "
-					"%lld %lld %lld",
-					&v[0], &v[1], &v[2], &v[3], &v[4],
-					&v[5], &v[6], &v[7], &v[8], &v[9],
-					&v[10], &v[11], &v[12], &v[13],
-					&v[14], &v[15], &v[16], &v[17],
-					&v[18], &v[19], &v[20], &v[21],
-					&v[22]);
-
-				if (got != 23) {
-					fprintf(stderr, "bad %s line (%d): %s\n",
-						op, got, line);
-					return 2;
-				}
+			got = sscanf(line,
+				"%*s %lld %lld %lld %lld %lld %lld "
+				"%lld %lld %lld %lld %lld %lld %lld "
+				"%lld %lld %lld %lld %lld %lld %lld "
+				"%lld %lld %lld %lld %lld %lld %lld "
+				"%lld %lld %lld %lld",
+				&v[0], &v[1], &v[2], &v[3], &v[4],
+				&v[5], &v[6], &v[7], &v[8], &v[9],
+				&v[10], &v[11], &v[12], &v[13],
+				&v[14], &v[15], &v[16], &v[17],
+				&v[18], &v[19], &v[20], &v[21],
+				&v[22], &v[23], &v[24], &v[25],
+				&v[26], &v[27], &v[28], &v[29],
+				&v[30]);
+			/* 23=老行（K1 v2 新列补零）；31=v2 全参 */
+			if (got != 23 && got != 31) {
+				fprintf(stderr, "bad %s line (%d): %s\n",
+					op, got, line);
+				return 2;
 			}
 			memset(&r, 0, sizeof(r));
 			r.decision_id = v[0];
@@ -207,6 +227,16 @@ int main(int argc, char **argv)
 			r.source = (int8_t)v[20];
 			r.executed = (int8_t)v[21];
 			r.safety_clamped = (int8_t)v[22];
+			if (got == 31) {	/* K1 v2 尾 8 列 */
+				r.trace_hi = v[23];
+				r.trace_lo = v[24];
+				r.intent_id = v[25];
+				r.parent_id = v[26];
+				r.agent_id = (int32_t)v[27];
+				r.expected = v[28];
+				r.cost_ns = v[29];
+				r.side_effect_mask = (int32_t)v[30];
+			}
 			if (op[0] == 'D')
 				drows[dn++] = r;
 			else

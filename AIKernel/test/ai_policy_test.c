@@ -16,6 +16,9 @@
 #include <linux/ktime.h>
 #include <linux/sched.h>
 #include <linux/cpumask.h>
+#include <linux/slab.h>
+#include <linux/sort.h>
+#include <linux/ai_netlink.h>
 #include "../core/ai_types.h"
 #include "../core/ai_policy.h"
 #include "../core/ai_policy_safety.h"
@@ -536,6 +539,302 @@ static void policy_snapshot_pre_lookup_test(struct kunit *test)
 			AI_ERR_NOT_FOUND);
 }
 
+/* ---- K1：统一 trace 与决策环扩展（KERNEL-K1-DESIGN D2/D3/D5/D6） ---- */
+
+/* 读出全量 ring 快照（KUnit 套件内串行，末条=最近；失败返回 NULL
+ * 由调用方 ASSERT 兜底——非 void 帮手不用 KUNIT_ASSERT 宏） */
+static struct ai_decision_record *policy_ring_read(struct kunit *test,
+						   u32 *count)
+{
+	struct ai_decision_record *buf;
+
+	buf = kunit_kzalloc(test, AI_POLICY_DECISION_RING_SIZE * sizeof(*buf),
+			    GFP_KERNEL);
+	if (!buf)
+		return NULL;
+	if (ai_policy_decision_read(buf, AI_POLICY_DECISION_RING_SIZE *
+				    sizeof(*buf), count, NULL) != AI_OK)
+		return NULL;
+	return buf;
+}
+
+/* K1 D2：v1 零进零铸 → 每条决策 trace 恒非零，hi==boot_cookie、
+ * lo==decision_id；连发 3 次验证唯一性（lo 单调递增）。 */
+static void policy_trace_mint_test(struct kunit *test)
+{
+	struct ai_decision_record *recs;
+	struct ai_policy_ctx ctx;
+	u64 last_lo = 0;
+	u32 count = 0, i;
+	int rc;
+
+	/* 依赖 policy_register_execute_test 已注册 kunit.test.param
+	 * （套件按声明序串行；防御性重注册幂等） */
+	ai_policy_unregister("kunit.test.param");
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_register(AI_POLICY_DOMAIN_GENERAL,
+					    "kunit.test.param", test_action_cb,
+					    test_action_rb, NULL),
+			AI_OK);
+
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+
+	for (i = 0; i < 3; i++) {
+		const struct ai_decision_record *r;
+
+		memset(&ctx, 0, sizeof(ctx));
+		ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+		ctx.decision_data[0] = 60;
+		rc = ai_policy_execute(&ctx, NULL);
+		KUNIT_ASSERT_EQ(test, rc, 1);
+
+		KUNIT_ASSERT_EQ(test,
+				ai_policy_decision_read(
+					recs,
+					AI_POLICY_DECISION_RING_SIZE *
+					sizeof(*recs),
+					&count, NULL),
+				AI_OK);
+		KUNIT_ASSERT_GE(test, count, 1u);
+		r = &recs[count - 1];
+		KUNIT_EXPECT_NE(test, r->decision_id, 0ULL);
+		KUNIT_EXPECT_NE(test, r->trace_hi, 0ULL);
+		KUNIT_EXPECT_NE(test, r->trace_lo, 0ULL);
+		KUNIT_EXPECT_EQ(test, r->trace_lo, r->decision_id);
+		KUNIT_EXPECT_EQ(test, r->trace_hi, ai_trace_boot_cookie);
+		KUNIT_EXPECT_GT(test, r->trace_lo, last_lo);   /* 唯一性 */
+		last_lo = r->trace_lo;
+	}
+}
+
+/* K1 D3/D8：ACT2 全链（ctx 直调 execute_trace → ring 回读）8 新字段
+ * 逐一对值；显式 trace（hi/lo 任一非零）采用不改写，ctx 出参带回。 */
+static void policy_record_ext_fields_test(struct kunit *test)
+{
+	struct ai_decision_record *recs;
+	struct ai_policy_ctx ctx;
+	u32 count = 0;
+	int rc;
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+	ctx.decision_type = 1;
+	ctx.decision_data[0] = 60;
+	ctx.confidence = 100;
+	ctx.model_version = 7;
+	ctx.trigger_ts = ktime_get_ns() - 1000000;   /* 1ms 前：cost 确定性 */
+	ctx.trace_hi = 0x00deadbeefcafe01ULL;   /* 显式携带（ACT2 语义） */
+	ctx.trace_lo = 0x0000000000000042ULL;
+	ctx.intent_id = 0xab;
+	ctx.parent_id = 0;
+	ctx.agent_id = AI_AGENT_OCC_AI;
+	ctx.expected = -1500000;
+	rc = ai_policy_execute_trace(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+
+	/* ctx 出参回读：id 补铸 + 显式 trace 原样带回（ACT2 ack 同源） */
+	KUNIT_EXPECT_NE(test, ctx.decision_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.trace_hi, 0x00deadbeefcafe01ULL);
+	KUNIT_EXPECT_EQ(test, ctx.trace_lo, 0x0000000000000042ULL);
+
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_ASSERT_GE(test, count, 1u);
+	{
+		const struct ai_decision_record *r = &recs[count - 1];
+
+		KUNIT_EXPECT_EQ(test, r->decision_id, ctx.decision_id);
+		KUNIT_EXPECT_EQ(test, r->trace_hi, 0x00deadbeefcafe01ULL);
+		KUNIT_EXPECT_EQ(test, r->trace_lo, 0x0000000000000042ULL);
+		KUNIT_EXPECT_EQ(test, r->intent_id, 0xabULL);
+		KUNIT_EXPECT_EQ(test, r->parent_id, 0ULL);
+		KUNIT_EXPECT_EQ(test, r->agent_id, (u32)AI_AGENT_OCC_AI);
+		KUNIT_EXPECT_EQ(test, r->expected, -1500000LL);
+		KUNIT_EXPECT_EQ(test, r->side_effect_mask,
+				(u32)AI_SE_PARAM_WRITTEN);
+		/* executed 形态：cost = exec_ts-trig_ts（trigger 提前 1ms） */
+		KUNIT_EXPECT_GE(test, r->cost_ns, 900000ULL);
+		KUNIT_EXPECT_EQ(test, r->cost_ns,
+				r->execute_ts - r->trigger_ts);
+	}
+}
+
+/* K1 D5：cost_ns 两形态——executed>0 → exec_ts-trig_ts；未命中 →
+ * dec_ts-trig_ts（VIRT 域无动作）。trigger 置 1ms 前使断言确定性。 */
+static void policy_cost_ns_test(struct kunit *test)
+{
+	struct ai_decision_record *recs;
+	struct ai_policy_ctx ctx;
+	u32 count = 0;
+	int rc;
+
+	/* 形态 1：executed>0（kunit.test.param 命中） */
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+	ctx.decision_data[0] = 60;
+	ctx.trigger_ts = ktime_get_ns() - 1000000;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_ASSERT_GE(test, count, 1u);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].executed, 1);
+	KUNIT_EXPECT_GE(test, recs[count - 1].cost_ns, 900000ULL);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].cost_ns,
+			recs[count - 1].execute_ts -
+			recs[count - 1].trigger_ts);
+
+	/* 形态 2：executed=0（VIRT 域无动作）→ dec_ts-trig_ts */
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_VIRT;
+	ctx.trigger_ts = ktime_get_ns() - 1000000;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_ASSERT_GE(test, count, 1u);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].executed, 0);
+	KUNIT_EXPECT_GE(test, recs[count - 1].cost_ns, 900000ULL);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].cost_ns,
+			recs[count - 1].decision_ts -
+			recs[count - 1].trigger_ts);
+}
+
+/* K1 D6 se 位情形 2 用：返回 clamp 语义（executed++/clamped++） */
+static int test_clamp_cb(const struct ai_policy_ctx *ctx, void *arg)
+{
+	return AI_POLICY_RC_CLAMPED;
+}
+
+/* K1 D6：se 位三情形——成功写参数 / clamp / 失败回退（单点位聚合，
+ * 位组合精确断言，不重复置位） */
+static void policy_side_effect_mask_test(struct kunit *test)
+{
+	struct ai_decision_record *recs;
+	struct ai_policy_ctx ctx;
+	u32 count = 0;
+	int rc;
+
+	/* 情形 1：成功执行（kunit.test.param）→ 仅 PARAM_WRITTEN */
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+	ctx.decision_data[0] = 60;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].side_effect_mask,
+			(u32)AI_SE_PARAM_WRITTEN);
+
+	/* 情形 2：handler 返回 RC_CLAMPED → +SAFETY_CLAMPED（定向执行） */
+	ai_policy_unregister("kunit.test.clamp");
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_register(AI_POLICY_DOMAIN_GENERAL,
+					    "kunit.test.clamp", test_clamp_cb,
+					    NULL, NULL),
+			AI_OK);
+	memset(&ctx, 0, sizeof(ctx));
+	strscpy(ctx.param, "kunit.test.clamp", sizeof(ctx.param));
+	ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].safety_clamped, 1);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].side_effect_mask,
+			(u32)(AI_SE_PARAM_WRITTEN |
+			       AI_SE_SAFETY_CLAMPED));
+	ai_policy_unregister("kunit.test.clamp");
+
+	/* 情形 3：失败 + rollback 回调 → 仅 ROLLED_BACK（无 PARAM_WRITTEN） */
+	ai_policy_unregister("kunit.test.param");
+	ai_policy_unregister("kunit.test.fail");
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_register(AI_POLICY_DOMAIN_GENERAL,
+					    "kunit.test.fail", test_fail_cb,
+					    test_action_rb, NULL),
+			AI_OK);
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_GENERAL;
+	rc = ai_policy_execute(&ctx, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].side_effect_mask,
+			(u32)AI_SE_ROLLED_BACK);
+	ai_policy_unregister("kunit.test.fail");
+
+	/* 恢复：后续套件依赖 kunit.test.param（latency 等用例） */
+	ai_policy_register(AI_POLICY_DOMAIN_GENERAL, "kunit.test.param",
+			   test_action_cb, test_action_rb, NULL);
+}
+
+/* K1 D2：heuristic 入口同理铸 trace（零进零铸第二条路径） */
+static void policy_heuristic_trace_test(struct kunit *test)
+{
+	struct ai_decision_record *recs;
+	u32 count = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_record_heuristic(AI_POLICY_DOMAIN_MM,
+						  3, 10, 1, 2),
+			AI_OK);
+	recs = policy_ring_read(test, &count);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, recs);
+	KUNIT_ASSERT_GE(test, count, 1u);
+	KUNIT_EXPECT_NE(test, recs[count - 1].decision_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].trace_hi,
+			ai_trace_boot_cookie);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].trace_lo,
+			recs[count - 1].decision_id);
+	KUNIT_EXPECT_EQ(test, recs[count - 1].source,
+			(u8)AI_DEC_SRC_HEURISTIC);
+}
+
+static int policy_u64_cmp(const void *a, const void *b)
+{
+	u64 x = *(const u64 *)a, y = *(const u64 *)b;
+
+	return (x > y) - (x < y);
+}
+
+/* K1（KERNEL-K1-DESIGN §5 验收门）：record_write p99 微基准。
+ * N=100000 次直调内部 record_write（KUnit 钩子，183B 整条落笔），
+ * 逐次 ktime_get_ns 计时，p50/p99/p999 实测值 pr_info 输出（K1c
+ * 真机取数，真值 ~1µs 级）；断言 p99 < 5000ns（CI 宽限防噪声）。 */
+static void policy_record_write_p99_test(struct kunit *test)
+{
+	struct ai_decision_record rec = { 0 };
+	u64 *lat, t0, t1, p50, p99, p999;
+	unsigned int i, n = 100000;
+
+	lat = kvmalloc_array(n, sizeof(*lat), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, lat);
+
+	rec.trigger_ts = ktime_get_ns();
+	rec.decision_ts = rec.trigger_ts + 1000;
+	rec.execute_ts = rec.trigger_ts + 2000;
+	rec.decision_id = 0x66000099ULL;
+	rec.executed = 1;
+
+	for (i = 0; i < n; i++) {
+		t0 = ktime_get_ns();
+		ai_policy_test_record_write(&rec);
+		t1 = ktime_get_ns();
+		lat[i] = t1 - t0;
+	}
+	sort(lat, n, sizeof(lat[0]), policy_u64_cmp, NULL);
+
+	p50 = lat[n * 50 / 100];
+	p99 = lat[n * 99 / 100];
+	p999 = lat[n * 999 / 1000];
+	pr_info("AIKernel KUnit: rec_write n=%u p50=%llu p99=%llu p999=%llu ns\n",
+		n, p50, p99, p999);
+	KUNIT_EXPECT_LT(test, p99, 5000ULL);
+	kvfree(lat);
+}
+
 static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_register_execute_test),
 	KUNIT_CASE(policy_param_target_test),
@@ -548,6 +847,13 @@ static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_execute_latency_test),
 	KUNIT_CASE(policy_affinity_idem_fastpath_test),
 	KUNIT_CASE(policy_snapshot_pre_lookup_test),
+	/* K1：统一 trace 与决策环扩展（仅追加，既有用例零删改） */
+	KUNIT_CASE(policy_trace_mint_test),
+	KUNIT_CASE(policy_record_ext_fields_test),
+	KUNIT_CASE(policy_cost_ns_test),
+	KUNIT_CASE(policy_side_effect_mask_test),
+	KUNIT_CASE(policy_heuristic_trace_test),
+	KUNIT_CASE(policy_record_write_p99_test),
 	{}
 };
 

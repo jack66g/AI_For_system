@@ -38,6 +38,11 @@ struct as_event {
 	char digest_hex[17];
 	int has_decision_id;		/* event/policy 专属 */
 	unsigned long long decision_id;
+	uint64_t trace_hi;		/* K1 统一 trace_id 高 64 位（0:0=无/未
+					 * 携带；policy/decision 事件填充，环境事件
+					 * 0——透传 telemetry parquet trace_hi/lo 列
+					 * 与 SME 行文本） */
+	uint64_t trace_lo;
 	int merged_count;		/* 聚合记录专用：合并总条数（含首条）；
 					 * 普通事件为 0 */
 };
@@ -88,11 +93,15 @@ void as_event_outcome(struct as_event *ev, unsigned long long decision_id,
  * ring」对应——telemetry 链 category=18/event_type=0（aistreamd 归一化行
  * 专用，与 outcome 合成事件同口径，零新类）；行格式冻结：
  * "[kern] event decision decision_id=%llu type=%u domain=%u executed=%u
- *  safety_clamped=%u outcome=%u delta=%lld" */
+ *  safety_clamped=%u outcome=%u delta=%lld trace_id=0x%016llx:0x%016llx"
+ * （K1 D10：trace_id 恒渲染，0:0=无——id 类不脱敏，decision_id
+ *  例外同待遇） */
 void as_event_decision(struct as_event *ev, unsigned long long decision_id,
 		       unsigned type, unsigned domain, unsigned executed,
 		       unsigned safety_clamped, unsigned outcome,
-		       long long delta);
+		       long long delta,
+		       unsigned long long trace_hi,
+		       unsigned long long trace_lo);
 
 void as_event_ai_model(struct as_event *ev, unsigned long long model_id,
 		       int loaded, const char *name);

@@ -363,6 +363,50 @@ static void test_write(void)
 		      "decisions overwritten rows=1");
 	}
 
+	/* K1 D10 v2：31 列 append-only——全参行 + 零值行（老行语义）
+	 * 混写；footer num_rows 确认（31 列值级对拍由差分向量 run_parity
+	 * 的 pyarrow 全列校验覆盖，此处 C 侧自证写入路径不因列扩坏） */
+	{
+		struct pq_dec_row dv[2];
+		struct pq_tel_row tv;
+
+		memset(dv, 0, sizeof(dv));
+		dv[0].decision_id = 4713;
+		dv[0].trigger_ts = 1000000000LL;
+		dv[0].decision_ts = 5000000000LL;
+		dv[0].trace_hi = (int64_t)0x00deadbeefcafe01ULL;
+		dv[0].trace_lo = 42;
+		dv[0].intent_id = 0xab;
+		dv[0].parent_id = 0xcd;
+		dv[0].agent_id = 2;
+		dv[0].expected = -1500000;
+		dv[0].cost_ns = 512000;
+		dv[0].side_effect_mask = 3;
+		dv[1].decision_id = 4714;
+		dv[1].trigger_ts = 1000000000LL;
+		dv[1].decision_ts = 5000000000LL;
+		CHECK(as_pq_write_decisions(root, dv, 2, bt, NULL) == 2,
+		      "v2 31-col decisions write 2");
+		as_pq_day_from_ts(5000000000LL, bt, day);
+		snprintf(path, sizeof(path),
+			 "%s/decisions/%s/decisions.parquet", root, day);
+		CHECK(as_pq_file_stats(path, &fs) == 0 && fs.num_rows == 2,
+		      "v2 rows=2 (full tail + zero-col row)");
+		CHECK(as_pq_write_chains(root, dv, 2, bt, NULL) == 2,
+		      "v2 31-col chains write 2");
+
+		memset(&tv, 0, sizeof(tv));
+		tv.ts_ns = 8000000000LL;
+		tv.category = 18;
+		tv.trace_hi = (int64_t)0x00deadbeefcafe01ULL;
+		tv.trace_lo = 42;
+		tv.data_len = 0;
+		tv.data = NULL;
+		CHECK(as_pq_write_telemetry(root, &tv, 1, bt, 65536,
+				    NULL) == 1,
+		      "v2 11-col telemetry write (trace cols)");
+	}
+
 	/* 空批 = 零操作零文件 */
 	{
 		char teldir[600];

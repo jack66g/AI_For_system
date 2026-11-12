@@ -68,6 +68,7 @@
 #define AI_CMD_SENSE        16
 #define AI_CMD_ACT          17
 #define AI_CMD_REG          18
+#define AI_CMD_ACT2         20   /* K1 D1：nlattr 载荷的决策指令（uapi §3） */
 
 /* 常量，include/uapi/linux/ai_netlink.h:34-38 */
 #define AI_NL_SENSE_CPU_ALL     0xFFFFFFFFu
@@ -122,6 +123,52 @@ struct ai_nl_act_ack {
     __u32 reserved;
 };
 
+/* ACT2 决策属性（K1 D1，uapi §3 镜像）：nlattr 流载荷——
+ * NLA_HDRLEN+NLA_ALIGN(4) 手写编码（u16 nla_len/u16 nla_type +
+ * payload）。必备 DOMAIN+TYPE+PARAM；其余可选（缺省零，DATA 缺省
+ * 零数组）。attr 号=枚举序（与 uapi 同源，编号由下方 _Static_assert
+ * 钉住）。 */
+enum {
+    AI_DEC_ATTR_UNSPEC,        /* 0 */
+    AI_DEC_ATTR_DOMAIN,        /* 1  u8   决策域 0..12 */
+    AI_DEC_ATTR_TYPE,          /* 2  u32  决策类型 */
+    AI_DEC_ATTR_PARAM,         /* 3  string ≤23+NUL（定向参数名，非空）*/
+    AI_DEC_ATTR_DATA,          /* 4  64B=8×u64 决策参数 */
+    AI_DEC_ATTR_CONFIDENCE,    /* 5  u8   0-100 */
+    AI_DEC_ATTR_MODEL_VER,     /* 6  u32 */
+    AI_DEC_ATTR_TRIG_EVID,     /* 7  u64 */
+    AI_DEC_ATTR_TRACE_HI,      /* 8  u64  统一 trace 高 64 位 */
+    AI_DEC_ATTR_TRACE_LO,      /* 9  u64  统一 trace 低 64 位 */
+    AI_DEC_ATTR_INTENT,        /* 10 u64  意图 id（0=未供给）*/
+    AI_DEC_ATTR_PARENT,        /* 11 u64  父决策 id（0=无）*/
+    AI_DEC_ATTR_AGENT,         /* 12 u32  enum ai_agent_id */
+    AI_DEC_ATTR_EXPECTED,      /* 13 s64  调用方预期 delta（0=未供给）*/
+    __AI_DEC_ATTR_MAX,
+    AI_DEC_ATTR_MAX = __AI_DEC_ATTR_MAX - 1,
+};
+
+/* 决策发起方（K1 D6，uapi 小枚举——防自由数） */
+enum ai_agent_id {
+    AI_AGENT_KERNEL     = 0,
+    AI_AGENT_OCC_CLI    = 1,
+    AI_AGENT_OCC_AI     = 2,
+    AI_AGENT_AISTREAMD  = 3,
+    AI_AGENT_APIC       = 4,
+    AI_AGENT_TOOL       = 5,
+    AI_AGENT_OTHER      = 255,
+};
+
+/* ACT2 应答载荷（K1 D2/uapi §3）：ack 回带决策关联——decision_id 与
+ * 内核侧铸造/采用的 trace（ctx 回读，golden 三跳的第一跳） */
+struct ai_nl_act2_ack {
+    __u8  executed;     /* 执行到的策略数 */
+    __u8  hit;          /* 命中数（executed>0 即命中） */
+    __s32 ai_err;       /* AI_OK 或负 AI 错误码 */
+    __u64 decision_id;  /* 内核分配的决策 id */
+    __u64 trace_hi;     /* D2：铸造/采用的 trace（显式携带=原样回显） */
+    __u64 trace_lo;
+};
+
 /* REG 请求载荷（include/uapi/linux/ai_netlink.h:83-86） */
 struct ai_nl_reg {
     __u32 flags;        /* 0=仅登记（预留位） */
@@ -148,6 +195,22 @@ struct ai_nl_reg_ack {
 _Static_assert(NETLINK_AI == 31, "NETLINK_AI must be 31");
 _Static_assert(AI_CMD_SENSE == 16 && AI_CMD_ACT == 17 &&
                AI_CMD_REG == 18, "AI netlink command numbers drifted");
+/* K1：ACT2 命令号与 attr 编号钉死（uapi §3；漂移即编译失败强制同步） */
+_Static_assert(AI_CMD_ACT2 == 20, "AI_CMD_ACT2 must be 20");
+_Static_assert(AI_DEC_ATTR_DOMAIN == 1 && AI_DEC_ATTR_TYPE == 2 &&
+               AI_DEC_ATTR_PARAM == 3 && AI_DEC_ATTR_DATA == 4 &&
+               AI_DEC_ATTR_TRACE_HI == 8 && AI_DEC_ATTR_TRACE_LO == 9 &&
+               AI_DEC_ATTR_INTENT == 10 && AI_DEC_ATTR_PARENT == 11 &&
+               AI_DEC_ATTR_AGENT == 12 && AI_DEC_ATTR_EXPECTED == 13,
+               "AI_DEC_ATTR_* numbers drifted");
+_Static_assert(sizeof(struct ai_nl_act2_ack) == 32, "ai_nl_act2_ack size");
+_Static_assert(offsetof(struct ai_nl_act2_ack, executed) == 0 &&
+               offsetof(struct ai_nl_act2_ack, hit) == 1 &&
+               offsetof(struct ai_nl_act2_ack, ai_err) == 4 &&
+               offsetof(struct ai_nl_act2_ack, decision_id) == 8 &&
+               offsetof(struct ai_nl_act2_ack, trace_hi) == 16 &&
+               offsetof(struct ai_nl_act2_ack, trace_lo) == 24,
+               "ai_nl_act2_ack offsets");
 _Static_assert(AI_NL_PAYLOAD_MAX == 65536, "AI_NL_PAYLOAD_MAX drifted");
 
 _Static_assert(sizeof(struct nlmsghdr) == 16, "struct nlmsghdr layout");
@@ -259,6 +322,63 @@ int ai_nl_send_act(struct ai_nl_client *cli,
                    const struct ai_nl_act *req,
                    struct ai_nl_act_ack *ack,
                    int *kern_err);
+
+/*
+ * ai_nl_send_act2 - AI_CMD_ACT2：nlattr 载荷下发决策指令（K1 D1；v1
+ * ai_nl_send_act 一字不动，两轨并存）。必备 DOMAIN+TYPE+PARAM；其余
+ * 可选（零=缺省，attr 恒携带——消息形状恒定）。trace_hi/trace_lo 任一
+ * 非零=显式携带（内核原样采用不铸）；全零=由内核铸造（D2），铸造结果
+ * 从 ack 回读。
+ * @req:      决策内容（domain 0..12、confidence 0..100、param 非空且
+ *            NUL 结尾 ≤23 字节——客户端先做与内核一致的预校验）
+ * @ack:      出参，执行结果（executed/hit/ai_err + decision_id/trace）
+ * @kern_err: 出参（可 NULL），内核拒绝时收到正 errno
+ * 返回: 同 ai_nl_send_sense
+ */
+struct ai_nl_act2_req {
+    __u8  domain;         /* AI_DEC_ATTR_DOMAIN（u8 载荷）*/
+    __u32 decision_type;  /* AI_DEC_ATTR_TYPE（u32 载荷）*/
+    __u8  confidence;     /* AI_DEC_ATTR_CONFIDENCE（u8 载荷，0-100）*/
+    __u32 model_version;  /* AI_DEC_ATTR_MODEL_VER（u32 载荷）*/
+    __u64 trig_evid;      /* AI_DEC_ATTR_TRIG_EVID（u64 载荷）*/
+    char  param[AI_NL_ACT_PARAM_LEN];   /* AI_DEC_ATTR_PARAM（非空 NUL 结尾）*/
+    __u64 data[8];        /* AI_DEC_ATTR_DATA（64B 定长）*/
+    __u64 trace_hi;       /* AI_DEC_ATTR_TRACE_HI（0:0=内核铸）*/
+    __u64 trace_lo;       /* AI_DEC_ATTR_TRACE_LO */
+    __u64 intent_id;      /* AI_DEC_ATTR_INTENT（0=未供给）*/
+    __u64 parent_id;      /* AI_DEC_ATTR_PARENT（0=无）*/
+    __u32 agent;          /* AI_DEC_ATTR_AGENT（enum ai_agent_id）*/
+    __s64 expected;       /* AI_DEC_ATTR_EXPECTED（0=未供给）*/
+};
+
+_Static_assert(sizeof(struct ai_nl_act2_req) == 160, "ai_nl_act2_req size");
+_Static_assert(offsetof(struct ai_nl_act2_req, domain) == 0 &&
+               offsetof(struct ai_nl_act2_req, decision_type) == 4 &&
+               offsetof(struct ai_nl_act2_req, confidence) == 8 &&
+               offsetof(struct ai_nl_act2_req, model_version) == 12 &&
+               offsetof(struct ai_nl_act2_req, trig_evid) == 16 &&
+               offsetof(struct ai_nl_act2_req, param) == 24 &&
+               offsetof(struct ai_nl_act2_req, data) == 48 &&
+               offsetof(struct ai_nl_act2_req, trace_hi) == 112 &&
+               offsetof(struct ai_nl_act2_req, trace_lo) == 120 &&
+               offsetof(struct ai_nl_act2_req, intent_id) == 128 &&
+               offsetof(struct ai_nl_act2_req, parent_id) == 136 &&
+               offsetof(struct ai_nl_act2_req, agent) == 144 &&
+               offsetof(struct ai_nl_act2_req, expected) == 152,
+               "ai_nl_act2_req offsets");
+
+int ai_nl_send_act2(struct ai_nl_client *cli,
+                    const struct ai_nl_act2_req *req,
+                    struct ai_nl_act2_ack *ack,
+                    int *kern_err);
+
+/*
+ * ai_nl_trace_mint - 进程级统一 trace_id 铸造（K1 D9：executor 换轨用）。
+ * hi：进程内一次铸造（8B /dev/urandom，失败退 time^pid），恒非零、
+ *     进程级恒定；lo：原子递增计数（自 1 起）。调用方填入
+ * req->trace_hi/trace_lo 显式携带（内核不再改写）。
+ */
+void ai_nl_trace_mint(__u64 *hi, __u64 *lo);
 
 /*
  * ai_nl_send_reg - AI_CMD_REG：登记本进程 portid（内核需 CAP_SYS_ADMIN）

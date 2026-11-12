@@ -1161,7 +1161,7 @@ int exec_netlink_act(const struct ai_tool *tool, const char *args_json, /* W78 �
 {
 	struct ai_nl_client cli;
 	struct ai_nl_act req;
-	struct ai_nl_act_ack ack;
+	struct ai_nl_act2_ack ack;	/* K1：ACT2 应答（含 decision_id/trace） */
 	long long value, orig_value, pid = 0, confidence;
 	char *clamp_note = NULL;
 	int clamped = 0;
@@ -1274,7 +1274,40 @@ int exec_netlink_act(const struct ai_tool *tool, const char *args_json, /* W78 �
 		return rc;
 	}
 
-	rc = ai_nl_send_act(&cli, &req, &ack, &kern_err);
+	/*
+	 * K1（D9）：换轨 ACT2（nlattr 载荷）。v1 语义面零变化——
+	 * domain/type/conf/param/data 逐字段同值携带（data[0]=pid、
+	 * data[1]=value 约定与确认交互、HTTP /act 外部字节均不变，
+	 * OK/error 文案原样）。携带统一 trace_id（进程级铸造：hi=进程
+	 * 一次 urandom、lo=原子计数——ai_nl_trace_mint；内核对非零
+	 * trace 原样采用不铸）、agent=OCC_AI、intent=FNV-1a64(occ
+	 * session_id)（无会话=0；FNV 常量同 app_policy.c/net_intent.c
+	 * 先例口径）。
+	 */
+	{
+		struct ai_nl_act2_req req2;
+		const char *sid = ai_trace_session_id();
+
+		memset(&req2, 0, sizeof(req2));
+		req2.domain = req.domain;
+		req2.decision_type = req.decision_type;
+		req2.confidence = req.confidence;
+		memcpy(req2.param, req.param, sizeof(req2.param));
+		memcpy(req2.data, req.data, sizeof(req2.data));
+		req2.agent = AI_AGENT_OCC_AI;
+		ai_nl_trace_mint(&req2.trace_hi, &req2.trace_lo);
+		if (sid && sid[0]) {
+			unsigned long long h = 1469598103934665603ULL;
+			const unsigned char *q = (const unsigned char *)sid;
+
+			while (*q) {
+				h ^= *q++;
+				h *= 1099511628211ULL;
+			}
+			req2.intent_id = h;
+		}
+		rc = ai_nl_send_act2(&cli, &req2, &ack, &kern_err);
+	}
 	ai_nl_client_close(&cli);
 
 	if (rc == AI_ERR_API) {

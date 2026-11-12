@@ -176,6 +176,24 @@ static void ai_proc_dec_record(struct seq_file *m,
 			seq_puts(m, "none");
 		}
 	}
+	/* K1（KERNEL-K1-DESIGN D4）：行尾追加（K66 pre= 先例续）。
+	 * trace/cost 恒渲染（trace 构造恒非零、cost 恒可算）；
+	 * intent/parent/agent/expected/se 非零才渲染（=0 语义「未供给」，
+	 * 无元数据行与老格式逐字节相同——16.2/16.3 老样本天然 golden）。
+	 * /proc/ai/chains 复用本函数自动同步；渲染走 seq_file 自管缓冲
+	 * （无定长栈 buf，无余量风险）。 */
+	seq_printf(m, " trace=0x%016llx:0x%016llx cost=%llu",
+		   e->trace_hi, e->trace_lo, e->cost_ns);
+	if (e->intent_id)
+		seq_printf(m, " intent=0x%016llx", e->intent_id);
+	if (e->parent_id)
+		seq_printf(m, " parent=0x%016llx", e->parent_id);
+	if (e->agent_id)
+		seq_printf(m, " agent=%u", e->agent_id);
+	if (e->expected)
+		seq_printf(m, " expected=%lld", e->expected);
+	if (e->side_effect_mask)
+		seq_printf(m, " se=0x%08x", e->side_effect_mask);
 	seq_putc(m, '\n');
 }
 

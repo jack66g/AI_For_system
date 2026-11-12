@@ -37,12 +37,39 @@ struct net;
 #ifdef CONFIG_AIKERNEL_NETLINK
 int ai_netlink_push_event(u32 category, u32 severity, u64 event_id,
 			  s32 code, const char *param);
+int ai_netlink_push_event_trace(u32 category, u32 severity, u64 event_id,
+				s32 code, const char *param,
+				u64 trace_hi, u64 trace_lo);
 #else
 static inline int ai_netlink_push_event(u32 category, u32 severity,
 					u64 event_id, s32 code, const char *param)
 {
 	return AI_ERR_DISABLED;
 }
+static inline int ai_netlink_push_event_trace(u32 category, u32 severity,
+					u64 event_id, s32 code,
+					const char *param,
+					u64 trace_hi, u64 trace_lo)
+{
+	return AI_ERR_DISABLED;
+}
+#endif
+
+struct nlattr;
+struct ai_policy_ctx;
+
+#ifdef CONFIG_AIKERNEL_NETLINK
+/**
+ * ai_nl_act2_parse() - ACT2 nlattr 载荷解析（可测助手，K1）
+ * @head: attr 区（nlmsg_attrdata(nlh, 0)）
+ * @rem: attr 区长度（nlmsg_attrlen(nlh, 0)）
+ * @ctx: 输出（全零基线 + attr 字段；trigger_ts/source 调用方补）
+ *
+ * 必备 DOMAIN+TYPE+PARAM 缺任一 -EINVAL；畸形 attr 由 policy 全拒。
+ * 实现于 ai_netlink.c；测试直调：ai_netlink_test.c。
+ */
+int ai_nl_act2_parse(const struct nlattr *head, int rem,
+		     struct ai_policy_ctx *ctx);
 #endif
 
 #ifdef CONFIG_AIKERNEL_KUNIT_TEST

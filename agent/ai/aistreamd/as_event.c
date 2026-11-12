@@ -229,18 +229,24 @@ void as_event_outcome(struct as_event *ev, unsigned long long decision_id,
 void as_event_decision(struct as_event *ev, unsigned long long decision_id,
 		       unsigned type, unsigned domain, unsigned executed,
 		       unsigned safety_clamped, unsigned outcome,
-		       long long delta)
+		       long long delta,
+		       unsigned long long trace_hi,
+		       unsigned long long trace_lo)
 {
 	/* T8 遗留接线（as_decisions）：/proc/ai/decisions 行原生字段原样
 	 * 透传（零解释——type/domain 枚举语义在内核 ai_policy.h，文档
-	 * 义务在本侧头注释）；行格式冻结（as_event.h） */
+	 * 义务在本侧头注释）；行格式冻结（as_event.h）。
+	 * K1（D10）：行尾恒渲染 trace_id（0:0=无——id 类不脱敏）。 */
 	as_event_mk(ev, as_stream_idx(AS_STREAM_EVENT), "decision", NULL,
 		    "decision_id=%llu type=%u domain=%u executed=%u "
-		    "safety_clamped=%u outcome=%u delta=%lld",
+		    "safety_clamped=%u outcome=%u delta=%lld "
+		    "trace_id=0x%016llx:0x%016llx",
 		    decision_id, type, domain, executed, safety_clamped,
-		    outcome, delta);
+		    outcome, delta, trace_hi, trace_lo);
 	ev->has_decision_id = 1;
 	ev->decision_id = decision_id;
+	ev->trace_hi = trace_hi;
+	ev->trace_lo = trace_lo;
 }
 
 void as_event_ai_model(struct as_event *ev, unsigned long long model_id,
