@@ -1,0 +1,32 @@
+#!/bin/sh
+# aik-console v3 — q17 修复版（取代 auto-fbterm.sh 的 tty1 吞链）：
+#   tty1/2/3 = fbterm 内跑 occ（中文渲染 + /zoom 可缩放；FBTERM=1 门）；
+#              fbterm 缺失时退原生 fbcon 直跑 occ。
+#   退出码 70 = /zoom 字号重启环（新 fbtermrc 生效后回 occ）。
+#   循环兜底（v2 语义=重拉不退出）+ 取证：chain-start/occ-exit 落
+#   /root/aik-console.log，occ+fbterm stderr 落 /root/aik-console.err。
+TTY=$(tty 2>/dev/null) || exit 0
+case "$TTY" in
+  /dev/tty1|/dev/tty2|/dev/tty3)
+    echo "$(date +%s) chain-start $TTY" >> /root/aik-console.log
+    FBTERM_BIN=$(command -v fbterm 2>/dev/null)
+    [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
+    n=0
+    while :; do
+      if [ -n "$FBTERM_BIN" ]; then
+        FBTERM=1 "$FBTERM_BIN" -- /usr/local/bin/occ 2>> /root/aik-console.err
+      else
+        /usr/local/bin/occ 2>> /root/aik-console.err
+      fi
+      rc=$?
+      n=$((n+1))
+      echo "$(date +%s) occ-exit rc=$rc n=$n fb=${FBTERM_BIN:+y}" >> /root/aik-console.log
+      [ "$rc" -eq 70 ] && continue
+      sleep 2
+    done
+    ;;
+  /dev/ttyS*)
+    exec /usr/local/bin/occ
+    ;;
+esac
+exit 0

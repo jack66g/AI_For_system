@@ -14,6 +14,7 @@ PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKuhRsSrM2Cv6nS0crB+YooaZAdNBf6fQEDY
 IMG=/home/jack66g/aikernel-root.raw
 MNT=/mnt/aikernel-root
 SRC=/home/jack66g/linux-6.18.39
+FACTORY=/home/jack66g/aikernel-repo-alpha11/factory
 export DEBIAN_FRONTEND=noninteractive
 
 echo "=== [0] host tools ==="
@@ -97,10 +98,13 @@ ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,57600,3840
 A
 cat /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
-# ---- T9e: 登录面接管（TTY 分流）----
+# ---- T9e/q17: 登录面接管（TTY 分流经 aik-console）----
 # 控制台(ttyS0/tty1) autologin 落 bash 后读 .profile，命中控制台 TTY 即
-# exec occ（无参=全屏 TUI）；SSH 会话为 /dev/pts/* 不匹配，保持 bash 运维通道。
-# aikernel-shell 已出厂移除（T9e 用户裁定 #1：默认入口就是 occ）。
+# exec aik-console（q17 起接管层：tty1=fbterm 内跑 occ——中文渲染+/zoom
+# 字号重启环+循环兜底；ttyS0=直 occ 运维通道）；SSH 会话为 /dev/pts/*
+# 不匹配，保持 bash 运维通道。注意：勿在 /etc/profile.d 里再挂任何
+# exec 型接管（17.2 的 auto-fbterm.sh 曾因此在 login 链最前端吞掉 tty1，
+# occ/gate 从未上过 tty1——q17 实机根因）。
 cat > /root/.profile <<'PR'
 # ~/.profile: executed by Bourne-compatible login shells.
 
@@ -112,12 +116,12 @@ fi
 
 mesg n 2> /dev/null || true
 
-# T9e: console takeover -- 控制台登录面直进 occ
+# T9e/q17: console takeover -- 控制台登录面经 aik-console 进 occ
 # .bashrc 已 source（AIKERNEL_TOOLS_JSON 环境就位）后再分流。
 if [ -t 0 ] && [ -x /usr/local/bin/occ ]; then
     case "$(tty 2>/dev/null)" in
         /dev/ttyS0|/dev/tty1)
-            exec /usr/local/bin/occ
+            exec /usr/local/bin/aik-console
             ;;
     esac
 fi
@@ -134,7 +138,17 @@ echo "=== [5] 拷入 AI 二进制 (strip 后进镜像) ==="
 strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl"
 install -D -m755 "$SRC/agent/ai/occ/occ"  "$MNT/usr/local/bin/occ"
 install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
-file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl" | sed 's/, BuildID.*//'
+# q17: 控制台接管层 aik-console（v3：tty1=fbterm--occ 循环兜底，70=zoom
+# 重启环；factory 树权威文件）
+install -D -m755 "$FACTORY/usr/local/bin/aik-console"     "$MNT/usr/local/bin/aik-console"
+grep -c "fbterm" "$MNT/usr/local/bin/aik-console"
+# q17: 17.2 遗留的 auto-fbterm.sh 若在（增量树），退役之（login 链最前端
+# exec fbterm 吞 tty1 的实机根因；职责已并入 aik-console v3）
+if [ -e "$MNT/etc/profile.d/auto-fbterm.sh" ]; then
+    mv "$MNT/etc/profile.d/auto-fbterm.sh"        "$MNT/etc/profile.d/auto-fbterm.sh.superseded17"
+    echo "auto-fbterm.sh superseded (q17)"
+fi
+file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl"       "$MNT/usr/local/bin/aik-console" | sed 's/, BuildID.*//'
 ls -la "$MNT/usr/local/bin/"
 
 echo "=== [6] 拷入 SME (/opt/sme) + python 依赖 ==="

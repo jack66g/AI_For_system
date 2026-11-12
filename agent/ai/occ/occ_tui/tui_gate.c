@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@ static struct termios gate_term_orig;
 #include "tui_core.h"
 #include "tui_input.h"
 #include "tui_theme.h"
+#include "tui_utf8.h"
 #include "tui_gate.h"
 
 #define GATE_USER "admin"
@@ -172,7 +174,8 @@ struct gate_field {
 static void draw_center(tui_screen *s, int row, int cols,
 			const char *txt, tui_attr a)
 {
-	int c = (cols - (int)strlen(txt)) / 2;
+	/* q17 audit A-5：按显示列居中（字节长度会把 CJK 行整体推右） */
+	int c = (cols - (int)tui_utf8_cols(txt)) / 2;
 
 	if (c < 0)
 		c = 0;
@@ -258,6 +261,39 @@ static int gate_field_input(tui_input *in, struct gate_field *f, int *done,
 	return 0;
 }
 
+/* q17 实机抓获（audit A-1，致命）：gate 只出队（tui_input_next）不进队
+ * ——无人调 tui_input_feed，首屏画完即冻死、CPU 空转，掩码/两段确认/
+ * 3 错冷却在实机全部不可达（串口日志实证：喂键后零掩码重绘零状态变化）。
+ * 补上主 TUI 同源的 poll→read→feed 泵（tui_view.c 输入口径）；
+ * EOF/读错按主 TUI 惯例退出（termios 由收尾路径恢复）。 */
+static uint64_t gate_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static void gate_pump_input(tui_input *in, int *quit)
+{
+	struct pollfd pfd;
+	char buf[256];
+	ssize_t r;
+
+	pfd.fd = STDIN_FILENO;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+	if (poll(&pfd, 1, 30) <= 0)
+		return;
+	if (!(pfd.revents & (POLLIN | POLLHUP)))
+		return;
+	r = read(STDIN_FILENO, buf, sizeof(buf));
+	if (r > 0)
+		(void)tui_input_feed(in, buf, (size_t)r, gate_now_ms());
+	else if (r == 0 || (errno != EINTR && errno != EAGAIN))
+		*quit = 1;
+}
+
 static int gate_run_ui(int mode, int *unlocked)
 {
 	tui_sink sink;
@@ -269,6 +305,7 @@ static int gate_run_ui(int mode, int *unlocked)
 	int stage = 0;		/* setup: 0=首次输入 1=确认输入 */
 	int fails = 0;
 	char hash[128];
+	char login_note[160] = "";	/* 一次性状态（SETUP→LOGIN 切换说明） */
 	tui_attr title_a = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
 	tui_attr txt_a = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0);
 	tui_attr mut_a = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
@@ -298,16 +335,19 @@ static int gate_run_ui(int mode, int *unlocked)
 	}
 	tui_sink_init_fd(&sink, STDOUT_FILENO);
 	ren = tui_renderer_create(rows, cols, sink);
-	if (!ren)
+	if (!ren) {
+		/* q17 audit A-2：raw 已置位后的失败路径必须还 termios */
+		if (gate_term_restore)
+			tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
 		return 1;
+	}
 	s = tui_renderer_front(ren);
 	tui_input_init(&in);
 
 	memset(&f1, 0, sizeof(f1));
 	memset(&f2, 0, sizeof(f2));
 	for (;;) {
-		int done, quit;
-		char msg[160] = "";
+		int done = 0, quit = 0;
 		const char *status;
 		static char status_buf[160];
 
@@ -337,7 +377,11 @@ static int gate_run_ui(int mode, int *unlocked)
 				    "用户：admin", txt_a);
 			draw_center(s, rows / 2 - 2, cols, "密码：", txt_a);
 			draw_masked(s, rows / 2 - 1, cols, &f1, 1);
-			snprintf(status_buf, sizeof(status_buf), "%s", msg);
+			if (login_note[0]) {
+				snprintf(status_buf, sizeof(status_buf), "%s",
+					 login_note);
+				login_note[0] = '\0';
+			}
 			status = status_buf;
 			draw_center(s, rows / 2 + 1, cols, status,
 				    status[0] ? err_a : txt_a);
@@ -345,6 +389,11 @@ static int gate_run_ui(int mode, int *unlocked)
 				    "Enter 登录 · Ctrl-C 退出", mut_a);
 		}
 		tui_renderer_flush(ren, rows / 2 - 1, cols / 2);
+		gate_pump_input(&in, &quit);
+		if (quit) {
+			rc = 1;
+			break;
+		}
 
 		if (mode == GATE_MODE_SETUP) {
 			gate_field_input(&in, stage == 0 ? &f1 : &f2,
@@ -374,6 +423,22 @@ static int gate_run_ui(int mode, int *unlocked)
 						memset(&f1, 0, sizeof(f1));
 						memset(&f2, 0, sizeof(f2));
 						stage = 0;
+					} else if (tui_gate_read(tui_gate_path(),
+								 hash, NULL) == 0) {
+						/* q17 覆写探针实机抓获：双
+						 * 控制台并发 SETUP，后到者会
+						 * 静默覆写先设好的密码。提交
+						 * 前重读凭据——已被其他控制
+						 * 台设置则不覆写，转 LOGIN。 */
+						mode = GATE_MODE_LOGIN;
+						memset(&f1, 0, sizeof(f1));
+						memset(&f2, 0, sizeof(f2));
+						stage = 0;
+						fails = 0;
+						snprintf(login_note,
+							 sizeof(login_note),
+							 "密码已由其他控制台设置，请登录");
+						continue;
 					} else if (tui_gate_hash(f1.buf,
 								 hash) == 0 &&
 						   tui_gate_write(
@@ -396,7 +461,14 @@ static int gate_run_ui(int mode, int *unlocked)
 		if (fails >= GATE_MAX_FAIL) {
 			/* 冷却倒计时（阻塞 1s 步进重绘） */
 			int left = GATE_COOLDOWN_SEC;
+			tui_event ev_drain;
 
+			/* q17 audit A-7：冷却期输入整段丢弃——先排空已泵入
+			 * 队列的事件 + flush tty 层，倒计时结束再 flush 一次
+			 * （否则解冻后旧字符会并入密码首段） */
+			while (tui_input_next(&in, &ev_drain) > 0)
+				;
+			tcflush(STDIN_FILENO, TCIFLUSH);
 			while (left > 0) {
 				snprintf(status_buf, sizeof(status_buf),
 					 "尝试过多，冷却 %d 秒…", left);
@@ -408,6 +480,7 @@ static int gate_run_ui(int mode, int *unlocked)
 				sleep(1);
 				left--;
 			}
+			tcflush(STDIN_FILENO, TCIFLUSH);
 			fails = 0;
 			memset(&f1, 0, sizeof(f1));
 			snprintf(status_buf, sizeof(status_buf), "%s", "");
@@ -424,6 +497,7 @@ static int gate_run_ui(int mode, int *unlocked)
 				mode = GATE_MODE_SETUP;
 				memset(&f1, 0, sizeof(f1));
 				stage = 0;
+				status_buf[0] = '\0';	/* q17 audit A-8 */
 				continue;
 			}
 			if (f1.len > 0 && tui_gate_verify(f1.buf, hash)) {
@@ -432,8 +506,11 @@ static int gate_run_ui(int mode, int *unlocked)
 				break;
 			}
 			fails++;
-			snprintf(msg, sizeof(msg), "密码不正确（%d/%d）",
-				 fails, GATE_MAX_FAIL);
+			/* q17 实机抓获：msg 曾是循环顶每帧置空的局部量，
+			 * LOGIN 画面前状态就被清空——错误消息从未上过屏。
+			 * 改直接写 status_buf（SETUP 口径）。 */
+			snprintf(status_buf, sizeof(status_buf),
+				 "密码不正确（%d/%d）", fails, GATE_MAX_FAIL);
 			memset(&f1, 0, sizeof(f1));
 		}
 	}

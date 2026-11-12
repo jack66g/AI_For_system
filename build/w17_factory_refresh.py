@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 
 REPO = "/home/jack66g/aikernel-repo-alpha11"
 SRC = REPO + "/agent/ai"
@@ -52,6 +53,24 @@ def install(rel, src, mode=0o644):
     print("install %s  md5=%s" % (rel, md5(dst)))
 
 
+def install_bin(rel, src):
+    """q17 勘误（audit B-1）：二进制必须 strip 再进镜像 —— W4A 铁律
+    （build-rootfs.sh #28 实测：未 strip 的 ELF 布局在 AIKernel 内核上
+    间歇 SIGSEGV）。w17 装件链此前绕过了它，17.2 的 occ 因此未 strip。"""
+    import tempfile
+    real = os.path.realpath(src)
+    with tempfile.NamedTemporaryFile(suffix=".q17strip", delete=False) as t:
+        tmp = t.name
+    shutil.copyfile(real, tmp)
+    r = subprocess.run(["strip", tmp], capture_output=True, text=True)
+    assert r.returncode == 0, "strip %s failed: %s" % (src, r.stderr)
+    r = subprocess.run(["file", tmp], capture_output=True, text=True)
+    assert "stripped" in r.stdout and "not stripped" not in r.stdout, \
+        "strip verify failed: %s" % r.stdout
+    install(rel, tmp, 0o755)
+    os.unlink(tmp)
+
+
 def text_replace(rel, old, new):
     p = ROOT + rel
     s = open(p, encoding="utf-8").read()
@@ -67,10 +86,11 @@ def text_replace(rel, old, new):
 os.makedirs(BAK, exist_ok=True)
 
 # 1) binaries (K1/K2 userland: occ act2/act2batch, api batch twin, aistreamd v2 schema)
-install("/usr/local/bin/occ", SRC + "/occ/occ", 0o755)
-install("/usr/local/bin/aik-sandbox", SRC + "/aik-sandbox", 0o755)
-install("/usr/local/sbin/aikernel-api", SRC + "/apic/aikerneld-api", 0o755)
-install("/usr/local/sbin/aistreamd", SRC + "/aistreamd/aistreamd", 0o755)
+# q17: install_bin = strip 后进镜像（W4A 铁律，见函数注）
+install_bin("/usr/local/bin/occ", SRC + "/occ/occ")
+install_bin("/usr/local/bin/aik-sandbox", SRC + "/aik-sandbox")
+install_bin("/usr/local/sbin/aikernel-api", SRC + "/apic/aikerneld-api")
+install_bin("/usr/local/sbin/aistreamd", SRC + "/aistreamd/aistreamd")
 
 # 2) registries + seed (K2b regenerated family)
 for n in ("tools.json", "tools.openai.json", "tools-sandbox.json",
