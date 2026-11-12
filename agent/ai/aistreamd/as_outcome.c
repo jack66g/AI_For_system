@@ -1063,7 +1063,7 @@ int as_outcome_init(struct as_outcome *oc, struct as_conf *c,
 	if (c->outcome_auto_rollback)
 		as_warn_ratelimit("oc-c4", 3600000,
 				  "OUTCOME_AUTO_ROLLBACK=1 acknowledged but "
-				  "rollback write is NOT implemented (C4 "
+				  "rollback write is NOT implemented (kernel K2 auto_rollback owns it) (C4 "
 				  "needs separate approval) - no rollback "
 				  "will be written");
 	oc->cap = (int)c->outcome_max_pending;
