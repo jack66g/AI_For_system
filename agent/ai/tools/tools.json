@@ -1,7 +1,7 @@
 {
   "version": 2,
   "generator": "agent/ai/tools/gen_registry.py",
-  "generated_at": "2026-11-09T15:20:22",
+  "generated_at": "2026-11-12T12:34:45",
   "source": "AIKernel 内核源码静态梳理",
   "tool_count": 237,
   "tool_names_sha256": "45ad909953ac6c840e79c13f867ed0a93cf6a64abdf596f9ac12943b0bf3e34c",
@@ -2091,7 +2091,7 @@
       "name": "process_quarantine",
       "channel": "macro",
       "risk": "W2",
-      "description": "可疑进程隔离三连：sched.nice=19 → proc.freeze=1 → 读 /proc/<pid>/status 验证 State=F。比 kill 温和，可逆（proc.freeze=0 解冻）。W2：逐次确认。",
+      "description": "可疑进程隔离（K2 原子批）：sched.nice=19 + proc.freeze=1 单事务下发（AI_CMD_ACT_BATCH，一个 decision_id，任一项失败整体回滚）→ 读 /proc/<pid>/status 验证 State=F。比 kill 温和，可逆（proc.freeze=0 解冻）。W2：逐次确认。",
       "parameters": {
         "type": "object",
         "properties": {

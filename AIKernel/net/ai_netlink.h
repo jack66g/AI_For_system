@@ -20,6 +20,7 @@
 #include <linux/types.h>
 #include <linux/ai_netlink.h>
 #include "../core/ai_types.h"
+#include "../core/ai_policy.h"	/* K2a：struct ai_batch_op/ai_batch_opts */
 
 struct net;
 
@@ -70,6 +71,28 @@ struct ai_policy_ctx;
  */
 int ai_nl_act2_parse(const struct nlattr *head, int rem,
 		     struct ai_policy_ctx *ctx);
+
+/**
+ * ai_nl_act_batch_parse() - ACT_BATCH 嵌套 nlattr 载荷解析（K2a 可测助手）
+ * @head: attr 区（nlmsg_attrdata(nlh, 0)）
+ * @rem: attr 区长度（nlmsg_attrlen(nlh, 0)）
+ * @req: 输出——元组数组（param 指向载荷内存，handler 期间固定）+ 批级选项
+ *
+ * 严格轨 nla_parse 取批级（未知 attr/缺 NLA_F_NESTED 全拒）+
+ * nla_for_each_attr 逐 AI_BATCH_ATTR_OPS 元组 nla_parse_nested_deprecated
+ * （overlays 同款先例）；元组内严格表：PARAM NUL_STRING≤23、VALUE
+ * NLA_U64 必备、PID NLA_U32 可选；1 ≤ 元组数 ≤ AI_BATCH_MAX_OPS。
+ * 重复 param 名由 execute_batch Pass1 拒（D2）。测试直调：
+ * ai_netlink_test.c。
+ */
+struct ai_nl_batch_req {
+	struct ai_batch_op ops[AI_BATCH_MAX_OPS];
+	u32 n_ops;
+	struct ai_batch_opts opts;
+};
+
+int ai_nl_act_batch_parse(const struct nlattr *head, int rem,
+			  struct ai_nl_batch_req *req);
 #endif
 
 #ifdef CONFIG_AIKERNEL_KUNIT_TEST

@@ -25,6 +25,8 @@
 
 #include "tools/tool_registry.h"
 #include "netlink/ai_streams.h"	/* JSON 转义复用 */
+#include "netlink/ai_netlink_client.h"	/* K2：ACT_BATCH 批量事务 */
+#include "ai_trace.h"			/* K2：session id（intent 口径） */
 #include "tools/macro_tools.h"
 
 /* executor.c 既有实现（W78 去静态供组合复用；不新增旁路语义） */
@@ -731,15 +733,27 @@ static int m_ip_ban_verified(const char *args, char **out)
 	return 0;
 }
 
+/*
+ * K2（KERNEL-K2-DESIGN D9）：quarantine 换批——两连发
+ * exec_netlink_act（step2 失败不撤 step1 的非原子痛点）改为单
+ * AI_CMD_ACT_BATCH 事务：[sched.nice=19:pid, proc.freeze=1:pid] 一个
+ * decision_id，任一项失败整体回滚（失败=全未应用，输出文案即诚实
+ * 形态：整体成功/整体未应用，无部分应用中间态）。auto_rollback_ms=0
+ * 维持原语义（不 arm 定时回滚）。agent/intent/trace 与 K1 executor
+ * 换轨同口径（OCC_AI / FNV64(session) / 进程级铸造）。
+ */
 static int m_process_quarantine(const char *args, char **out)
 {
 	long long pid = jnum(args, "pid", 0);
-	struct ai_tool t;
-	char ajson[64];
-	char *sub = NULL;
-	FILE *f;
+	struct ai_nl_client cli;
+	struct ai_nl_batch_op ops[2];
+	struct ai_nl_batch_opts bopts;
+	struct ai_nl_batch_ack ack;
+	const char *sid = ai_trace_session_id();
 	char st[512], path[64];
-	int rc1, rc2, rcv = -1;
+	FILE *f;
+	int kern_err = 0;
+	int rc, ok = 0, rcv = -1;
 
 	if (pid <= 1) {
 		*out = strdup("ERROR: 需要 pid>1（拒绝对 init 操作）");
@@ -753,25 +767,72 @@ static int m_process_quarantine(const char *args, char **out)
 	f = open_memstream(out, &(size_t){0});
 	if (!f)
 		goto oom;
-	memset(&t, 0, sizeof(t));
-	t.name = "netlink_act_sched_nice";
-	t.param = "sched.nice";
-	t.domain = 1;
-	t.risk = "W2";
-	snprintf(ajson, sizeof(ajson), "{\"pid\":%lld,\"value\":19}", pid);
-	rc1 = exec_netlink_act(&t, ajson, &sub);
-	fprintf(f, "step1 sched.nice=19: %s\n", sub ? sub : "?");
-	free(sub);
-	sub = NULL;
-	memset(&t, 0, sizeof(t));
-	t.name = "netlink_act_proc_freeze";
-	t.param = "proc.freeze";
-	t.domain = 12;
-	t.risk = "W2";
-	snprintf(ajson, sizeof(ajson), "{\"pid\":%lld,\"value\":1}", pid);
-	rc2 = exec_netlink_act(&t, ajson, &sub);
-	fprintf(f, "step2 proc.freeze=1: %s\n", sub ? sub : "?");
-	free(sub);
+
+	memset(&ops, 0, sizeof(ops));
+	strcpy(ops[0].param, "sched.nice");
+	ops[0].value = 19;
+	ops[0].pid = (__u32)pid;
+	strcpy(ops[1].param, "proc.freeze");
+	ops[1].value = 1;
+	ops[1].pid = (__u32)pid;
+	memset(&bopts, 0, sizeof(bopts));
+	bopts.auto_rollback_ms = 0;	/* 维持原语义：不 arm */
+	bopts.agent = AI_AGENT_OCC_AI;
+	ai_nl_trace_mint(&bopts.trace_hi, &bopts.trace_lo);
+	if (sid && sid[0]) {
+		unsigned long long h = 1469598103934665603ULL;
+		const unsigned char *q = (const unsigned char *)sid;
+
+		while (*q) {
+			h ^= *q++;
+			h *= 1099511628211ULL;
+		}
+		bopts.intent_id = h;
+	}
+
+	rc = ai_nl_client_open(&cli);
+	if (rc != AI_OK) {
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "ERROR: NETLINK_AI 通道不可用 (%s)——需要在 "
+		       "AIKernel 内核上运行\n",
+		       pid, ai_error_string(rc));
+		fclose(f);
+		return rc;
+	}
+	rc = ai_nl_send_act_batch(&cli, ops, 2, &bopts, &ack, &kern_err);
+	ai_nl_client_close(&cli);
+	if (rc != AI_OK) {
+		const char *hint = ai_nl_errno_hint(kern_err);
+
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "ERROR: netlink 传输失败 (%s)%s%s\n",
+		       pid, ai_error_string(rc),
+		       hint ? " 提示: " : "", hint ? hint : "");
+	} else if (ack.ai_err == -EAGAIN && ack.token != 0) {
+		/* D6 blast 拒：token 供两段式重试（HTTP /act ops） */
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "ERROR: blast radius=%u 超阈拒收"
+		       "（confirm_token=%llu）——确认影响面后重试\n",
+		       pid, ack.blast_radius,
+		       (unsigned long long)ack.token);
+	} else if (ack.ai_err != 0) {
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "ERROR: 内核 ai_err=%d（批量事务失败，未提交："
+		       "已整体回滚，失败项序号 %d）\n",
+		       pid, ack.ai_err, ack.first_fail_idx);
+	} else if (ack.executed == 0) {
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "未命中任何策略（executed=0）\n", pid);
+	} else {
+		fprintf(f, "batch [sched.nice=19, proc.freeze=1] pid=%lld: "
+		       "OK（原子批已应用 | executed=%u decision_id=%llu "
+		       "trace_id=0x%016llx:0x%016llx）\n",
+		       pid, (unsigned)ack.executed,
+		       (unsigned long long)ack.decision_id,
+		       (unsigned long long)ack.trace_hi,
+		       (unsigned long long)ack.trace_lo);
+		ok = 1;
+	}
 	if (read_file_max(path, st, sizeof(st)) >= 0) {
 		char *sp = strstr(st, "State:");
 
@@ -783,7 +844,7 @@ static int m_process_quarantine(const char *args, char **out)
 		}
 	}
 	fclose(f);
-	return (rc1 == 0 && rc2 == 0) ? (rcv == 0 ? 0 : -1) : -1;
+	return ok ? (rcv == 0 ? 0 : -1) : -1;
 oom:
 	*out = strdup("ERROR: 内存不足");
 	return -1;

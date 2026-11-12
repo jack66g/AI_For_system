@@ -69,6 +69,8 @@
 #define AI_CMD_ACT          17
 #define AI_CMD_REG          18
 #define AI_CMD_ACT2         20   /* K1 D1：nlattr 载荷的决策指令（uapi §3） */
+#define AI_CMD_ACT_BATCH    21   /* K2 D1：批量事务（嵌套 nlattr，uapi §3 镜像） */
+#define AI_BATCH_MAX_OPS    27   /* K2：元组数上限（对齐 KTB 验收口径） */
 
 /* 常量，include/uapi/linux/ai_netlink.h:34-38 */
 #define AI_NL_SENSE_CPU_ALL     0xFFFFFFFFu
@@ -169,6 +171,40 @@ struct ai_nl_act2_ack {
     __u64 trace_lo;
 };
 
+/* ACT_BATCH 批级属性（K2 D1/uapi §3 镜像）：TRACE_HI/LO(8/9)、INTENT(10)、
+ * AGENT(12) 复用 AI_DEC_ATTR_* 号；AUTO_ROLLBACK_MS/CONFIRM_TOKEN 为 K2 新号。
+ * OPS 每元组一个 attr，nla_type 置 NLA_F_NESTED，内嵌元组 attr。 */
+enum {
+    AI_BATCH_ATTR_OPS = 1,              /* NLA_F_NESTED 可重复：{PARAM, VALUE, PID?} */
+    AI_BATCH_ATTR_AUTO_ROLLBACK_MS = 2, /* u32；0=不 arm（缺省） */
+    AI_BATCH_ATTR_CONFIRM_TOKEN = 3,    /* u64；blast 拒后重试携带 */
+    __AI_BATCH_ATTR_MAX,
+    AI_BATCH_ATTR_MAX = __AI_BATCH_ATTR_MAX - 1,
+};
+
+/* 元组内 attr（K2 D1）：PARAM 复用 AI_DEC_ATTR_PARAM(3)；VALUE/PID 为
+ * AI_DEC_ATTR_* 命名空间的 K2 新号（续 EXPECTED=13 之后）。#ifndef 防御：
+ * 主机已装 K2 uapi 头时直接采用其定义，号漂移由下方 _Static_assert 捕获 */
+#ifndef AI_DEC_ATTR_VALUE
+#define AI_DEC_ATTR_VALUE  14   /* u64：元组内钳前请求值（必备） */
+#endif
+#ifndef AI_DEC_ATTR_PID
+#define AI_DEC_ATTR_PID    15   /* u32：元组内可选 pid（0=不带 attr） */
+#endif
+
+/* ACT_BATCH 应答载荷（K2 D4/uapi §3 镜像，_Static_assert 钉布局） */
+struct ai_nl_batch_ack {
+    __u8  executed;       /* 成功子项数 */
+    __u8  hit;            /* 命中（executed>0 即 1） */
+    __s32 ai_err;         /* AI_OK 或负 AI 错误码 */
+    __u64 decision_id;    /* 本批决策 ID（一个 batch=一个 decision） */
+    __u64 trace_hi;       /* 统一 trace 高 64 位（回读铸造结果） */
+    __u64 trace_lo;
+    __s32 first_fail_idx; /* 首个失败元组序号（-1=无） */
+    __u32 blast_radius;   /* D6：粗粒度受影响任务数 */
+    __u64 token;          /* blast 拒派生 token（未触发=0） */
+};
+
 /* REG 请求载荷（include/uapi/linux/ai_netlink.h:83-86） */
 struct ai_nl_reg {
     __u32 flags;        /* 0=仅登记（预留位） */
@@ -212,6 +248,26 @@ _Static_assert(offsetof(struct ai_nl_act2_ack, executed) == 0 &&
                offsetof(struct ai_nl_act2_ack, trace_lo) == 24,
                "ai_nl_act2_ack offsets");
 _Static_assert(AI_NL_PAYLOAD_MAX == 65536, "AI_NL_PAYLOAD_MAX drifted");
+/* K2：ACT_BATCH 命令号/批级 attr 号/元组号钉死（uapi §3；漂移即编译失败） */
+_Static_assert(AI_CMD_ACT_BATCH == 21, "AI_CMD_ACT_BATCH must be 21");
+_Static_assert(AI_BATCH_MAX_OPS == 27, "AI_BATCH_MAX_OPS must be 27");
+_Static_assert(AI_BATCH_ATTR_OPS == 1 &&
+               AI_BATCH_ATTR_AUTO_ROLLBACK_MS == 2 &&
+               AI_BATCH_ATTR_CONFIRM_TOKEN == 3,
+               "AI_BATCH_ATTR_* numbers drifted");
+_Static_assert(AI_DEC_ATTR_VALUE == 14 && AI_DEC_ATTR_PID == 15,
+               "batch tuple attr numbers drifted");
+_Static_assert(sizeof(struct ai_nl_batch_ack) == 48, "ai_nl_batch_ack size");
+_Static_assert(offsetof(struct ai_nl_batch_ack, executed) == 0 &&
+               offsetof(struct ai_nl_batch_ack, hit) == 1 &&
+               offsetof(struct ai_nl_batch_ack, ai_err) == 4 &&
+               offsetof(struct ai_nl_batch_ack, decision_id) == 8 &&
+               offsetof(struct ai_nl_batch_ack, trace_hi) == 16 &&
+               offsetof(struct ai_nl_batch_ack, trace_lo) == 24 &&
+               offsetof(struct ai_nl_batch_ack, first_fail_idx) == 32 &&
+               offsetof(struct ai_nl_batch_ack, blast_radius) == 36 &&
+               offsetof(struct ai_nl_batch_ack, token) == 40,
+               "ai_nl_batch_ack offsets");
 
 _Static_assert(sizeof(struct nlmsghdr) == 16, "struct nlmsghdr layout");
 _Static_assert(sizeof(struct nlmsgerr) == 20, "struct nlmsgerr layout");
@@ -371,6 +427,62 @@ int ai_nl_send_act2(struct ai_nl_client *cli,
                     const struct ai_nl_act2_req *req,
                     struct ai_nl_act2_ack *ack,
                     int *kern_err);
+
+/*
+ * ai_nl_pack_act_batch / ai_nl_send_act_batch - AI_CMD_ACT_BATCH：批量
+ * 事务（K2 D1/D9；嵌套 nlattr——AIKernel 用户态客户端首个嵌套面）。
+ * 一个 batch=一个 decision_id；ops 每元组一个 AI_BATCH_ATTR_OPS
+ * （NLA_F_NESTED），内嵌 PARAM（复用 AI_DEC_ATTR_PARAM）+ VALUE(u64
+ * 必备) + PID(u32 可选，ops[].pid==0 不带)。批级 AUTO_ROLLBACK_MS(u32)
+ * + CONFIRM_TOKEN(u64) 恒携带（零=显式缺省）+ TRACE_HI/LO/INTENT/AGENT
+ * 复用 AI_DEC_ATTR_* 号（沿 act2「可选恒携带、消息形状恒定」先例）。
+ * 对齐规则：NLA_ALIGN(4)——attr 头 4B（u16 nla_len 含头/u16 nla_type），
+ * 载荷补零到 4 的倍数；嵌套由 nla_type 高位 NLA_F_NESTED(1<<8) 标记，
+ * 内层 attr 流即外层载荷（无嵌套长度魔法——nla_len 覆盖头+全部内层）。
+ * 预校验与内核同口径：1<=n<=27、param 非空 NUL 结尾 <=23B、重复
+ * param 名拒收（-EINVAL 同义 -> AI_ERR_INVALID_ARG）。
+ *
+ * ai_nl_pack_act_batch 为纯打包器（单测面：tests/test_netlink_batch.c
+ * 逐字节断言）；attr_len 出参=编码后 attr 流长度。
+ */
+struct ai_nl_batch_op {
+    char  param[AI_NL_ACT_PARAM_LEN];  /* 定向参数名（非空 NUL 结尾 ≤23）*/
+    __u64 value;                       /* 钳前请求值 */
+    __u32 pid;                         /* 0=不带 PID attr（全局参数） */
+    __u32 reserved;                    /* 必须为 0（前向兼容） */
+};
+
+struct ai_nl_batch_opts {
+    __u32 auto_rollback_ms;   /* 0=不 arm（缺省） */
+    __u32 agent;              /* enum ai_agent_id */
+    __u64 confirm_token;      /* 0=不带语义（blast 拒后重试携带） */
+    __u64 trace_hi;           /* 全零=内核铸造（ack 回读） */
+    __u64 trace_lo;
+    __u64 intent_id;          /* 0=未供给 */
+};
+
+_Static_assert(sizeof(struct ai_nl_batch_op) == 40, "ai_nl_batch_op size");
+_Static_assert(offsetof(struct ai_nl_batch_op, param) == 0 &&
+               offsetof(struct ai_nl_batch_op, value) == 24 &&
+               offsetof(struct ai_nl_batch_op, pid) == 32,
+               "ai_nl_batch_op offsets");
+_Static_assert(sizeof(struct ai_nl_batch_opts) == 40, "ai_nl_batch_opts size");
+
+/* 最坏 attr 流：27 元组×52B（OPS 头 4+PARAM 28+VALUE 12+PID 8）+ 批级
+ * 64B（AUTO_ROLLBACK_MS 8+CONFIRM_TOKEN 12+TRACE_HI/LO 12×2+INTENT
+ * 12+AGENT 8）=1468B，取 1600 裕量 */
+#define AI_BATCH_ATTRS_MAX 1600
+
+int ai_nl_pack_act_batch(unsigned char *attrs, size_t cap,
+                         const struct ai_nl_batch_op *ops, size_t n,
+                         const struct ai_nl_batch_opts *opts,
+                         size_t *attr_len);
+
+int ai_nl_send_act_batch(struct ai_nl_client *cli,
+                         const struct ai_nl_batch_op *ops, size_t n,
+                         const struct ai_nl_batch_opts *opts,
+                         struct ai_nl_batch_ack *ack,
+                         int *kern_err);
 
 /*
  * ai_nl_trace_mint - 进程级统一 trace_id 铸造（K1 D9：executor 换轨用）。

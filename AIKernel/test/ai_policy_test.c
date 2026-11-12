@@ -25,6 +25,8 @@
 #include "../core/ai_control.h"
 #include "../core/ai_runtime.h"
 #include "../core/ai_telemetry.h"
+#include <linux/ai_accessors.h>	/* K2a ⑤：vm_swappiness 真值读 */
+#include <linux/sched/stat.h>	/* K2a ③：nr_threads（radius 断言） */
 
 #ifdef CONFIG_AIKERNEL_RUNTIME
 
@@ -835,6 +837,383 @@ static void policy_record_write_p99_test(struct kunit *test)
 	kvfree(lat);
 }
 
+/* ---- K2a（KERNEL-K2-DESIGN D2/D3/D6/D7/D10①-⑤）：ACT_BATCH ---- */
+
+/* 测试批量参数（REAL 簿记型：apply=NULL → handler 只更新影子 cur+
+ * 快照，零内核副作用；同名幂等——跨运行复用表内既有条目） */
+static void batch_ensure_param(const char *name, s64 def)
+{
+	if (ai_control_find(name) < 0)
+		ai_control_register(name, AI_POLICY_DOMAIN_GENERAL,
+				    AI_CTRL_F_REAL, 0, 100, def, NULL);
+}
+
+/* 故障注入参数：第 fail_at 次 apply 调用返回错误（沿 fail_rollback
+ * 先例——Pass1 不触 apply，失败只在 Pass2 爆） */
+static int test_batch_fail_at;
+static int test_batch_fail_calls;
+
+static int test_batch_fail_apply(struct ai_control_param *p, s32 pid,
+				 s64 value, s64 *eff)
+{
+	if (++test_batch_fail_calls == test_batch_fail_at)
+		return AI_ERR_GENERIC;
+	*eff = value;
+	return AI_OK;
+}
+
+static void batch_ensure_fail_param(void)
+{
+	if (ai_control_find("kunit.batch.fail") < 0)
+		ai_control_register("kunit.batch.fail",
+				    AI_POLICY_DOMAIN_GENERAL,
+				    AI_CTRL_F_REAL, 0, 100, 0,
+				    test_batch_fail_apply);
+}
+
+/* 影子表 dump（名字+cur）：Pass1 拒收零副作用断言用（前后对比） */
+static void batch_ctrl_dump(struct kunit *test, char *names, s64 *curs,
+			    u32 *count)
+{
+	struct ai_control_param p;
+	u32 i = 0;
+
+	while (i < AI_CONTROL_MAX_PARAMS &&
+	       ai_control_query(i, &p) == AI_OK) {
+		strscpy(names + (size_t)i * AI_MAX_NAME_LEN, p.name,
+			AI_MAX_NAME_LEN);
+		curs[i] = p.cur;
+		i++;
+	}
+	*count = i;
+}
+
+static int batch_ctrl_same(const char *n1, const s64 *c1, u32 k1,
+			   const char *n2, const s64 *c2, u32 k2)
+{
+	return k1 == k2 &&
+	       !memcmp(n1, n2, (size_t)k1 * AI_MAX_NAME_LEN) &&
+	       !memcmp(c1, c2, (size_t)k1 * sizeof(*c1));
+}
+
+/* D10①：Pass1 拒收——坏名/超量(28)/重复名/超范围值 → -EINVAL
+ * 且影子表（名字+cur）前后零变化 */
+static void policy_batch_pass1_reject_test(struct kunit *test)
+{
+	struct ai_batch_op ops[AI_BATCH_MAX_OPS + 1];
+	struct ai_batch_opts opts = { 0 };
+	struct ai_nl_batch_ack ack;
+	char *n0, *n1;
+	s64 *c0, *c1;
+	u32 k0 = 0, k1 = 0;
+	unsigned int i;
+
+	n0 = kunit_kzalloc(test, AI_CONTROL_MAX_PARAMS * AI_MAX_NAME_LEN,
+			   GFP_KERNEL);
+	n1 = kunit_kzalloc(test, AI_CONTROL_MAX_PARAMS * AI_MAX_NAME_LEN,
+			   GFP_KERNEL);
+	c0 = kunit_kzalloc(test, AI_CONTROL_MAX_PARAMS * sizeof(*c0),
+			   GFP_KERNEL);
+	c1 = kunit_kzalloc(test, AI_CONTROL_MAX_PARAMS * sizeof(*c1),
+			   GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, n0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, n1);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, c0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, c1);
+
+	batch_ensure_param("kunit.batch.a", 10);
+	batch_ensure_param("kunit.batch.b", 20);
+	batch_ctrl_dump(test, n0, c0, &k0);
+
+	/* 坏 param 名 */
+	memset(ops, 0, sizeof(ops));
+	ops[0].param = "no.such.batch.param";
+	ops[0].value = 1;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_execute_batch(ops, 1, &opts, &ack),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ack.first_fail_idx, 0);
+	KUNIT_EXPECT_EQ(test, ack.decision_id, 0ULL);	/* 未取号零副作用 */
+
+	/* 超量 28 项（计数检查先于逐项校验） */
+	memset(ops, 0, sizeof(ops));
+	for (i = 0; i <= AI_BATCH_MAX_OPS; i++) {
+		ops[i].param = "kunit.batch.a";
+		ops[i].value = 11;
+	}
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_execute_batch(ops, AI_BATCH_MAX_OPS + 1,
+						&opts, &ack),
+			-EINVAL);
+
+	/* 重复 param 名（同参双值歧义拒收） */
+	memset(ops, 0, sizeof(ops));
+	ops[0].param = "kunit.batch.a";
+	ops[0].value = 12;
+	ops[1].param = "kunit.batch.a";
+	ops[1].value = 13;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_execute_batch(ops, 2, &opts, &ack),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ack.first_fail_idx, 1);
+
+	/* 超范围值（硬范围 0..100：批量契约=拒收而非静默钳） */
+	memset(ops, 0, sizeof(ops));
+	ops[0].param = "kunit.batch.a";
+	ops[0].value = 101;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_execute_batch(ops, 1, &opts, &ack),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ack.first_fail_idx, 0);
+
+	/* 零副作用：影子表（名字+cur）前后逐项一致 */
+	batch_ctrl_dump(test, n1, c1, &k1);
+	KUNIT_EXPECT_TRUE(test,
+			 batch_ctrl_same(n0, c0, k0, n1, c1, k1));
+}
+
+/* D10②：Pass2 故障注入——第 2 项 apply 强制失败 → 第 1 项值回 pre
+ * （快照全退），注入解除后同批全成 */
+static void policy_batch_fault_inject_test(struct kunit *test)
+{
+	struct ai_batch_op ops[3];
+	struct ai_batch_opts opts = { 0 };
+	struct ai_nl_batch_ack ack;
+	s64 pre_a, pre_b, v;
+	u32 thr_save;
+	int rc;
+
+	/* K2 勘误（真机 KUnit 抓获）：lt-vm nr_threads=83>默认阈值 64，
+	 * 未带 token 的批全被 blast gate 正确拦为 -EAGAIN——本用例测
+	 * 故障注入不测门，入口关闸（0=off）毕恢复。 */
+	thr_save = ai_policy_blast_threshold_get();
+	ai_policy_blast_threshold_set(0);
+	batch_ensure_param("kunit.batch.a", 10);
+	batch_ensure_param("kunit.batch.b", 20);
+	batch_ensure_fail_param();
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &pre_a), AI_OK);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.b", &pre_b), AI_OK);
+
+	memset(ops, 0, sizeof(ops));
+	ops[0].param = "kunit.batch.a";
+	ops[0].value = (u64)pre_a + 1;
+	ops[1].param = "kunit.batch.fail";
+	ops[1].value = 5;
+	ops[2].param = "kunit.batch.b";
+	ops[2].value = (u64)pre_b + 1;
+
+	test_batch_fail_calls = 0;
+	test_batch_fail_at = 1;	/* 元组 2 的 apply（第 1 次调用）即失败 */
+	rc = ai_policy_execute_batch(ops, 3, &opts, &ack);
+	KUNIT_EXPECT_EQ(test, rc, -EIO);
+	KUNIT_EXPECT_EQ(test, ack.first_fail_idx, 1);
+	KUNIT_EXPECT_EQ(test, (u32)ack.executed, 1);	/* 失败前成功数 */
+	KUNIT_EXPECT_EQ(test, ack.ai_err, -EIO);
+
+	/* 全退：第 1 项值回 pre；快照消费即毁 */
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, pre_a);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.b", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, pre_b);
+	{
+		s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+		u8 n = AI_SAFETY_SNAPSHOT_PARAMS;
+
+		KUNIT_EXPECT_EQ(test,
+				ai_policy_safety_snapshot_lookup(
+					ack.decision_id, pre_vals, &n),
+				AI_ERR_NOT_FOUND);
+	}
+
+	/* 注入解除：同批全成（语义/幂等恢复） */
+	test_batch_fail_calls = 0;
+	test_batch_fail_at = 0;	/* 0=永不失败 */
+	rc = ai_policy_execute_batch(ops, 3, &opts, &ack);
+	KUNIT_EXPECT_EQ(test, rc, 3);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, pre_a + 1);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.b", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, pre_b + 1);
+
+	ai_policy_blast_threshold_set(thr_save);
+}
+/* D10③：token 派生确定性 + 改值失配 + 正确 token 过闸放行 */
+static void policy_batch_token_test(struct kunit *test)
+{
+	struct ai_batch_op ops[2], ops2[2];
+	struct ai_batch_opts opts = { 0 };
+	struct ai_nl_batch_ack ack, ack2;
+	u64 tok;
+	u32 saved_thr;
+	s64 a0, b0, v;
+	int rc;
+
+	batch_ensure_param("kunit.batch.a", 10);
+	batch_ensure_param("kunit.batch.b", 20);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &a0), AI_OK);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.b", &b0), AI_OK);
+
+	memset(ops, 0, sizeof(ops));
+	ops[0].param = "kunit.batch.a";
+	ops[0].value = (u64)a0 + 1;
+	ops[1].param = "kunit.batch.b";
+	ops[1].value = (u64)b0 + 1;
+
+	saved_thr = ai_policy_blast_threshold_get();
+	ai_policy_blast_threshold_set(1);	/* 全局参数 radius=nr_threads>1 */
+
+	/* 无 token → -EAGAIN + radius/token 回带；同请求两次派生一致 */
+	rc = ai_policy_execute_batch(ops, 2, &opts, &ack);
+	KUNIT_EXPECT_EQ(test, rc, -EAGAIN);
+	KUNIT_EXPECT_EQ(test, ack.ai_err, -EAGAIN);
+	KUNIT_EXPECT_EQ(test, ack.blast_radius, (u32)nr_threads);
+	KUNIT_EXPECT_NE(test, ack.token, 0ULL);
+	tok = ack.token;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_execute_batch(ops, 2, &opts, &ack2),
+			-EAGAIN);
+	KUNIT_EXPECT_EQ(test, ack2.token, tok);
+
+	/* 拒收零副作用：不落值 */
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, a0);
+
+	/* 改一项 value → token 失配（radius 不变亦拒） */
+	memcpy(ops2, ops, sizeof(ops));
+	ops2[0].value = (u64)a0 + 2;
+	rc = ai_policy_execute_batch(ops2, 2, &opts, &ack2);
+	KUNIT_EXPECT_EQ(test, rc, -EAGAIN);
+	KUNIT_EXPECT_NE(test, ack2.token, tok);
+
+	/* 带正确 token → 放行（executed=2），token/radius 回显 */
+	opts.token = tok;
+	rc = ai_policy_execute_batch(ops, 2, &opts, &ack);
+	KUNIT_EXPECT_EQ(test, rc, 2);
+	KUNIT_EXPECT_EQ(test, ack.ai_err, 0);
+	KUNIT_EXPECT_EQ(test, ack.token, tok);
+	KUNIT_EXPECT_EQ(test, ack.blast_radius, (u32)nr_threads);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.a", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, a0 + 1);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("kunit.batch.b", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, b0 + 1);
+
+	ai_policy_blast_threshold_set(saved_thr);	/* 还原阈值 */
+}
+
+/* D10④：快照 32 槽扩容 + post 回填（D3） */
+static void policy_snapshot_32_post_test(struct kunit *test)
+{
+	s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+	u64 id = 0x660000A1ULL;
+	u8 n;
+	u32 i;
+
+	KUNIT_EXPECT_EQ(test, AI_SAFETY_SNAPSHOT_PARAMS, 32);
+
+	for (i = 0; i < AI_SAFETY_SNAPSHOT_PARAMS; i++)
+		KUNIT_EXPECT_EQ(test,
+				ai_policy_safety_snapshot_save(
+					id, i, (s32)(i + 1),
+					(s64)-1000 + (s64)i),
+				AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(id, pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, n, AI_SAFETY_SNAPSHOT_PARAMS);
+	for (i = 0; i < AI_SAFETY_SNAPSHOT_PARAMS; i++)
+		KUNIT_EXPECT_EQ(test, pre_vals[i], (s64)-1000 + (s64)i);
+
+	/* post 回填：全槽 + 未知决策/未知参数 NOT_FOUND */
+	for (i = 0; i < AI_SAFETY_SNAPSHOT_PARAMS; i++)
+		KUNIT_EXPECT_EQ(test,
+				ai_policy_safety_snapshot_post(
+					id, i, (s64)5000 + (s64)i),
+				AI_OK);
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_post(id, 999, 1),
+			AI_ERR_NOT_FOUND);
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_post(0x660000B2ULL, 0, 1),
+			AI_ERR_NOT_FOUND);
+
+	/* post 不污染 pre 取数（回滚依据）；消费即毁 */
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(id, pre_vals, &n),
+			AI_OK);
+	KUNIT_EXPECT_EQ(test, pre_vals[0], -1000);
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_rollback_decision(id, NULL),
+			AI_OK);
+	n = AI_SAFETY_SNAPSHOT_PARAMS;
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_safety_snapshot_lookup(id, pre_vals, &n),
+			AI_ERR_NOT_FOUND);
+}
+
+/* D10⑤：swappiness 读回真值（D7）——set_read 注册后 current= 与
+ * 恒等快路径都以内核真值为基准（KUnit 环境直接读 vm_swappiness） */
+/* K2 D7：vmscan 真值访问器（定义 mm/vmscan.c 埋点；声明同
+ * AIKernel/mm/ai_mm.h:600——此处 extern 直引免拖子系统头） */
+extern int ai_vmscan_swappiness_get(void);
+extern void ai_vmscan_swappiness_set(int value);
+
+static void policy_swappiness_readback_test(struct kunit *test)
+{
+	struct ai_policy_ctx ctx;
+	struct ai_control_param p;
+	s64 v, true_v;
+	int saved, idx;
+
+	idx = ai_control_find("mm.swappiness");
+	KUNIT_ASSERT_GE(test, idx, 0);
+
+	saved = ai_vmscan_swappiness_get();
+	/* 人造漂移：影子 60 / 真值非 60（选异值） */
+	ai_vmscan_swappiness_set(saved == 60 ? 80 : 60);
+	true_v = (s64)ai_vmscan_swappiness_get();
+
+	/* current=（query/get_value 双出口）显真值 */
+	KUNIT_ASSERT_EQ(test, ai_control_query((u32)idx, &p), AI_OK);
+	KUNIT_EXPECT_EQ(test, p.cur, true_v);
+	KUNIT_EXPECT_EQ(test,
+			ai_control_get_value("mm.swappiness", &v), AI_OK);
+	KUNIT_EXPECT_EQ(test, v, true_v);
+
+	/* 恒等快路径对真值生效：定向 act(真值) → 恒等 no-op、无快照
+	 * （D7 前：影子 60 视角下 80≠60 → 误判非恒等真 apply 落 pre=60） */
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.domain = AI_POLICY_DOMAIN_MM;
+	ctx.decision_type = 1;
+	strscpy(ctx.param, "mm.swappiness", sizeof(ctx.param));
+	ctx.decision_id = 0x660000C3ULL;
+	ctx.decision_data[0] = (u64)true_v;
+	KUNIT_EXPECT_EQ(test, ai_policy_execute(&ctx, NULL), 1);
+	{
+		s64 pre_vals[AI_SAFETY_SNAPSHOT_PARAMS];
+		u8 n = AI_SAFETY_SNAPSHOT_PARAMS;
+
+		KUNIT_EXPECT_EQ(test,
+				ai_policy_safety_snapshot_lookup(
+					0x660000C3ULL, pre_vals, &n),
+				AI_ERR_NOT_FOUND);
+	}
+
+	ai_vmscan_swappiness_set(saved);	/* 还原真值 */
+}
+
 static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_register_execute_test),
 	KUNIT_CASE(policy_param_target_test),
@@ -854,6 +1233,13 @@ static struct kunit_case policy_test_cases[] = {
 	KUNIT_CASE(policy_side_effect_mask_test),
 	KUNIT_CASE(policy_heuristic_trace_test),
 	KUNIT_CASE(policy_record_write_p99_test),
+	/* K2a：ACT_BATCH 批量事务 + 快照扩容 + swappiness 读回（仅追加，
+	 * 既有用例零删改） */
+	KUNIT_CASE(policy_batch_pass1_reject_test),
+	KUNIT_CASE(policy_batch_fault_inject_test),
+	KUNIT_CASE(policy_batch_token_test),
+	KUNIT_CASE(policy_snapshot_32_post_test),
+	KUNIT_CASE(policy_swappiness_readback_test),
 	{}
 };
 

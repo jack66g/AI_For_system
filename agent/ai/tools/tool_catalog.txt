@@ -75,7 +75,7 @@ sysctl_restore 逐次确认
 schedule_create systemd-run transient ti
 schedule_remove 停止并移除 aik-<nam
 ip_ban_verified 插入 nft 运行时规
-process_quarantine sched.nice=19 → proc.f
+process_quarantine sched.nice=19 + proc.fre
 model_verify model_load(path)→model
 net_iface state=up|down
 net_addr_add 已存在如实报 EEXIS

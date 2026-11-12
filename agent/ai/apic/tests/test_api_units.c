@@ -307,6 +307,100 @@ static void test_nl_unpack(void)
 	aik_json_free(a);
 }
 
+static void test_nl_pack_batch(void)
+{
+	struct api_batch_op ops[2];
+	unsigned char out[1600];
+	char hex[3201];
+	size_t out_len = 0, i;
+
+	/* K2b：与 Python nl_pack_act_batch 黄金字节逐字节一致（140B：
+	 * 双元组[含 pid]+AUTO_ROLLBACK_MS+CONFIRM_TOKEN+TRACE/INTENT/AGENT）*/
+	memset(ops, 0, sizeof(ops));
+	strcpy(ops[0].param, "mm.swappiness");
+	ops[0].value = 60;
+	ops[0].pid = 0;
+	strcpy(ops[1].param, "sched.nice");
+	ops[1].value = 19;
+	ops[1].pid = 4242;
+	CHECK(api_nl_pack_act_batch(out, sizeof(out), &out_len, ops, 2,
+				     5000, 0xdeadbeefull) == 0);
+	CHECK(out_len == 140);
+	for (i = 0; i < out_len; i++)
+		snprintf(hex + i * 2, 3, "%02x", out[i]);
+	CHECK_STR(hex,
+		  "24000180120003006d6d2e7377617070696e6573730000000c000e00"
+		  "3c00000000000000280001800f00030073636865642e6e69636500000c"
+		  "000e00130000000000000008000f009210000008000200881300000c"
+		  "000300efbeadde000000000c00080000000000000000000c000900000"
+		  "00000000000000c000a00000000000000000008000c0000000000");
+	/* 单元组（无 pid）：96B */
+	memset(ops, 0, sizeof(ops));
+	strcpy(ops[0].param, "llm.top_k");
+	ops[0].value = 40;
+	CHECK(api_nl_pack_act_batch(out, sizeof(out), &out_len, ops, 1,
+				     0, 0) == 0);
+	CHECK(out_len == 96);
+	/* 重复 param 拒收 */
+	memset(ops, 0, sizeof(ops));
+	strcpy(ops[0].param, "llm.top_k");
+	strcpy(ops[1].param, "llm.top_k");
+	ops[0].value = ops[1].value = 1;
+	CHECK(api_nl_pack_act_batch(out, sizeof(out), &out_len, ops, 2,
+				     0, 0) != 0);
+	/* 超 27 拒收 */
+	{
+		struct api_batch_op big[28];
+		size_t k;
+
+		memset(big, 0, sizeof(big));
+		for (k = 0; k < 28; k++)
+			snprintf(big[k].param, sizeof(big[k].param), "p%02zu",
+				 k);
+		CHECK(api_nl_pack_act_batch(out, sizeof(out), &out_len, big,
+					     28, 0, 0) != 0);
+	}
+}
+
+static void test_nl_unpack_batch(void)
+{
+	unsigned char ack48[48];
+	aik_json *a;
+	char *dump;
+
+	memset(ack48, 0, sizeof(ack48));
+	ack48[0] = 2;				/* executed */
+	ack48[1] = 1;				/* hit */
+	/* ai_err = -EAGAIN(11)：s32 小端 */
+	{
+		int v = -11;
+
+		memcpy(ack48 + 4, &v, 4);
+	}
+	{
+		unsigned long long did = 77, thi = 1, tlo = 2, tok = 0xbeaf;
+		int ff = -1;
+		unsigned int br = 120;
+
+		memcpy(ack48 + 8, &did, 8);
+		memcpy(ack48 + 16, &thi, 8);
+		memcpy(ack48 + 24, &tlo, 8);
+		memcpy(ack48 + 32, &ff, 4);
+		memcpy(ack48 + 36, &br, 4);
+		memcpy(ack48 + 40, &tok, 8);
+	}
+	a = api_nl_unpack_batch_ack(ack48, 48);
+	dump = dt_json_dump_default(a);
+	CHECK_STR(dump,
+		  "{\"executed\": 2, \"hit\": 1, \"ai_err\": -11, "
+		  "\"decision_id\": 77, \"trace_hi\": 1, \"trace_lo\": 2, "
+		  "\"first_fail\": -1, \"blast_radius\": 120, "
+		  "\"token\": 48815}");
+	free(dump);
+	aik_json_free(a);
+	CHECK(api_nl_unpack_batch_ack(ack48, 40) == NULL);
+}
+
 static void test_query(void)
 {
 	char *v;
@@ -728,6 +822,8 @@ int main(void)
 	test_control_parse();
 	test_nl_pack();
 	test_nl_unpack();
+	test_nl_pack_batch();
+	test_nl_unpack_batch();
 	test_query();
 	test_validate_event();
 	test_render();

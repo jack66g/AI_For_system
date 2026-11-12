@@ -20,6 +20,7 @@
 
 #include "ai_types.h"
 #include <linux/types.h>
+#include <linux/errno.h>
 
 /* ---- 策略决策域 ---- */
 
@@ -91,6 +92,28 @@ struct ai_policy_ctx {
 	s64  expected;           /* 调用方预期 delta（0=未供给，D5） */
 	u64  cost_ns;            /* 决策+执行耗时（record_write 算定） */
 	u32  side_effect_mask;   /* AI_SE_* 位（execute 聚合） */
+};
+
+/* ---- K2a（KERNEL-K2-DESIGN D2）：ACT_BATCH 批量事务内核侧描述 ---- */
+
+struct ai_nl_batch_ack;	/* uapi include/uapi/linux/ai_netlink.h（ack 同形出参） */
+
+/* 单个批量元组（≤ AI_BATCH_MAX_OPS 项）。param 指向调用方内存——
+ * netlink 路径=skb nla 载荷（handler 执行期间固定），测试=栈缓冲。 */
+struct ai_batch_op {
+	const char *param;	/* 参数全名（精确匹配 ai_control 表） */
+	u64 value;		/* 请求值（Pass1 硬范围校验+限幅后生效） */
+	u32 pid;		/* task 作用域目标 pid（0=全局参数） */
+};
+
+/* 批级选项（对应 AI_BATCH_ATTR_* + 复用 AI_DEC_ATTR_TRACE/INTENT/AGENT） */
+struct ai_batch_opts {
+	u64 trace_hi;		/* 双零=未携带（execute_batch 内铸） */
+	u64 trace_lo;
+	u64 intent_id;		/* 0=未供给 */
+	u32 agent_id;		/* enum ai_agent_id */
+	u32 auto_rollback_ms;	/* >0：成功后 arm 自动回滚定时器（D5） */
+	u64 token;		/* blast 拒后重试携带（D6 派生值） */
 };
 
 /* ---- 策略回调 ---- */
@@ -241,6 +264,43 @@ int ai_policy_execute(const struct ai_policy_ctx *ctx, void *arg);
 int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg);
 
 /**
+ * ai_policy_execute_batch() - ACT_BATCH 两阶段批量事务（K2a D2/D3/D5/D6）
+ * @ops: 元组数组（param=参数全名，精确匹配 ai_control 表）
+ * @n_ops: 元组数（1..AI_BATCH_MAX_OPS）
+ * @opts: 批级选项（trace/intent/agent/auto_rollback_ms/token）
+ * @ack: 出参（同形 struct ai_nl_batch_ack，全路径回填）
+ *
+ * 全程持 ai_policy_lock（与 __ai_policy_execute 同锁=串行化；独立实现
+ * 拿锁骨架，仅复用 handler 级函数，勿嵌套加锁）。Pass1 dry-run 零副作用
+ * （查表+非 reserved+硬范围+TASK pid+重复名拒+限幅算钳后值+radius）；
+ * 超阈（blast_threshold）且 token 缺失/失配 → -EAGAIN（ack 带
+ * radius+token）。Pass2：单 decision_id+trace 铸 → 逐项复用 ai_control
+ * handler 链（限幅→快照→apply）+snapshot_post 回填；任一项失败 →
+ * 快照全退（消费即毁）→ -EIO+first_fail。完毕 record_write
+ * （data[0]=子项数、data[1]=first_fail、executed=成功数）+cat18 遥测
+ * +EVENT 推送（param="batch"）；auto_rollback_ms>0 且成功 → D5 arm
+ * （单槽占用 → ack.ai_err=-EBUSY）。
+ * 返回 executed（>=0）或 -EINVAL/-EAGAIN/-EIO/AI_ERR_DISABLED。
+ */
+int ai_policy_execute_batch(const struct ai_batch_op *ops, u32 n_ops,
+			    const struct ai_batch_opts *opts,
+			    struct ai_nl_batch_ack *ack);
+
+/**
+ * ai_policy_batch_confirm() - confirm 持久化：取消 pending 自动回滚（D5）
+ * @decision_id: 目标决策（sysfs /sys/kernel/ai/policy/confirm 写入口）
+ *
+ * 返回 0（已取消，已应用值保持持久化）/ -ENOENT（未 arm/已回滚/id
+ * 不符）/ -EINVAL。
+ */
+int ai_policy_batch_confirm(u64 decision_id);
+
+/* D6：blast radius 阈值（sysfs /sys/kernel/ai/policy/blast_threshold，
+ * 0644，默认 64，0=关） */
+u32 ai_policy_blast_threshold_get(void);
+int ai_policy_blast_threshold_set(u32 val);
+
+/**
  * ai_policy_outcome_update() - 回写决策结果（决策闭环第 4 步）
  * @decision_id: execute 分配的决策 ID
  * @outcome: AI_OUTCOME_*
@@ -362,6 +422,20 @@ static inline int ai_policy_outcome_update(u64 id, u8 outcome, s64 delta)
 }
 static inline int ai_policy_rollback_decision(u64 id) { return AI_OK; }
 static inline int ai_policy_rollback_all(void) { return AI_OK; }
+/* K2a：!RUNTIME stub（NETLINK 依赖 RUNTIME，仅保头文件自洽） */
+static inline int ai_policy_execute_batch(const struct ai_batch_op *ops,
+					  u32 n_ops,
+					  const struct ai_batch_opts *opts,
+					  struct ai_nl_batch_ack *ack)
+{
+	return -EINVAL;
+}
+static inline int ai_policy_batch_confirm(u64 decision_id)
+{
+	return -ENOENT;
+}
+static inline u32 ai_policy_blast_threshold_get(void) { return 64; }
+static inline int ai_policy_blast_threshold_set(u32 val) { return AI_OK; }
 static inline int ai_policy_set_enabled(const char *name, u8 enable) { return AI_OK; }
 static inline int ai_policy_get_name(unsigned int index, char *name, u8 *enabled)
 {

@@ -259,6 +259,195 @@ static void netlink_act2_parse_invalid_test(struct kunit *test)
 	KUNIT_EXPECT_LT(test, err, 0);
 }
 
+/* ---- K2a（KERNEL-K2-DESIGN D1/D10）：ACT_BATCH 嵌套 nlattr 解析
+ * （沿 K1 act2_parse 先例：手搓 nlattr 缓冲，NLA_HDRLEN 对齐，无真实
+ * socket 依赖；元组=NLA_F_NESTED 的 AI_BATCH_ATTR_OPS 容器，内平铺
+ * PARAM/VALUE/PID） ---- */
+
+static u8 *batch_open_tuple(u8 *p)
+{
+	struct nlattr *nla = (struct nlattr *)p;
+
+	nla->nla_type = (u16)(AI_BATCH_ATTR_OPS | NLA_F_NESTED);
+	nla->nla_len = (u16)NLA_HDRLEN;	/* 收尾回填 */
+	return p + NLA_HDRLEN;
+}
+
+static u8 *batch_close_tuple(u8 *start, u8 *end)
+{
+	struct nlattr *nla = (struct nlattr *)start;
+
+	nla->nla_len = (u16)(end - start);
+	return start + NLA_ALIGN((int)(end - start));
+}
+
+/* 全参：双元组（TASK 三参/全局两参）+ 全批级 attr → 逐字段对值 */
+static void netlink_act_batch_parse_full_test(struct kunit *test)
+{
+	u8 buf[1024] __aligned(NLA_ALIGNTO);
+	u8 *p = buf, *t;
+	struct ai_nl_batch_req req;
+	u64 u64v;
+	u32 u32v;
+	int rem, err;
+
+	memset(buf, 0, sizeof(buf));
+	/* 元组 1：TASK 三参全（sched.nice / 5 / pid 1） */
+	t = batch_open_tuple(p);
+	t = act2_put_attr(t, AI_DEC_ATTR_PARAM, "sched.nice",
+			 sizeof("sched.nice"));
+	u64v = 5;
+	t = act2_put_attr(t, AI_DEC_ATTR_VALUE, &u64v, sizeof(u64v));
+	u32v = 1;
+	t = act2_put_attr(t, AI_DEC_ATTR_PID, &u32v, sizeof(u32v));
+	p = batch_close_tuple(p, t);
+	/* 元组 2：全局两参（mm.swappiness / 80，PID 缺省 0） */
+	t = batch_open_tuple(p);
+	t = act2_put_attr(t, AI_DEC_ATTR_PARAM, "mm.swappiness",
+			 sizeof("mm.swappiness"));
+	u64v = 80;
+	t = act2_put_attr(t, AI_DEC_ATTR_VALUE, &u64v, sizeof(u64v));
+	p = batch_close_tuple(p, t);
+	/* 批级：trace/intent/agent + auto_rollback_ms + confirm_token */
+	u64v = 0x11;
+	p = act2_put_attr(p, AI_DEC_ATTR_TRACE_HI, &u64v, sizeof(u64v));
+	u64v = 0x22;
+	p = act2_put_attr(p, AI_DEC_ATTR_TRACE_LO, &u64v, sizeof(u64v));
+	u64v = 0x33;
+	p = act2_put_attr(p, AI_DEC_ATTR_INTENT, &u64v, sizeof(u64v));
+	u32v = AI_AGENT_OCC_AI;
+	p = act2_put_attr(p, AI_DEC_ATTR_AGENT, &u32v, sizeof(u32v));
+	u32v = 500;
+	p = act2_put_attr(p, AI_BATCH_ATTR_AUTO_ROLLBACK_MS, &u32v,
+			 sizeof(u32v));
+	u64v = 0x99;
+	p = act2_put_attr(p, AI_BATCH_ATTR_CONFIRM_TOKEN, &u64v,
+			 sizeof(u64v));
+	rem = (int)(p - buf);
+
+	err = ai_nl_act_batch_parse((struct nlattr *)buf, rem, &req);
+	KUNIT_EXPECT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, req.n_ops, 2u);
+	KUNIT_EXPECT_STREQ(test, req.ops[0].param, "sched.nice");
+	KUNIT_EXPECT_EQ(test, req.ops[0].value, 5ULL);
+	KUNIT_EXPECT_EQ(test, req.ops[0].pid, 1u);
+	KUNIT_EXPECT_STREQ(test, req.ops[1].param, "mm.swappiness");
+	KUNIT_EXPECT_EQ(test, req.ops[1].value, 80ULL);
+	KUNIT_EXPECT_EQ(test, req.ops[1].pid, 0u);
+	KUNIT_EXPECT_EQ(test, req.opts.trace_hi, 0x11ULL);
+	KUNIT_EXPECT_EQ(test, req.opts.trace_lo, 0x22ULL);
+	KUNIT_EXPECT_EQ(test, req.opts.intent_id, 0x33ULL);
+	KUNIT_EXPECT_EQ(test, req.opts.agent_id, (u32)AI_AGENT_OCC_AI);
+	KUNIT_EXPECT_EQ(test, req.opts.auto_rollback_ms, 500u);
+	KUNIT_EXPECT_EQ(test, req.opts.token, 0x99ULL);
+}
+
+/* 缺 VALUE（PARAM+PID 元组）→ -EINVAL；零元组（仅批级）→ -EINVAL */
+static void netlink_act_batch_parse_missing_test(struct kunit *test)
+{
+	u8 buf[256] __aligned(NLA_ALIGNTO);
+	u8 *p = buf, *t;
+	struct ai_nl_batch_req req;
+	u32 u32v;
+	int rem;
+
+	memset(buf, 0, sizeof(buf));
+	t = batch_open_tuple(p);
+	t = act2_put_attr(t, AI_DEC_ATTR_PARAM, "sched.nice",
+			 sizeof("sched.nice"));
+	u32v = 2;
+	t = act2_put_attr(t, AI_DEC_ATTR_PID, &u32v, sizeof(u32v));
+	p = batch_close_tuple(p, t);
+	rem = (int)(p - buf);
+	KUNIT_EXPECT_EQ(test,
+			ai_nl_act_batch_parse((struct nlattr *)buf, rem,
+					       &req),
+			-EINVAL);
+
+	/* 批级 attr 齐备但零元组 → -EINVAL（1 ≤ 元组数） */
+	memset(buf, 0, sizeof(buf));
+	u32v = 100;
+	p = act2_put_attr(buf, AI_BATCH_ATTR_AUTO_ROLLBACK_MS, &u32v,
+			  sizeof(u32v));
+	rem = (int)(p - buf);
+	KUNIT_EXPECT_EQ(test,
+			ai_nl_act_batch_parse((struct nlattr *)buf, rem,
+					       &req),
+			-EINVAL);
+}
+
+/* 元组超 27 → -EINVAL；恰好 27（边界）放行 */
+static void netlink_act_batch_parse_overflow_test(struct kunit *test)
+{
+	u8 buf[1024] __aligned(NLA_ALIGNTO);
+	u8 *p, *t;
+	struct ai_nl_batch_req req;
+	u64 u64v = 1;
+	unsigned int i, n;
+	int rem;
+
+	/* 28 元组 */
+	memset(buf, 0, sizeof(buf));
+	p = buf;
+	for (i = 0; i <= AI_BATCH_MAX_OPS; i++) {
+		char name[8];
+
+		snprintf(name, sizeof(name), "p%02u", i);
+		t = batch_open_tuple(p);
+		t = act2_put_attr(t, AI_DEC_ATTR_PARAM, name,
+				  (int)strlen(name) + 1);
+		t = act2_put_attr(t, AI_DEC_ATTR_VALUE, &u64v,
+				  sizeof(u64v));
+		p = batch_close_tuple(p, t);
+	}
+	rem = (int)(p - buf);
+	KUNIT_ASSERT_LT(test, rem, (int)sizeof(buf));
+	KUNIT_EXPECT_EQ(test,
+			ai_nl_act_batch_parse((struct nlattr *)buf, rem,
+					       &req),
+			-EINVAL);
+
+	/* 27 元组边界：放行 */
+	memset(buf, 0, sizeof(buf));
+	p = buf;
+	for (i = 0; i < AI_BATCH_MAX_OPS; i++) {
+		char name[8];
+
+		snprintf(name, sizeof(name), "q%02u", i);
+		t = batch_open_tuple(p);
+		t = act2_put_attr(t, AI_DEC_ATTR_PARAM, name,
+				  (int)strlen(name) + 1);
+		t = act2_put_attr(t, AI_DEC_ATTR_VALUE, &u64v,
+				  sizeof(u64v));
+		p = batch_close_tuple(p, t);
+	}
+	rem = (int)(p - buf);
+	n = AI_BATCH_MAX_OPS;
+	KUNIT_EXPECT_EQ(test,
+			ai_nl_act_batch_parse((struct nlattr *)buf, rem,
+					       &req),
+			0);
+	KUNIT_EXPECT_EQ(test, req.n_ops, n);
+}
+
+/* 坏嵌套：OPS 容器缺 NLA_F_NESTED 标志 → 严格轨拒 */
+static void netlink_act_batch_parse_badnest_test(struct kunit *test)
+{
+	u8 buf[256] __aligned(NLA_ALIGNTO);
+	u8 *p;
+	struct ai_nl_batch_req req;
+	u64 u64v = 5;
+	int rem;
+
+	memset(buf, 0, sizeof(buf));
+	p = act2_put_attr(buf, AI_BATCH_ATTR_OPS, &u64v, sizeof(u64v));
+	rem = (int)(p - buf);
+	KUNIT_EXPECT_EQ(test,
+			ai_nl_act_batch_parse((struct nlattr *)buf, rem,
+					       &req),
+			-EINVAL);
+}
+
 static struct kunit_case netlink_test_cases[] = {
 	KUNIT_CASE(netlink_registry_test),
 	KUNIT_CASE(netlink_urelease_cleanup_test),
@@ -267,6 +456,11 @@ static struct kunit_case netlink_test_cases[] = {
 	KUNIT_CASE(netlink_act2_parse_full_test),
 	KUNIT_CASE(netlink_act2_parse_missing_test),
 	KUNIT_CASE(netlink_act2_parse_invalid_test),
+	/* K2a：ACT_BATCH 嵌套解析四形态（仅追加，既有用例零删改） */
+	KUNIT_CASE(netlink_act_batch_parse_full_test),
+	KUNIT_CASE(netlink_act_batch_parse_missing_test),
+	KUNIT_CASE(netlink_act_batch_parse_overflow_test),
+	KUNIT_CASE(netlink_act_batch_parse_badnest_test),
 	{}
 };
 

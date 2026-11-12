@@ -86,13 +86,23 @@ int ai_control_query(u32 index, struct ai_control_param *out)
 		rc = AI_OK;
 	}
 	spin_unlock_irqrestore(&ai_ctrl_lock, flags);
+
+	/* K2a（KERNEL-K2-DESIGN D7）：current= 显真值——read 回调锁外回填
+	 * cur（mm.swappiness 等全局参数读内核真值；TASK 参数 pid=0 读取
+	 * 失败 → 保持影子 cur，/proc/ai/control 渲染不变）。 */
+	if (rc == AI_OK && out->read) {
+		s64 v;
+
+		if (out->read(out, 0, &v) == AI_OK)
+			out->cur = v;
+	}
 	return rc;
 }
 EXPORT_SYMBOL_GPL(ai_control_query);
 
 int ai_control_get_value(const char *name, s64 *value)
 {
-	struct ai_control_param *p;
+	struct ai_control_param p;
 	unsigned long flags;
 	int rc = AI_ERR_NOT_FOUND;
 
@@ -100,13 +110,24 @@ int ai_control_get_value(const char *name, s64 *value)
 		return AI_ERR_INVALID_ARG;
 
 	spin_lock_irqsave(&ai_ctrl_lock, flags);
-	p = ai_control_find_locked(name);
-	if (p) {
-		*value = p->cur;
-		rc = AI_OK;
+	{
+		struct ai_control_param *q = ai_control_find_locked(name);
+
+		if (q) {
+			p = *q;
+			rc = AI_OK;
+		}
 	}
 	spin_unlock_irqrestore(&ai_ctrl_lock, flags);
-	return rc;
+	if (rc != AI_OK)
+		return rc;
+
+	/* K2a D7：读回调优先（真值；sched 三参 TASK 参数 pid=0 读取失败
+	 * → 退影子 cur，原行为不变） */
+	if (p.read && p.read(&p, 0, value) == AI_OK)
+		return AI_OK;
+	*value = p.cur;
+	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_control_get_value);
 
@@ -196,7 +217,11 @@ static int ai_control_policy_handler(const struct ai_policy_ctx *ctx,
 	 * 无 read 回调 → 退回全局表 cur 语义（原行为不变）；有 read 回调
 	 * 但读取失败（任务退出、多 CPU 亲和掩码等无法单值忠实表出）→
 	 * cur/pre 退回全局表值，且禁用同值快路径（K66 T1，见下）。 */
-	if ((p->flags & AI_CTRL_F_TASK) && p->read) {
+	/* K2a（KERNEL-K2-DESIGN D7）：读回调扩展到全局参数（原仅 TASK）——
+	 * mm.swappiness 读 vm_swappiness 真值，恒等快路径与快照 pre 基准
+	 * 随之对真值生效（修「影子 60 / sysctl 80 双源漂移恒等误判」：
+	 * apply 后双源收敛的单向同步既有行为不变）。 */
+	if (p->read) {
 		if (p->read(p, pid, &task_cur) == AI_OK) {
 			cur_val = task_cur;
 			pre = task_cur;

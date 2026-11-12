@@ -27,6 +27,10 @@
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/errno.h>
+#include <linux/hrtimer.h>
+#include <linux/workqueue.h>
+#include <linux/sched/stat.h>	/* nr_threads（D6 radius） */
 #include <linux/types.h>
 #include "ai_policy.h"
 #include "ai_policy_safety.h"
@@ -46,17 +50,43 @@ static struct ai_policy *ai_policy_table[AI_POLICY_MAX_COUNT];
 static unsigned int ai_policy_count;
 static DEFINE_MUTEX(ai_policy_lock);
 
+/* K2a（KERNEL-K2-DESIGN D5/D6）：自动回滚单槽 + blast 阈值（状态定义
+ * 在前——ai_policy_trace_init 引用；机制函数见 execute_trace 之后的
+ * ACT_BATCH 一节） */
+/* K2 勘误（K2c 真机实证）：64 在常态机（nr_threads>100）即拦所有
+ * 全局参数单发——默认抬到 1024（sysfs 可调 0=off）。 */
+static u32 ai_batch_blast_threshold = 1024;	/* sysfs 0644，0=关 */
+static struct hrtimer ai_batch_ar_timer;
+static struct work_struct ai_batch_ar_work;
+static struct {
+	u64 decision_id;	/* pending 待回滚决策 */
+	u64 trace_hi;		/* 事件推送用 trace（从决策记录铸链取） */
+	u64 trace_lo;
+	bool armed;		/* v1 单槽：同刻仅一个 pending 自动回滚 */
+} ai_batch_ar;
+
+static void ai_batch_ar_work_fn(struct work_struct *work);
+
 static atomic64_t ai_decision_seq = ATOMIC64_INIT(0);
 
 /* K1 D2：统一 trace per-boot 随机 cookie——init 一次 get_random_u64()
  * （非零保证），跨 boot 由 hi 区分；lo=decision_id 同 boot 单调。 */
 u64 ai_trace_boot_cookie;
 
+/* K2 D5：自动回滚定时器回调（定义见 ai_batch_ar_work 段） */
+static enum hrtimer_restart ai_batch_ar_timer_fn(struct hrtimer *timer);
+
 static int __init ai_policy_trace_init(void)
 {
 	do {
 		ai_trace_boot_cookie = get_random_u64();
 	} while (!ai_trace_boot_cookie);   /* 退化 0（2^-64）重摇 */
+	/* K2a D5：自动回滚定时器 + work 跳板初始化（单槽） */
+	/* K2 勘误（主会话构建门抓获）：6.18 树 hrtimer_init 已移除
+	 * （6.15+ 改名），换 hrtimer_setup。 */
+	hrtimer_setup(&ai_batch_ar_timer, ai_batch_ar_timer_fn,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	INIT_WORK(&ai_batch_ar_work, ai_batch_ar_work_fn);
 	return 0;
 }
 subsys_initcall(ai_policy_trace_init);
@@ -470,6 +500,389 @@ int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg)
 }
 EXPORT_SYMBOL_GPL(ai_policy_execute_trace);
 
+/* ---- K2a（KERNEL-K2-DESIGN D2/D3/D5/D6）：ACT_BATCH 批量事务 ---- */
+
+/*
+ * 无状态 confirm token 派生（D6）：FNV64a——offset basis
+ * 0xcbf29ce484222325、prime 0x100000001b3（仓内同款口径：用户态
+ * as_util.c:45 / executor.c:1305 的 intent/session 混合即此参数组）；
+ * u64 字段按小端 8 字节展开逐字节 xor-mul。
+ * token = FNV64a(升序 (param_idx, pid, clamped_value) 序列 + radius)
+ * ——无状态可重算；radius 或任一元组变化 → token 自然失配（重试即重验）。
+ */
+#define AI_BATCH_FNV_OFFSET	0xcbf29ce484222325ULL
+#define AI_BATCH_FNV_PRIME	0x100000001b3ULL
+
+static u64 ai_batch_fnv64a_mix(u64 h, u64 v)
+{
+	u8 k;
+
+	for (k = 0; k < 8; k++) {
+		h ^= (u8)v;
+		h *= AI_BATCH_FNV_PRIME;
+		v >>= 8;
+	}
+	return h;
+}
+
+/* Pass1 dry-run 逐项产物（栈上 ≤ AI_BATCH_MAX_OPS 项；不驻留
+ * ai_control 参数结构体，控内核栈占用） */
+struct ai_batch_item {
+	struct ai_policy *pol;	/* 精确同名且 enabled 的策略项（持锁稳定） */
+	u32 pidx;		/* ai_control 参数表索引 */
+	u32 pflags;		/* AI_CTRL_F_* */
+	u8  domain;		/* 参数域（记录/ctx 用） */
+	u8  clamped_flag;	/* 1=被幅度限幅 */
+	s64 clamped;		/* 钳后值（token 派生与 Pass2 请求值） */
+	u32 radius;		/* D6：pid 定向=1，全局=nr_threads */
+};
+
+/* D5 自动回滚：hrtimer 回调只 queue_work（ai_net.c:402 qdisc 范式——
+ * restore 链含 GFP_KERNEL/mutex 级睡眠，硬中断直调必炸）；work 持
+ * ai_policy_lock 回滚（锁序收编后与 execute/batch 同锁串行）。 */
+static enum hrtimer_restart ai_batch_ar_timer_fn(struct hrtimer *timer)
+{
+	queue_work(system_wq, &ai_batch_ar_work);
+	return HRTIMER_NORESTART;
+}
+
+static void ai_batch_ar_work_fn(struct work_struct *work)
+{
+	u64 id, thi, tlo;
+
+	mutex_lock(&ai_policy_lock);
+	if (!ai_batch_ar.armed) {
+		mutex_unlock(&ai_policy_lock);
+		return;	/* confirm 已取消 / 幂等残留触发 */
+	}
+	id = ai_batch_ar.decision_id;
+	thi = ai_batch_ar.trace_hi;
+	tlo = ai_batch_ar.trace_lo;
+	ai_batch_ar.armed = false;
+	/* 已持 ai_policy_lock：直调 safety 层（public 包装同锁，勿嵌套） */
+	ai_policy_safety_rollback_decision(id, ai_control_restore_value);
+	mutex_unlock(&ai_policy_lock);
+	pr_info("AIKernel: batch auto-rollback decision=%llu (values restored)\n",
+		id);
+	/* code=0：与常规 policy 事件（code=executed）区分——as_outcome tap
+	 * 以 category==policy && executed>0 建 job（rows-b §3），回滚通知
+	 * 若带 executed 会误触 outcome 管线（K2a 判决；设计册 D5 原文
+	 * code=executed，差异登记 K2a 报告） */
+	ai_netlink_push_event_trace(AI_NL_EV_POLICY, AI_NL_EV_SEV_WARN,
+				    id, 0, "auto_rollback", thi, tlo);
+}
+
+/* 成功批 arm（持 ai_policy_lock 调用）；v1 单槽：armed 再 arm → -EBUSY */
+static int ai_batch_ar_arm(u64 id, u32 ms, u64 thi, u64 tlo)
+{
+	if (READ_ONCE(ai_batch_ar.armed))
+		return -EBUSY;	/* 诚实拒：多槽需求登记 K4 前 */
+	ai_batch_ar.armed = true;
+	ai_batch_ar.decision_id = id;
+	ai_batch_ar.trace_hi = thi;
+	ai_batch_ar.trace_lo = tlo;
+	hrtimer_start(&ai_batch_ar_timer, ms_to_ktime(ms),
+		      HRTIMER_MODE_REL);
+	return 0;
+}
+
+int ai_policy_batch_confirm(u64 decision_id)
+{
+	if (!decision_id)
+		return -EINVAL;
+
+	mutex_lock(&ai_policy_lock);
+	if (!ai_batch_ar.armed || ai_batch_ar.decision_id != decision_id) {
+		mutex_unlock(&ai_policy_lock);
+		return -ENOENT;	/* 未 arm / 已回滚（work 消费）/ id 不符 */
+	}
+	ai_batch_ar.armed = false;
+	/* 锁外 cancel：work 本体也取 ai_policy_lock，持锁 cancel_work_sync
+	 * 会自等死锁（armed 已清，残留 work/timer 动作幂等空转） */
+	mutex_unlock(&ai_policy_lock);
+	hrtimer_cancel(&ai_batch_ar_timer);
+	cancel_work_sync(&ai_batch_ar_work);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ai_policy_batch_confirm);
+
+u32 ai_policy_blast_threshold_get(void)
+{
+	return READ_ONCE(ai_batch_blast_threshold);
+}
+EXPORT_SYMBOL_GPL(ai_policy_blast_threshold_get);
+
+int ai_policy_blast_threshold_set(u32 val)
+{
+	WRITE_ONCE(ai_batch_blast_threshold, val);
+	return AI_OK;
+}
+EXPORT_SYMBOL_GPL(ai_policy_blast_threshold_set);
+
+int ai_policy_execute_batch(const struct ai_batch_op *ops, u32 n_ops,
+			    const struct ai_batch_opts *opts,
+			    struct ai_nl_batch_ack *ack)
+{
+	struct ai_batch_item items[AI_BATCH_MAX_OPS];
+	struct ai_decision_record rec;
+	struct ai_policy_ctx ictx;
+	struct ai_tp_decision tp;
+	u64 t0, t1, lat, radius = 0, token = 0;
+	u32 threshold, i, j;
+	int executed = 0, clamped = 0;
+	int first_fail = -1;
+	int rc;
+
+	if (!ack)
+		return -EINVAL;
+	memset(ack, 0, sizeof(*ack));
+	ack->first_fail_idx = -1;
+	if (!ops || !opts)
+		return -EINVAL;
+	if (n_ops == 0 || n_ops > AI_BATCH_MAX_OPS) {
+		ack->ai_err = -EINVAL;
+		return -EINVAL;	/* 计数检查先于逐项（28 项直接拒） */
+	}
+	if (!ai_policy_safety_get_enabled()) {
+		ack->ai_err = AI_ERR_DISABLED;
+		return AI_ERR_DISABLED;
+	}
+
+	t0 = ktime_get_ns();
+	mutex_lock(&ai_policy_lock);
+
+	/* ---- Pass1 dry-run：查表+硬范围+重复名+pid+限幅（零副作用） ---- */
+	for (i = 0; i < n_ops; i++) {
+		struct ai_control_param p;
+		int idx = ai_control_find(ops[i].param);
+		s64 cur, v;
+		u8 cf = 0;
+
+		memset(&p, 0, sizeof(p));
+		if (!ops[i].param || !ops[i].param[0] || idx < 0 ||
+		    ai_control_query((u32)idx, &p) != AI_OK) {
+			first_fail = (s32)i;	/* 参数名不存在（精确全名） */
+			break;
+		}
+		if (!(p.flags & AI_CTRL_F_REAL)) {
+			first_fail = (s32)i;	/* reserved 参数拒收（D2） */
+			break;
+		}
+		for (j = 0; j < i; j++) {
+			if (strcmp(ops[j].param, ops[i].param) == 0) {
+				first_fail = (s32)i;	/* 重复名拒（D1） */
+				break;
+			}
+		}
+		if (first_fail >= 0)
+			break;
+		if ((p.flags & AI_CTRL_F_TASK) && (s32)ops[i].pid <= 0) {
+			first_fail = (s32)i;	/* TASK 参数必须定向 pid */
+			break;
+		}
+		/* 硬范围：批量显式拒（单发 ACT 为静默硬钳；批量新契约=拒收，
+		 * D10①「超范围值→-EINVAL」验收口径，K2a 报告登记差异） */
+		if ((s64)ops[i].value < p.min || (s64)ops[i].value > p.max) {
+			first_fail = (s32)i;
+			break;
+		}
+		/* 限幅基准镜像 handler：read 真值优先（K2a D7 后全局参数亦有
+		 * read），失败退影子 cur */
+		cur = p.cur;
+		if (p.read && p.read(&p, (s32)ops[i].pid, &cur) != AI_OK)
+			cur = p.cur;
+		v = (s64)ops[i].value;
+		if (ai_policy_safety_limit_value(p.min, p.max, cur, &v,
+						 &cf) != AI_OK) {
+			first_fail = (s32)i;
+			break;
+		}
+		items[i].clamped = v;
+		items[i].clamped_flag = cf;
+		items[i].pidx = (u32)idx;
+		items[i].pflags = p.flags;
+		items[i].domain = p.domain;
+		/* radius：pid 定向=1；全局参数=全系统任务面 nr_threads（D6，
+		 * v1 诚实粗估——cgroup/netns/文件维度不冒充，登记 K4/K6） */
+		items[i].radius = ops[i].pid ? 1 : (u32)nr_threads;
+		if (items[i].radius > radius)
+			radius = items[i].radius;
+		/* 策略表精确同名 + enabled（Pass2 handler 级复用入口） */
+		items[i].pol = NULL;
+		for (j = 0; j < ai_policy_count; j++) {
+			if (ai_policy_table[j]->enabled &&
+			    strcmp(ai_policy_table[j]->name,
+				   ops[i].param) == 0) {
+				items[i].pol = ai_policy_table[j];
+				break;
+			}
+		}
+		if (!items[i].pol) {
+			first_fail = (s32)i;	/* 策略缺失/停用 */
+			break;
+		}
+	}
+	if (first_fail >= 0) {
+		mutex_unlock(&ai_policy_lock);
+		ack->ai_err = -EINVAL;
+		ack->first_fail_idx = first_fail;
+		return -EINVAL;	/* 零副作用：无 id 无记录无取值 */
+	}
+
+	/* ---- D6 blast gate：超阈且 token 缺失/失配 → -EAGAIN ---- */
+	threshold = ai_policy_blast_threshold_get();
+	if (threshold && radius > threshold) {
+		u64 h = AI_BATCH_FNV_OFFSET;
+
+		for (i = 0; i < n_ops; i++) {
+			h = ai_batch_fnv64a_mix(h, items[i].pidx);
+			h = ai_batch_fnv64a_mix(h, ops[i].pid);
+			h = ai_batch_fnv64a_mix(h, (u64)items[i].clamped);
+		}
+		h = ai_batch_fnv64a_mix(h, radius);
+		if (opts->token != h) {
+			mutex_unlock(&ai_policy_lock);
+			ack->ai_err = -EAGAIN;
+			ack->blast_radius = (u32)radius;
+			ack->token = h;	/* 无状态派生，重试重算匹配 */
+			return -EAGAIN;	/* 零副作用：无 id 无记录 */
+		}
+		token = h;	/* 过闸 token 回显（未触发=0） */
+	}
+
+	/* ---- 取号+铸 trace（K1 链：双零→铸；显式携带不改写） ---- */
+	ack->decision_id = ai_policy_next_decision_id();
+	ack->trace_hi = opts->trace_hi;
+	ack->trace_lo = opts->trace_lo;
+	ai_trace_mint(ack->decision_id, &ack->trace_hi, &ack->trace_lo);
+
+	/* ---- Pass2：逐项 snapshot_save+apply（复用 ai_control 既有链） ----
+	 * 每项构造定向 ctx（TASK: data[0]=pid data[1]=值；全局: data[0]=值）
+	 * 直接调策略 handler（=ai_control_policy_handler，priv=ctrl 表项）：
+	 * 限幅→恒等快路径→快照→apply→失败 handler 内自恢复，全部语义与
+	 * 单发 execute 一致（同 decision_id 落快照，槽序=子项序号）。 */
+	for (i = 0; i < n_ops; i++) {
+		memset(&ictx, 0, sizeof(ictx));
+		ictx.decision_id = ack->decision_id;
+		ictx.trigger_ts = t0;
+		ictx.domain = (enum ai_policy_domain)items[i].domain;
+		ictx.source = AI_DEC_SRC_NETLINK;
+		ictx.trace_hi = ack->trace_hi;
+		ictx.trace_lo = ack->trace_lo;
+		ictx.intent_id = opts->intent_id;
+		ictx.agent_id = opts->agent_id;
+		strscpy(ictx.param, ops[i].param, sizeof(ictx.param));
+		if (items[i].pflags & AI_CTRL_F_TASK) {
+			ictx.decision_data[0] = ops[i].pid;
+			ictx.decision_data[1] = (u64)items[i].clamped;
+		} else {
+			ictx.decision_data[0] = (u64)items[i].clamped;
+		}
+		rc = items[i].pol->handler(&ictx, items[i].pol->private_data);
+		if (rc == AI_POLICY_RC_CLAMPED) {
+			executed++;
+			clamped++;
+		} else if (rc == 0) {
+			executed++;
+		} else {
+			first_fail = (s32)i;	/* handler 内已自恢复本项 */
+			break;
+		}
+		/* D3 post 回填：重复名已拒 → pidx 唯一；恒等快路径项无快照
+		 * → NOT_FOUND 静默（post 保持 0=未回填） */
+		ai_policy_safety_snapshot_post(ack->decision_id,
+					       items[i].pidx,
+					       items[i].clamped);
+	}
+
+	if (first_fail >= 0) {
+		/* 全退已应用项（快照消费即毁）；已持锁 → 直调 safety 层
+		 * （public 包装 ai_policy_rollback_decision 同锁勿嵌套） */
+		ai_policy_safety_rollback_decision(ack->decision_id,
+						  ai_control_restore_value);
+	}
+
+	t1 = ktime_get_ns();
+	lat = t1 - t0;
+
+	/* 决策记录（D3：data[0]=子项数、data[1]=first_fail；executed=成功
+	 * 子项数（失败全退时=失败前成功数，审计留痕）；se 三位复用） */
+	memset(&rec, 0, sizeof(rec));
+	rec.trigger_ts = t0;
+	rec.decision_ts = t0;
+	rec.execute_ts = t1;
+	rec.decision_data[0] = n_ops;
+	rec.decision_data[1] = first_fail >= 0 ? (u64)first_fail : 0;
+	rec.decision_id = ack->decision_id;
+	rec.domain = items[0].domain;	/* 首元组域（跨域批的代表性记账） */
+	rec.source = AI_DEC_SRC_NETLINK;
+	rec.executed = (u8)min_t(int, executed, U8_MAX);
+	rec.safety_clamped = clamped ? 1 : 0;
+	rec.trace_hi = ack->trace_hi;
+	rec.trace_lo = ack->trace_lo;
+	rec.intent_id = opts->intent_id;
+	rec.agent_id = opts->agent_id;
+	if (executed > 0)	/* 位语义对齐 __ai_policy_execute */
+		rec.side_effect_mask |= AI_SE_PARAM_WRITTEN;
+	if (clamped)
+		rec.side_effect_mask |= AI_SE_SAFETY_CLAMPED;
+	if (first_fail >= 0)
+		rec.side_effect_mask |= AI_SE_ROLLED_BACK;
+	if (first_fail >= 0)
+		rec.outcome = AI_OUTCOME_FAILED;	/* 失败全退 */
+	else if (clamped)
+		rec.outcome = AI_OUTCOME_PARTIAL;	/* 任一钳=PARTIAL */
+	else
+		rec.outcome = AI_OUTCOME_SUCCESS;
+
+	ai_policy_record_write(&rec, lat);
+
+	/* cat18 遥测（K1 链照旧） */
+	memset(&tp, 0, sizeof(tp));
+	tp.type = 1;
+	tp.decision_id = rec.decision_id;
+	tp.trigger_ts = rec.trigger_ts;
+	tp.decision_type = rec.decision_type;
+	tp.domain = rec.domain;
+	tp.executed = rec.executed;
+	tp.safety_clamped = rec.safety_clamped;
+	ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_DECISION, AI_SEV_NORMAL,
+			  &tp, sizeof(tp));
+
+	mutex_unlock(&ai_policy_lock);
+
+	ack->executed = rec.executed;
+	ack->hit = (first_fail < 0 && executed > 0) ? 1 : 0;
+	ack->ai_err = first_fail >= 0 ? -EIO : AI_OK;
+	ack->first_fail_idx = first_fail;
+	ack->blast_radius = (u32)radius;
+	ack->token = token;
+
+	pr_info_ratelimited("AIKernel: policy batch items=%u executed=%d "
+			    "clamped=%d first_fail=%d radius=%llu "
+			    "decision=%llu%s\n",
+			    n_ops, executed, clamped, first_fail, radius,
+			    ack->decision_id,
+			    first_fail >= 0 ? " (rolled back)" : "");
+
+	/* W49 形态：决策结果异步推送（param="batch"） */
+	ai_netlink_push_event_trace(AI_NL_EV_POLICY,
+		first_fail >= 0 ? AI_NL_EV_SEV_ERROR :
+		clamped ? AI_NL_EV_SEV_WARN : AI_NL_EV_SEV_INFO,
+		ack->decision_id, executed, "batch",
+		ack->trace_hi, ack->trace_lo);
+
+	/* D5：成功且请求 arm → 单槽定时器（占用中 -EBUSY 记入 ack；
+	 * 批已生效，arm 拒不是批失败） */
+	if (first_fail < 0 && opts->auto_rollback_ms &&
+	    ai_batch_ar_arm(ack->decision_id, opts->auto_rollback_ms,
+			    ack->trace_hi, ack->trace_lo))
+		ack->ai_err = -EBUSY;
+
+	return first_fail >= 0 ? -EIO : executed;
+}
+EXPORT_SYMBOL_GPL(ai_policy_execute_batch);
+
 /* 按 decision_id 定位 ring 槽（先查缓存，未命中线性扫；持 ai_dec_lock 调用） */
 static struct ai_decision_record *ai_policy_ring_find_locked(u64 decision_id)
 {
@@ -545,14 +958,29 @@ EXPORT_SYMBOL_GPL(ai_policy_outcome_update);
 
 int ai_policy_rollback_decision(u64 decision_id)
 {
-	return ai_policy_safety_rollback_decision(decision_id,
-						  ai_control_restore_value);
+	int rc;
+
+	/* K2a D5 锁序收编：rollback 与 execute/batch 同锁串行（原实现不持
+	 * ai_policy_lock——定时器回滚 vs 在途 execute 交错未定义，rows-a
+	 * §5）。调用者全为进程上下文（sysfs/测试/batch 内部走 safety 层
+	 * 直调），grep 清单见 K2a 报告。 */
+	mutex_lock(&ai_policy_lock);
+	rc = ai_policy_safety_rollback_decision(decision_id,
+					       ai_control_restore_value);
+	mutex_unlock(&ai_policy_lock);
+	return rc;
 }
 EXPORT_SYMBOL_GPL(ai_policy_rollback_decision);
 
 int ai_policy_rollback_all(void)
 {
-	return ai_policy_safety_rollback_all(ai_control_restore_value);
+	int rc;
+
+	/* K2a D5 锁序收编（同 ai_policy_rollback_decision） */
+	mutex_lock(&ai_policy_lock);
+	rc = ai_policy_safety_rollback_all(ai_control_restore_value);
+	mutex_unlock(&ai_policy_lock);
+	return rc;
 }
 EXPORT_SYMBOL_GPL(ai_policy_rollback_all);
 

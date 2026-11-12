@@ -1864,9 +1864,10 @@ def macro_tools():
             ["ip"]),
         tool_macro(
             "process_quarantine", RISK_W2,
-            "可疑进程隔离三连：sched.nice=19 → proc.freeze=1 → 读 "
-            "/proc/<pid>/status 验证 State=F。比 kill 温和，可逆"
-            "（proc.freeze=0 解冻）。W2：逐次确认。",
+            "可疑进程隔离（K2 原子批）：sched.nice=19 + proc.freeze=1 "
+            "单事务下发（AI_CMD_ACT_BATCH，一个 decision_id，任一项"
+            "失败整体回滚）→ 读 /proc/<pid>/status 验证 State=F。比 "
+            "kill 温和，可逆（proc.freeze=0 解冻）。W2：逐次确认。",
             {"pid": {"type": "integer", "description": "目标 pid（>1）",
                      "minimum": 2, "maximum": 4194304}},
             ["pid"]),

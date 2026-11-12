@@ -206,6 +206,46 @@ int ai_policy_safety_snapshot_lookup(u64 decision_id, s64 *pre_values,
 }
 EXPORT_SYMBOL_GPL(ai_policy_safety_snapshot_lookup);
 
+/* K2a D3：apply 后回填 post（pre/post 审计承载）。spin 锁内找槽回填；
+ * 槽序=子项序号（批量逐项 save 后逐项 post）。 */
+int ai_policy_safety_snapshot_post(u64 decision_id, u32 param_index,
+				   s64 post_value)
+{
+	unsigned long flags;
+	struct ai_safety_snapshot *s = NULL;
+	unsigned int i;
+	u8 k;
+
+	if (!decision_id)
+		return AI_ERR_INVALID_ARG;
+
+	spin_lock_irqsave(&ai_safety_lock, flags);
+	for (i = 0; i < ai_safety_snap_count; i++) {
+		struct ai_safety_snapshot *c =
+			ai_safety_slot(ai_safety_snap_head - ai_safety_snap_count
+				       + i);
+
+		if (c->decision_id == decision_id) {
+			s = c;
+			break;
+		}
+	}
+	if (!s) {
+		spin_unlock_irqrestore(&ai_safety_lock, flags);
+		return AI_ERR_NOT_FOUND;
+	}
+	for (k = 0; k < s->n; k++) {
+		if (s->params[k].param_index == param_index) {
+			s->params[k].post_value = (u64)post_value;
+			spin_unlock_irqrestore(&ai_safety_lock, flags);
+			return AI_OK;
+		}
+	}
+	spin_unlock_irqrestore(&ai_safety_lock, flags);
+	return AI_ERR_NOT_FOUND;
+}
+EXPORT_SYMBOL_GPL(ai_policy_safety_snapshot_post);
+
 int ai_policy_safety_rollback_decision(u64 decision_id,
 				       ai_safety_restore_t restore)
 {

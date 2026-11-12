@@ -332,7 +332,7 @@ test-e2e: all
 	cd .. && python3 tests/test_clarify_e2e.py --agent-dir .
 
 clean:
-	rm -f $(TESTS) test_sched_live netlink_probe
+	rm -f $(TESTS) test_sched_live netlink_probe test_netlink_batch
 
 .PHONY: all test test-e2e clean
 
@@ -350,10 +350,11 @@ test_tls_srv: test_tls_srv.c tls_test_certs.h
 # W78：宏工具单测（纯函数+R 件真跑；W 件的 executor 依赖以桩满足链接）
 test_macros: test_macros.c ../tools/macro_tools.c \
 		../runtime/netlink/ai_streams.c ../runtime/netlink/ai_netlink_client.c \
-		../runtime/ai_types.c
+		../runtime/ai_types.c ../trace/ai_trace.c
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_macros.c \
 		../tools/macro_tools.c ../runtime/netlink/ai_streams.c \
-		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c \
+		../trace/ai_trace.c
 
 # W78 agent-E：P2 网络执行面单测（纯函数 + 注入拒绝 + 无 root 诚实错误路径）
 test_net_admin: test_net_admin.c ../tools/net_admin.c \
@@ -457,6 +458,12 @@ test_sched_live: test_sched.c test_sandbox_stubs.c $(SB_EXEC_SRCS) \
 test_bpf: test_bpf.c test_sandbox_stubs.c $(SB_EXEC_SRCS)
 	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_bpf.c \
 		test_sandbox_stubs.c $(SB_EXEC_SRCS) -lpthread
+
+# K2b：ACT_BATCH 嵌套 NLA 编码单测（纯打包，L1 可跑）
+test_netlink_batch: test_netlink_batch.c ../runtime/netlink/ai_netlink_client.c \
+		../runtime/ai_types.c
+	$(CC) $(CFLAGS) -I.. -I../runtime -o $@ test_netlink_batch.c \
+		../runtime/netlink/ai_netlink_client.c ../runtime/ai_types.c
 
 # W79：NETLINK_AI 逐层 errno 诊断（真客户端；手动目标）
 netlink_probe: netlink_probe.c ../runtime/netlink/ai_netlink_client.c \

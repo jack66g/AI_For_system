@@ -32,6 +32,7 @@
 #include <linux/init.h>
 #include <linux/uaccess.h>
 #include <linux/ktime.h>
+#include <linux/ctype.h>
 #include "ai_types.h"
 #include "ai_startup.h"
 #include "ai_runtime.h"
@@ -354,6 +355,68 @@ static ssize_t ai_rollback_store(struct kobject *kobj,
 }
 static struct kobj_attribute ai_rollback_attr =
 	__ATTR(rollback, 0200, NULL, ai_rollback_store);
+
+/* K2a（KERNEL-K2-DESIGN D5/D6）：批量事务 confirm（持久化确认——取消
+ * pending 自动回滚）与 blast_threshold（radius 阈值） */
+static ssize_t ai_policy_confirm_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	u64 id;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+
+	/* K2 收尾：容许尾随空白（sysfs 惯例 echo 带 LF）——
+	 * kstrtoull 全串消费拒尾缀；rollback store 同款先 trim */
+	while (count > 0 && isspace((unsigned char)buf[count - 1]))
+		count--;
+	if (count == 0 || count >= 32)
+		return -EINVAL;
+	{
+		char tmp[33];
+
+		memcpy(tmp, buf, count);
+		tmp[count] = 0;
+		if (kstrtoull(tmp, 0, &id) != 0)
+			return -EINVAL;
+	}
+	rc = ai_policy_batch_confirm(id);
+	if (rc)
+		return rc;
+	pr_info("AIKernel: policy batch %llu confirmed (auto-rollback cancelled)\n",
+		id);
+	return count;
+}
+static struct kobj_attribute ai_policy_confirm_attr =
+	__ATTR(confirm, 0200, NULL, ai_policy_confirm_store);
+
+static ssize_t ai_blast_threshold_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", ai_policy_blast_threshold_get());
+}
+
+static ssize_t ai_blast_threshold_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+	if (kstrtouint(buf, 0, &val) != 0)
+		return -EINVAL;
+	ai_policy_blast_threshold_set(val);	/* 0=关 */
+	return count;
+}
+static struct kobj_attribute ai_blast_threshold_attr =
+	__ATTR(blast_threshold, 0644, ai_blast_threshold_show,
+	       ai_blast_threshold_store);
 
 /* think：感知 → 决策 → 执行（决策闭环触发面，AI 外层程序用）
  * 格式：<event_id>,<domain>,<type>,<value>          （全局参数）
@@ -745,6 +808,13 @@ static int __init ai_sysfs_init(void)
 	if (rc)
 		goto err_kobj;
 	rc = sysfs_create_file(ai_policy_kobj, &ai_rollback_attr.attr);
+	if (rc)
+		goto err_kobj;
+	rc = sysfs_create_file(ai_policy_kobj, &ai_policy_confirm_attr.attr);
+	if (rc)
+		goto err_kobj;
+	rc = sysfs_create_file(ai_policy_kobj,
+			       &ai_blast_threshold_attr.attr);
 	if (rc)
 		goto err_kobj;
 	rc = sysfs_create_file(ai_policy_kobj, &ai_think_attr.attr);

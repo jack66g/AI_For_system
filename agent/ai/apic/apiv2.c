@@ -722,6 +722,520 @@ int api_do_sense(struct api_http_req *req, struct api_http_resp *resp,
 	return 0;
 }
 
+/* ---------------- /act ops 批量形态（K2 D9） ----------------
+ * 响应形态/键序/文案与 Python _do_act_batch 逐字节对齐（差分重放门）。
+ * auth 已由 api_do_act 完成（分流点在其后）。 */
+static void api_act_batch_put_op(aik_json *arr, const char *param,
+				long long value, long long pid)
+{
+	aik_json *o = dt_new_obj();
+
+	dt_put_str(o, "param", param);
+	dt_put_int(o, "value", value);
+	if (pid > 0)
+		dt_put_int(o, "pid", pid);
+	else
+		dt_put_null(o, "pid");
+	dt_arr_push_copy(arr, o);
+	aik_json_free(o);
+}
+
+/* 读 blast_threshold sysfs；读不到返回 have=0（响应诚实省略键） */
+static long long api_read_blast_threshold(int *have)
+{
+	char *text = api_read_file(API_BLAST_THRESHOLD_SYSFS, NULL, NULL);
+	long long v;
+	char *end;
+
+	*have = 0;
+	if (!text)
+		return 0;
+	errno = 0;
+	v = strtoll(text, &end, 10);
+	free(text);
+	if (errno != 0 || end == text)
+		return 0;
+	while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
+		end++;
+	if (*end != '\0')
+		return 0;
+	*have = 1;
+	return v;
+}
+
+static int api_do_act_batch(struct api_http_req *req,
+			    struct api_http_resp *resp,
+			    aik_json *body_json)
+{
+	const aik_json *opsv, *rollbackv, *tokenv, *confirmv;
+	aik_json *out;
+	long long auto_rollback_ms = 0, confirm_token = 0;
+	int have_rollback = 1, have_token = 1, confirm;
+	size_t count = 0, nops = 0, i;
+	aik_json *arr = NULL;
+	struct api_batch_op ops[AI_BATCH_MAX_OPS];
+	char vmsg[256];
+	char (*opnames)[AI_NL_ACT_PARAM_LEN];
+	long long *pre_vals = NULL;
+	aik_json *ops_echo = NULL;
+
+	(void)req;
+	vmsg[0] = '\0';
+	if (dt_get(body_json, "param") || dt_get(body_json, "value")) {
+		out = api_err_body(
+			"ops_exclusive",
+			"ops 与 param/value 互斥：批量走 ops，单参数走 "
+			"param/value");
+		api_resp_json(resp, 400, out);
+		aik_json_free(out);
+		return 0;
+	}
+	opsv = dt_get(body_json, "ops");
+	confirmv = dt_get(body_json, "confirm");
+	confirm = (confirmv &&
+		   aik_json_typeof(confirmv) == AIK_JSON_BOOL &&
+		   aik_json_bool(confirmv));
+	rollbackv = dt_get(body_json, "auto_rollback_ms");
+	if (!rollbackv) {
+		auto_rollback_ms = 0;	/* 缺省（与 Python get(,0) 同） */
+	} else if (aik_json_typeof(rollbackv) == AIK_JSON_STR) {
+		if (api_py_int0(aik_json_str(rollbackv),
+				&auto_rollback_ms) != 1)
+			have_rollback = 0;
+	} else if (aik_json_typeof(rollbackv) == AIK_JSON_INT) {
+		auto_rollback_ms = aik_json_int(rollbackv);
+	} else {
+		have_rollback = 0;	/* bool/num/null 等：Python 同拒 */
+	}
+	if (!have_rollback || auto_rollback_ms < 0 ||
+	    auto_rollback_ms > API_AUTO_ROLLBACK_MS_MAX) {
+		out = api_err_body(
+			"invalid_auto_rollback_ms",
+			"auto_rollback_ms 必须是整数 [0, 600000]");
+		api_resp_json(resp, 400, out);
+		aik_json_free(out);
+		return 0;
+	}
+	tokenv = dt_get(body_json, "confirm_token");
+	if (!tokenv) {
+		confirm_token = 0;
+	} else if (aik_json_typeof(tokenv) == AIK_JSON_STR) {
+		if (api_py_int0(aik_json_str(tokenv), &confirm_token) != 1)
+			have_token = 0;
+	} else if (aik_json_typeof(tokenv) == AIK_JSON_INT) {
+		confirm_token = aik_json_int(tokenv);
+	} else {
+		have_token = 0;
+	}
+	if (!have_token || confirm_token < 0) {
+		out = api_err_body(
+			"invalid_confirm_token",
+			"confirm_token 必须是非负整数");
+		api_resp_json(resp, 400, out);
+		aik_json_free(out);
+		return 0;
+	}
+
+	/* validate_act_ops（文案与 Python 逐字一致） */
+	if (!opsv || aik_json_typeof(opsv) != AIK_JSON_ARR) {
+		snprintf(vmsg, sizeof(vmsg), "ops 必须是数组（1-27 项）");
+		goto bad_ops;
+	}
+	nops = aik_json_count(opsv);
+	if (nops < 1 || nops > AI_BATCH_MAX_OPS) {
+		snprintf(vmsg, sizeof(vmsg), "ops 项数超出 [1, 27]");
+		goto bad_ops;
+	}
+	arr = read_control_params_json(&count);
+	memset(ops, 0, sizeof(ops));
+	for (i = 0; i < nops; i++) {
+		const aik_json *item = aik_json_at(opsv, i);
+		const aik_json *paramv2, *valuev2, *pidv2;
+		const char *ps;
+		char *t;
+		long long value_i = 0, pid_i = 0;
+		int have_value = 0, have_pid = 0;
+		const aik_json *pdef = NULL;
+		size_t k, plen;
+		char namebuf[128];
+
+		if (!item || aik_json_typeof(item) != AIK_JSON_OBJ) {
+			snprintf(vmsg, sizeof(vmsg),
+				 "ops 每项必须是对象 {\"param\": \"...\", "
+				 "\"value\": N}");
+			goto bad_ops;
+		}
+		paramv2 = dt_get(item, "param");
+		ps = aik_json_str(paramv2);
+		t = ps ? dt_strip(ps) : NULL;
+		if (!is_str(paramv2) || !t || !*t) {
+			free(t);
+			snprintf(vmsg, sizeof(vmsg),
+				 "ops 每项需 {\"param\": \"...\", "
+				 "\"value\": N}");
+			goto bad_ops;
+		}
+		snprintf(namebuf, sizeof(namebuf), "%s", t);
+		free(t);
+		for (k = 0; k < i; k++) {
+			if (strcmp(ops[k].param, namebuf) == 0) {
+				snprintf(vmsg, sizeof(vmsg),
+					 "ops 内 param 重复（%s）：同参双值"
+					 "歧义，拒收", namebuf);
+				goto bad_ops;
+			}
+		}
+		valuev2 = dt_get(item, "value");
+		if (valuev2 && aik_json_typeof(valuev2) == AIK_JSON_STR) {
+			if (api_py_int0(aik_json_str(valuev2), &value_i))
+				have_value = 1;
+		} else if (valuev2 &&
+			   aik_json_typeof(valuev2) == AIK_JSON_INT) {
+			value_i = aik_json_int(valuev2);
+			have_value = 1;
+		}
+		pidv2 = dt_get(item, "pid");
+		if (pidv2 && aik_json_typeof(pidv2) == AIK_JSON_STR) {
+			if (api_py_int(aik_json_str(pidv2), &pid_i))
+				have_pid = 1;
+		} else if (pidv2 && aik_json_typeof(pidv2) == AIK_JSON_INT) {
+			pid_i = aik_json_int(pidv2);
+			have_pid = 1;
+		}
+		for (k = 0; k < count; k++) {
+			const aik_json *p = aik_json_at(arr, k);
+
+			if (strcmp(aik_json_str(dt_get(p, "name")),
+				   namebuf) == 0) {
+				pdef = p;
+				break;
+			}
+		}
+		if (!pdef) {
+			snprintf(vmsg, sizeof(vmsg),
+				 "unknown param（范围限 /proc/ai/control "
+				 "27 参数，不开放 exec）");
+			goto bad_ops_404;
+		}
+		if (!have_value ||
+		    (valuev2 && aik_json_typeof(valuev2) != AIK_JSON_STR &&
+		     aik_json_typeof(valuev2) != AIK_JSON_INT)) {
+			snprintf(vmsg, sizeof(vmsg), "value 必须是整数");
+			goto bad_ops;
+		}
+		if (value_i < aik_json_int(dt_get(pdef, "min")) ||
+		    value_i > aik_json_int(dt_get(pdef, "max"))) {
+			snprintf(vmsg, sizeof(vmsg),
+				 "value 超出 [%lld, %lld]",
+				 aik_json_int(dt_get(pdef, "min")),
+				 aik_json_int(dt_get(pdef, "max")));
+			goto bad_ops;
+		}
+		if (aik_json_bool(dt_get(pdef, "task_scoped")) &&
+		    (!have_pid || pid_i <= 0)) {
+			snprintf(vmsg, sizeof(vmsg),
+				 "task 作用域参数需带正整数 pid"
+				 "（data[0]=pid）");
+			goto bad_ops;
+		}
+		plen = strlen(namebuf);
+		if (plen >= AI_NL_ACT_PARAM_LEN)
+			plen = AI_NL_ACT_PARAM_LEN - 1;
+		memcpy(ops[i].param, namebuf, plen);
+		ops[i].value = value_i;
+		ops[i].pid = have_pid ? pid_i : 0;
+	}
+	/* ---- 校验通过：norm 完成 ---- */
+	ops_echo = dt_new_arr();
+	pre_vals = malloc(sizeof(long long) * nops);
+	opnames = malloc((size_t)AI_NL_ACT_PARAM_LEN * nops);
+	if (!pre_vals || !opnames || !ops_echo)
+		goto oom;
+	for (i = 0; i < nops; i++) {
+		long long pre = 0;
+		size_t k;
+
+		memcpy(opnames[i], ops[i].param, AI_NL_ACT_PARAM_LEN);
+		api_act_batch_put_op(ops_echo, ops[i].param, ops[i].value,
+				     ops[i].pid);
+		for (k = 0; k < count; k++) {
+			const aik_json *p = aik_json_at(arr, k);
+
+			if (strcmp(aik_json_str(dt_get(p, "name")),
+				   ops[i].param) == 0) {
+				pre = aik_json_int(dt_get(p, "current"));
+				break;
+			}
+		}
+		pre_vals[i] = pre;
+	}
+	aik_json_free(arr);
+	arr = NULL;
+
+	if (!confirm) {
+		aik_json *args = dt_new_obj();
+
+		out = dt_new_obj();
+		dt_put_str(out, "error", "need_confirm");
+		dt_put_str(out, "message",
+			   "受控写需显式确认：重发并带 \"confirm\": true");
+		dt_put_str(out, "code", "NEED_CONFIRM");
+		dt_put_copy(out, "ops", ops_echo);
+		dt_put_int(out, "auto_rollback_ms", auto_rollback_ms);
+		dt_put_copy(args, "ops", ops_echo);
+		dt_put_bool(args, "confirm", 0);
+		dt_put_int(args, "auto_rollback_ms", auto_rollback_ms);
+		api_audit_line("api_act", args, "NEED_CONFIRM");
+		aik_json_free(args);
+		api_resp_json(resp, 409, out);
+		aik_json_free(out);
+		goto out_free;
+	}
+
+	{
+		aik_json *ack = NULL;
+		char *nlerr = NULL;
+		aik_json *args = dt_new_obj();
+		long long ai_err;
+
+		dt_put_copy(args, "ops", ops_echo);
+		dt_put_bool(args, "confirm", 1);
+		dt_put_int(args, "auto_rollback_ms", auto_rollback_ms);
+		if (tokenv && confirm_token > 0)
+			dt_put_int(args, "confirm_token", confirm_token);
+		if (api_nl_act_batch(ops, nops, auto_rollback_ms,
+				     (unsigned long long)confirm_token,
+				     &ack, &nlerr) != 0 || !ack) {
+			char m[512];
+
+			snprintf(m, sizeof(m), "ERR: %s",
+				 nlerr ? nlerr : "?");
+			api_audit_line("api_act", args, m);
+			out = api_err_body("kernel_rejected",
+					   nlerr ? nlerr : "");
+			api_resp_json(resp, 502, out);
+			aik_json_free(out);
+			aik_json_free(args);
+			free(nlerr);
+			aik_json_free(ack);
+			goto out_free;
+		}
+		ai_err = aik_json_int(dt_get(ack, "ai_err"));
+		if (ai_err == -EAGAIN &&
+		    aik_json_int(dt_get(ack, "token")) != 0) {
+			char m[256];
+			char res[96];
+			int have_thr = 0;
+			long long thr;
+			long long radius = aik_json_int(dt_get(ack,
+							       "blast_radius"));
+
+			thr = api_read_blast_threshold(&have_thr);
+			snprintf(m, sizeof(m),
+				 "影响面（blast radius=%lld）超过阈值：确认后"
+				 "重发并带 \"confirm_token\"", radius);
+			snprintf(res, sizeof(res), "BLAST_RADIUS radius=%lld",
+				 radius);
+			api_audit_line("api_act", args, res);
+			out = dt_new_obj();
+			dt_put_str(out, "error", "BLAST_RADIUS");
+			dt_put_str(out, "message", m);
+			dt_put_int(out, "blast_radius", radius);
+			dt_put_int(out, "confirm_token",
+				   aik_json_int(dt_get(ack, "token")));
+			if (have_thr)
+				dt_put_int(out, "threshold", thr);
+			api_resp_json(resp, 428, out);
+			aik_json_free(out);
+			aik_json_free(args);
+			aik_json_free(ack);
+			goto out_free;
+		}
+		if (ai_err != 0) {
+			char m[128];
+			char res[96];
+
+			snprintf(m, sizeof(m),
+				 "内核 ai_err=%lld（批量事务失败，未提交）",
+				 ai_err);
+			snprintf(res, sizeof(res), "ERR: ai_err=%lld",
+				 ai_err);
+			api_audit_line("api_act", args, res);
+			out = api_err_body("kernel_rejected", m);
+			dt_put_copy(out, "executed", dt_get(ack, "executed"));
+			dt_put_int(out, "first_fail",
+				   aik_json_int(dt_get(ack, "first_fail")));
+			dt_put_int(out, "decision_id",
+				   aik_json_int(dt_get(ack, "decision_id")));
+			api_resp_json(resp, 502, out);
+			aik_json_free(out);
+			aik_json_free(args);
+			aik_json_free(ack);
+			goto out_free;
+		}
+		if (aik_json_int(dt_get(ack, "executed")) == 0) {
+			api_audit_line("api_act", args, "NOT_APPLIED");
+			out = api_err_body(
+				"not_applied",
+				"策略未命中（0 条执行）：参数未注册或被安全"
+				"策略过滤");
+			dt_put_int(out, "executed", 0);
+			dt_put_int(out, "hit", 0);
+			dt_put_int(out, "decision_id",
+				   aik_json_int(dt_get(ack, "decision_id")));
+			api_resp_json(resp, 409, out);
+			aik_json_free(out);
+			aik_json_free(args);
+			aik_json_free(ack);
+			goto out_free;
+		}
+		/* 成功：重读 control 聚合 items（pre=校验时快照，
+		 * post=回读——与 Python 同口径） */
+		{
+			size_t count2 = 0;
+			aik_json *arr2 = read_control_params_json(&count2);
+			aik_json *items = dt_new_arr();
+			aik_json *after_arr = dt_new_arr();
+			char trace_id[64];
+			unsigned long long thi, tlo, did;
+
+			thi = (unsigned long long)aik_json_int(
+				dt_get(ack, "trace_hi"));
+			tlo = (unsigned long long)aik_json_int(
+				dt_get(ack, "trace_lo"));
+			did = (unsigned long long)aik_json_int(
+				dt_get(ack, "decision_id"));
+			snprintf(trace_id, sizeof(trace_id),
+				 "0x%016llx:0x%016llx", thi, tlo);
+			for (i = 0; i < nops; i++) {
+				const aik_json *after = NULL;
+				aik_json *it = dt_new_obj();
+				int have_after = 0;
+				long long post = 0;
+				size_t k;
+
+				for (k = 0; k < count2; k++) {
+					const aik_json *p = aik_json_at(arr2, k);
+
+					if (strcmp(aik_json_str(
+							dt_get(p, "name")),
+						   opnames[i]) == 0) {
+						after = dt_get(p, "current");
+						post = aik_json_int(after);
+						have_after = 1;
+						break;
+					}
+				}
+				dt_put_str(it, "param", opnames[i]);
+				dt_put_int(it, "pre", pre_vals[i]);
+				if (have_after) {
+					dt_put_int(it, "post", post);
+					dt_put_bool(it, "clamped",
+						    post != ops[i].value);
+				}
+				dt_arr_push_copy(items, it);
+				aik_json_free(it);
+				if (have_after)
+					dt_arr_push_int(after_arr, post);
+				else {
+					aik_json *nv = dt_new_null();
+
+					dt_arr_push_copy(after_arr, nv);
+					aik_json_free(nv);
+				}
+			}
+			dt_put_copy(args, "current_after", after_arr);
+			api_audit_line("api_act", args, "OK");
+			out = dt_new_obj();
+			dt_put_bool(out, "ok", 1);
+			dt_put_int(out, "decision_id", (long long)did);
+			dt_put_str(out, "trace_id", trace_id);
+			dt_put_copy(out, "executed", dt_get(ack, "executed"));
+			dt_put_copy(out, "items", items);
+			dt_put_int(out, "first_fail",
+				   aik_json_int(dt_get(ack, "first_fail")));
+			dt_put_bool(out, "rolled_back", 0);
+			dt_put_int(out, "blast_radius",
+				   aik_json_int(dt_get(ack,
+						       "blast_radius")));
+			api_resp_json(resp, 200, out);
+			aik_json_free(out);
+			aik_json_free(items);
+			aik_json_free(after_arr);
+			aik_json_free(arr2);
+		}
+		aik_json_free(args);
+		aik_json_free(ack);
+	}
+out_free:
+	aik_json_free(ops_echo);
+	free(pre_vals);
+	free(opnames);
+	aik_json_free(arr);
+	return 0;
+oom:
+	aik_json_free(ops_echo);
+	free(pre_vals);
+	free(opnames);
+	aik_json_free(arr);
+	out = api_err_body("kernel_rejected", "内部错误：内存不足");
+	api_resp_json(resp, 502, out);
+	aik_json_free(out);
+	return 0;
+bad_ops_404:
+	out = api_err_body("unknown_param", vmsg);
+	dt_put_str(out, "allowed", "GET /params");
+	api_resp_json(resp, 404, out);
+	aik_json_free(out);
+	aik_json_free(arr);
+	return 0;
+bad_ops:
+	out = api_err_body("invalid_ops", vmsg);
+	/* 与 Python 同形：首个可解析 param 的 min/max 附带（over-27 等早退
+	 * 形态此处补读 control 表——Python 侧校验前已读，同源同值） */
+	if (!arr)
+		arr = read_control_params_json(&count);
+	if (opsv && aik_json_typeof(opsv) == AIK_JSON_ARR) {
+		size_t j2;
+
+		for (j2 = 0; j2 < aik_json_count(opsv); j2++) {
+			const aik_json *item = aik_json_at(opsv, j2);
+			const aik_json *pv;
+			const aik_json *pdef = NULL;
+			size_t k;
+			char nb[128];
+
+			if (!item || aik_json_typeof(item) != AIK_JSON_OBJ)
+				continue;
+			pv = dt_get(item, "param");
+			if (!is_str(pv))
+				continue;
+			snprintf(nb, sizeof(nb), "%s", aik_json_str(pv));
+			for (k = 0; k < count; k++) {
+				const aik_json *p = aik_json_at(arr, k);
+
+				if (strcmp(aik_json_str(dt_get(p, "name")),
+					   nb) == 0) {
+					pdef = p;
+					break;
+				}
+			}
+			if (pdef) {
+				dt_put_str(out, "param", nb);
+				dt_put_int(out, "min",
+					   aik_json_int(dt_get(pdef, "min")));
+				dt_put_int(out, "max",
+					   aik_json_int(dt_get(pdef, "max")));
+				break;
+			}
+		}
+	}
+	api_resp_json(resp, 400, out);
+	aik_json_free(out);
+	aik_json_free(arr);
+	return 0;
+}
+
 /* ---------------- /act ---------------- */
 int api_do_act(struct api_http_req *req, struct api_http_resp *resp)
 {
@@ -798,6 +1312,18 @@ int api_do_act(struct api_http_req *req, struct api_http_resp *resp)
 	}
 	free(raw);
 	raw = NULL;
+	{
+		/* K2：body 含 ops 键 → 批量形态（Python 端 "ops" in req 同形
+		 * 分流；单 param 旧路径零字节不动） */
+		const aik_json *opsv = dt_get(body_json, "ops");
+
+		if (opsv) {
+			int r = api_do_act_batch(req, resp, body_json);
+
+			aik_json_free(body_json);
+			return r;
+		}
+	}
 	paramv = dt_get(body_json, "param");
 	{
 		const char *ps = aik_json_str(paramv);

@@ -13,6 +13,16 @@
  *         等元数据（需 CAP_SYS_ADMIN，交互确认）。k: param=<参数名>（
  *         必填）、trace_id=0x<hex>:0x<hex>（键名 trace/trace_id 等价）、
  *         intent= parent= agent= expected= ver= trig_evid=
+ *   netlink act2batch <param=value[:pid] ...> [k=v ...]
+ *       - AI_CMD_ACT_BATCH（K2 D1/D9）：批量事务（嵌套 nlattr，一个
+ *         decision_id，任一项失败整体回滚）。元组 param=value[:pid]
+ *         （1-27 个，重复 param 拒收）；k: rollback_ms= trace_id=
+ *         intent= agent=（batch 无 expected）。需 CAP_SYS_ADMIN，
+ *         交互确认；blast radius 超阈内核拒（回显 token——重试带
+ *         confirm_token 走 HTTP /act ops）
+ *   netlink confirm <decision_id>
+ *       - 写 /sys/kernel/ai/policy/confirm（K2 D5：取消 pending 自动
+ *         回滚；已回滚返回 ENOENT）
  *   netlink reg
  *       - AI_CMD_REG：登记本进程 portid（需 CAP_SYS_ADMIN，内核幂等去重）
  *
@@ -21,9 +31,11 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ai_shell.h"
 #include "ai_commands.h"
@@ -58,6 +70,14 @@ static void netlink_usage(void)
            "参数名>(必填) trace_id=0x<hex>:0x<hex>\n"
            "                                                  "
            "intent= parent= agent= expected= ver= trig_evid=\n");
+    printf("  netlink act2batch <param=value[:pid] ...> [k=v ...]\n");
+    printf("                                                  批量事务"
+           "（K2：一个 decision_id，失败整体回滚；需 CAP_SYS_ADMIN）\n");
+    printf("                                                  元组: "
+           "param=value[:pid]（1-27 个）；k: rollback_ms= trace_id="
+           "intent= agent=\n");
+    printf("  netlink confirm <decision_id>                   确认决策"
+           "（取消 pending 自动回滚；写 /sys/kernel/ai/policy/confirm）\n");
     printf("%s", tr(TR_NL_HELP_REG));
     printf("\n");
     printf("domain: 0=general 1=sched 2=mm 3=io 4=net 5=security 6=power\n");
@@ -609,6 +629,268 @@ static int netlink_act2_cmd(int argc, char **argv)
     return rc;
 }
 
+/*
+ * netlink act2batch <param=value[:pid] ...> [k=v ...]（K2 D9）
+ * 批量事务：AI_CMD_ACT_BATCH 嵌套 nlattr，一个 decision_id；任一项
+ * 失败整体回滚（修「step2 失败不撤 step1」类痛点）。k 集合无
+ * expected（batch 无单值预期语义，设计册明示不加）。
+ */
+static int netlink_act2batch_cmd(int argc, char **argv)
+{
+	struct ai_nl_client cli;
+	struct ai_nl_batch_op ops[AI_BATCH_MAX_OPS];
+	struct ai_nl_batch_opts opts;
+	struct ai_nl_batch_ack ack;
+	size_t nops = 0;
+	int kern_err = 0;
+	int rc, i;
+	char confirm[16];
+
+	memset(&opts, 0, sizeof(opts));
+	opts.agent = AI_AGENT_OCC_CLI;   /* 手工 occ 命令（沿 act2 先例） */
+
+	if (argc < 1) {
+		netlink_usage();
+		return AI_ERR_INVALID_ARG;
+	}
+	for (i = 0; i < argc; i++) {
+		const char *arg = argv[i];
+		const char *eq = strchr(arg, '=');
+
+		if (!eq || eq == arg || !eq[1]) {
+			printf("Invalid tuple/key: %s (元组 param=value[:pid]"
+			       "；k: rollback_ms= trace_id= intent= agent=)\n",
+			       arg);
+			netlink_usage();
+			return AI_ERR_INVALID_ARG;
+		}
+		if (strncmp(arg, "rollback_ms=", 12) == 0) {
+			__u32 v;
+
+			rc = parse_u32_arg(eq + 1, 600000, &v);
+			if (rc != AI_OK) {
+				printf("Invalid rollback_ms: %s (0~600000)\n",
+				       eq + 1);
+				return rc;
+			}
+			opts.auto_rollback_ms = v;
+			continue;
+		}
+		if (strncmp(arg, "trace_id=", 9) == 0 ||
+		    strncmp(arg, "trace=", 6) == 0) {
+			rc = parse_trace_arg(eq + 1, &opts.trace_hi,
+					     &opts.trace_lo);
+			if (rc != AI_OK) {
+				printf("Invalid trace_id: %s"
+				       "（0x<hex>:0x<hex>）\n", eq + 1);
+				return rc;
+			}
+			continue;
+		}
+		if (strncmp(arg, "intent=", 7) == 0) {
+			long long v64;
+
+			rc = parse_s64_arg(eq + 1, &v64);
+			if (rc != AI_OK) {
+				printf("Invalid intent: %s\n", eq + 1);
+				return rc;
+			}
+			opts.intent_id = (__u64)v64;
+			continue;
+		}
+		if (strncmp(arg, "agent=", 6) == 0) {
+			__u32 v;
+
+			rc = parse_u32_arg(eq + 1, 255, &v);
+			if (rc != AI_OK) {
+				printf("Invalid agent: %s\n", eq + 1);
+				return rc;
+			}
+			opts.agent = v;
+			continue;
+		}
+		{
+			/* 元组：param=value[:pid]（param 不含 '='，key 不在
+			 * k 集合即元组——与 act2 的 k=v 约定同界） */
+			char buf[128];
+			char *colon;
+			size_t plen = (size_t)(eq - arg);
+			long long v64;
+			char *end;
+
+			if (plen == 0 || plen >= sizeof(ops[0].param)) {
+				printf("Invalid param (too long): %.*s\n",
+				       (int)plen, arg);
+				return AI_ERR_INVALID_ARG;
+			}
+			if (nops >= AI_BATCH_MAX_OPS) {
+				printf("Too many ops (max %d)\n",
+				       AI_BATCH_MAX_OPS);
+				return AI_ERR_INVALID_ARG;
+			}
+			for (size_t k = 0; k < nops; k++)
+				if (strlen(ops[k].param) == plen &&
+				    strncmp(ops[k].param, arg, plen) == 0) {
+					printf("Duplicate param: %.*s"
+					       "（同参双值歧义，拒收）\n",
+					       (int)plen, arg);
+					return AI_ERR_INVALID_ARG;
+				}
+			snprintf(buf, sizeof(buf), "%s", eq + 1);
+			colon = strrchr(buf, ':');
+			ops[nops].pid = 0;
+			if (colon) {
+				unsigned long long pv;
+
+				*colon = '\0';
+				errno = 0;
+				pv = strtoull(colon + 1, &end, 0);
+				if (errno != 0 || end == colon + 1 ||
+				    *end != '\0' || pv == 0 || pv > 0xFFFFFFFFull) {
+					printf("Invalid pid: %s（正整数）\n",
+					       colon + 1);
+					return AI_ERR_INVALID_ARG;
+				}
+				ops[nops].pid = (__u32)pv;
+			}
+			errno = 0;
+			v64 = strtoll(buf, &end, 0);
+			if (errno != 0 || end == buf || *end != '\0') {
+				printf("Invalid value: %s\n", buf);
+				return AI_ERR_INVALID_ARG;
+			}
+			memcpy(ops[nops].param, arg, plen);
+			ops[nops].param[plen] = '\0';
+			ops[nops].value = (__u64)v64;
+			ops[nops].reserved = 0;
+			nops++;
+		}
+	}
+	if (nops == 0) {
+		printf("act2batch 需要至少 1 个元组 param=value[:pid]\n");
+		netlink_usage();
+		return AI_ERR_INVALID_ARG;
+	}
+
+	/* 与 act 同闸：直接影响系统行为且需 CAP_SYS_ADMIN，先确认再下发 */
+	printf("%s", tr(TR_NL_ACT_CONFIRM1));
+	printf("  批量事务 ops=%zu  rollback_ms=%u\n", nops,
+	       opts.auto_rollback_ms);
+	for (i = 0; (size_t)i < nops; i++) {
+		if (ops[i].pid)
+			printf("    [%d] %s=%llu:pid=%u\n", i, ops[i].param,
+			       (unsigned long long)ops[i].value, ops[i].pid);
+		else
+			printf("    [%d] %s=%llu\n", i, ops[i].param,
+			       (unsigned long long)ops[i].value);
+	}
+	printf("%s", tr(TR_NL_ACT_CONFIRM3));
+	fflush(stdout);
+	if (!fgets(confirm, sizeof(confirm), stdin) ||
+	    (confirm[0] != 'y' && confirm[0] != 'Y')) {
+		printf("%s", tr(TR_NL_CANCELLED));
+		return AI_OK;
+	}
+
+	rc = ai_nl_client_open(&cli);
+	if (rc != AI_OK) {
+		netlink_print_open_fail(rc);
+		return rc;
+	}
+
+	rc = ai_nl_send_act_batch(&cli, ops, nops, &opts, &ack, &kern_err);
+	if (rc != AI_OK) {
+		netlink_print_error(rc, kern_err);
+	} else if (ack.ai_err == -EAGAIN && ack.token != 0) {
+		printf("\n=== NETLINK_AI ACT_BATCH（blast radius 拒） ===\n\n");
+		printf("Blast radius:  %u（超阈）\n", ack.blast_radius);
+		printf("Confirm token: %llu\n",
+		       (unsigned long long)ack.token);
+		printf("提示: 确认影响面后重试——HTTP POST /act ops 请求带 "
+		       "\"confirm_token\": %llu 放行\n",
+		       (unsigned long long)ack.token);
+		rc = AI_ERR_API;
+	} else {
+		printf("\n=== NETLINK_AI ACT_BATCH ===\n\n");
+		printf("Ops:           %zu\n", nops);
+		printf("Rollback_ms:   %u\n", opts.auto_rollback_ms);
+		printf("Executed:      %u\n", (unsigned)ack.executed);
+		printf("Hit:           %s\n", ack.hit ? "yes" : "no");
+		printf("Decision id:   %llu\n",
+		       (unsigned long long)ack.decision_id);
+		printf("trace_id:      0x%016llx:0x%016llx%s\n",
+		       (unsigned long long)ack.trace_hi,
+		       (unsigned long long)ack.trace_lo,
+		       (ack.trace_hi || ack.trace_lo) ? "" : " (kernel mint)");
+		printf("First fail:    %d%s\n", ack.first_fail_idx,
+		       ack.first_fail_idx < 0 ? "（无）" : "");
+		printf("Blast radius:  %u\n", ack.blast_radius);
+		if (ack.ai_err != 0)
+			printf(tr(TR_NL_ACK_AIERR), ack.ai_err);
+		if (ack.executed == 0 && ack.ai_err == 0)
+			printf("%s", tr(TR_NL_ACK_NO_POLICY));
+		printf("\n");
+	}
+
+	ai_nl_client_close(&cli);
+	return rc;
+}
+
+/*
+ * netlink confirm <decision_id>（K2 D5）：写
+ * /sys/kernel/ai/policy/confirm（0200）。内核端 kstrtoull(buf, 0)
+ * 不吃尾随 \n——写纯十进制数字。已回滚=-ENOENT（窗口已过）。
+ */
+#define AI_POLICY_CONFIRM_SYSFS "/sys/kernel/ai/policy/confirm"
+
+static int netlink_confirm_cmd(int argc, char **argv)
+{
+	char idbuf[32];
+	unsigned long long id;
+	char *end;
+	int fd;
+	ssize_t w;
+	int n;
+
+	if (argc != 1) {
+		netlink_usage();
+		return AI_ERR_INVALID_ARG;
+	}
+	errno = 0;
+	id = strtoull(argv[0], &end, 0);
+	if (errno != 0 || end == argv[0] || *end != '\0') {
+		printf("Invalid decision_id: %s（十进制/0x 十六进制）\n",
+		       argv[0]);
+		return AI_ERR_INVALID_ARG;
+	}
+	n = snprintf(idbuf, sizeof(idbuf), "%llu", id);
+	if (n < 0 || (size_t)n >= sizeof(idbuf))
+		return AI_ERR_INVALID_ARG;
+	fd = open(AI_POLICY_CONFIRM_SYSFS, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		if (errno == ENOENT)
+			printf("confirm 节点不存在（/sys/kernel/ai/policy/"
+			       "confirm）——未加载 K2 内核或节点未注册\n");
+		else
+			printf("open %s: %s（需 root/CAP_SYS_ADMIN）\n",
+			       AI_POLICY_CONFIRM_SYSFS, strerror(errno));
+		return AI_ERR_API;
+	}
+	w = write(fd, idbuf, (size_t)n);
+	if (w != n) {
+		if (errno == ENOENT)
+			printf("决策 %llu 已回滚（confirm 窗口已过）\n", id);
+		else
+			printf("write %s: %s\n", AI_POLICY_CONFIRM_SYSFS,
+			       strerror(errno));
+		close(fd);
+		return AI_ERR_API;
+	}
+	close(fd);
+	printf("OK: 决策 %llu 已确认（pending 自动回滚已取消）\n", id);
+	return AI_OK;
+}
+
 /* netlink reg */
 static int netlink_reg_cmd(void)
 {
@@ -655,6 +937,10 @@ int cmd_netlink(void *shell_ptr, int argc, char **argv)
         return netlink_act_cmd(argc - 2, argv + 2);
     if (strcmp(argv[1], "act2") == 0)
         return netlink_act2_cmd(argc - 2, argv + 2);
+    if (strcmp(argv[1], "act2batch") == 0)
+        return netlink_act2batch_cmd(argc - 2, argv + 2);
+    if (strcmp(argv[1], "confirm") == 0)
+        return netlink_confirm_cmd(argc - 2, argv + 2);
     if (strcmp(argv[1], "reg") == 0) {
         if (argc > 2) {
             printf("%s", tr(TR_NL_REG_NOARGS));

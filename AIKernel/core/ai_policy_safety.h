@@ -23,7 +23,7 @@
 #define AI_SAFETY_DEFAULT_ENABLE      1     /* 全局开关默认开启 */
 #define AI_SAFETY_DEFAULT_MAX_IMPACT  50    /* 最大影响幅度默认 50% */
 #define AI_SAFETY_SNAPSHOT_MAX        64    /* 决策快照环容量 */
-#define AI_SAFETY_SNAPSHOT_PARAMS     8     /* 单决策最多快照参数数 */
+#define AI_SAFETY_SNAPSHOT_PARAMS     32    /* K2a D3：单决策快照参数数（8→32，27 上限+裕量） */
 
 /* ---- 决策快照 ---- */
 
@@ -35,8 +35,15 @@ struct ai_safety_snapshot {
 		u32 param_index;         /* ai_control 参数表索引 */
 		s32 pid;                 /* 0=全局参数；>0=task 作用域 */
 		s64 pre_value;           /* 决策前值 */
+		u64 post_value;		/* K2a D3：apply 后回填钳后值（0=未回填） */
 	} params[AI_SAFETY_SNAPSHOT_PARAMS];
 };
+
+/* K2a D3：扩容后尺寸钉死（24B 头自然对齐 + 32×24B 条目 = 792B；
+ * drift 即编译失败） */
+_Static_assert(sizeof(struct ai_safety_snapshot) ==
+		       24 + AI_SAFETY_SNAPSHOT_PARAMS * 24,
+		       "ai_safety_snapshot K2 32 参数布局漂移");
 
 /* ---- 安全边界接口（实现于 ai_policy_safety.c） ---- */
 
@@ -117,6 +124,19 @@ int ai_policy_safety_snapshot_lookup(u64 decision_id, s64 *pre_values,
 				     u8 *n_params);
 
 /**
+ * ai_policy_safety_snapshot_post() - 回填决策后参数值（K2a D3）
+ * @decision_id: 目标决策
+ * @param_index: ai_control 参数表索引（槽序=子项序号）
+ * @post_value: apply 后钳后值（0=未回填语义）
+ *
+ * Pass2 逐项 apply 后回填 post（审计承载：pre/post 齐）。槽序=子项
+ * 序号；恒等快路径项无快照 → NOT_FOUND（post 保持 0）。
+ * 返回 AI_OK 或 AI_ERR_NOT_FOUND（无该决策/该参数快照）。
+ */
+int ai_policy_safety_snapshot_post(u64 decision_id, u32 param_index,
+				   s64 post_value);
+
+/**
  * ai_policy_safety_rollback_decision() - 按决策 ID 回滚
  * @decision_id: 目标决策
  * @restore: 恢复回调（参数表提供，恢复 param_index 对应参数）
@@ -166,6 +186,11 @@ static inline int ai_policy_safety_snapshot_lookup(u64 id,
 						   s64 *pre_values, u8 *n_params)
 {
 	return AI_ERR_NOT_FOUND;
+}
+static inline int ai_policy_safety_snapshot_post(u64 id, u32 idx,
+						  s64 post)
+{
+	return AI_OK;
 }
 typedef int (*ai_safety_restore_t)(u32 param_index, s32 pid, s64 value);
 static inline int ai_policy_safety_rollback_decision(

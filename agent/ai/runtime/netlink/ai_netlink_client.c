@@ -451,6 +451,128 @@ int ai_nl_send_act2(struct ai_nl_client *cli,
     return AI_OK;
 }
 
+/* ---- AI_CMD_ACT_BATCH（K2 D1/D9：嵌套 nlattr；v1/ACT2 一字不动） ---- */
+
+int ai_nl_pack_act_batch(unsigned char *attrs, size_t cap,
+                         const struct ai_nl_batch_op *ops, size_t n,
+                         const struct ai_nl_batch_opts *opts,
+                         size_t *attr_len)
+{
+    unsigned char *p = attrs, *end = attrs + cap;
+    unsigned char inner[48];   /* 元组内层最坏 48B（28+12+8） */
+    unsigned char *q, *qend = inner + sizeof(inner);
+    __u32 u32v;
+    __u64 u64v;
+    size_t i, j, param_len, inner_len;
+
+    if (!attrs || !ops || !opts || !attr_len || n == 0 ||
+        n > AI_BATCH_MAX_OPS)
+        return AI_ERR_INVALID_ARG;
+    for (i = 0; i < n; i++) {
+        param_len = strnlen(ops[i].param, sizeof(ops[i].param));
+        if (param_len == 0 || param_len >= sizeof(ops[i].param))
+            return AI_ERR_INVALID_ARG;
+        if (ops[i].reserved != 0)
+            return AI_ERR_INVALID_ARG;
+        /* 重复 param 名拒收（-EINVAL 同义：防同参双值歧义，D1） */
+        for (j = 0; j < i; j++)
+            if (strcmp(ops[i].param, ops[j].param) == 0)
+                return AI_ERR_INVALID_ARG;
+    }
+
+    /* 每元组：内层 {PARAM, VALUE[, PID]} 编入 inner，再作为 OPS 嵌套
+     * attr（nla_type 置 NLA_F_NESTED）载荷追加——平铺 nla_parse 同型
+     * attr 互覆盖，重复元组必须嵌套（rows-a §3 实锚） */
+    for (i = 0; i < n; i++) {
+        param_len = strnlen(ops[i].param, sizeof(ops[i].param));
+        q = inner;
+        q = nla_append(q, qend, AI_DEC_ATTR_PARAM, ops[i].param,
+                       param_len + 1);
+        if (!q)
+            return AI_ERR_INVALID_ARG;
+        u64v = ops[i].value;
+        q = nla_append(q, qend, AI_DEC_ATTR_VALUE, &u64v, sizeof(u64v));
+        if (!q)
+            return AI_ERR_INVALID_ARG;
+        if (ops[i].pid != 0) {
+            u32v = ops[i].pid;
+            q = nla_append(q, qend, AI_DEC_ATTR_PID, &u32v, sizeof(u32v));
+            if (!q)
+                return AI_ERR_INVALID_ARG;
+        }
+        inner_len = (size_t)(q - inner);
+        p = nla_append(p, end, AI_BATCH_ATTR_OPS | NLA_F_NESTED,
+                       inner, inner_len);
+        if (!p)
+            return AI_ERR_INVALID_ARG;
+    }
+    /* 批级：AUTO_ROLLBACK_MS + CONFIRM_TOKEN + TRACE/INTENT/AGENT
+     * （复用 AI_DEC_ATTR_* 号；零=显式缺省，消息形状恒定） */
+    u32v = opts->auto_rollback_ms;
+    p = nla_append(p, end, AI_BATCH_ATTR_AUTO_ROLLBACK_MS, &u32v,
+                   sizeof(u32v));
+    u64v = opts->confirm_token;
+    p = nla_append(p, end, AI_BATCH_ATTR_CONFIRM_TOKEN, &u64v,
+                   sizeof(u64v));
+    u64v = opts->trace_hi;
+    p = nla_append(p, end, AI_DEC_ATTR_TRACE_HI, &u64v, sizeof(u64v));
+    u64v = opts->trace_lo;
+    p = nla_append(p, end, AI_DEC_ATTR_TRACE_LO, &u64v, sizeof(u64v));
+    u64v = opts->intent_id;
+    p = nla_append(p, end, AI_DEC_ATTR_INTENT, &u64v, sizeof(u64v));
+    u32v = opts->agent;
+    p = nla_append(p, end, AI_DEC_ATTR_AGENT, &u32v, sizeof(u32v));
+    if (!p)
+        return AI_ERR_INVALID_ARG;  /* 容量不足：编码防御（1468<1600） */
+
+    *attr_len = (size_t)(p - attrs);
+    return AI_OK;
+}
+
+int ai_nl_send_act_batch(struct ai_nl_client *cli,
+                         const struct ai_nl_batch_op *ops, size_t n,
+                         const struct ai_nl_batch_opts *opts,
+                         struct ai_nl_batch_ack *ack,
+                         int *kern_err)
+{
+    unsigned char reqbuf[NLMSG_HDRLEN + AI_BATCH_ATTRS_MAX];
+    unsigned char attrs[AI_BATCH_ATTRS_MAX];
+    const unsigned char *data;
+    const struct ai_nl_batch_ack *ack_rx;
+    const struct nlmsghdr *nlh = NULL;
+    size_t attr_len = 0, plen;
+    __u32 seq;
+    int rc;
+
+    if (!cli || cli->fd < 0 || !ack)
+        return AI_ERR_INVALID_ARG;
+
+    rc = ai_nl_pack_act_batch(attrs, sizeof(attrs), ops, n, opts, &attr_len);
+    if (rc != AI_OK)
+        return rc;
+
+    seq = cli->next_seq++;
+    ai_nl_build_req(reqbuf, AI_CMD_ACT_BATCH, attrs, attr_len, seq,
+                    cli->portid);
+
+    rc = ai_nl_send_req(cli, reqbuf, NLMSG_HDRLEN + attr_len);
+    if (rc != AI_OK)
+        return rc;
+
+    rc = ai_nl_recv_match(cli, (__u16)AI_CMD_ACT_BATCH, seq, &nlh, kern_err);
+    if (rc != AI_OK)
+        return rc;
+
+    plen = (size_t)nlh->nlmsg_len - NLMSG_HDRLEN;
+    if (plen < sizeof(struct ai_nl_batch_ack))
+        return AI_ERR_PARSE;
+
+    data = (const unsigned char *)NLMSG_DATA(nlh);
+    ack_rx = (const struct ai_nl_batch_ack *)data;
+    memcpy(ack, ack_rx, sizeof(*ack));
+    return AI_OK;
+}
+
 void ai_nl_trace_mint(__u64 *hi, __u64 *lo)
 {
     /* 进程级一次铸造（D9）：hi 恒非零且进程内恒定；lo 原子递增 */

@@ -545,6 +545,125 @@ static int ai_nl_act2(struct sk_buff *skb, const struct nlmsghdr *nlh)
 	return 0;
 }
 
+/* ---- AI_CMD_ACT_BATCH（K2：嵌套 nlattr 批量事务，KERNEL-K2-DESIGN
+ * §3/D1；AIKernel 首个嵌套面——严格轨+元组数上限+重复名拒三重防线） ---- */
+
+/*
+ * 批级 policy（严格 nla_parse）：OPS=NLA_NESTED（可重复——tb[] 只留
+ * 末项，元组遍历走下方 nla_for_each_attr 原始流）；表尺寸覆盖到
+ * AI_DEC_ATTR_AGENT(12)（复用号），NULL 项（含 VALUE/PID）= 严格轨拒收。
+ */
+static const struct nla_policy ai_nl_batch_policy[AI_DEC_ATTR_MAX + 1] = {
+	[AI_BATCH_ATTR_OPS]		= { .type = NLA_NESTED },
+	[AI_BATCH_ATTR_AUTO_ROLLBACK_MS]	= { .type = NLA_U32 },
+	[AI_BATCH_ATTR_CONFIRM_TOKEN]	= { .type = NLA_U64 },
+	/* 批级复用 AI_DEC_ATTR_*（8/9/10/12） */
+	[AI_DEC_ATTR_TRACE_HI]		= { .type = NLA_U64 },
+	[AI_DEC_ATTR_TRACE_LO]		= { .type = NLA_U64 },
+	[AI_DEC_ATTR_INTENT]		= { .type = NLA_U64 },
+	[AI_DEC_ATTR_AGENT]		= { .type = NLA_U32 },
+};
+
+/* 元组内严格表（nla_parse_nested_deprecated，overlays 同款先例） */
+static const struct nla_policy ai_nl_batch_tuple_policy[AI_DEC_ATTR_MAX + 1] = {
+	[AI_DEC_ATTR_PARAM]	= { .type = NLA_NUL_STRING,
+				   .len = AI_NL_ACT_PARAM_LEN - 1 },
+	[AI_DEC_ATTR_VALUE]	= { .type = NLA_U64 },
+	[AI_DEC_ATTR_PID]	= { .type = NLA_U32 },
+};
+
+int ai_nl_act_batch_parse(const struct nlattr *head, int rem,
+			  struct ai_nl_batch_req *req)
+{
+	struct nlattr *tb[AI_DEC_ATTR_MAX + 1];
+	struct nlattr *stream = (struct nlattr *)head;
+	struct nlattr *nla;
+	int err, rem2;
+
+	memset(req, 0, sizeof(*req));
+
+	/* 批级：严格轨（NL_VALIDATE_STRICT，K1 act2 同口径）——
+	 * 未知 attr / OPS 缺 NLA_F_NESTED / 定长属性长度违规全拒 */
+	err = nla_parse(tb, AI_DEC_ATTR_MAX, head, rem,
+			ai_nl_batch_policy, NULL);
+	if (err)
+		return err;
+
+	if (tb[AI_BATCH_ATTR_AUTO_ROLLBACK_MS])
+		req->opts.auto_rollback_ms =
+			nla_get_u32(tb[AI_BATCH_ATTR_AUTO_ROLLBACK_MS]);
+	if (tb[AI_BATCH_ATTR_CONFIRM_TOKEN])
+		req->opts.token =
+			nla_get_u64(tb[AI_BATCH_ATTR_CONFIRM_TOKEN]);
+	if (tb[AI_DEC_ATTR_TRACE_HI])
+		req->opts.trace_hi =
+			nla_get_u64(tb[AI_DEC_ATTR_TRACE_HI]);
+	if (tb[AI_DEC_ATTR_TRACE_LO])
+		req->opts.trace_lo =
+			nla_get_u64(tb[AI_DEC_ATTR_TRACE_LO]);
+	if (tb[AI_DEC_ATTR_INTENT])
+		req->opts.intent_id =
+			nla_get_u64(tb[AI_DEC_ATTR_INTENT]);
+	if (tb[AI_DEC_ATTR_AGENT])
+		req->opts.agent_id =
+			nla_get_u32(tb[AI_DEC_ATTR_AGENT]);
+
+	/* 元组：原始 attr 流逐个 OPS（可重复）→ 元组内 nested 解析 */
+	nla_for_each_attr(nla, stream, rem, rem2) {
+		struct nlattr *ttb[AI_DEC_ATTR_MAX + 1];
+
+		if (nla_type(nla) != AI_BATCH_ATTR_OPS)
+			continue;
+		if (req->n_ops >= AI_BATCH_MAX_OPS)
+			return -EINVAL;	/* 元组数 > 27 */
+		err = nla_parse_nested_deprecated(ttb, AI_DEC_ATTR_MAX,
+							  nla,
+							  ai_nl_batch_tuple_policy,
+							  NULL);
+		if (err)
+			return err;
+		if (!ttb[AI_DEC_ATTR_PARAM] || !ttb[AI_DEC_ATTR_VALUE])
+			return -EINVAL;	/* PARAM/VALUE 必备 */
+		req->ops[req->n_ops].param =
+			nla_data(ttb[AI_DEC_ATTR_PARAM]);
+		req->ops[req->n_ops].value =
+			nla_get_u64(ttb[AI_DEC_ATTR_VALUE]);
+		req->ops[req->n_ops].pid = ttb[AI_DEC_ATTR_PID] ?
+			nla_get_u32(ttb[AI_DEC_ATTR_PID]) : 0;
+		req->n_ops++;
+	}
+	if (!req->n_ops)
+		return -EINVAL;	/* 1 ≤ 元组数 */
+	return 0;
+}
+
+/*
+ * ACT_BATCH 处理器：与 ACT2 同闸（startup enabled + CAP_SYS_ADMIN）；
+ * 无 DOMAIN（param 全名自带域，Pass1 查表校验）。结果一律回 ack
+ * 单播（-EAGAIN 形态带 radius+token 供两段式重试；解析/权限错误
+ * 走 netlink 错误返回，不回 ack）。
+ */
+static int ai_nl_act_batch(struct sk_buff *skb, const struct nlmsghdr *nlh)
+{
+	struct ai_nl_batch_req req;
+	struct ai_nl_batch_ack ack;
+	int err;
+
+	if (!ai_startup_get_enabled())
+		return -EPERM;
+	if (!netlink_net_capable(skb, CAP_SYS_ADMIN))
+		return -EACCES;
+
+	err = ai_nl_act_batch_parse(nlmsg_attrdata(nlh, 0),
+				   nlmsg_attrlen(nlh, 0), &req);
+	if (err)
+		return err;
+
+	ai_policy_execute_batch(req.ops, req.n_ops, &req.opts, &ack);
+	ai_nl_reply(skb, AI_CMD_ACT_BATCH, &ack, sizeof(ack));
+	return 0;
+}
+
 /* ---- AI_CMD_REG ---- */
 
 static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
@@ -743,6 +862,8 @@ static int ai_netlink_handle(struct sk_buff *skb, struct nlmsghdr *nlh,
 		return ai_nl_act(skb, nlh);
 	case AI_CMD_ACT2:
 		return ai_nl_act2(skb, nlh);
+	case AI_CMD_ACT_BATCH:
+		return ai_nl_act_batch(skb, nlh);
 	case AI_CMD_REG:
 		return ai_nl_reg(skb, nlh);
 	default:

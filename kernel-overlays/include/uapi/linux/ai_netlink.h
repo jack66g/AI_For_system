@@ -115,6 +115,11 @@ enum {
 	AI_DEC_ATTR_PARENT,	/* u64：父决策 ID（0=无父） */
 	AI_DEC_ATTR_AGENT,	/* u32：发起方（enum ai_agent_id） */
 	AI_DEC_ATTR_EXPECTED,	/* s64：调用方预期 delta（0=未供给） */
+	/* K2a（KERNEL-K2-DESIGN §3/D1）：批量事务元组内新属性（续枚举尾，
+	 * 不动现有号）。仅 AI_CMD_ACT_BATCH 元组内合法——ACT2 严格 policy
+	 * 表中二者为 NULL 项=拒收，ACT2 行为不变（D12 追加式）。 */
+	AI_DEC_ATTR_VALUE,	/* u64：元组目标值（元组内必备） */
+	AI_DEC_ATTR_PID,	/* u32：task 作用域目标 pid（元组内可选，0=全局） */
 
 	__AI_DEC_ATTR_MAX,
 	AI_DEC_ATTR_MAX = __AI_DEC_ATTR_MAX - 1,
@@ -213,5 +218,43 @@ _Static_assert(sizeof(struct ai_nl_event) == 56,
 	       "ai_nl_event 布局漂移（as_streams 56B 定长契约）");
 _Static_assert(sizeof(struct ai_nl_event_tail) == 16,
 	       "ai_nl_event_tail 布局漂移");
+
+/* ---- ACT_BATCH 请求/应答（K2，KERNEL-K2-DESIGN §3/D1 追加段） ----
+ *
+ * AI_CMD_ACT_BATCH(21)：嵌套 nlattr 批量事务（两阶段，单 decision_id）。
+ * 载荷 = 批级 attr（TRACE_HI/LO、INTENT、AGENT 复用 AI_DEC_ATTR_* 8/9/10/12
+ * + AUTO_ROLLBACK_MS + CONFIRM_TOKEN）+ 可重复 AI_BATCH_ATTR_OPS 元组
+ * （NLA_F_NESTED，每元组内 {AI_DEC_ATTR_PARAM, VALUE(u64 必备),
+ * PID(u32 可选)}）；1≤元组数≤AI_BATCH_MAX_OPS，重复 param 名拒收。 */
+#define AI_CMD_ACT_BATCH	21		/* K2：批量事务（嵌套 nlattr） */
+#define AI_BATCH_MAX_OPS	27		/* 对齐 KTB 验收口径 */
+
+enum {
+	AI_BATCH_ATTR_OPS = 1,		/* NLA_F_NESTED 可重复：单参数元组 */
+	AI_BATCH_ATTR_AUTO_ROLLBACK_MS = 2,	/* u32；0=不 arm（缺省） */
+	AI_BATCH_ATTR_CONFIRM_TOKEN = 3,	/* u64；blast 拒后重试携带 */
+
+	__AI_BATCH_ATTR_MAX,
+	AI_BATCH_ATTR_MAX = __AI_BATCH_ATTR_MAX - 1,
+};
+
+/* ACT_BATCH 应答载荷：executed=成功子项数（失败全退时=失败前成功数）、
+ * first_fail_idx=-1 无失败；blast_radius=受影响任务数粗估（D6），
+ * token 未触发=0；ai_err=-EAGAIN 时 radius+token 供两段式重试。 */
+struct ai_nl_batch_ack {		/* _Static_assert 钉布局（下行） */
+	__u8 executed;			/* 成功子项数（钳 U8_MAX） */
+	__u8 hit;			/* 1=整批成功 */
+	__s32 ai_err;			/* 0 / -EINVAL / -EAGAIN / -EIO / -EBUSY */
+	__u64 decision_id;		/* 本批决策 ID */
+	__u64 trace_hi;			/* 统一 trace 高 64 位 */
+	__u64 trace_lo;			/* 统一 trace 低 64 位 */
+	__s32 first_fail_idx;		/* 首个失败元组序号（-1=无） */
+	__u32 blast_radius;		/* D6 粗估（pid 定向=1/全局=nr_threads） */
+	__u64 token;			/* D6 派生 token（未触发=0） */
+};
+
+/* K2a D4：自然对齐实际尺寸——1+1+(pad2)+4 + 3×8 + 4+4 + 8 = 48B */
+_Static_assert(sizeof(struct ai_nl_batch_ack) == 48,
+		       "ai_nl_batch_ack 布局漂移（K2 冻结契约）");
 
 #endif /* _UAPI_LINUX_AI_NETLINK_H */

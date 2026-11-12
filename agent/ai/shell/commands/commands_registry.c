@@ -76,7 +76,7 @@ static struct ai_command command_table[] = {
 	{
 		.name        = "netlink",
 		.description = "NETLINK_AI kernel channel (sense/act/act2/reg)",
-		.usage       = "netlink <sense|act|act2|reg> [args]",
+		.usage       = "netlink <sense|act|act2|act2batch|confirm|reg> [args]",
 		.handler     = cmd_netlink,
 		.min_args    = 1,
 		.max_args    = -1,

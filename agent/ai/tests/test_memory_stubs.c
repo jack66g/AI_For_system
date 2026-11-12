@@ -38,6 +38,15 @@ int ai_nl_send_act2(struct ai_nl_client *cli,
 	return -1;                      /* K1：ACT2 同口径 stub */
 }
 
+int ai_nl_send_act_batch(struct ai_nl_client *cli,
+			 const struct ai_nl_batch_op *ops, size_t n,
+			 const struct ai_nl_batch_opts *opts,
+			 struct ai_nl_batch_ack *ack, int *kern_err)
+{
+	(void)cli; (void)ops; (void)n; (void)opts; (void)ack; (void)kern_err;
+	return -1;                      /* K2b：ACT_BATCH 同口径 stub */
+}
+
 void ai_nl_trace_mint(unsigned long long *hi, unsigned long long *lo)
 {
 	(void)hi; (void)lo;             /* stub：不铸 */

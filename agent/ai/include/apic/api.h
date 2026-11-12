@@ -69,6 +69,31 @@ static inline ssize_t api_write_discard(int fd, const void *buf, size_t n)
 #define NLM_F_REQUEST_AI 0x01
 #define NLMSG_ERROR_AI 0x2
 #define AI_NL_ACT_PARAM_LEN 24
+
+/* K2 批量事务（KERNEL-K2-DESIGN §3；号与 agent/ai/include/netlink/
+ * ai_netlink_client.h 的 _Static_assert 同源——漂移即差分破） */
+#define AI_CMD_ACT_BATCH		21
+#define AI_BATCH_MAX_OPS		27
+#define AI_BATCH_ATTR_OPS		1	/* NLA_F_NESTED 可重复 */
+#define AI_BATCH_ATTR_AUTO_ROLLBACK_MS	2	/* u32；0=不 arm */
+#define AI_BATCH_ATTR_CONFIRM_TOKEN	3	/* u64；blast 拒后重试携带 */
+#define AI_DEC_ATTR_PARAM_B		3	/* 元组内复用 AI_DEC_ATTR_PARAM */
+#define AI_DEC_ATTR_TRACE_HI_B		8
+#define AI_DEC_ATTR_TRACE_LO_B		9
+#define AI_DEC_ATTR_INTENT_B		10
+#define AI_DEC_ATTR_AGENT_B		12
+#define AI_DEC_ATTR_VALUE_B		14	/* K2 新号（续 EXPECTED=13） */
+#define AI_DEC_ATTR_PID_B		15
+#define NLA_F_NESTED_AI			0x8000	/* uapi netlink.h (1<<15) */
+#define API_AUTO_ROLLBACK_MS_MAX	600000
+#define API_BLAST_THRESHOLD_SYSFS	"/sys/kernel/ai/policy/blast_threshold"
+
+/* /act ops 元组（norm 形：param 非空 ≤23B、pid=0 表示全局） */
+struct api_batch_op {
+	char	param[AI_NL_ACT_PARAM_LEN];
+	long long value;
+	long long pid;
+};
 #define AI_NL_ACT_SIZE 112	/* "<QIBBHI4x8Q24s" */
 #define AI_NL_ACT_ACK_SIZE 16	/* "<IIiI" */
 
@@ -216,6 +241,22 @@ int api_nl_pack_act(unsigned char out[AI_NL_ACT_SIZE],
 		    long long data0, long long data1);
 /* 解包 ai_nl_act_ack;payload<16B → NULL */
 aik_json *api_nl_unpack_act_ack(const unsigned char *payload, size_t n);
+/* K2：批量事务构包（嵌套 NLA，与 Python nl_pack_act_batch 逐字节
+ * 一致）；出参 out_len=载荷长度。返回 0 成功 */
+int api_nl_pack_act_batch(unsigned char *out, size_t cap, size_t *out_len,
+			  const struct api_batch_op *ops, size_t n,
+			  long long auto_rollback_ms,
+			  unsigned long long confirm_token);
+/* 解包 struct ai_nl_batch_ack(48B) → JSON obj
+ * {executed,hit,ai_err,decision_id,trace_hi,trace_lo,first_fail,
+ * blast_radius,token}；长度不足返回 NULL */
+aik_json *api_nl_unpack_batch_ack(const unsigned char *body, size_t len);
+/* 发 AI_CMD_ACT_BATCH:ack(JSON,可 NULL)/err(malloc 文案,可 NULL) */
+int api_nl_act_batch(const struct api_batch_op *ops, size_t n,
+		     long long auto_rollback_ms,
+		     unsigned long long confirm_token,
+		     aik_json **ack_out, char **err_out);
+
 /* 发 AI_CMD_ACT:ack(JSON,可 NULL)/err(malloc 文案,可 NULL) */
 int api_nl_act(const char *param, long long value, long long pid,
 	       aik_json **ack_out, char **err_out);

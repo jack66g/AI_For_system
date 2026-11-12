@@ -30,6 +30,12 @@
 #                          confirm=true 才执行，否则 409 NEED_CONFIRM——
 #                          对齐 REPL W2 确认语义；范围限 control 27 参数，
 #                          不开放 exec；task 参数需带 pid）
+#                          K2：body 可选 ops=[{param,value,pid?}]（1-27 项，
+#                          与 param/value 互斥）走 AI_CMD_ACT_BATCH 批量
+#                          事务（一个 decision_id，失败整体回滚）；可选
+#                          auto_rollback_ms（0-600000）+ confirm_token
+#                          （blast radius 超阈拒收时 428 附 token，重发
+#                          放行）。单 param 旧路径逐字节不变。
 #
 # 鉴权: Bearer token。token 来源优先级：model.toml [api] token >
 #       /etc/aikernel/api-token (600)。无 token -> 401；token 错 -> 403。
@@ -113,6 +119,24 @@ AI_NL_ACT_PARAM_LEN = 24
 AI_NL_ACT_FMT = "<QIBBHI4x8Q24s"       # struct ai_nl_act v2（112B，LE/x86_64）
 AI_NL_ACT_SIZE = struct.calcsize(AI_NL_ACT_FMT)   # == 112
 AI_NL_ACT_ACK_FMT = "<IIiI"            # struct ai_nl_act_ack（executed/hit/ai_err/reserved）
+# ---- AI_CMD_ACT_BATCH（K2 批量事务，KERNEL-K2-DESIGN §3 镜像；号与
+# agent/ai/include/netlink/ai_netlink_client.h 的 _Static_assert 同源） ----
+AI_CMD_ACT_BATCH = 21
+AI_BATCH_MAX_OPS = 27
+AI_BATCH_ATTR_OPS = 1                 # NLA_F_NESTED 可重复：{PARAM,VALUE,PID?}
+AI_BATCH_ATTR_AUTO_ROLLBACK_MS = 2    # u32；0=不 arm（缺省）
+AI_BATCH_ATTR_CONFIRM_TOKEN = 3       # u64；blast 拒后重试携带
+AI_DEC_ATTR_PARAM = 3                 # 元组内复用 AI_DEC_ATTR_* 号
+AI_DEC_ATTR_TRACE_HI = 8
+AI_DEC_ATTR_TRACE_LO = 9
+AI_DEC_ATTR_INTENT = 10
+AI_DEC_ATTR_AGENT = 12
+AI_DEC_ATTR_VALUE = 14                # K2 新号（续 EXPECTED=13 之后）
+AI_DEC_ATTR_PID = 15
+NLA_F_NESTED = 0x8000                 # uapi netlink.h：NLA_F_NESTED=(1<<15)
+AUTO_ROLLBACK_MS_MAX = 600000
+AI_NL_BATCH_ACK_FMT = "<BB2xiQQQiIQ"  # struct ai_nl_batch_ack（48B）
+BLAST_THRESHOLD_SYSFS = "/sys/kernel/ai/policy/blast_threshold"
 
 _CONTROL_RE = re.compile(
     r"^(\S+)\s+domain=(\d+)\s+\[real\]\s+min=(-?\d+)\s+max=(-?\d+)"
@@ -235,6 +259,109 @@ def nl_unpack_act_ack(payload):
     return {"executed": executed, "hit": hit, "ai_err": ai_err}
 
 
+def _nla_pack(attr_type, payload):
+    """nlattr 手搓编码：u16 nla_len(含头) + u16 nla_type + 载荷。
+    对齐规则：总长补零到 4 字节倍数（NLA_ALIGN(4)，与内核/客户端库
+    ai_netlink_client.c nla_append 同口径）；嵌套由 nla_type 高位
+    NLA_F_NESTED(0x8000) 标记，内层 attr 流即外层载荷。"""
+    total = 4 + len(payload)
+    pad = (4 - total % 4) % 4
+    return struct.pack("<HH", total, attr_type) + payload + b"\x00" * pad
+
+
+def nl_pack_act_batch(ops, auto_rollback_ms=0, confirm_token=0,
+                      trace_hi=0, trace_lo=0, intent=0, agent=0):
+    """打包 AI_CMD_ACT_BATCH 载荷（嵌套 nlattr 流，K2 D1）。
+    ops=[(param, value, pid)]；pid=0 不带 PID attr；批级可选字段恒携带
+    （零=显式缺省，消息形状恒定——沿客户端库 act2 先例）。"""
+    out = b""
+    for param, value, pid in ops:
+        inner = _nla_pack(AI_DEC_ATTR_PARAM,
+                          param.encode("utf-8") + b"\x00")
+        inner += _nla_pack(AI_DEC_ATTR_VALUE,
+                           struct.pack("<Q", value & 0xFFFFFFFFFFFFFFFF))
+        if pid:
+            inner += _nla_pack(AI_DEC_ATTR_PID, struct.pack("<I", pid))
+        out += _nla_pack(AI_BATCH_ATTR_OPS | NLA_F_NESTED, inner)
+    out += _nla_pack(AI_BATCH_ATTR_AUTO_ROLLBACK_MS,
+                     struct.pack("<I", auto_rollback_ms))
+    out += _nla_pack(AI_BATCH_ATTR_CONFIRM_TOKEN,
+                     struct.pack("<Q", confirm_token))
+    out += _nla_pack(AI_DEC_ATTR_TRACE_HI, struct.pack("<Q", trace_hi))
+    out += _nla_pack(AI_DEC_ATTR_TRACE_LO, struct.pack("<Q", trace_lo))
+    out += _nla_pack(AI_DEC_ATTR_INTENT, struct.pack("<Q", intent))
+    out += _nla_pack(AI_DEC_ATTR_AGENT, struct.pack("<I", agent))
+    return out
+
+
+def nl_unpack_batch_ack(payload):
+    """解包 struct ai_nl_batch_ack（48B）-> dict；长度不足返回 None。"""
+    if len(payload) < struct.calcsize(AI_NL_BATCH_ACK_FMT):
+        return None
+    (executed, hit, ai_err, decision_id, trace_hi, trace_lo,
+     first_fail_idx, blast_radius, token) = struct.unpack(
+        AI_NL_BATCH_ACK_FMT,
+        payload[:struct.calcsize(AI_NL_BATCH_ACK_FMT)])
+    return {"executed": executed, "hit": hit, "ai_err": ai_err,
+            "decision_id": decision_id, "trace_hi": trace_hi,
+            "trace_lo": trace_lo, "first_fail": first_fail_idx,
+            "blast_radius": blast_radius, "token": token}
+
+
+def validate_act_ops(params, ops):
+    """校验 /act ops 数组 -> (errcode, message, norm_ops)。
+    norm_ops=[(param, value, pid)]；errcode None=通过。形态：1-27 项、
+    每项 {param, value, pid?}、重复 param 名 400（同参双值歧义）、
+    未知参数 404 / 值域 / task 缺 pid 与单 param 路径同口径
+    （validate_act 逐项复用，值串自动 int(x,0) 同风格）。"""
+    if not isinstance(ops, list):
+        return 400, "ops 必须是数组（1-%d 项）" % AI_BATCH_MAX_OPS, None
+    if not (1 <= len(ops) <= AI_BATCH_MAX_OPS):
+        return 400, "ops 项数超出 [1, %d]" % AI_BATCH_MAX_OPS, None
+    pmap = {}
+    for p in params:
+        pmap[p["name"]] = p
+    norm = []
+    seen = set()
+    for item in ops:
+        if not isinstance(item, dict):
+            return 400, "ops 每项必须是对象 {\"param\": \"...\", \"value\": N}", None
+        param = item.get("param")
+        value = item.get("value")
+        pid = item.get("pid")
+        if not isinstance(param, str) or not param.strip():
+            return 400, "ops 每项需 {\"param\": \"...\", \"value\": N}", None
+        param = param.strip()
+        if param in seen:
+            return 400, "ops 内 param 重复（%s）：同参双值歧义，拒收" % param, None
+        seen.add(param)
+        if isinstance(value, str):
+            try:
+                value = int(value, 0)
+            except ValueError:
+                value = None
+        if isinstance(pid, str):
+            try:
+                pid = int(pid)
+            except ValueError:
+                pid = None
+        code, msg = validate_act(pmap.get(param), value, pid)
+        if code is not None:
+            return code, msg, None
+        norm.append((param, value, pid or 0))
+    return None, None, norm
+
+
+def read_blast_threshold():
+    """读 /sys/kernel/ai/policy/blast_threshold（0644，默认 64，0=关）。
+    读不到（K2 前内核/未部署）返回 None——响应体诚实省略 threshold。"""
+    try:
+        with open(BLAST_THRESHOLD_SYSFS, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def nl_act(param, value, pid, timeout=5.0):
     """发 AI_CMD_ACT v2 定向 apply，返回 (ack_dict 或 None, errmsg 或 None)。
     需 CAP_SYS_ADMIN（API 以 root 运行）。"""
@@ -282,6 +409,56 @@ def nl_act(param, value, pid, timeout=5.0):
                     err = struct.unpack("<i", body[:4])[0]
                     if err == 0:
                         return None, "netlink ack(0) 未携带 act 应答"
+                    import errno as _errno
+                    return None, "kernel errno %d (%s)" % (
+                        -err, _errno.errorcode.get(-err, "?"))
+                return None, "malformed netlink error"
+        return None, "netlink reply timeout"
+    except OSError as e:
+        return None, "netlink io: %s" % e
+    finally:
+        sock.close()
+
+
+def nl_act_batch(ops, auto_rollback_ms=0, confirm_token=0, timeout=5.0):
+    """发 AI_CMD_ACT_BATCH（嵌套 nlattr 载荷），返回 (ack_dict 或
+    None, errmsg 或 None)。沿 nl_act raw socket 骨架（:238-296 同形）；
+    ack=struct ai_nl_batch_ack（含 decision_id/trace/first_fail/
+    blast_radius/token）。需 CAP_SYS_ADMIN（API 以 root 运行）。"""
+    payload = nl_pack_act_batch(ops, auto_rollback_ms=auto_rollback_ms,
+                                confirm_token=confirm_token)
+    try:
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_AI)
+    except OSError as e:
+        return None, "netlink socket: %s" % e
+    try:
+        sock.bind((0, 0))
+        portid = sock.getsockname()[0]
+        seq = int(time.time()) & 0x7fffffff
+        hdr = struct.pack("=IHHII", 16 + len(payload), AI_CMD_ACT_BATCH,
+                          NLM_F_REQUEST, seq, portid)
+        sock.settimeout(timeout)
+        sock.sendto(hdr + payload, (0, 0))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                resp, src = sock.recvfrom(65536)
+            except socket.timeout:
+                return None, "netlink reply timeout"
+            if len(resp) < 16 or src[0] != 0:
+                continue
+            rlen, rtype, _rflags, rseq, _rpid = struct.unpack("=IHHII",
+                                                              resp[:16])
+            if rseq != seq:
+                continue
+            body = resp[16:16 + max(rlen - 16, 0)]
+            if rtype == AI_CMD_ACT_BATCH:
+                return nl_unpack_batch_ack(body), None
+            if rtype == NLMSG_ERROR:
+                if len(body) >= 4:
+                    err = struct.unpack("<i", body[:4])[0]
+                    if err == 0:
+                        return None, "netlink ack(0) 未携带 act_batch 应答"
                     import errno as _errno
                     return None, "kernel errno %d (%s)" % (
                         -err, _errno.errorcode.get(-err, "?"))
@@ -1013,6 +1190,8 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             return self._err(400, "invalid json", err)
         req = req or {}
+        if "ops" in req:
+            return self._do_act_batch(req)
         param = req.get("param")
         value = req.get("value")
         pid = req.get("pid")
@@ -1092,6 +1271,146 @@ class Handler(BaseHTTPRequestHandler):
                                 "pid": pid, "executed": ack["executed"],
                                 "hit": ack["hit"], "current_before":
                                     pdef["current"], "current_after": after})
+
+    def _do_act_batch(self, req):
+        """K2 D9：/act ops 批量形态（新面，无冻结向量）。单 param 旧
+        路径在本方法之外原样保留（零字节改动）。"""
+        import errno as _errno
+        if ("param" in req) or ("value" in req):
+            return self._err(400, "ops_exclusive",
+                             "ops 与 param/value 互斥：批量走 ops，"
+                             "单参数走 param/value")
+        ops = req.get("ops")
+        confirm = req.get("confirm") is True
+        auto_rollback_ms = req.get("auto_rollback_ms", 0)
+        confirm_token = req.get("confirm_token", 0)
+        if isinstance(auto_rollback_ms, str):
+            try:
+                auto_rollback_ms = int(auto_rollback_ms, 0)
+            except ValueError:
+                auto_rollback_ms = None
+        if (not isinstance(auto_rollback_ms, int) or
+                isinstance(auto_rollback_ms, bool) or
+                not (0 <= auto_rollback_ms <= AUTO_ROLLBACK_MS_MAX)):
+            return self._err(400, "invalid_auto_rollback_ms",
+                             "auto_rollback_ms 必须是整数 "
+                             "[0, %d]" % AUTO_ROLLBACK_MS_MAX)
+        if isinstance(confirm_token, str):
+            try:
+                confirm_token = int(confirm_token, 0)
+            except ValueError:
+                confirm_token = None
+        if (not isinstance(confirm_token, int) or
+                isinstance(confirm_token, bool) or confirm_token < 0):
+            return self._err(400, "invalid_confirm_token",
+                             "confirm_token 必须是非负整数")
+
+        params = read_control_params()
+        code, msg, norm = validate_act_ops(params, ops)
+        if code == 404:
+            return self._err(404, "unknown_param", msg,
+                             allowed="GET /params")
+        if code == 400:
+            extra = {}
+            if norm is None and isinstance(ops, list):
+                for item in ops:
+                    if isinstance(item, dict):
+                        p = item.get("param")
+                        pdef = None
+                        for q in params:
+                            if q["name"] == p:
+                                pdef = q
+                                break
+                        if pdef is not None:
+                            extra = {"param": p,
+                                     "min": pdef["min"],
+                                     "max": pdef["max"]}
+                            break
+            return self._err(400, "invalid_ops", msg, **extra)
+
+        ops_echo = [{"param": p, "value": v, "pid": pid or None}
+                    for p, v, pid in norm]
+        pre_map = {}
+        for p in params:
+            pre_map[p["name"]] = p["current"]
+
+        if not confirm:
+            audit_line("api_act",
+                       {"ops": ops_echo, "confirm": False,
+                        "auto_rollback_ms": auto_rollback_ms},
+                       "NEED_CONFIRM")
+            body = {"error": "need_confirm",
+                    "message": "受控写需显式确认：重发并带 "
+                               "\"confirm\": true",
+                    "code": "NEED_CONFIRM", "ops": ops_echo,
+                    "auto_rollback_ms": auto_rollback_ms}
+            return self._json(409, body)
+
+        ack, nerr = nl_act_batch(norm,
+                                 auto_rollback_ms=auto_rollback_ms,
+                                 confirm_token=confirm_token)
+        aargs = {"ops": ops_echo, "confirm": True,
+                 "auto_rollback_ms": auto_rollback_ms}
+        if confirm_token:
+            aargs["confirm_token"] = confirm_token
+        if ack is None:
+            audit_line("api_act", aargs, "ERR: %s" % nerr)
+            return self._err(502, "kernel_rejected", nerr)
+        if ack["ai_err"] == -_errno.EAGAIN and ack["token"] != 0:
+            audit_line("api_act", aargs,
+                       "BLAST_RADIUS radius=%d" % ack["blast_radius"])
+            body = {"error": "BLAST_RADIUS",
+                    "message": "影响面（blast radius=%d）超过阈值："
+                               "确认后重发并带 \"confirm_token\""
+                               % ack["blast_radius"],
+                    "blast_radius": ack["blast_radius"],
+                    "confirm_token": ack["token"]}
+            threshold = read_blast_threshold()
+            if threshold is not None:
+                body["threshold"] = threshold
+            return self._json(428, body)
+        if ack["ai_err"] != 0:
+            audit_line("api_act", aargs, "ERR: ai_err=%d" % ack["ai_err"])
+            return self._err(502, "kernel_rejected",
+                             "内核 ai_err=%d（批量事务失败，未提交）"
+                             % ack["ai_err"],
+                             executed=ack["executed"],
+                             first_fail=ack["first_fail"],
+                             decision_id=ack["decision_id"])
+        if ack["executed"] == 0:
+            audit_line("api_act", aargs, "NOT_APPLIED")
+            return self._err(409, "not_applied",
+                             "策略未命中（0 条执行）：参数未注册或被安全"
+                             "策略过滤",
+                             executed=0, hit=0,
+                             decision_id=ack["decision_id"])
+
+        after_map = {}
+        for p in read_control_params():
+            after_map[p["name"]] = p["current"]
+        items = []
+        for p, v, pid in norm:
+            post = after_map.get(p)
+            item = {"param": p}
+            if p in pre_map:
+                item["pre"] = pre_map[p]
+            if post is not None:
+                item["post"] = post
+                item["clamped"] = (post != v)
+            items.append(item)
+        audit_line("api_act",
+                   dict(aargs, current_after=[
+                       after_map.get(p) for p, _v, _pid in norm]), "OK")
+        return self._json(200, {
+            "ok": True,
+            "decision_id": ack["decision_id"],
+            "trace_id": "0x%016x:0x%016x" % (ack["trace_hi"],
+                                             ack["trace_lo"]),
+            "executed": ack["executed"],
+            "items": items,
+            "first_fail": ack["first_fail"],
+            "rolled_back": False,
+            "blast_radius": ack["blast_radius"]})
 
     def log_message(self, fmt, *args):
         print("[aikernel-api] %s %s" % (self.address_string(), fmt % args),

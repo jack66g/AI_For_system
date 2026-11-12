@@ -163,6 +163,8 @@ static const char *reason_phrase(int status)
 		return "Conflict";
 	case 410:
 		return "Gone";
+	case 428:
+		return "Precondition Required";
 	case 414:
 		return "Request-URI Too Long";
 	case 500:

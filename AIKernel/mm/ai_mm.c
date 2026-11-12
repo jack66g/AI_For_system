@@ -60,6 +60,19 @@ static int ai_mm_swappiness_apply(struct ai_control_param *p, s32 pid,
 	return AI_OK;
 }
 
+/* K2a（KERNEL-K2-DESIGN D7）：mm.swappiness 读回真值——经 set_read
+ * 注册后，影子 current= 与恒等快路径都对内核真值生效（修「影子 60 /
+ * sysctl 80 双源漂移、恒等误判」）。同源：ai_vmscan_swappiness_get
+ * （kernel-overlays/mm/vmscan.c 访问器，与 apply 写侧同源）。
+ * mm.readahead 无读访问器（backing-dev.c 仅 ai_bdi_ra_pages_set，
+ * 无 get）——真值源不存在，按设计册 D7 不做（K2a 报告登记）。 */
+static int ai_mm_swappiness_read(struct ai_control_param *p, s32 pid,
+				 s64 *value)
+{
+	*value = (s64)ai_vmscan_swappiness_get();
+	return AI_OK;
+}
+
 
 /* ---- mm.readahead 立即生效参数（mm/backing-dev.c 门控访问器） ----
  * value 单位 KB（与 /sys/class/bdi/<dev> 下 read_ahead_kb 节点同源同
@@ -272,6 +285,8 @@ static int __init ai_mm_init(void)
 	ai_control_register("mm.swappiness", AI_POLICY_DOMAIN_MM,
 			    AI_CTRL_F_REAL, 0, 100, 60,
 			    ai_mm_swappiness_apply);
+	/* K2a D7：读回真值（sched 三参 set_read 先例照抄） */
+	ai_control_set_read("mm.swappiness", ai_mm_swappiness_read);
 	ai_control_register("mm.readahead", AI_POLICY_DOMAIN_MM,
 			    AI_CTRL_F_REAL, 0, 4096, 128,
 			    ai_mm_readahead_apply);
