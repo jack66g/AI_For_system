@@ -515,6 +515,21 @@ void ai_mm_emit_kasan_report(unsigned long address, unsigned long ip,
 void ai_mm_emit_kfence_report(unsigned long address, u8 is_write,
 			      const char *bug_type);
 
+/* ---- K4 效果结算器（实现见 ai_mm.c；观测点=ai_mm_telemetry_*.c
+ * 对应发射函数入口，先于采样门控取全量流） ---- */
+
+void ai_mm_k4_oom_event_note(void);
+void ai_mm_k4_readahead_settle(unsigned long pages_hit,
+			       unsigned long pages_missed);
+void ai_mm_k4_reclaim_settle(unsigned long nr_reclaimed);
+
+#ifdef CONFIG_AIKERNEL_KUNIT_TEST
+/* 纯判定函数（ai_effect_test.c 直测；返回 AI_EFFECT_OUTCOME_* 值） */
+bool ai_mm_k4_oom_is_reoom(u64 now_ns, u64 open_ns, u64 last_oom_ns);
+u8 ai_mm_k4_readahead_outcome(unsigned long hit, unsigned long miss,
+			      long *metric);
+#endif
+
 #else /* !CONFIG_AIKERNEL_MM */
 
 /* 空函数兜底：CONFIG_AIKERNEL_MM=n 时 mm/ 不包含本头文件，

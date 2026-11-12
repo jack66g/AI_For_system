@@ -25,8 +25,20 @@
  */
 
 /* 01 CPU 与调度 */
+
+/* K4 效果结算观测（实现于 AIKernel/sched/ai_sched.c；此处只透传
+ * 指针，payload 解释在实现侧——本头文件不依赖 ai_sched.h 类型）。
+ * sched_switch/sched_latency 由 kernel/sched/core.c 直调本包装，是
+ * AIKernel 侧唯一零 overlay 拦截点；观测在 emit 之前进行，走全量
+ * 流，不受下方 emit 内部的采样门控影响。 */
+extern void ai_k4_sched_switch_note(const void *payload);
+extern void ai_k4_sched_latency_note(const void *payload);
+
 static inline int ai_telemetry_sched_switch(u8 s, const void *d, u16 l)
-{ return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_CTX_SWITCH, s, d, l); }
+{
+	ai_k4_sched_switch_note(d);
+	return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_CTX_SWITCH, s, d, l);
+}
 static inline int ai_telemetry_sched_wakeup(u8 s, const void *d, u16 l)
 { return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_CTX_SWITCH, s, d, l); }
 static inline int ai_telemetry_sched_wakeup_new(u8 s, const void *d, u16 l)
@@ -34,7 +46,10 @@ static inline int ai_telemetry_sched_wakeup_new(u8 s, const void *d, u16 l)
 static inline int ai_telemetry_sched_migrate(u8 s, const void *d, u16 l)
 { return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_CTX_SWITCH, s, d, l); }
 static inline int ai_telemetry_sched_latency(u8 s, const void *d, u16 l)
-{ return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_LATENCY, s, d, l); }
+{
+	ai_k4_sched_latency_note(d);
+	return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_LATENCY, s, d, l);
+}
 static inline int ai_telemetry_cpu_load(u8 s, const void *d, u16 l)
 { return ai_telemetry_emit(AI_CAT_SCHED, AI_EV_CPU_LOAD, s, d, l); }
 static inline int ai_telemetry_pelt(u8 s, const void *d, u16 l)

@@ -313,6 +313,18 @@ int ai_policy_blast_threshold_set(u32 val);
 int ai_policy_outcome_update(u64 decision_id, u8 outcome, s64 metric_delta);
 
 /**
+ * ai_policy_fill_outcome() - 效果归因环定向回填（K4.0，轻量版回写）
+ * @decision_id: 决策 ring 记录 ID（record_heuristic/execute 铸造）
+ * @outcome: 结算结果（ai_effect.h AI_EFFECT_OUTCOME_*）
+ * @delta: 结算量化（语义由结算器定义，原样落 metric_delta）
+ *
+ * 只更新 ring 条目的 outcome_ts/outcome/metric_delta（不发遥测、
+ * 不落因果链——效果窗结算频率高）。返回 0；找不到（被覆盖滚出
+ * ring）返回 -ENOENT；id=0 返回 -EINVAL。
+ */
+int ai_policy_fill_outcome(u32 decision_id, u8 outcome, long delta);
+
+/**
  * ai_policy_rollback_decision() - 回滚一次决策（恢复决策前状态）
  * @decision_id: 目标决策 ID
  *
@@ -419,6 +431,11 @@ static inline int ai_policy_execute_trace(struct ai_policy_ctx *ctx, void *arg)
 static inline int ai_policy_outcome_update(u64 id, u8 outcome, s64 delta)
 {
 	return AI_OK;
+}
+/* K4.0：效果归因环回填 stub（ai_effect.c 未编译时窗口结算零落笔） */
+static inline int ai_policy_fill_outcome(u32 id, u8 outcome, long delta)
+{
+	return -ENOENT;
 }
 static inline int ai_policy_rollback_decision(u64 id) { return AI_OK; }
 static inline int ai_policy_rollback_all(void) { return AI_OK; }

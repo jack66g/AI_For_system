@@ -43,6 +43,7 @@
 #include "../core/ai_types.h"
 #include "../core/ai_telemetry.h"
 #include "../core/ai_control.h"
+#include "../core/ai_effect.h"
 #include <linux/ai_accessors.h>
 #include "ai_sched.h"
 
@@ -186,6 +187,166 @@ int ai_sched_query(u32 query_id, const void *in, size_t in_len,
 	}
 }
 EXPORT_SYMBOL_GPL(ai_sched_query);
+
+/* ==================================================================
+ * K4 效果结算器（K4.2 vruntime 延迟差 / K4.3 wakeup 误抢占）
+ *
+ * 观测点：kernel/sched/core.c 的 switch/latency 遥测经
+ * core/ai_telemetry_wrappers.h 的 static inline 包装直发，AIKernel
+ * 侧唯一零 overlay 拦截点=包装本体（包装在 emit 之前调下面的
+ * note，观测走全量流，不受 emit 内部采样门控影响）；payload 解释
+ * 在本文件（ai_sched.h 类型可见），wrappers.h 只透传指针。
+ * ================================================================== */
+
+/* K4.2：全局唤醒延迟聚合 v1 近似——AI_SCHED_LATENCY 流的 run_delay
+ * EWMA（1/4 权重）。run_delay 是 per-task 累计值，不做 per-pid 增量
+ * join 时混任务均值只反映「全局等待水位」的升降方向（v2 才做
+ * per-pid join 出真正的唤醒→运行延迟）；CONFIG_SCHED_INFO=n 时
+ * run_delay 恒 0 → 结算恒中性 GOOD。/proc/ai/latency 的 min/max/avg
+ * 是决策执行延迟（ai_policy.c 的 ai_pstat），与任务唤醒延迟不同源，
+ * 故不取。 */
+static u64 ai_k4_lat_ewma;
+
+/* K4.2：vruntime 效果窗开窗时刻的水位快照（开窗后 100ms 内样本刷新） */
+static long ai_k4_vruntime_open_avg;
+
+/* K4.3：误抢占累计（BAD 结算次数；sysfs stats 读数出口下次波接） */
+static atomic64_t ai_k4_mispreempt;
+
+/**
+ * ai_k4_vruntime_outcome() - K4.2 水位方向判定（纯函数，KUnit 可测）
+ * @open_avg: 开窗时延迟水位
+ * @now_avg: 结算时延迟水位
+ * @metric_pct: 出参（now 相对 open 的变化百分比，负=降）
+ *
+ * 水位升（>0%）→ BAD（平移后全局等待变差）；降或持平（含降<1% 的
+ * 中性区）→ GOOD；无基线（open≤0）→ 中性 GOOD。
+ */
+u8 ai_k4_vruntime_outcome(long open_avg, long now_avg, long *metric_pct)
+{
+	long delta;
+
+	if (metric_pct)
+		*metric_pct = 0;
+	if (open_avg <= 0)
+		return AI_EFFECT_OUTCOME_GOOD;
+	delta = now_avg - open_avg;
+	if (metric_pct)
+		*metric_pct = delta * 100 / open_avg;
+	return delta > 0 ? AI_EFFECT_OUTCOME_BAD : AI_EFFECT_OUTCOME_GOOD;
+}
+
+/**
+ * ai_k4_wakeup_switch_outcome() - K4.3 switch 事件判定（纯函数）
+ * @prev_pid: 被切出任务 pid
+ * @wakee_pid: 窗 aux0（被唤醒任务 pid）
+ * @age_ns: switch 事件距开窗时长
+ *
+ * 距开窗 ≥1ms 的任意 switch → GOOD（wakee 没被立刻抢回=无误抢占）；
+ * 1ms 内 wakee 自己被切出 → BAD（误抢占）；其余 → NONE（继续观测）。
+ */
+u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns)
+{
+	if (age_ns >= NSEC_PER_MSEC)
+		return AI_EFFECT_OUTCOME_GOOD;
+	if (prev_pid == wakee_pid)
+		return AI_EFFECT_OUTCOME_BAD;
+	return AI_EFFECT_OUTCOME_NONE;
+}
+
+/**
+ * ai_k4_sched_latency_note() - K4.2 延迟观测入口（sched_latency 包装
+ * 在全量流上调用；每次 enqueue 一次，仅 EWMA 加法 + 一次窗探测）
+ */
+void ai_k4_sched_latency_note(const void *payload)
+{
+	const struct ai_sched_latency_payload *lt = payload;
+
+	if (!lt || lt->type != AI_SCHED_LATENCY)
+		return;   /* BLOCK 子事件不是等待延迟观测 */
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	if (ai_k4_lat_ewma)
+		ai_k4_lat_ewma = (ai_k4_lat_ewma * 3 + lt->run_delay_ns) >> 2;
+	else
+		ai_k4_lat_ewma = lt->run_delay_ns;
+
+	/* vruntime 窗刚开（<100ms）→ 刷新开窗水位快照（开窗的那次
+	 * enqueue 自带的 latency 事件即可命中） */
+	{
+		struct ai_effect_win w;
+		u64 now = ktime_get_ns();
+
+		if (ai_effect_win_peek(AI_HOOK_SCHED_VRUNTIME, &w) &&
+		    now >= w.open_ns &&
+		    now - w.open_ns < 100 * NSEC_PER_MSEC)
+			WRITE_ONCE(ai_k4_vruntime_open_avg,
+				   (long)READ_ONCE(ai_k4_lat_ewma));
+	}
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+}
+EXPORT_SYMBOL_GPL(ai_k4_sched_latency_note);
+
+/**
+ * ai_k4_sched_switch_note() - K4.3 误抢占观测入口（sched_switch 包装
+ * 在全量流上调用；无在途 wakeup 窗时仅一次 used 读 + 分支）
+ */
+void ai_k4_sched_switch_note(const void *payload)
+{
+	const struct ai_sched_switch_payload *sw = payload;
+
+	if (!sw || sw->type != AI_SCHED_CTX_SWITCH)
+		return;
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	{
+		struct ai_effect_win w;
+		u64 now = ktime_get_ns();
+		u8 out;
+
+		if (!ai_effect_win_peek(AI_HOOK_SCHED_WAKEUP, &w))
+			return;
+		if (now < w.open_ns)
+			return;
+		out = ai_k4_wakeup_switch_outcome(sw->prev_pid, (u32)w.aux0,
+						  now - w.open_ns);
+		if (out == AI_EFFECT_OUTCOME_BAD)
+			atomic64_inc(&ai_k4_mispreempt);
+		if (out != AI_EFFECT_OUTCOME_NONE)
+			ai_effect_close(AI_HOOK_SCHED_WAKEUP, out, 0);
+	}
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+}
+EXPORT_SYMBOL_GPL(ai_k4_sched_switch_note);
+
+/**
+ * ai_k4_vruntime_settle() - K4.2 vruntime 窗结算（1Hz 采样器尾调，
+ * ai_effect_tick() 之前——有观测走观测语义，tick 只兜底）
+ *
+ * vruntime 窗龄 ≥2s 未结算（持续注入下窗龄不达 2s=单槽最后写赢，
+ * 旧窗被下一注入覆盖放弃、不计数，K4.0 采样语义）→ 比较当前水位
+ * 与开窗快照：升→BAD / 降或持平→GOOD（v1 全局近似，见上方注释）。
+ */
+void ai_k4_vruntime_settle(void)
+{
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	struct ai_effect_win w;
+	long metric = 0;
+	u8 out;
+	u64 now = ktime_get_ns();
+
+	if (!ai_effect_win_peek(AI_HOOK_SCHED_VRUNTIME, &w))
+		return;
+	if (now < w.open_ns ||
+	    now - w.open_ns < (u64)AI_EFFECT_WIN_SEC_VRUNTIME * NSEC_PER_SEC)
+		return;
+	out = ai_k4_vruntime_outcome(READ_ONCE(ai_k4_vruntime_open_avg),
+				     (long)READ_ONCE(ai_k4_lat_ewma),
+				     &metric);
+	ai_effect_close(AI_HOOK_SCHED_VRUNTIME, out, metric);
+	/* 清快照：防下一窗（开窗 100ms 内无样本时）复用旧基线 */
+	WRITE_ONCE(ai_k4_vruntime_open_avg, 0);
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+}
+EXPORT_SYMBOL_GPL(ai_k4_vruntime_settle);
 
 /* ==================================================================
  * B 轨：遥测采集
@@ -420,6 +581,13 @@ static void ai_sched_metrics_sample_once(void)
 	ai_sched_sample_cpu_temperature();
 	ai_sched_sample_rq_depth();
 	ai_sched_sample_psi();
+	/* K4.2：vruntime 窗观测结算（先于 tick——有观测走观测语义，
+	 * tick 只兜底到期未结算的窗） */
+	ai_k4_vruntime_settle();
+	/* K4.0 效果归因环：1Hz 兜底结算（到窗长未结算的效果窗按
+	 * 到期 outcome 关窗回填决策 ring）；CONFIG_AIKERNEL_RUNTIME=n
+	 * 时为空内联（零开销）。复用本 kthread 的节拍，不另起定时器。 */
+	ai_effect_tick();
 }
 
 static int ai_sched_metrics_sampler(void *unused)

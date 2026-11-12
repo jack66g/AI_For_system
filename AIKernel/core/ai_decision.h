@@ -121,6 +121,8 @@ s32 ai_decision_query(enum ai_hook_id hook, const struct ai_hook_ctx *ctx);
  *
  * 仅在消费侧真实改变内核状态后调用；节流采样推入 decisions ring
  * （source=AI_DEC_SRC_HEURISTIC）。开关关时不会到达（query 先返回 0）。
+ * K4.0：同时为该挂点开效果窗（ai_effect_open，先于 ring 采样），
+ * 采样记录经 ai_effect_bind 绑到窗，结算后 outcome 回填（ai_effect.h）。
  */
 void ai_decision_note_effect(enum ai_hook_id hook, s64 aux0, s64 aux1);
 

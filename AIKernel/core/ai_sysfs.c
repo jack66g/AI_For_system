@@ -42,6 +42,7 @@
 #include "ai_policy_safety.h"
 #include "ai_causal.h"
 #include "ai_decision.h"
+#include "ai_effect.h"
 
 static struct kobject *ai_kobj;          /* /sys/kernel/ai/ */
 static struct kobject *ai_policy_kobj;   /* /sys/kernel/ai/policy/ */
@@ -724,17 +725,21 @@ static ssize_t ai_dec_stats_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buf)
 {
 	struct ai_decision_stats st;
+	struct ai_effect_stats eff[AI_HOOK_NR];   /* K4.0 效果归因累计 */
 	ssize_t n;
 	unsigned int i;
 
 	ai_decision_stats_get(&st);
+	ai_effect_stats_get(eff);
 	n = sysfs_emit(buf, "master: %u\n", st.master);
-	n += sysfs_emit_at(buf, n, "%-16s %3s %10s %9s %8s %9s %7s %10s\n",
+	n += sysfs_emit_at(buf, n,
+			   "%-16s %3s %10s %9s %8s %9s %7s %10s %6s %6s %8s %12s\n",
 			   "hook", "en", "queries", "injected", "effects",
-			   "fallback", "ring", "last_bias");
+			   "fallback", "ring", "last_bias",
+			   "good", "bad", "timeout", "last_metric");
 	for (i = 0; i < AI_HOOK_NR; i++) {
 		n += sysfs_emit_at(buf, n,
-				   "%-16s %3u %10llu %9llu %8llu %9llu %7llu %10d\n",
+				   "%-16s %3u %10llu %9llu %8llu %9llu %7llu %10d %6llu %6llu %8llu %12ld\n",
 				   ai_decision_hook_name((enum ai_hook_id)i),
 				   st.hook_en[i],
 				   atomic64_read(&st.hook[i].queries),
@@ -742,7 +747,11 @@ static ssize_t ai_dec_stats_show(struct kobject *kobj,
 				   atomic64_read(&st.hook[i].effects),
 				   atomic64_read(&st.hook[i].fallback),
 				   atomic64_read(&st.hook[i].ring),
-				   st.hook[i].last_bias);
+				   st.hook[i].last_bias,
+				   atomic64_read(&eff[i].good),
+				   atomic64_read(&eff[i].bad),
+				   atomic64_read(&eff[i].timeout),
+				   eff[i].last_metric);
 	}
 	return n;
 }

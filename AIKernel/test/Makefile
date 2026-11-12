@@ -12,6 +12,8 @@ obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_telemetry_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_policy_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_control_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_decision_test.o
+# K4.0：效果归因环（开窗/绑定/结算回填/超时/统计/ENOENT；RUNTIME 兜底）
+obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_effect_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_causal_test.o
 # W63：NETLINK_AI 订阅生命周期（文件内部按 CONFIG_AIKERNEL_NETLINK 兜底）
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_netlink_test.o

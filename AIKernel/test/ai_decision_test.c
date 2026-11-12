@@ -10,7 +10,9 @@
  *   - 异常回退：分类槽 miss → 0 + fallback 计数；
  *   - 全量记账：queries/injected/effects 计数与 decisions ring 采样
  *     （source=AI_DEC_SRC_HEURISTIC）；
- *   - ACT 参数族 ai.decision_*（REAL，默认 0）注册存在性。
+ *   - ACT 参数族 ai.decision_*（REAL，默认 0）注册存在性；
+ *   - K4.0 效果归因环：note_effect 开窗字段语义 + 节流采样绑定
+ *     （窗 decision_id == ring 记录 id）。
  * 退出还原：master=0、per-hook=0、决策源=启发式、清理 current 槽位。
  */
 #include <kunit/test.h>
@@ -22,6 +24,7 @@
 #include "../core/ai_control.h"
 #include "../core/ai_policy.h"
 #include "../core/ai_decision.h"
+#include "../core/ai_effect.h"
 
 #ifdef CONFIG_AIKERNEL_RUNTIME
 
@@ -227,6 +230,54 @@ static void decision_accounting_test(struct kunit *test)
 	enable_all(0);
 }
 
+/* ---- K4.0：note_effect 开效果窗（窗口字段语义对上） ---- */
+static void decision_effect_window_test(struct kunit *test)
+{
+	struct ai_effect_win *w = ai_effect_test_win(AI_HOOK_SCHED_VRUNTIME);
+
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, w);
+
+	/* note_effect 直调（消费侧确认语义，与开关无关）→ 本挂点开窗 */
+	ai_decision_note_effect(AI_HOOK_SCHED_VRUNTIME, -500, -400);
+	KUNIT_EXPECT_EQ(test, w->used, (u8)1);
+	KUNIT_EXPECT_EQ(test, w->aux0, -500L);
+	KUNIT_EXPECT_EQ(test, w->aux1, -400L);
+	KUNIT_EXPECT_GT(test, w->open_ns, (u64)0);
+	KUNIT_EXPECT_EQ(test, w->close_ns, (u64)0);
+}
+
+/* ---- K4.0：节流采样铸记录 → 窗与决策记录 id 绑定一致 ---- */
+static void decision_effect_bind_test(struct kunit *test)
+{
+	struct ai_decision_record *buf;
+	struct ai_effect_win *w = ai_effect_test_win(AI_HOOK_MM_RECLAIM);
+	u32 count = 0;
+
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, w);
+	buf = kunit_kzalloc(test, AI_POLICY_DECISION_RING_SIZE * sizeof(*buf),
+			    GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, buf);
+
+	/* 本套件内 MM_RECLAIM 的首次 note_effect 必然穿透节流 → ring
+	 * 铸出 source=AI_DEC_SRC_HEURISTIC 采样，且 record_heuristic
+	 * 内部已把 id 绑到刚开的窗 */
+	ai_decision_note_effect(AI_HOOK_MM_RECLAIM, 3, 4);
+	KUNIT_EXPECT_EQ(test,
+			ai_policy_decision_read(buf,
+						AI_POLICY_DECISION_RING_SIZE *
+						sizeof(*buf),
+						&count, NULL),
+			AI_OK);
+	KUNIT_ASSERT_GE(test, count, 1u);
+	KUNIT_EXPECT_EQ(test, buf[count - 1].source,
+			(u8)AI_DEC_SRC_HEURISTIC);
+	KUNIT_EXPECT_EQ(test, buf[count - 1].decision_data[0],
+			(u64)AI_HOOK_MM_RECLAIM);
+	KUNIT_EXPECT_NE(test, w->decision_id, (u32)0);
+	KUNIT_EXPECT_EQ(test, w->decision_id,
+			(u32)buf[count - 1].decision_id);
+}
+
 /* ---- 单 hook 粒度：只开 OOM 时其他 hook 不注入且不计 queries ---- */
 static void decision_single_hook_test(struct kunit *test)
 {
@@ -304,6 +355,8 @@ static struct kunit_case ai_decision_test_cases[] = {
 	KUNIT_CASE(decision_fallback_test),
 	KUNIT_CASE(decision_source_clamp_test),
 	KUNIT_CASE(decision_accounting_test),
+	KUNIT_CASE(decision_effect_window_test),
+	KUNIT_CASE(decision_effect_bind_test),
 	KUNIT_CASE(decision_single_hook_test),
 	KUNIT_CASE(decision_act_params_test),
 	{}

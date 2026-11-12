@@ -333,6 +333,20 @@ void ai_telemetry_pelt_se_sample(struct sched_entity *se, struct cfs_rq *cfs_rq)
  */
 void ai_sched_stats_read(struct ai_sched_stats *st);
 
+/* ---- K4 效果结算器（实现见 ai_sched.c）----
+ * 观测入口由 core/ai_telemetry_wrappers.h 的 sched_switch/
+ * sched_latency 包装在全量流上调用（payload 解释在实现侧）；
+ * ai_k4_vruntime_settle 挂 1Hz 采样器尾（ai_effect_tick 之前）。 */
+void ai_k4_sched_switch_note(const void *payload);
+void ai_k4_sched_latency_note(const void *payload);
+void ai_k4_vruntime_settle(void);
+
+#ifdef CONFIG_AIKERNEL_KUNIT_TEST
+/* 纯判定函数（ai_effect_test.c 直测；返回 AI_EFFECT_OUTCOME_* 值） */
+u8 ai_k4_vruntime_outcome(long open_avg, long now_avg, long *metric_pct);
+u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns);
+#endif
+
 #else /* !CONFIG_AIKERNEL_SCHED */
 
 /* 空函数兜底：CONFIG_AIKERNEL_SCHED=n 时 kernel/sched 不包含本头文件，

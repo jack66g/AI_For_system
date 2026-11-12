@@ -31,6 +31,7 @@
 #include "ai_proc.h"
 #include "ai_control.h"
 #include "ai_policy.h"
+#include "ai_effect.h"
 #include "ai_decision.h"
 
 /* ---- 开关与决策记账（全部默认 0 = 关闭 = 原生行为） ---- */
@@ -172,6 +173,13 @@ void ai_decision_note_effect(enum ai_hook_id hook, s64 aux0, s64 aux1)
 	atomic64_inc(&st->effects);   /* K2b（K1B-06） */
 	WRITE_ONCE(st->last_aux0, aux0);
 	WRITE_ONCE(st->last_aux1, aux1);
+
+	/* K4.0 效果归因环：本挂点开效果窗。必须在下方 record_heuristic
+	 * 采样之前——绑定语义是「绑定最近 pending 窗」，开窗在前才能让
+	 * ring 样本绑到本窗（record_heuristic 内铸完 id 即调
+	 * ai_effect_bind）。纯字段写+时间戳，原子上下文安全
+	 * （零分配零睡眠零自旋）。 */
+	ai_effect_open(hook, (long)aux0, (long)aux1);
 
 	/* decisions ring 节流采样（每挂点 AI_DEC_RING_JIFFIES 一条；
 	 * 全量精确计数在上面 effects/last_*，ring 只是样本流） */

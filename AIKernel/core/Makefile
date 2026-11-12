@@ -18,6 +18,9 @@ obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_control.o
 # RUNTIME 门控与 ai_control 同源（ACT 参数注册依赖 ai_control 表）。
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_decision.o
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_causal.o
+# ai_effect.o（K4.0 效果归因环）：per-hook 效果窗 + 结算回填决策 ring，
+# RUNTIME 门控与 ai_decision.o 同源（开窗/绑定入口都在决策注入层）。
+obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_effect.o
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_startup.o
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_model_mlp.o
 # ai_proc*.o：A 轨（RUNTIME）与 B 轨（TELEMETRY）代码按各自 CONFIG 条件编译，

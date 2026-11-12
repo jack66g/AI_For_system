@@ -42,7 +42,11 @@
 #include "ai_mm.h"
 #include "../core/ai_control.h"
 #include "../core/ai_decision.h"
+#include "../core/ai_effect.h"
 #include <linux/ai_accessors.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
+#include <linux/psi.h>
 
 /* ---- mm.swappiness 立即生效参数（经 mm/vmscan.c 门控访问器） ---- */
 
@@ -262,6 +266,173 @@ void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address, u8 *decision)
 }
 EXPORT_SYMBOL_GPL(ai_mm_thp_hook);
 #endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+
+/* ==================================================================
+ * K4 效果结算器（K4.1 OOM re-OOM / K4.4 readahead 命中率 /
+ * K4.5 reclaim PSI+回收量）
+ *
+ * 观测点：ai_mm_telemetry_reclaim.c 的 oom_event/readahead_hit/
+ * shrink_lru 发射函数入口（先于采样门控 → 全量事件流）；结算逻辑
+ * 全部在本文件，遥测侧只一行转发。
+ * ================================================================== */
+
+/* K4.1：上一次 OOM 事件时刻（任何 OOM 都更新，不管 AI 与否） */
+static u64 ai_k4_last_oom_ns;
+
+/**
+ * ai_mm_k4_oom_is_reoom() - re-OOM 判定（纯函数，KUnit 可测）
+ * @now_ns: 本次 OOM 时刻
+ * @open_ns: OOM 效果窗开窗时刻（0=无在途窗）
+ * @last_oom_ns: 上一次 OOM 时刻（0=首次）
+ *
+ * 在途窗 + 窗龄 <60s + 窗开于上次 OOM 之前 → true。第三个条件排除
+ * 本 OOM 周期 badness 评分刚开的窗（评分与 kill/emit 同周期、间隔
+ * 毫秒级，不加此过滤会把每次 AI 偏置过的 kill 都误判成 re-OOM）。
+ */
+bool ai_mm_k4_oom_is_reoom(u64 now_ns, u64 open_ns, u64 last_oom_ns)
+{
+	if (!open_ns || now_ns < open_ns)
+		return false;
+	if (now_ns - open_ns >= (u64)AI_EFFECT_WIN_SEC_OOM * NSEC_PER_SEC)
+		return false;
+	return last_oom_ns && open_ns < last_oom_ns;
+}
+
+/**
+ * ai_mm_k4_oom_event_note() - K4.1 OOM re-OOM 探测
+ * （ai_mm_emit_oom_event 入口调：一次 OOM kill 一次）
+ *
+ * 在途窗命中 re-OOM 判定 → close(BAD, metric=距上次 OOM 的秒数)
+ * （偏置后 60s 内仍复发=偏置方向错误）；否则只滚动 last_oom_ns。
+ * 60s 无复发由 ai_effect_tick 按到期 outcome 覆盖表兜底为 GOOD。
+ */
+void ai_mm_k4_oom_event_note(void)
+{
+	u64 now = ktime_get_ns();
+
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	{
+		struct ai_effect_win w;
+		u64 last = READ_ONCE(ai_k4_last_oom_ns);
+
+		if (ai_effect_win_peek(AI_HOOK_OOM_BADNESS, &w) &&
+		    ai_mm_k4_oom_is_reoom(now, w.open_ns, last) &&
+		    now > last)
+			ai_effect_close(AI_HOOK_OOM_BADNESS,
+					AI_EFFECT_OUTCOME_BAD,
+					(long)div_u64(now - last,
+						      NSEC_PER_SEC));
+	}
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+	WRITE_ONCE(ai_k4_last_oom_ns, now);
+}
+EXPORT_SYMBOL_GPL(ai_mm_k4_oom_event_note);
+
+/**
+ * ai_mm_k4_readahead_outcome() - K4.4 命中率判定（纯函数，KUnit 可测）
+ * @hit: 命中页数
+ * @miss: 未命中页数
+ * @metric: 出参（百分点，ratio−50，值域 ±50）
+ *
+ * ratio≥50% → GOOD，否则 BAD；hit+miss=0（防 0 除）→ 中性 GOOD。
+ */
+u8 ai_mm_k4_readahead_outcome(unsigned long hit, unsigned long miss,
+			      long *metric)
+{
+	unsigned long total = hit + miss;
+	unsigned long pct;
+
+	if (metric)
+		*metric = 0;
+	if (!total)
+		return AI_EFFECT_OUTCOME_GOOD;
+	pct = hit * 100 / total;
+	if (metric)
+		*metric = (long)pct - 50;
+	return pct >= 50 ? AI_EFFECT_OUTCOME_GOOD : AI_EFFECT_OUTCOME_BAD;
+}
+
+/**
+ * ai_mm_k4_readahead_settle() - K4.4 预读命中率结算
+ * （ai_mm_emit_readahead_hit 入口调：逐 extent hit/miss 计数发射处）
+ *
+ * v1 以「最后一次注入的窗口」近似归属（单槽语义：窗口开于
+ * ai_mm_readahead_hook 的 note_effect，同批预读结束即用该批命中率
+ * 结算）。
+ */
+void ai_mm_k4_readahead_settle(unsigned long hit, unsigned long miss)
+{
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	struct ai_effect_win w;
+	long metric = 0;
+	u8 out;
+
+	if (!ai_effect_win_peek(AI_HOOK_MM_READAHEAD, &w))
+		return;
+	out = ai_mm_k4_readahead_outcome(hit, miss, &metric);
+	ai_effect_close(AI_HOOK_MM_READAHEAD, out, metric);
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+}
+EXPORT_SYMBOL_GPL(ai_mm_k4_readahead_settle);
+
+/* K4.5：reclaim 查询点（mm/vmscan.c get_scan_count 内联，无 AIKernel
+ * 侧包装可包）的 PSI 基线近似——以上一轮 shrink_lruvec 遥测尾的
+ * PSI MEM full avg10（定点值）当本轮开窗水位（两轮回收间水位变化
+ * 平缓，采样近似语义）。PSI 不可用（CONFIG_PSI=n / 访问器未编译 /
+ * 运行时禁用）时只判回收量维度。 */
+static unsigned long ai_k4_reclaim_open_full;
+static bool ai_k4_reclaim_has_psi;
+
+/**
+ * ai_mm_k4_reclaim_settle() - K4.5 回收效果结算
+ * （ai_mm_emit_shrink_lru 入口调：shrink_lruvec 尾=本轮回收完成）
+ * @nr_reclaimed: 本轮回收页数
+ *
+ * v1 判定：回收到页（nr_reclaimed>0）且 PSI MEM full 未较上轮升 →
+ * GOOD，否则 BAD；metric=nr_reclaimed。emit 签名无 nr_to_reclaim
+ * （overlay 调用契约冻结），「reclaimed≥nr_to_reclaim」v1 退化为
+ * 「reclaimed>0」，v2 扩 payload 后恢复精确语义。
+ */
+void ai_mm_k4_reclaim_settle(unsigned long nr_reclaimed)
+{
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
+	unsigned long some[3], full[3];
+	unsigned long now_full;
+	bool psi_ok;
+#endif
+
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
+	psi_ok = ai_psi_read(PSI_MEM, some, full) == AI_OK;
+	now_full = psi_ok ? full[0] : 0;
+#endif
+#ifdef CONFIG_AIKERNEL_RUNTIME
+	{
+		struct ai_effect_win w;
+
+		if (ai_effect_win_peek(AI_HOOK_MM_RECLAIM, &w)) {
+			bool good = nr_reclaimed > 0;
+
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
+			if (psi_ok && READ_ONCE(ai_k4_reclaim_has_psi) &&
+			    now_full > READ_ONCE(ai_k4_reclaim_open_full))
+				good = false;
+#endif
+			ai_effect_close(AI_HOOK_MM_RECLAIM,
+					good ? AI_EFFECT_OUTCOME_GOOD :
+					       AI_EFFECT_OUTCOME_BAD,
+					(long)nr_reclaimed);
+		}
+	}
+#endif /* CONFIG_AIKERNEL_RUNTIME */
+#if defined(CONFIG_PSI) && defined(CONFIG_AIKERNEL_TELEMETRY)
+	/* 滚动基线：本轮回收结束水位 = 下一轮开窗水位近似 */
+	if (psi_ok) {
+		WRITE_ONCE(ai_k4_reclaim_open_full, now_full);
+		WRITE_ONCE(ai_k4_reclaim_has_psi, true);
+	}
+#endif
+}
+EXPORT_SYMBOL_GPL(ai_mm_k4_reclaim_settle);
 
 /* ==================================================================
  * 初始化：默认采样率（热路径事件采样，低频事件全量）

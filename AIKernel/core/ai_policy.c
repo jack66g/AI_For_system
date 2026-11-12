@@ -37,6 +37,7 @@
 #include "ai_control.h"
 #include "ai_telemetry.h"
 #include "ai_causal.h"
+#include "ai_effect.h"
 #include "../net/ai_netlink.h"
 
 /* K1 D3/D8：决策记录尾部扩 8 字段，127→183B packed（drift 即编译
@@ -279,6 +280,11 @@ int ai_policy_record_heuristic(u8 domain, u8 hook_id,
 	rec.executed = 1;
 	/* K1 D2：heuristic 入口同理铸 trace（零进零铸，id 已取号） */
 	ai_trace_mint(rec.decision_id, &rec.trace_hi, &rec.trace_lo);
+	/* K4.0 效果归因环：铸完 id 即绑定该挂点最近 pending 效果窗
+	 * （note_effect 在采样前已开窗）；窗口结算时按 id 回填本记录
+	 * 的 outcome/outcome_ts/metric_delta。id 截 u32 与效果窗字段
+	 * 同宽（计数器 64 位、实际远不到回绕） */
+	ai_effect_bind((enum ai_hook_id)hook_id, (u32)rec.decision_id);
 	ai_policy_record_write(&rec, 0);
 	return AI_OK;
 }
@@ -955,6 +961,36 @@ int ai_policy_outcome_update(u64 decision_id, u8 outcome, s64 metric_delta)
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_policy_outcome_update);
+
+/*
+ * 效果归因环回填（K4.0）：ai_effect.c 窗口结算的定向落笔。与
+ * ai_policy_outcome_update 的差异——只改 ring 条目的
+ * outcome_ts/outcome/metric_delta，不发遥测、不落因果链（效果窗结算
+ * 频率高，逐条 cat18/causal 会淹没 AI Runtime 决策流）。定位复用
+ * ai_policy_ring_find_locked（id 缓存 + 线扫兜底）；找不到（被覆盖
+ * 滚出 ring）返回 -ENOENT，调用方静默容忍。
+ */
+int ai_policy_fill_outcome(u32 decision_id, u8 outcome, long delta)
+{
+	struct ai_decision_record *r;
+	unsigned long flags;
+
+	if (!decision_id)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ai_dec_lock, flags);
+	r = ai_policy_ring_find_locked((u64)decision_id);
+	if (!r) {
+		spin_unlock_irqrestore(&ai_dec_lock, flags);
+		return -ENOENT;
+	}
+	r->outcome_ts = ktime_get_ns();
+	r->outcome = outcome;
+	r->metric_delta = (s64)delta;
+	spin_unlock_irqrestore(&ai_dec_lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ai_policy_fill_outcome);
 
 int ai_policy_rollback_decision(u64 decision_id)
 {

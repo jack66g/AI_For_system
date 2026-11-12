@@ -34,6 +34,9 @@ void ai_mm_emit_shrink_lru(s32 nid, unsigned long nr_scanned_anon,
 {
 	struct ai_mm_shrink_lru_payload p;
 
+	/* K4.5 回收效果结算（全量流：先于采样门控，逻辑见 ai_mm.c） */
+	ai_mm_k4_reclaim_settle(nr_reclaimed);
+
 	if (!ai_telemetry_sample_take(AI_CAT_MM, AI_EV_RECLAIM))
 		return;
 	p.type = AI_MM_SHRINK_LRU;
@@ -144,6 +147,9 @@ void ai_mm_emit_readahead_hit(unsigned long inode_nr, unsigned long pages_hit,
 			      unsigned long pages_missed)
 {
 	struct ai_mm_readahead_hit_payload p;
+
+	/* K4.4 预读命中率结算（全量流：先于采样门控，逻辑见 ai_mm.c） */
+	ai_mm_k4_readahead_settle(pages_hit, pages_missed);
 
 	if (!ai_telemetry_sample_take(AI_CAT_MM, AI_EV_PAGE_CACHE))
 		return;
@@ -324,6 +330,9 @@ void ai_mm_emit_oom_event(u32 killed_pid, const char *killed_comm,
 			  s16 oom_score, u8 constraint)
 {
 	struct ai_mm_oom_event_payload p;
+
+	/* K4.1 OOM re-OOM 探测（全量流：先于采样门控，逻辑见 ai_mm.c） */
+	ai_mm_k4_oom_event_note();
 
 	if (!ai_telemetry_sample_take(AI_CAT_MM, AI_EV_OOM))
 		return;

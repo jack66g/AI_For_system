@@ -50,6 +50,9 @@ struct ai_proc_slot {
 	u8  class;
 	u8  alive;
 	u32 gen;                 /* 换代计数（槽满时淘汰最旧） */
+	u32 wakeups;             /* K4.0：唤醒计数（预留字段——自增点由后续
+				  * 挂点波接入 wakeup 钩子，本波只落字段；
+				  * 插槽 memset 清零已覆盖） */
 	u64 app_start_ns;        /* exec 后启动时刻（app_lifetime 用） */
 	u64 app_start_boot_ns;
 	char app_path[256];      /* exec 全路径（槽表存，用于 app_lifetime/crash） */
