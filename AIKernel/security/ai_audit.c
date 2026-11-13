@@ -27,8 +27,10 @@
 #include <linux/ptrace.h>
 #include <uapi/linux/audit.h>
 #include <asm/syscall.h>
+#include <linux/xxhash.h>
 #include "../core/ai_types.h"
 #include "ai_audit.h"
+#include "ai_chain.h"
 
 /* per-CPU 原始记录 ring（32KB，无锁：head 属主写，AI Runtime 单读者） */
 #define AI_AUDIT_RING_SIZE	(32 * 1024)
@@ -182,6 +184,20 @@ void ai_telemetry_audit_anomaly(const char *anomaly_type, const char *detail)
 	ai_telemetry_emit_direct(AI_CAT_SECURITY, AI_EV_AUDIT, AI_SEV_CRITICAL,
 				 &p, sizeof(p));
 	ai_audit_stat_anomaly++;
+
+	/* K8：审计异常铸链（已限频；字符串打 xxh64 摘要） */
+	{
+		struct ai_chain_ev_anomaly ev = {
+			.type_hash = anomaly_type ?
+				xxh64(anomaly_type, strlen(anomaly_type),
+				       AI_CHAIN_XXH_SEED) : 0,
+			.detail_hash = detail ?
+				xxh64(detail, strlen(detail),
+				      AI_CHAIN_XXH_SEED) : 0,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_AUDIT_ANOMALY, &ev, sizeof(ev));
+	}
 }
 
 /* ==================================================================

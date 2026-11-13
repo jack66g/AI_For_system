@@ -54,6 +54,7 @@
 #include "ai_startup.h"
 #include "ai_runtime.h"
 #include "ai_model_mlp.h"
+#include "../security/ai_chain.h"
 
 #define AI_MLP_MAGIC      "AIKWMDL1"
 #define AI_MLP_MAX_LAYERS 8
@@ -458,6 +459,17 @@ int ai_mlp_model_create(const char *name, const void *data, size_t data_len)
 		"in=%u out=%u, weights=%zu B Q31, sha256=%6phN)\n",
 		name, m->desc.id, m->n_layers, m->layers[0].in_dim,
 		m->layers[m->n_layers - 1].out_dim, m->qbuf_len, m->sha256);
+
+	/* K8：装载成功铸链（MODEL_EVENT/LOAD，摘要取 sha256 前 8B） */
+	{
+		struct ai_chain_ev_model ev = {
+			.op = AI_CHAIN_MODEL_OP_LOAD,
+			.model_id = m->desc.id,
+			.sha256_hi64 = get_unaligned_be64(m->sha256),
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_MODEL_EVENT, &ev, sizeof(ev));
+	}
 	return (int)m->desc.id;
 
 fail_mem:

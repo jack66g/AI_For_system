@@ -45,6 +45,7 @@
 #include "ai_telemetry.h"
 #include "ai_policy.h"
 #include "../net/ai_netlink.h"
+#include "../security/ai_chain.h"
 
 #define AI_RUNTIME_MAX_MODELS      16   /* 模型注册表容量 */
 #define AI_RUNTIME_MAX_CALLBACKS   8    /* 回调表容量 */
@@ -360,6 +361,16 @@ static void ai_rt_switch_on_unload_locked(struct ai_model *m,
 		pr_info("AIKernel: active decision model '%s' unloading -> %s\n",
 			m->name,
 			ai_rt_sw.active ? "builtin decide" : "no decision model");
+		/* K8：active 卸载自动回退铸链（REVERT；builtin 无摘要） */
+		{
+			struct ai_chain_ev_model ev = {
+				.op = AI_CHAIN_MODEL_OP_REVERT,
+				.model_id = m->id,
+			};
+
+			ai_chain_append(AI_CHAIN_KIND_MODEL_EVENT, &ev,
+					 sizeof(ev));
+		}
 	}
 }
 
@@ -486,6 +497,15 @@ int ai_runtime_model_switch_arm(const char *name, u64 *token)
 	mutex_unlock(&ai_runtime_lock);
 
 	*token = h;
+	/* K8：布防成功铸链（ARM；冒烟已过，token 不入链） */
+	{
+		struct ai_chain_ev_model ev = {
+			.op = AI_CHAIN_MODEL_OP_ARM,
+			.model_id = target->id,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_MODEL_EVENT, &ev, sizeof(ev));
+	}
 	pr_info("AIKernel: model_switch armed '%s' (id=%u, smoke ok)\n",
 		name, target->id);
 	ai_model_put(target);
@@ -546,6 +566,16 @@ int ai_runtime_model_switch_confirm(u64 token)
 	} else {
 		pr_info("AIKernel: model_switch confirmed '%s' active "
 			"(observation off, old released)\n", tname);
+	}
+
+	/* K8：切换生效铸链（两分支共用尾；no-op 路径已 goto out 不经此） */
+	{
+		struct ai_chain_ev_model ev = {
+			.op = AI_CHAIN_MODEL_OP_CONFIRM,
+			.model_id = ai_rt_sw.active->id,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_MODEL_EVENT, &ev, sizeof(ev));
 	}
 out:
 	mutex_unlock(&ai_runtime_lock);

@@ -179,7 +179,7 @@ AI 从下表"接管点"列处接管决策。
 | arch/x86/entry/syscall_64.c | `ai_telemetry_syscall_entry` / `ai_telemetry_syscall_exit` | 系统调用入口是全内核最热路径，汇编相邻、绝对性能敏感；采样判定（默认 1/256）已在被调函数内 | 采样命中 → 全量参数留痕；频率/序列/错误簇统计供 AI 行为建模 |
 | drivers/input/input.c（2769） | `ai_proc_input_event` | input_handle_event 是所有输入设备汇聚点，逐字节热路径 | per-CPU 输入状态机（键盘序列/组合键/鼠标/触摸）驱动用户行为感知 |
 | drivers/tty/n_tty.c | `ai_proc_tty_input_focus` / `ai_telemetry_tty_input` / `ai_telemetry_tty_output` | tty 缓冲路径紧贴行规程语义 | 8 槽 tty 焦点窗口表 → user_focus_window 事件（前台应用识别） |
-| kernel/seccomp.c | `ai_sec_seccomp_hook` / `ai_telemetry_seccomp_filter/kill` | seccomp 过滤器检查在 syscall 热路径上 | `ai_sec_seccomp_hook` 只计数（W49 确认调用点不消费 action；seccomp 只允许进程自装，故不承担 sec.seccomp 参数执行） |
+| kernel/seccomp.c | `ai_sec_seccomp_hook` / `ai_telemetry_seccomp_filter/kill` | seccomp 过滤器检查在 syscall 热路径上 | `ai_sec_seccomp_hook` 计数+行为模型更新（W49 确认调用点不消费 action；seccomp 只允许进程自装，故不承担 sec.seccomp 参数执行）；K8 起超阈升格限频入链 SECCOMP_ANOMALY（门控仍 EXPERIMENTAL，见 §4.1/§4.5） |
 | mm/page_alloc.c（7741） | `ai_mm_emit_page_alloc/free/failure/latency` | 分配器热路径（每秒百万次），只能加分支最少的埋点 | 仅遥测外流（`ai_mm_alloc_hook` 空钩 K5 已删，复活路径见 CHANGELOG） |
 | mm/slub.c（10164） | `ai_mm_emit_slab_alloc/free/grow/shrink/fragmentation` | slab 快路径同理 | 遥测外流（slab 碎片率 → AI 内存压力建模） |
 
@@ -207,8 +207,16 @@ AI 从下表"接管点"列处接管决策。
   只在任务已挂 seccomp 过滤器时执行且不消费 action，无法给任意任务强装
   过滤器（seccomp 只允许进程自装/clone 继承/同线程组 TSYNC）→
   `sec.seccomp` 参数如实降级 reserved（无 REAL、无 apply，仅记录值）；
-  真正的基线应由用户态在 exec 前对子进程自装过滤器（W51 设计））、
-  `ai_sec_key_hook`（密钥强度启发式三档，出参被调用方消费）。
+  真正的基线应由用户态在 exec 前对子进程自装过滤器（W51 设计）。
+  **K8（2026-11）两钩做深已接线审计链**：seccomp 侧超阈升格——模型异常
+  分 `m->anomaly`（0~100，滑动窗偏离比）≥60 且距上次入链 ≥1s（全局限频）
+  才发射一条 `SECCOMP_ANOMALY` 节点，不逐 syscall 入链；key 侧强度三档
+  算出即入链 `KEY_EVENT` 节点（既往算出即弃）。链发射器在 `ai_chain.c`
+  为**未门控纯函数**（可 KUnit 代位证明），两钩体接线仍居
+  EXPERIMENTAL 门内（D6 口径：门不翻，产品默认关=诚实登记））、
+  `ai_sec_key_hook`（密钥强度启发式三档，出参被调用方消费；K8 起
+  strength 同步入链，调用点紧邻 key.c 既有 `ai_telemetry_key_create`
+  ——遥测+审计链双记）。
 配套：每个保留钩都有决策统计计数（`ai_*_stats`/`*_hook_calls`），
 经 /proc/ai/stats、/sys/kernel/ai/stats/ 外流，供 AI 主体评估影响面；
 KUnit 覆盖见 `test/ai_hooks_test.c`（分类/异常/强度启发式 +
@@ -263,6 +271,25 @@ net 2/io 5/sec 2——15 个纯桩「计数+恒等返回」门控钩）。
 R1~R3 立新案（K6/K7/K8 或新证据）。参数面无随删：mm.thp 经
 huge_memory.c 门控访问器 REAL 生效（ai_mm_thp_apply），与已删的
 khugepaged 咨询桩无涉，参数与工具面文案保留。
+
+### 4.5 K8 审计链（2026-11）：不可篡改节点流
+
+决策记录 183B 冻约不动，K8 新增**独立 append-only 审计链**（`security/
+ai_chain.{c,h}`，施工 A 交付）：72B 定长节点（seq/ts/prev_hash/self_hash
+/pid/kind/flags/data[32]）静态环 8192 槽，`self_hash=xxh64(整节点且
+self_hash 清零)`、prev 前后咬合成链；事件族 v1 十类（GENESIS/
+DECISION_NEW+OUTCOME 事件对/ROLLBACK/AGENT_REJECT/MODEL_EVENT/
+KEY_EVENT/SECCOMP_ANOMALY/AUDIT_ANOMALY/ANCHOR），审计链 append 永不
+阻断业务路径。出入口：**/proc/ai/audit**（首行 head/nodes/evicted/
+anchors/seeded 计数 + 每节点一行 hex 凭据）与 **/sys/kernel/ai/chain/**
+（`seed` 仅空链收、`anchor_now` 即发锚、`period` 周期锚、`enable`
+kill-switch）。用户面 **aikctl**（`agent/ai/aikctl/aikctl`，python3 纯
+stdlib 单文件，施工 B 交付；aikd 不动）：`selftest`（纯 python xxh64
+向量+合成链篡改检出）、`audit export/verify/anchor/seed/status`——
+export 逐节点重算自检落 jsonl、verify 定位 TAMPER index/seq/field、
+anchor 追加 anchors.jsonl（sha256 行链，TPM/只读分区不可用的偏差登记
+落法）、seed 从锚末行续链跨重启（新 boot GENESIS.prev==旧锚 head 即证）。
+sec 两钩接线见 §4.1；K8 台架 `~/k2/k3/k8v.py`。
 
 ---
 
@@ -547,6 +574,7 @@ real 化 / agent 侧桩清零），第二波 guest 集成 E2E，主控补修 pro
 | sec.lsm_override | AIKernel 自家 LSM enforce/observe 档位 |
 | sec.seccomp | **reserved（W49 降级）**：跨进程 seccomp 注入无安全路径；参数仅记录值，无内核效果 |
 | sec.audit | ai_audit 采集真开关（关后 gate 直接丢弃） |
+| sec.ws_label | per-task 工作区标签（W80：ACT data[0]=pid data[1]=label；真 apply=ai_sec_ws_label_apply） |
 | power.freq | aiguard 频率上限万分比（get_next_freq 真实钳制；QEMU 无 cpufreq 如实标注） |
 | power.cstate | PM QoS cpu_dma_latency（/dev/cpu_dma_latency 同源） |
 | power.wakeup | sched_wakeup tracepoint 探针采集门控 |

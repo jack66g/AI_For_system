@@ -582,6 +582,109 @@ static struct kobj_attribute ai_chain_dir_attr =
 
 #include "ai_sysfs_internal.h"
 
+/* ---- K8：审计链控制面（/sys/kernel/ai/chain 子树）---- */
+#include "../security/ai_chain.h"
+
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+
+static struct kobject *ai_chain_kobj;
+
+static ssize_t ai_chain_enable_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", ai_chain_enable_read() ? 1 : 0);
+}
+
+static ssize_t ai_chain_enable_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	bool on;
+	int rc;
+
+	rc = kstrtobool(buf, &on);
+	if (rc)
+		return rc;
+	ai_chain_enable_set(on);
+	return count;
+}
+
+static struct kobj_attribute ai_chain_enable_c_attr =
+	__ATTR(enable, 0644, ai_chain_enable_show, ai_chain_enable_store);
+
+static ssize_t ai_chain_period_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	struct ai_chain_stats st;
+
+	ai_chain_stats_read(&st);
+	return sysfs_emit(buf, "%u\n", st.period);
+}
+
+static ssize_t ai_chain_period_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	u32 v;
+	int rc;
+
+	rc = kstrtou32(buf, 0, &v);
+	if (rc)
+		return rc;
+	rc = ai_chain_period_set(v);
+	if (rc)
+		return rc;
+	return count;
+}
+
+static struct kobj_attribute ai_chain_period_c_attr =
+	__ATTR(period, 0644, ai_chain_period_show, ai_chain_period_store);
+
+/* seed（0200）：写 %016llx 续链种子——仅空链收（防事后改史） */
+static ssize_t ai_chain_seed_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	u64 v;
+	int rc;
+
+	rc = kstrtou64(buf, 16, &v);
+	if (rc)
+		return rc;
+	rc = ai_chain_seed(v);
+	if (rc)
+		return rc;
+	return count;
+}
+
+static struct kobj_attribute ai_chain_seed_c_attr =
+	__ATTR(seed, 0200, NULL, ai_chain_seed_store);
+
+static ssize_t ai_chain_anchor_now_store(struct kobject *kobj,
+					 struct kobj_attribute *attr,
+					 const char *buf, size_t count)
+{
+	ai_chain_anchor_now();
+	return count;
+}
+
+static struct kobj_attribute ai_chain_anchor_now_c_attr =
+	__ATTR(anchor_now, 0200, NULL, ai_chain_anchor_now_store);
+
+static struct attribute *ai_chain_group_attrs[] = {
+	&ai_chain_enable_c_attr.attr,
+	&ai_chain_period_c_attr.attr,
+	&ai_chain_seed_c_attr.attr,
+	&ai_chain_anchor_now_c_attr.attr,
+	NULL,
+};
+
+static const struct attribute_group ai_chain_c_group = {
+	.attrs = ai_chain_group_attrs,
+};
+
+#endif	/* CONFIG_AIKERNEL_SECURITY */
+
 /* ---- 初始化 ---- */
 
 /* ---- model_infer/model_out：AIKWMDL MLP 真前向触发与结果观测 ----
@@ -1068,6 +1171,17 @@ static int __init ai_sysfs_init(void)
 	if (rc)
 		goto err_kobj;
 
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+	/* K8：审计链控制面 */
+	ai_chain_kobj = kobject_create_and_add("chain", ai_kobj);
+	if (!ai_chain_kobj) {
+		rc = -ENOMEM;
+		goto err_kobj;
+	}
+	rc = sysfs_create_group(ai_chain_kobj, &ai_chain_c_group);
+	if (rc)
+		goto err_kobj;
+#endif
 	/* K3：agents/<name>/{actions_per_win,win_ms}（照 policy/ 子目录手法） */
 	ai_agents_kobj = kobject_create_and_add("agents", ai_kobj);
 	if (!ai_agents_kobj) {
@@ -1109,6 +1223,9 @@ static int __init ai_sysfs_init(void)
 err_kobj:
 	for (i = 0; i < ARRAY_SIZE(ai_sysfs_agent_dirs); i++)
 		kobject_put(ai_sysfs_agent_dirs[i].kobj);
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+	kobject_put(ai_chain_kobj);
+#endif
 	kobject_put(ai_agents_kobj);
 	kobject_put(ai_decision_kobj);
 	kobject_put(ai_stats_kobj);
@@ -1126,6 +1243,9 @@ static void __exit ai_sysfs_exit(void)
 
 	for (i = 0; i < ARRAY_SIZE(ai_sysfs_agent_dirs); i++)
 		kobject_put(ai_sysfs_agent_dirs[i].kobj);
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+	kobject_put(ai_chain_kobj);
+#endif
 	kobject_put(ai_agents_kobj);
 	kobject_put(ai_decision_kobj);
 	kobject_put(ai_stats_kobj);

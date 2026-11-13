@@ -13,7 +13,9 @@
  *   - ai_sec_seccomp/key_hook：AI 决策接入点（seccomp 行为模型观测 +
  *     key 强度启发式；K5 删除 cap/crypto 两个空桩钩，见
  *     AIKernel/CHANGELOG.md；sec.seccomp 参数已于 W49 如实降级
- *     reserved，见文末说明）；
+ *     reserved，见文末说明；K8 起两钩做深——key 强度入链 KEY_EVENT、
+ *     seccomp 异常升格限频入链 SECCOMP_ANOMALY，发射走 ai_chain.h
+ *     冻结契约，钩体仍居 EXPERIMENTAL 门）；
  *   - ai_sec_syscall_name()：syscall 号→名称（低频事件专用）。
  * B 轨（数据计划 第8类）：8.1/8.2/8.3/8.5/8.6/8.8 事件发射全量原始零脱敏。
  * 8.4（审计）由 ai_audit.c 承担；8.7 kmsan/ubsan/kcsan 发射本文件提供，采集点在
@@ -29,6 +31,7 @@
 #include <linux/init.h>
 #include <linux/lsm_hooks.h>
 #include "ai_audit.h"
+#include "ai_chain.h"	/* K8 审计链便捷发射器（冻结契约，未门控纯函数） */
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/signal.h>
@@ -37,6 +40,7 @@
 #include <linux/ptrace.h>
 #include <linux/kallsyms.h>
 #include <linux/spinlock.h>
+#include <linux/atomic.h>
 #include <linux/sched.h>
 #include <linux/bitops.h>
 #include <linux/ktime.h>
@@ -171,6 +175,10 @@ static struct ai_lsm_model ai_lsm_models[AI_LSM_MODEL_SLOTS];
 static DEFINE_SPINLOCK(ai_lsm_model_lock);
 
 #define AI_LSM_WINDOW_NS	(10ULL * NSEC_PER_SEC)
+/* K8（设计册 D6）：seccomp 观测点异常升格入链阈值——m->anomaly（模型
+ * 现成 0~100 异常分）≥60 才升格一条 SECCOMP_ANOMALY（依据见
+ * ai_sec_seccomp_hook 内注释）；D6 口径=超阈限频一条，非逐 syscall。 */
+#define AI_LSM_SECCOMP_CHAIN_ANOM	60
 
 static struct ai_lsm_model *ai_lsm_model_get(u32 pid, u64 now, bool create)
 {
@@ -930,9 +938,13 @@ static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
 void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 			 u32 *action)
 {
+	/* K8 限频锚：上次 SECCOMP_ANOMALY 入链时刻（全局，非 per-CPU——
+	 * D6 要求跨 CPU 也只一条/秒；cmpxchg 无锁判更） */
+	static atomic64_t ai_sec_chain_last_ns = ATOMIC64_INIT(0);
 	struct ai_lsm_model *m;
 	unsigned long flags;
 	u64 now;
+	u8 anom = 0;
 
 	if (!current)
 		return;
@@ -940,9 +952,34 @@ void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 	now = ktime_get_ns();
 	spin_lock_irqsave(&ai_lsm_model_lock, flags);
 	m = ai_lsm_model_get(current->pid, now, true);
-	if (m)
+	if (m) {
 		ai_lsm_model_update(m, now, 4);
+		anom = m->anomaly;
+	}
 	spin_unlock_irqrestore(&ai_lsm_model_lock, flags);
+
+	/* K8 做深（设计册 D6）：超阈升格才入链，不逐 syscall。信号选
+	 * m->anomaly（模型现成异常分，而非 count_seccomp）——seccomp 槽位
+	 * 在 update 里 base=NULL 无基线：挂过滤器的任务每个 syscall 都过
+	 * 本钩（overlay 调用点在 seccomp_run_filters 之前），裸窗计数没有
+	 * 「正常画像」参照，busy 容器任务与探测行为不可分；anomaly 是模型
+	 * 唯一校准过的分制。其真值面（update 实现细读）：open/kill 路径仅
+	 * 在 count>base 时重算且 dev=count*100/base>100 恒封顶 100（近二
+	 * 值），cap_deny 连拒走 count*10 分档（kind==3，线性 0~100）。
+	 * 阈值 AI_LSM_SECCOMP_CHAIN_ANOM=60 的含义据此取：open/kill 超
+	 * 基线（恒 100）即升格；能力连拒 ≥6 次（6*10）达线，≤5 次轻微
+	 * 连拒不升格。anomaly 语义为「最近异常分」（不随 seccomp 观测
+	 * 衰减），由 1s 全局限频兜底频次。超阈且距上次入链 ≥1s 才发射，
+	 * 发射器 ai_chain_seccomp_anomaly() 未门控纯函数、
+	 * fire-and-forget，返回值无消费（审计链永不阻断业务路径）。 */
+	if (m && anom >= AI_LSM_SECCOMP_CHAIN_ANOM) {
+		s64 last = atomic64_read(&ai_sec_chain_last_ns);
+
+		if ((s64)now - last >= (s64)NSEC_PER_SEC &&
+		    atomic64_cmpxchg(&ai_sec_chain_last_ns, last,
+				     (s64)now) == last)
+			ai_chain_seccomp_anomaly(syscall_nr, anom);
+	}
 
 	/* AI 建议规则为空：不改 action */
 }
@@ -959,6 +996,14 @@ void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
 		*strength = 1;		/* 中 */
 	else
 		*strength = 2;		/* 强 */
+
+	/* K8 做深（设计册 D6）：strength 既往算出即弃，K8 起入链——算完
+	 * 即调 ai_chain_key_event()（type/desc 内部打 xxh64 短摘要连同
+	 * strength 落 KEY_EVENT 节点）；发射器未门控纯函数、
+	 * fire-and-forget，本调用仍在 EXPERIMENTAL 门内（D6 口径：门不
+	 * 翻）。调用点紧邻 key.c overlay 既有 ai_telemetry_key_create
+	 * 调用（遥测+审计链双记，A 轨 6.5 / B 轨 8.5）。 */
+	ai_chain_key_event(type, desc, plen, *strength);
 }
 #endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 

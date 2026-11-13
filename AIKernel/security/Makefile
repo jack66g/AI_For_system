@@ -7,4 +7,5 @@
 #   - ai_lsm_telemetry.o：第8类安全事件发射辅助（自 ai_lsm.c 拆分）
 #   - ai_audit.o：AI 安全审计模块（审计关联 + 攻击链）
 # 全部门控 CONFIG_AIKERNEL_SECURITY（default n）；AI 关闭时不构建 → 零回归。
-obj-$(CONFIG_AIKERNEL_SECURITY) += ai_lsm.o ai_lsm_telemetry.o ai_audit.o
+# K8：审计链核心（xxh64 哈希链+锚+窗口验证；ai_audit 深依赖）
+obj-$(CONFIG_AIKERNEL_SECURITY) += ai_lsm.o ai_lsm_telemetry.o ai_audit.o ai_chain.o

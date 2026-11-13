@@ -25,6 +25,7 @@
 #include <linux/export.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include "../security/ai_chain.h"
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/capability.h>
@@ -678,6 +679,43 @@ struct proc_dir_entry *ai_procfs_get_root(void)
 }
 EXPORT_SYMBOL_GPL(ai_procfs_get_root);
 
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+/* ---- audit（K8：审计链窗口导出；0400 敏感口径同 decisions） ---- */
+
+static int ai_proc_audit_show(struct seq_file *m, void *v)
+{
+	struct ai_chain_stats st;
+	struct ai_chain_node n;
+	u64 s;
+
+	ai_chain_stats_read(&st);
+	seq_printf(m, "chain head=%016llx nodes=%llu evicted=%llu anchors=%llu seeded=%016llx\n",
+		   st.head_hash, st.nodes, st.evicted, st.anchors,
+		   st.seeded ? st.seeded_val : 0);
+	for (s = st.first_seq; s && s <= st.nodes; s++) {
+		if (ai_chain_node_copy(s, &n))
+			break;
+		seq_printf(m, "n seq=%llu ts=%llu k=%u pid=%u f=%u prev=%016llx h=%016llx d=%32phN\n",
+			   n.seq, n.ts_ns, n.kind, n.pid, n.flags,
+			   n.prev_hash, n.self_hash, n.data);
+	}
+	return 0;
+}
+
+static int ai_proc_audit_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ai_proc_audit_show, NULL);
+}
+
+static const struct proc_ops ai_proc_audit_ops = {
+	.proc_open    = ai_proc_audit_open,
+	.proc_read    = seq_read,
+	.proc_lseek   = seq_lseek,
+	.proc_release = single_release,
+};
+
+#endif	/* CONFIG_AIKERNEL_SECURITY */
+
 static int __init ai_procfs_init(void)
 {
 	if (!ai_startup_get_enabled())
@@ -698,6 +736,10 @@ static int __init ai_procfs_init(void)
 	proc_create("agents", 0644, ai_proc_root, &ai_proc_agents_ops);
 	/* K6：模型治理视图（D3 七字段+slot；照 agents 节点同款手法追加） */
 	proc_create("models", 0444, ai_proc_root, &ai_proc_models_ops);
+#if IS_ENABLED(CONFIG_AIKERNEL_SECURITY)
+	/* K8：审计链窗口导出（hex 行单格式，aikctl 同口径解析） */
+	proc_create("audit", 0400, ai_proc_root, &ai_proc_audit_ops);
+#endif
 
 	pr_info("AIKernel: /proc/ai/ interface ready\n");
 	return 0;

@@ -1,0 +1,773 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""aikctl — AIKernel K8 审计链用户面 CLI（python3 纯 stdlib 单文件）。
+
+设计册 work/refactor/KERNEL-K8-DESIGN.md §2 D7；aikd 不动（独立新工具）。
+
+子命令：
+  selftest                        纯 python XXH64 向量自检 + 合成链篡改检出
+  audit export [-o FILE]          读 /proc/ai/audit 逐节点重算自检 → jsonl
+  audit verify FILE [--anchors F] 逐节点重算+seq 连续性；锚文件行链
+  audit anchor [-e export.jsonl] [--anchors F]  追加 anchors.jsonl 行链
+  audit seed [--anchors F]        锚末行 head_hash → /sys/kernel/ai/chain/seed
+  audit status                    /proc/ai/audit 首行 + chain sysfs 状态
+
+节点布局（72B 小端，A 路冻结契约）：
+  {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
+   u16 flags; u8 data[32]}
+  self_hash = xxh64(整 72B 且 self_hash 先清零, seed=0x414b3831)
+
+/proc/ai/audit 格式（A 路冻结）：
+  首行 chain head=%016llx nodes=%llu evicted=%llu anchors=%llu seeded=%016llx
+  节点行 n seq=%llu ts=%llu k=%u pid=%u f=%u prev=%016llx h=%016llx d=<64hex>
+
+退出码：0 成功；1 使用/IO 错；2 链校验失配（TAMPER）；3 锚行链断。
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import struct
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+
+PROC_AUDIT = '/proc/ai/audit'
+SYSFS_CHAIN = '/sys/kernel/ai/chain'
+AUDIT_DIR = '/var/lib/aikernel/audit'
+DEFAULT_ANCHORS = os.path.join(AUDIT_DIR, 'anchors.jsonl')
+
+CHAIN_SEED = 0x414b3831          # 'AK81'——节点 self_hash 的 xxh64 seed
+NODE_FMT = '<QQQQIHH'            # 40B 头 + data[32] = 72B（'<'=小端无垫）
+M64 = (1 << 64) - 1
+
+# kind 编号：KEY_EVENT=6 / SECCOMP_ANOMALY=7 为冻结契约；实机钉扎
+# （k8v rig 干跑，K8 内核实链 kind 分布 {0:GENESIS,1:DECISION_NEW,
+# 2:DECISION_OUTCOME,4:AGENT_REJECT,9:ANCHOR}）：GENESIS=0 起编，
+# 3=ROLLBACK、5=MODEL_EVENT、8=AUDIT_ANOMALY 为推定空位。集成时如与
+# ai_chain.h 有出入，只改本表与常量。
+KIND_GENESIS = 0
+KIND_DECISION_NEW = 1
+KIND_DECISION_OUTCOME = 2
+KIND_ROLLBACK = 3
+KIND_AGENT_REJECT = 4
+KIND_MODEL_EVENT = 5
+KIND_KEY_EVENT = 6
+KIND_SECCOMP_ANOMALY = 7
+KIND_AUDIT_ANOMALY = 8
+KIND_ANCHOR = 9
+KIND_NAMES = {
+    KIND_GENESIS: 'GENESIS',
+    KIND_DECISION_NEW: 'DECISION_NEW',
+    KIND_DECISION_OUTCOME: 'DECISION_OUTCOME',
+    KIND_ROLLBACK: 'ROLLBACK',
+    KIND_AGENT_REJECT: 'AGENT_REJECT',
+    KIND_KEY_EVENT: 'KEY_EVENT',
+    KIND_SECCOMP_ANOMALY: 'SECCOMP_ANOMALY',
+    KIND_AUDIT_ANOMALY: 'AUDIT_ANOMALY',
+    KIND_ANCHOR: 'ANCHOR',
+    KIND_MODEL_EVENT: 'MODEL_EVENT',
+}
+
+
+# ---------------------------------------------------------------- XXH64 ----
+# XXH64 官方算法 one-shot 纯 python 实现（小端；无第三方依赖）。
+_P1 = 11400714785074694791
+_P2 = 14029467366897019727
+_P3 = 1609587929392839161
+_P4 = 9650029242287828579
+_P5 = 2870177450012600261
+
+
+def _rotl(x, r):
+    x &= M64
+    return ((x << r) | (x >> (64 - r))) & M64
+
+
+def xxh64(data, seed=0):
+    """XXH64(data, seed) → int（官方 one-shot：stripe 循环 + 三段尾部）。"""
+    n = len(data)
+    i = 0
+    if n >= 32:
+        v1 = (seed + _P1 + _P2) & M64
+        v2 = (seed + _P2) & M64
+        v3 = seed & M64
+        v4 = (seed - _P1) & M64
+        while i + 32 <= n:
+            k1 = struct.unpack_from('<Q', data, i)[0]
+            k2 = struct.unpack_from('<Q', data, i + 8)[0]
+            k3 = struct.unpack_from('<Q', data, i + 16)[0]
+            k4 = struct.unpack_from('<Q', data, i + 24)[0]
+            v1 = (_rotl((v1 + k1 * _P2) & M64, 31) * _P1) & M64
+            v2 = (_rotl((v2 + k2 * _P2) & M64, 31) * _P1) & M64
+            v3 = (_rotl((v3 + k3 * _P2) & M64, 31) * _P1) & M64
+            v4 = (_rotl((v4 + k4 * _P2) & M64, 31) * _P1) & M64
+            i += 32
+        h = (_rotl(v1, 1) + _rotl(v2, 7) + _rotl(v3, 12) + _rotl(v4, 18)) & M64
+        for v in (v1, v2, v3, v4):
+            h ^= (_rotl(v * _P2 & M64, 31) * _P1) & M64
+            h = (h * _P1 + _P4) & M64
+    else:
+        h = (seed + _P5) & M64
+    h = (h + n) & M64
+    while i + 8 <= n:
+        k = (_rotl(struct.unpack_from('<Q', data, i)[0] * _P2 & M64, 31)
+             * _P1) & M64
+        h ^= k
+        h = (_rotl(h, 27) * _P1 + _P4) & M64
+        i += 8
+    if i + 4 <= n:
+        h ^= (struct.unpack_from('<I', data, i)[0] * _P1) & M64
+        h = (_rotl(h, 23) * _P2 + _P3) & M64
+        i += 4
+    while i < n:
+        h ^= (data[i] * _P5) & M64
+        h = (_rotl(h, 11) * _P1) & M64
+        i += 1
+    h ^= h >> 33
+    h = (h * _P2) & M64
+    h ^= h >> 29
+    h = (h * _P3) & M64
+    h ^= h >> 32
+    return h & M64
+
+
+# ------------------------------------------------------------ 节点编解码 ----
+def node_raw(seq, ts_ns, prev_hash, self_hash, pid, kind, flags, data32):
+    return (struct.pack(NODE_FMT, seq, ts_ns, prev_hash, self_hash, pid,
+                        kind, flags) + data32)
+
+
+def node_hash(raw72):
+    """self_hash = xxh64(整 72B 且 self_hash(偏移 24..32)清零, CHAIN_SEED)。"""
+    return xxh64(raw72[:24] + b'\x00' * 8 + raw72[32:], CHAIN_SEED)
+
+
+def decode_data(kind, data32):
+    """kind 专属字段展开（DECISION_NEW/OUTCOME、AGENT_REJECT、ANCHOR、
+    GENESIS）；其余 kind 返回 None（data 原样保留）。"""
+    try:
+        if kind == KIND_DECISION_NEW:
+            # {u64 decision_id; u32 trigger_event_id; u8 decision_type;
+            #  u8 domain; u8 source; 零垫}
+            did, tev, dtype, dom, src = struct.unpack_from('<QIBBB', data32)
+            return {'decision_id': did, 'trigger_event_id': tev,
+                    'decision_type': dtype, 'domain': dom, 'source': src}
+        if kind == KIND_DECISION_OUTCOME:
+            # {u64 decision_id; u8 outcome; pad7; s64 metric_delta;
+            #  u64 outcome_ts}
+            did, outcome = struct.unpack_from('<QB', data32)
+            mdelta, = struct.unpack_from('<q', data32, 16)
+            ots, = struct.unpack_from('<Q', data32, 24)
+            return {'decision_id': did, 'outcome': outcome,
+                    'metric_delta': mdelta, 'outcome_ts': ots}
+        if kind == KIND_AGENT_REJECT:
+            # {u32 agent_id; u32 failures; u32 window_actions; u32 pad}
+            aid, failures, window, _pad = struct.unpack('<IIII', data32)
+            return {'agent_id': aid, 'failures': failures,
+                    'window_actions': window}
+        if kind == KIND_ANCHOR:
+            # {u64 nodes_total; u64 window_first_seq; u32 epoch; u32 pad}
+            total, first_seq, epoch, _pad = struct.unpack('<QQII', data32)
+            return {'nodes_total': total, 'window_first_seq': first_seq,
+                    'epoch': epoch}
+        if kind == KIND_GENESIS:
+            # {u64 boot_cookie}
+            cookie, = struct.unpack_from('<Q', data32)
+            return {'boot_cookie': cookie}
+    except struct.error:
+        return None
+    return None
+
+
+def node_to_json(seq, ts_ns, kind, pid, flags, prev, h, data32):
+    d = {'seq': seq, 'ts_ns': ts_ns, 'kind': kind, 'pid': pid,
+         'flags': flags, 'prev': '%016x' % prev, 'hash': '%016x' % h,
+         'data': data32.hex()}
+    if kind in KIND_NAMES:
+        d['kind_name'] = KIND_NAMES[kind]
+    dec = decode_data(kind, data32)
+    if dec is not None:
+        d['data_decoded'] = dec
+    return d
+
+
+def node_from_json(obj):
+    """jsonl 节点行 → 72B 原始节点（self_hash 置 0，供 verify 重算）。"""
+    return node_raw(int(obj['seq']), int(obj['ts_ns']),
+                    int(obj['prev'], 16), 0, int(obj['pid']),
+                    int(obj['kind']), int(obj['flags']),
+                    bytes.fromhex(obj['data']))
+
+
+# --------------------------------------------------------- /proc 读取 ----
+PROC_HDR_RE = re.compile(
+    r'^chain head=([0-9a-f]{16}) nodes=(\d+) evicted=(\d+) '
+    r'anchors=(\d+) seeded=([0-9a-f]{16})')
+PROC_NODE_RE = re.compile(
+    r'^n seq=(\d+) ts=(\d+) k=(\d+) pid=(\d+) f=(\d+) '
+    r'prev=([0-9a-f]{16}) h=([0-9a-f]{16}) d=([0-9a-f]{64})$')
+
+
+def read_proc_audit(path=PROC_AUDIT):
+    """→ (header dict, [node dict…])；格式不符抛 RuntimeError。"""
+    with open(path, 'r', errors='replace') as f:
+        lines = f.read().splitlines()
+    hdr = None
+    nodes = []
+    for ln in lines:
+        if not ln.strip():
+            continue
+        m = PROC_HDR_RE.match(ln)
+        if m:
+            hdr = {'head': int(m.group(1), 16), 'nodes': int(m.group(2)),
+                   'evicted': int(m.group(3)), 'anchors': int(m.group(4)),
+                   'seeded': int(m.group(5), 16)}
+            continue
+        m = PROC_NODE_RE.match(ln)
+        if m:
+            nodes.append({'seq': int(m.group(1)), 'ts_ns': int(m.group(2)),
+                          'kind': int(m.group(3)), 'pid': int(m.group(4)),
+                          'flags': int(m.group(5)),
+                          'prev': int(m.group(6), 16),
+                          'hash': int(m.group(7), 16),
+                          'data': bytes.fromhex(m.group(8))})
+            continue
+        raise RuntimeError('%s: 无法解析行: %r' % (path, ln[:120]))
+    if hdr is None:
+        raise RuntimeError('%s: 缺首行 chain head=… 头行' % path)
+    return hdr, nodes
+
+
+def genesis_boot_cookie(nodes):
+    """从 genesis 节点（kind==GENESIS，兜底 seq==1）data 解 boot_cookie。"""
+    for nd in nodes:
+        if nd.get('kind') == KIND_GENESIS or nd.get('seq') == 1:
+            data = nd['data']
+            if isinstance(data, str):
+                data = bytes.fromhex(data)
+            if len(data) >= 8:
+                return struct.unpack_from('<Q', data)[0]
+    return None
+
+
+# ------------------------------------------------------------ jsonl I/O ----
+def _canon(obj):
+    return json.dumps(obj, sort_keys=True, separators=(',', ':'))
+
+
+def write_private(path, data):
+    """0600 覆盖写（父目录 mkdir -p）。"""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def append_private(path, data):
+    """0600 追加写（父目录 mkdir -p）。"""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def load_export(path):
+    """export jsonl → (meta, [node json dict…])。"""
+    meta, nodes = None, []
+    with open(path, 'r', errors='replace') as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            obj = json.loads(ln)
+            if meta is None:
+                if 'meta' not in obj:
+                    raise RuntimeError('%s: 首行不是 meta 行' % path)
+                meta = obj
+            else:
+                nodes.append(obj)
+    if meta is None:
+        raise RuntimeError('%s: 空文件（无 meta 行）' % path)
+    return meta, nodes
+
+
+# --------------------------------------------------------------- verify ----
+def verify_chain(meta, nodes):
+    """逐节点重算 + seq 连续性 + prev 链 + head 见证。
+
+    → (code, [输出行])；code 0=OK / 2=TAMPER，首失配即返回。
+    field 归因：prev=链断；gap=seq 断档或截尾；data=内容与 h 不符
+    （下一节点 prev / meta head 见证 h 原值）；hash=h 字段被翻
+    （见证==重算值）。
+    """
+    n = len(nodes)
+    if n == 0:
+        return 2, ['TAMPER index=0 seq=0 field=gap',
+                   'gap: 文件无节点（meta node_count=%s）'
+                   % meta.get('node_count')]
+    meta_head = None
+    if isinstance(meta.get('head'), str):
+        meta_head = int(meta['head'], 16)
+    for i, nd in enumerate(nodes):
+        seq = int(nd['seq'])
+        if i > 0:
+            pseq = int(nodes[i - 1]['seq'])
+            if seq != pseq + 1:
+                return 2, [
+                    'TAMPER index=%d seq=%d field=gap' % (i, seq),
+                    'gap: seq %d..%d 缺失（%d→%d）'
+                    % (pseq + 1, seq - 1, pseq, seq)]
+            if int(nd['prev'], 16) != int(nodes[i - 1]['hash'], 16):
+                return 2, ['TAMPER index=%d seq=%d field=prev' % (i, seq)]
+        calc = node_hash(node_from_json(nd))
+        stored = int(nd['hash'], 16)
+        if calc != stored:
+            witness = (int(nodes[i + 1]['prev'], 16) if i + 1 < n
+                       else meta_head)
+            if witness is not None and witness == calc:
+                field = 'hash'      # h 字段被翻：邻居/头行见证重算值
+            else:
+                field = 'data'      # 内容被动过（或无一致见证，默认归 data）
+            return 2, ['TAMPER index=%d seq=%d field=%s' % (i, seq, field)]
+    mcount = meta.get('node_count')
+    if isinstance(mcount, int) and mcount != n:
+        last_seq = int(nodes[-1]['seq'])
+        return 2, [
+            'TAMPER index=%d seq=%d field=gap' % (n, last_seq + 1),
+            'gap: meta node_count=%d 文件节点=%d（截尾）' % (mcount, n)]
+    if meta_head is not None and meta_head != int(nodes[-1]['hash'], 16):
+        return 2, ['TAMPER index=%d seq=%d field=hash'
+                   % (n - 1, int(nodes[-1]['seq']))]
+    return 0, ['OK nodes=%d head=%s' % (n, nodes[-1]['hash'])]
+
+
+def verify_anchor_file(path):
+    """锚文件行链：line[i].prev_line_sha256 == sha256(line[i-1] 原文)。
+
+    首行 prev_line_sha256 == '0'*64。→ (code, [行])；0=OK / 1=IO / 3=断。
+    """
+    try:
+        with open(path, 'r', errors='replace') as f:
+            raw_lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    except OSError as e:
+        return 1, ['anchor 文件读失败: %s' % e]
+    if not raw_lines:
+        return 1, ['anchor 文件为空: %s' % path]
+    prev_digest = '0' * 64
+    for i, ln in enumerate(raw_lines):
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            return 3, ['ANCHOR_CHAIN_BREAK line=%d（非 json 行）' % i]
+        if not isinstance(obj, dict) or \
+                obj.get('prev_line_sha256') != prev_digest:
+            return 3, ['ANCHOR_CHAIN_BREAK line=%d（prev_line_sha256 '
+                       '行链断）' % i]
+        prev_digest = hashlib.sha256(ln.encode('utf-8')).hexdigest()
+    try:
+        tail = json.loads(raw_lines[-1]).get('head_hash', '?')
+    except ValueError:
+        tail = '?'
+    return 0, ['ANCHOR_OK lines=%d tail_head=%s' % (len(raw_lines), tail)]
+
+
+def cmd_verify(args):
+    try:
+        meta, nodes = load_export(args.file)
+        code, out = verify_chain(meta, nodes)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
+        print('verify: 读取/解析失败: %s' % e, file=sys.stderr)
+        return 1
+    for ln in out:
+        print(ln)
+    if code != 0:
+        return 2
+    if args.anchors:
+        acode, aout = verify_anchor_file(args.anchors)
+        for ln in aout:
+            print(ln)
+        if acode != 0:
+            return acode
+    return 0
+
+
+# --------------------------------------------------------------- export ----
+def build_export_jsonl(hdr, nodes):
+    """→ jsonl bytes（meta 首行 + 节点行）；逐节点重算自检不符即抛。"""
+    cookie = genesis_boot_cookie(nodes)
+    meta = {'meta': True,
+            'boot_cookie': ('%016x' % cookie if cookie is not None else None),
+            'node_count': len(nodes), 'head': '%016x' % hdr['head']}
+    lines = [_canon(meta)]
+    for nd in sorted(nodes, key=lambda x: x['seq']):
+        raw = node_raw(nd['seq'], nd['ts_ns'], nd['prev'], 0, nd['pid'],
+                       nd['kind'], nd['flags'], nd['data'])
+        calc = node_hash(raw)
+        if calc != nd['hash']:
+            raise RuntimeError('节点 seq=%d 自检失败: h=%016x 重算=%016x'
+                               % (nd['seq'], nd['hash'], calc))
+        lines.append(_canon(node_to_json(
+            nd['seq'], nd['ts_ns'], nd['kind'], nd['pid'], nd['flags'],
+            nd['prev'], nd['hash'], nd['data'])))
+    if nodes and hdr['head'] != nodes[-1]['hash']:
+        raise RuntimeError('头行 head=%016x 与末节点 h=%016x 不符'
+                           % (hdr['head'], nodes[-1]['hash']))
+    return ('\n'.join(lines) + '\n').encode('utf-8')
+
+
+def cmd_export(args):
+    try:
+        hdr, nodes = read_proc_audit()
+        blob = build_export_jsonl(hdr, nodes)
+    except (OSError, RuntimeError) as e:
+        print('export: %s' % e, file=sys.stderr)
+        return 1
+    out = args.o or os.path.join(
+        AUDIT_DIR, 'chain-%s.jsonl'
+        % datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+    write_private(out, blob)
+    print('EXPORT nodes=%d evicted=%d head=%016x -> %s'
+          % (len(nodes), hdr['evicted'], hdr['head'], out))
+    return 0
+
+
+# --------------------------------------------------------------- anchor ----
+def _last_anchor_line(path):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            raw = [ln for ln in f.read().splitlines() if ln.strip()]
+        return raw[-1] if raw else None
+    except OSError:
+        return None
+
+
+def cmd_anchor(args):
+    cookie = None
+    nodes_count = None
+    head_hash = None
+    export_sha256 = None
+    if args.e:
+        try:
+            meta, _nodes = load_export(args.e)
+            with open(args.e, 'rb') as f:
+                export_sha256 = hashlib.sha256(f.read()).hexdigest()
+            cookie = meta.get('boot_cookie')
+            nodes_count = meta.get('node_count')
+            head_hash = meta.get('head')
+        except (OSError, RuntimeError, ValueError) as e:
+            print('anchor: 读 export 失败: %s' % e, file=sys.stderr)
+            return 1
+        if not head_hash:
+            print('anchor: export meta 缺 head', file=sys.stderr)
+            return 1
+    else:
+        try:
+            hdr, nodes = read_proc_audit()
+        except (OSError, RuntimeError) as e:
+            print('anchor: %s（无 -e 且 /proc 不可读）' % e, file=sys.stderr)
+            return 1
+        cookie = genesis_boot_cookie(nodes)
+        cookie = '%016x' % cookie if cookie is not None else None
+        nodes_count = hdr['nodes']
+        head_hash = '%016x' % hdr['head']
+    last = _last_anchor_line(args.anchors)
+    prev_digest = (hashlib.sha256(last.encode('utf-8')).hexdigest()
+                   if last else '0' * 64)
+    obj = {'ts': int(time.time()), 'boot_cookie': cookie, 'nodes': nodes_count,
+           'head_hash': head_hash, 'export_sha256': export_sha256,
+           'prev_line_sha256': prev_digest}
+    append_private(args.anchors, (_canon(obj) + '\n').encode('utf-8'))
+    prev_head = None
+    if last:
+        try:
+            prev_head = json.loads(last).get('head_hash')
+        except ValueError:
+            pass
+    print('ANCHOR head=%s nodes=%s -> %s（prev head=%s）'
+          % (head_hash, nodes_count, args.anchors, prev_head))
+    return 0
+
+
+# ----------------------------------------------------------------- seed ----
+def cmd_seed(args):
+    last = _last_anchor_line(args.anchors)
+    if not last:
+        print('seed: 锚文件无行: %s' % args.anchors, file=sys.stderr)
+        return 1
+    try:
+        head_hash = json.loads(last)['head_hash']
+        seed = '%016x' % int(head_hash, 16)
+    except (ValueError, KeyError, TypeError) as e:
+        print('seed: 锚末行解析失败: %s' % e, file=sys.stderr)
+        return 1
+    try:
+        with open(os.path.join(SYSFS_CHAIN, 'seed'), 'w') as f:
+            f.write(seed)
+    except OSError as e:
+        print('seed: 写 %s/seed 失败: %s' % (SYSFS_CHAIN, e), file=sys.stderr)
+        return 1
+    print('SEED %s -> %s/seed' % (seed, SYSFS_CHAIN))
+    return 0
+
+
+# --------------------------------------------------------------- status ----
+def cmd_status(_args):
+    try:
+        with open(PROC_AUDIT) as f:
+            print(f.readline().strip())
+    except OSError as e:
+        print('status: %s 读失败: %s' % (PROC_AUDIT, e), file=sys.stderr)
+        return 1
+    for key in ('enable', 'period'):
+        try:
+            with open(os.path.join(SYSFS_CHAIN, key)) as f:
+                print('chain.%s=%s' % (key, f.read().strip()))
+        except OSError as e:
+            print('chain.%s=<unreadable: %s>' % (key, e))
+    return 0
+
+
+# ------------------------------------------------------------- selftest ----
+# XXH64 官方算法向量（参考实现生成；确定性 pattern=bytes(range(256))[:n]，
+# n>256 时循环续铺；覆盖 0/1-3/4-7/8-31/≥32 各长度类 + 链 seed 0x414b3831）。
+XXH64_VECTORS = [
+    (0, 0x0, 0xef46db3751d8e999),
+    (0, 0x414b3831, 0xc87e75e8e0de4f2a),
+    (1, 0x0, 0xe934a84adb052768),
+    (1, 0x414b3831, 0x2fddecd796ed03fd),
+    (2, 0x0, 0x4865a00ba85b7cd6),
+    (2, 0x414b3831, 0x306e3c9f7ed643f0),
+    (3, 0x0, 0xe5c7bb4533bc65dd),
+    (3, 0x414b3831, 0x71df75de3c903dc1),
+    (4, 0x0, 0xffced8604453cc1e),
+    (4, 0x414b3831, 0x47f04458f326fed9),
+    (5, 0x0, 0xdd0274386e26030c),
+    (5, 0x414b3831, 0x9c92591e79a57e7d),
+    (7, 0x0, 0x14cc643f630c72d2),
+    (7, 0x414b3831, 0x1bb11bb9f9bb3f9e),
+    (8, 0x0, 0x884a173614b81b8d),
+    (8, 0x414b3831, 0x6a1371ae66c91213),
+    (9, 0x0, 0x67d85784a7c78c5b),
+    (9, 0x414b3831, 0x596c65be601f1b51),
+    (15, 0x0, 0xa948f5f0f6abac2d),
+    (15, 0x414b3831, 0xbb702294530e31af),
+    (16, 0x0, 0x44b6ef2fb84169f7),
+    (16, 0x414b3831, 0x8651a6bc77b5d427),
+    (20, 0x0, 0xa3e3fbe96798d8ac),
+    (20, 0x414b3831, 0x56a01b63eb7910b9),
+    (31, 0x0, 0xc346d2b59b4d8ee1),
+    (31, 0x414b3831, 0x3be25d5fc22c8881),
+    (32, 0x0, 0xcbf59c5116ff32b4),
+    (32, 0x414b3831, 0x78bd3ac94d3302a9),
+    (33, 0x0, 0x0c535d1acafb8ead),
+    (33, 0x414b3831, 0xaf6c0307d67fd864),
+    (40, 0x0, 0xf5da40f1b11741e9),
+    (40, 0x414b3831, 0x066d63cfbb3ed4d8),
+    (63, 0x0, 0xe26aa9e2a95f8e4f),
+    (63, 0x414b3831, 0x37144ff93b4c93eb),
+    (64, 0x0, 0xf7c67301db6713f0),
+    (64, 0x414b3831, 0x4e65241596b3e7f1),
+    (65, 0x0, 0xc31eb63b2ae4465b),
+    (65, 0x414b3831, 0x2f3516bd403bc505),
+    (100, 0x0, 0x6ac1e58032166597),
+    (100, 0x414b3831, 0x115ee3e8355e050d),
+    (101, 0x0, 0xe99038495f85381e),
+    (101, 0x414b3831, 0xf5a2ad11b09a1985),
+    (255, 0x0, 0x0f7d97507caad693),
+    (255, 0x414b3831, 0xa6aad7202ddd5c14),
+    (256, 0x0, 0x1facbe8406cd904b),
+    (256, 0x414b3831, 0x97cc5b5a14f2a1c1),
+    (1000, 0x0, 0x6ef436b00eba4078),
+    (1000, 0x414b3831, 0x2cf8b8788843f17b),
+]
+
+
+def _synth_chain(seed_val=0xdeadbeef00000000):
+    """合成 5 节点链（genesis+DECISION_NEW+AGENT_REJECT+KEY_EVENT+ANCHOR），
+    prev 逐节点咬合、self_hash 按 72B 布局重算。→ (meta, node_json_list)。"""
+    spec = [
+        (1, 10 ** 9, 1, KIND_GENESIS, 0,
+         struct.pack('<Q', 0x1234feed5678dcba) + b'\x00' * 24),
+        (2, 10 ** 9 + 5, 4242, KIND_DECISION_NEW, 0,
+         struct.pack('<QIBBB', 0xdead01, 7, 1, 2, 3) + b'\x00' * 17),
+        (3, 10 ** 9 + 9, 4242, KIND_AGENT_REJECT, 0,
+         struct.pack('<IIII', 5, 12, 8, 0)),
+        (4, 10 ** 9 + 14, 999, KIND_KEY_EVENT, 0,
+         struct.pack('<Q', 0xaabbccdd11223344) + struct.pack('<Q', 2)
+         + b'\x00' * 16),
+        (5, 10 ** 9 + 20, 1, KIND_ANCHOR, 1,
+         struct.pack('<QQII', 5, 1, 3, 0)),
+    ]
+    prev = seed_val
+    out = []
+    for seq, ts, pid, kind, flags, data in spec:
+        h = node_hash(node_raw(seq, ts, prev, 0, pid, kind, flags, data))
+        out.append(node_to_json(seq, ts, kind, pid, flags, prev, h, data))
+        prev = h
+    meta = {'meta': True, 'boot_cookie': '1234feed5678dcba',
+            'node_count': len(out), 'head': '%016x' % prev}
+    return meta, out
+
+
+def _write_export_file(path, meta, nodes):
+    with open(path, 'w') as f:
+        f.write('\n'.join([_canon(meta)] + [_canon(nd) for nd in nodes])
+                + '\n')
+
+
+def _flip_hex_char(s, pos):
+    """在 s 的 pos 处把 hex 字符翻成另一个（保持 hex 合法）。"""
+    c = s[pos]
+    return s[:pos] + ('0' if c != '0' else '1') + s[pos + 1:]
+
+
+def _rewrite_json_value(line, key, new_val):
+    """保持行 json 合法地改一个值（锚行链篡改用）。"""
+    obj = json.loads(line)
+    obj[key] = new_val
+    return _canon(obj)
+
+
+def cmd_selftest(_args):
+    total = [0]
+    ok = [0]
+
+    def case(name, cond):
+        total[0] += 1
+        ok[0] += 1 if cond else 0
+        print('  %-52s %s' % (name, 'PASS' if cond else 'FAIL'))
+
+    # ① 纯 python XXH64 向量自检（必含 empty/seed=0）
+    case('xxh64(b"", seed=0)==0xef46db3751d8e999',
+         xxh64(b'', 0) == 0xef46db3751d8e999)
+    pat = bytes(range(256))
+    for n, seed, expect in XXH64_VECTORS:
+        d = pat[:n] if n <= 256 else (pat * 4)[:n]
+        case('xxh64(pattern[:%d], seed=0x%x)==%016x' % (n, seed, expect),
+             xxh64(d, seed) == expect)
+
+    # ② 合成 5 节点链 → verify PASS → 篡改/抽走/截尾 → 必须失败并定位
+    with tempfile.TemporaryDirectory() as td:
+        chain_f = os.path.join(td, 'chain.jsonl')
+        meta, nodes = _synth_chain()
+        _write_export_file(chain_f, meta, nodes)
+        code, out = verify_chain(*load_export(chain_f))
+        case('合成 5 节点链 verify OK', code == 0
+             and out[0] == 'OK nodes=5 head=%s' % nodes[-1]['hash'])
+
+        bad = [dict(nd) for nd in nodes]
+        bad[2]['data'] = _flip_hex_char(bad[2]['data'], 5)
+        _write_export_file(chain_f, meta, bad)
+        code, out = verify_chain(*load_export(chain_f))
+        case('篡改 node[2].data → TAMPER index=2 seq=3 field=data',
+             code == 2 and out[0] == 'TAMPER index=2 seq=3 field=data')
+
+        bad = [dict(nd) for nd in nodes]
+        bad[4]['hash'] = _flip_hex_char(bad[4]['hash'], 3)
+        _write_export_file(chain_f, meta, bad)
+        code, out = verify_chain(*load_export(chain_f))
+        case('篡改 node[4].hash → TAMPER index=4 field=hash（头行见证）',
+             code == 2 and out[0] == 'TAMPER index=4 seq=5 field=hash')
+
+        bad = [dict(nd) for nd in nodes]
+        bad[3]['prev'] = _flip_hex_char(bad[3]['prev'], 2)
+        _write_export_file(chain_f, meta, bad)
+        code, out = verify_chain(*load_export(chain_f))
+        case('篡改 node[3].prev → TAMPER index=3 field=prev',
+             code == 2 and out[0] == 'TAMPER index=3 seq=4 field=prev')
+
+        bad = [nd for i, nd in enumerate(nodes) if i != 2]
+        _write_export_file(chain_f, meta, bad)
+        code, out = verify_chain(*load_export(chain_f))
+        case('抽走 node[2] → TAMPER index=2 field=gap + 缺口 seq 3..3',
+             code == 2 and out[0] == 'TAMPER index=2 seq=4 field=gap'
+             and 'gap: seq 3..3' in out[1])
+
+        _write_export_file(chain_f, meta, nodes[:4])
+        code, out = verify_chain(*load_export(chain_f))
+        case('截尾 5→4 → TAMPER field=gap（meta node_count=5）',
+             code == 2 and out[0] == 'TAMPER index=4 seq=5 field=gap'
+             and '截尾' in out[1])
+
+        # ③ 锚行链：追加 2 行 OK → 篡改首行值 → 断；去头行 → 断
+        _write_export_file(chain_f, meta, nodes)   # 还原完好链
+        anc_f = os.path.join(td, 'anchors.jsonl')
+        ns = argparse.Namespace(e=chain_f, anchors=anc_f)
+        cmd_anchor(ns)
+        meta_b = dict(meta, head='%016x' % (int(meta['head'], 16) ^ 3))
+        chain_b = os.path.join(td, 'chain_b.jsonl')
+        _write_export_file(chain_b, meta_b, nodes)
+        cmd_anchor(argparse.Namespace(e=chain_b, anchors=anc_f))
+        acode, _aout = verify_anchor_file(anc_f)
+        case('锚行链 2 行 ANCHOR_OK', acode == 0)
+        with open(anc_f) as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        with open(anc_f, 'w') as f:   # 篡改首行 head_hash 值（json 仍合法）
+            f.write(_rewrite_json_value(lines[0], 'head_hash',
+                                        'deadbeefdeadbeef') + '\n'
+                    + lines[1] + '\n')
+        acode, _aout = verify_anchor_file(anc_f)
+        case('锚首行值篡改 → ANCHOR_CHAIN_BREAK 退 3', acode == 3)
+        with open(anc_f, 'w') as f:   # 去头：次行 prev_line 指向已不存在的行
+            f.write(lines[1] + '\n')
+        acode, _aout = verify_anchor_file(anc_f)
+        case('锚去头行 → 退 3', acode == 3)
+
+    print('SELFTEST_RESULT cases=%d ok=%d' % (total[0], ok[0]))
+    return 0 if ok[0] == total[0] else 1
+
+
+# ------------------------------------------------------------------ main ----
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+
+    st = sub.add_parser('selftest', help='xxh64 向量 + 合成链篡改检出自检')
+    st.set_defaults(func=cmd_selftest)
+
+    p_aud = sub.add_parser('audit', help='审计链子族')
+    asub = p_aud.add_subparsers(dest='audit_cmd', required=True)
+
+    p_e = asub.add_parser('export', help='/proc/ai/audit → jsonl')
+    p_e.add_argument('-o', dest='o', default=None,
+                     help='输出文件（默认 %s/chain-<UTC>.jsonl）' % AUDIT_DIR)
+    p_e.set_defaults(func=cmd_export)
+
+    p_v = asub.add_parser('verify', help='逐节点重算+连续性+锚行链')
+    p_v.add_argument('file', help='export jsonl 文件')
+    p_v.add_argument('--anchors', default=None, help='锚文件（行链校验）')
+    p_v.set_defaults(func=cmd_verify)
+
+    p_an = asub.add_parser('anchor', help='追加 anchors.jsonl 行链')
+    p_an.add_argument('-e', dest='e', default=None, help='export jsonl')
+    p_an.add_argument('--anchors', default=DEFAULT_ANCHORS,
+                      help='锚文件（默认 %s）' % DEFAULT_ANCHORS)
+    p_an.set_defaults(func=cmd_anchor)
+
+    p_s = asub.add_parser('seed', help='锚末行 head → chain/seed')
+    p_s.add_argument('--anchors', default=DEFAULT_ANCHORS,
+                     help='锚文件（默认 %s）' % DEFAULT_ANCHORS)
+    p_s.set_defaults(func=cmd_seed)
+
+    p_st = asub.add_parser('status', help='链状态一览')
+    p_st.set_defaults(func=cmd_status)
+
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

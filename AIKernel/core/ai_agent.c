@@ -43,6 +43,7 @@
 #include "ai_proc.h"
 #include "ai_agent.h"
 #include "../net/ai_netlink.h"
+#include "../security/ai_chain.h"
 
 /* ---- 槽表（D1 结构原样：静态 8 槽） ---- */
 
@@ -253,6 +254,16 @@ int ai_agent_admit(struct sk_buff *skb, u32 msg_agent, u32 *role_out)
 		spin_unlock(&s->qlock);
 		atomic64_inc(&s->failures);
 		ai_agent_limit_hit(s, limit, used);
+		{
+			struct ai_chain_ev_agent_reject ev = {
+				.agent_id = ai_agent_slot_ids[i],
+				.failures = (u32)atomic64_read(&s->failures),
+				.window_actions = (u32)used,
+			};
+
+			ai_chain_append(AI_CHAIN_KIND_AGENT_REJECT, &ev,
+					 sizeof(ev));
+		}
 		return -EAGAIN;
 	}
 	atomic64_set(&s->win_used, used + 1);

@@ -40,6 +40,7 @@
 #include "ai_causal.h"
 #include "ai_effect.h"
 #include "../net/ai_netlink.h"
+#include "../security/ai_chain.h"
 
 /* K1 D3/D8：决策记录尾部扩 8 字段，127→183B packed（drift 即编译
  * 失败；字段与 struct ai_policy_ctx 尾部一一对应，注释锚见 .h） */
@@ -250,6 +251,19 @@ static void ai_policy_record_write(struct ai_decision_record *rec, u64 lat)
 	if (lat > ai_pstat.latency_max)
 		ai_pstat.latency_max = lat;
 	spin_unlock_irqrestore(&ai_dec_lock, flags);
+
+	/* K8：决策入环即铸链（fire-and-forget，链永不阻断业务路径） */
+	{
+		struct ai_chain_ev_decision_new ev = {
+			.decision_id = rec->decision_id,
+			.trigger_event_id = rec->trigger_event_id,
+			.decision_type = rec->decision_type,
+			.domain = rec->domain,
+			.source = rec->source,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_DECISION_NEW, &ev, sizeof(ev));
+	}
 }
 
 /*
@@ -972,6 +986,19 @@ int ai_policy_outcome_update(u64 decision_id, u8 outcome, s64 metric_delta)
 	/* 因果链落链（ring + CSV 导出） */
 	ai_causal_chain_push(&chain_rec);
 
+	/* K8：结果回填铸链（OUTCOME 半事件对，decision_id 关联） */
+	{
+		struct ai_chain_ev_decision_outcome ev = {
+			.decision_id = decision_id,
+			.outcome = outcome,
+			.metric_delta = metric_delta,
+			.outcome_ts = chain_rec.outcome_ts,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_DECISION_OUTCOME, &ev,
+					 sizeof(ev));
+	}
+
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_policy_outcome_update);
@@ -988,6 +1015,7 @@ int ai_policy_fill_outcome(u32 decision_id, u8 outcome, long delta)
 {
 	struct ai_decision_record *r;
 	unsigned long flags;
+	u64 ots;
 
 	if (!decision_id)
 		return -EINVAL;
@@ -999,9 +1027,23 @@ int ai_policy_fill_outcome(u32 decision_id, u8 outcome, long delta)
 		return -ENOENT;
 	}
 	r->outcome_ts = ktime_get_ns();
+	ots = r->outcome_ts;
 	r->outcome = outcome;
 	r->metric_delta = (s64)delta;
 	spin_unlock_irqrestore(&ai_dec_lock, flags);
+
+	/* K8：效果结算回填同铸 OUTCOME（与 outcome_update 同构半事件对） */
+	{
+		struct ai_chain_ev_decision_outcome ev = {
+			.decision_id = decision_id,
+			.outcome = outcome,
+			.metric_delta = (s64)delta,
+			.outcome_ts = ots,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_DECISION_OUTCOME, &ev,
+					 sizeof(ev));
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ai_policy_fill_outcome);
@@ -1018,6 +1060,15 @@ int ai_policy_rollback_decision(u64 decision_id)
 	rc = ai_policy_safety_rollback_decision(decision_id,
 					       ai_control_restore_value);
 	mutex_unlock(&ai_policy_lock);
+	/* K8：回滚执行铸链（仅成功路径） */
+	if (rc == 0) {
+		struct ai_chain_ev_rollback ev = {
+			.decision_id = decision_id,
+			.count = 1,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_ROLLBACK, &ev, sizeof(ev));
+	}
 	return rc;
 }
 EXPORT_SYMBOL_GPL(ai_policy_rollback_decision);
@@ -1030,6 +1081,15 @@ int ai_policy_rollback_all(void)
 	mutex_lock(&ai_policy_lock);
 	rc = ai_policy_safety_rollback_all(ai_control_restore_value);
 	mutex_unlock(&ai_policy_lock);
+	/* K8：全量回滚铸链（count=实回滚数，rc<0 不铸） */
+	if (rc >= 0) {
+		struct ai_chain_ev_rollback ev = {
+			.decision_id = 0,
+			.count = (u32)rc,
+		};
+
+		ai_chain_append(AI_CHAIN_KIND_ROLLBACK, &ev, sizeof(ev));
+	}
 	return rc;
 }
 EXPORT_SYMBOL_GPL(ai_policy_rollback_all);

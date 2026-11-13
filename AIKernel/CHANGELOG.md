@@ -1,5 +1,40 @@
 # AIKernel CHANGELOG
 
+## 2026-11 · WP-K8 审计链与不可篡改：sec 两钩做深 + aikctl 用户面（施工 B 部分）
+
+> 依据：`work/refactor/KERNEL-K8-DESIGN.md` §2 D6/D7、§3、§4 施工 B。
+> 内核审计链核心（`security/ai_chain.{c,h}` 节点流/xxh64/genesis/anchor/
+> seed/verify、/proc/ai/audit、/sys/kernel/ai/chain/、`test/ai_chain_test.c`、
+> 决策/agent/model/runtime/audit 六处接线）为**施工 A 交付**，本条不记。
+> 台架 `~/k2/k3/k8v.py`（宿主侧，仓库外）随本波交付。
+
+**AIKernel/security/ai_lsm.c**（sec 两钩做深，门控不翻）：
+
+- key 钩（`ai_sec_key_hook`）：strength 三档既往算出即弃，K8 起算完即调
+  `ai_chain_key_event(type, desc, plen, strength)` 入链 KEY_EVENT 节点
+  （desc 打 xxh64 短摘要）；调用点紧邻 key.c overlay 既有
+  `ai_telemetry_key_create`（遥测+链双记）。
+- seccomp 钩（`ai_sec_seccomp_hook`）：超阈升格才入链、不逐 syscall——
+  信号选模型现成异常分 `m->anomaly`（0~100 滑动窗偏离比；不选
+  `count_seccomp`：该槽 base=NULL 无基线，挂过滤器任务每 syscall 过钩，
+  裸计数无正常画像参照），阈值 60/100，超阈且距上次入链 ≥1s（全局
+  atomic64 cmpxchg 限频）才发射一条 `ai_chain_seccomp_anomaly(nr, anom)`。
+- 两钩体接线仍在 `CONFIG_AIKERNEL_EXPERIMENTAL` 门内（默认 n，门不翻）；
+  链发射器本身未门控（D6 口径，可 KUnit 代位证明）。
+
+**agent/ai/aikctl/aikctl**（新建，python3 纯 stdlib 单文件，可执行）：
+`selftest`（纯 python XXH64 官方算法向量自检含 `xxh64(b"")==0xef46db3751d8e999`
++ 合成 5 节点链篡改检出）、`audit export [-o]`（读 /proc/ai/audit 逐节点
+重算自检落 jsonl，首行 meta 含 genesis boot_cookie/node_count/head）、
+`audit verify FILE [--anchors]`（逐节点重算+seq 连续性，首个失配打印
+`TAMPER index= seq= field=` 退 2；锚行链断退 3）、`audit anchor`
+（anchors.jsonl 0600 追加式 sha256 行链）、`audit seed`（锚末行 head_hash
+写 /sys/kernel/ai/chain/seed 续链）、`audit status`。aikd 零改；
+build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登记）。
+
+**AIKernel/ARCHITECTURE.md**：§3 seccomp 行与 §4.1 sec 两钩描述更新为
+已接线审计链（门控仍 EXPERIMENTAL）；新增 §4.5 K8 审计链小节。
+
 ## 2026-11 · WP-K5 空钩治理：删除账（15 钩）
 
 > 判决依据：`work/refactor/KERNEL-K5-DESIGN.md` §3 逐钩判决表（终判）；
