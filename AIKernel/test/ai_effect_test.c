@@ -350,16 +350,24 @@ static void k4_sched_judge_test(struct kunit *test)
 {
 	long metric = 99;
 
-	/* wakee 1ms 内被切出 → BAD；≥1ms 任意 switch → GOOD；
-	 * 1ms 内他人被切出 → NONE（继续观测） */
+	/* wakee 1ms 内被切出：RUNNABLE 态（TASK_RUNNING=0）=真误抢占 BAD；
+	 * 自愿睡眠（state 非零，如 TASK_INTERRUPTIBLE=1）=CPU 已送达=GOOD
+	 * （q17 后勘误：futex 乒乓负载旧语义 94% 误报）；≥1ms 任意 switch
+	 * → GOOD；1ms 内他人被切出 → NONE（继续观测） */
 	KUNIT_EXPECT_EQ(test,
-			ai_k4_wakeup_switch_outcome(42, 42, 500UL * NSEC_PER_USEC),
+			ai_k4_wakeup_switch_outcome(42, 42, 500UL * NSEC_PER_USEC, 0),
 			(u8)AI_EFFECT_OUTCOME_BAD);
 	KUNIT_EXPECT_EQ(test,
-			ai_k4_wakeup_switch_outcome(7, 42, NSEC_PER_MSEC),
+			ai_k4_wakeup_switch_outcome(42, 42, 500UL * NSEC_PER_USEC, 1),
 			(u8)AI_EFFECT_OUTCOME_GOOD);
 	KUNIT_EXPECT_EQ(test,
-			ai_k4_wakeup_switch_outcome(7, 42, NSEC_PER_USEC),
+			ai_k4_wakeup_switch_outcome(42, 42, 500UL * NSEC_PER_USEC, 2),
+			(u8)AI_EFFECT_OUTCOME_GOOD);
+	KUNIT_EXPECT_EQ(test,
+			ai_k4_wakeup_switch_outcome(7, 42, NSEC_PER_MSEC, 0),
+			(u8)AI_EFFECT_OUTCOME_GOOD);
+	KUNIT_EXPECT_EQ(test,
+			ai_k4_wakeup_switch_outcome(7, 42, NSEC_PER_USEC, 0),
 			(u8)AI_EFFECT_OUTCOME_NONE);
 
 	/* 延迟水位：升→BAD（+10%），降→GOOD（-50%），无基线→中性 */

@@ -241,17 +241,25 @@ u8 ai_k4_vruntime_outcome(long open_avg, long now_avg, long *metric_pct)
  * @prev_pid: 被切出任务 pid
  * @wakee_pid: 窗 aux0（被唤醒任务 pid）
  * @age_ns: switch 事件距开窗时长
+ * @prev_state: 被切出任务的切换前状态位
  *
  * 距开窗 ≥1ms 的任意 switch → GOOD（wakee 没被立刻抢回=无误抢占）；
- * 1ms 内 wakee 自己被切出 → BAD（误抢占）；其余 → NONE（继续观测）。
+ * 1ms 内他人被切出 → NONE（继续观测）。q17 后勘误（wakeup×7 实机
+ * 抓获）：wakee 1ms 内自己被切出时，只有以 RUNNABLE 态（TASK_RUNNING）
+ * 切出才是真误抢占；自愿睡眠（futex/wait 等，state 非零）= 抢占已把
+ * CPU 送达且任务用完转入等待 → GOOD（futex 乒乓负载下旧语义把 94% 的
+ * 正常睡眠误计成误抢占）。
  */
-u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns)
+u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns,
+			       u32 prev_state)
 {
 	if (age_ns >= NSEC_PER_MSEC)
 		return AI_EFFECT_OUTCOME_GOOD;
-	if (prev_pid == wakee_pid)
+	if (prev_pid != wakee_pid)
+		return AI_EFFECT_OUTCOME_NONE;
+	if (prev_state == TASK_RUNNING)
 		return AI_EFFECT_OUTCOME_BAD;
-	return AI_EFFECT_OUTCOME_NONE;
+	return AI_EFFECT_OUTCOME_GOOD;
 }
 
 /**
@@ -307,7 +315,8 @@ void ai_k4_sched_switch_note(const void *payload)
 		if (now < w.open_ns)
 			return;
 		out = ai_k4_wakeup_switch_outcome(sw->prev_pid, (u32)w.aux0,
-						  now - w.open_ns);
+						  now - w.open_ns,
+						  sw->prev_state);
 		if (out == AI_EFFECT_OUTCOME_BAD)
 			atomic64_inc(&ai_k4_mispreempt);
 		if (out != AI_EFFECT_OUTCOME_NONE)

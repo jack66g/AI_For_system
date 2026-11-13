@@ -344,7 +344,8 @@ void ai_k4_vruntime_settle(void);
 #ifdef CONFIG_AIKERNEL_KUNIT_TEST
 /* 纯判定函数（ai_effect_test.c 直测；返回 AI_EFFECT_OUTCOME_* 值） */
 u8 ai_k4_vruntime_outcome(long open_avg, long now_avg, long *metric_pct);
-u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns);
+u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns,
+			       u32 prev_state);
 #endif
 
 #else /* !CONFIG_AIKERNEL_SCHED */
