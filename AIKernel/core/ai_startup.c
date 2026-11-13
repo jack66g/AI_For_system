@@ -9,9 +9,11 @@
  *   ai.log_level=0..3  日志级别（默认 1）
  *
  * 模型加载：
- *   - 内置 echo 模型（"echo"）：infer = 输入原样拷贝到输出（骨架测试用）；
- *   - 文件模型：<model_path>/<name>.bin 读入包装为 echo-ops 模型（source=EMBEDDED），
- *     私有数据持有文件内容（全量原始，不脱敏不截断），unload 时释放。
+ *   - 文件模型：<model_path>/<name>.bin（AIKWMDL v1 真实权重，解析/量化/
+ *     Q31 前向见 ai_model_mlp.c；回声推理已删除）；
+ *   - K6 D1（WP-K6）：kernel_read_file 之后、model_create 之前执行
+ *     sha256 + /etc/aikernel/models.allow 白名单校验（fail-closed：
+ *     allow 缺失/不匹配 → -EPERM + pr 审计；builtin decide 不受影响）。
  *
  * 本文件受 CONFIG_AIKERNEL_USRIFACE 门控；关闭时 ai_startup.h 提供空函数兜底。
  */
@@ -27,7 +29,12 @@
 #include <linux/kernel_read_file.h>
 #include "ai_startup.h"
 #include <linux/namei.h>
+#include <linux/err.h>
+#include <linux/crypto.h>
+#include <crypto/hash.h>
 #include "ai_model.h"
+#include "ai_model_mlp.h"
+#include "ai_runtime.h"
 
 static struct ai_startup_cfg {
 	bool enabled;                          /* ai.enabled */
@@ -121,6 +128,167 @@ u8 ai_startup_get_log_level(void)
 EXPORT_SYMBOL_GPL(ai_startup_get_log_level);
 
 /* ---- 模型加载（AIKWMDL v1 真实权重模型；回声推理已彻底删除） ---- */
+
+/* ---- K6 D1：模型签名/哈希白名单（fail-closed） ---- */
+
+#define AI_ALLOWLIST_PATH	"/etc/aikernel/models.allow"
+#define AI_ALLOWLIST_MAX_SIZE	(64 * 1024)   /* 小文件：约 1800 行余量 */
+
+/* sha256（进程上下文，可睡眠；与 ai_model_mlp.c 的元数据计算各持一份
+ * ——策略校验与模型元数据职责分离，避免跨文件共享栈上摘要状态） */
+static int ai_startup_sha256(const void *data, size_t len, u8 *out)
+{
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	int rc;
+
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm),
+		       GFP_KERNEL);
+	if (!desc) {
+		crypto_free_shash(tfm);
+		return -ENOMEM;
+	}
+	desc->tfm = tfm;
+	rc = crypto_shash_digest(desc, data, len, out);
+	kfree(desc);
+	crypto_free_shash(tfm);
+	return rc;
+}
+
+/* 行首 64 个 hex 字符与摘要逐位比较（大小写不敏感） */
+static bool ai_allow_hex_eq(const char *hex, const u8 *sha)
+{
+	u32 i;
+
+	for (i = 0; i < AI_MODEL_SHA256_LEN * 2; i++) {
+		int v = hex_to_bin(hex[i]);
+
+		if (v < 0)
+			return false;
+		if (i & 1) {
+			if (v != (sha[i >> 1] & 0xf))
+				return false;
+		} else if (v != (sha[i >> 1] >> 4)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * 白名单校验（fail-closed，每次加载重读不缓存——文件小）：
+ *   /etc/aikernel/models.allow 每行 "<64 位 sha256 hex> <name>"
+ *   （# 注释/空行跳过）；哈希与名字都等 → 放行。
+ *   文件缺失/不可读/过大致畸/无命中行 → 一律 -EPERM + pr_info_
+ *   ratelimited 审计。allow 缺失=拒绝一切外部模型加载（误删 allow
+ *   的影响是回到无外部模型态而非敞开）；空文件同义（factory 首批
+ *   预置空文件=只禁外部模型，builtin decide 不受影响）。
+ */
+static int ai_startup_allow_check(const char *name, const u8 *sha)
+{
+	char hexbuf[AI_MODEL_HASH_HEX_LEN];
+	struct kstat st;
+	struct path kpath;
+	void *abuf;
+	size_t asize;
+	ssize_t rd;
+	char *p;
+	int rc;
+
+	bin2hex(hexbuf, sha, 6);
+	hexbuf[12] = '\0';
+
+	/* stat 定长（同模型文件读取同款手法） */
+	rc = kern_path(AI_ALLOWLIST_PATH, LOOKUP_FOLLOW, &kpath);
+	if (!rc) {
+		rc = vfs_getattr(&kpath, &st, STATX_BASIC_STATS,
+				 AT_STATX_SYNC_AS_STAT);
+		path_put(&kpath);
+	}
+	if (rc) {
+		pr_info_ratelimited("AIKernel: model '%s' rejected: allowlist %s "
+				    "missing/unreadable (sha256=%s)\n",
+				    name, AI_ALLOWLIST_PATH, hexbuf);
+		return -EPERM;   /* fail-closed */
+	}
+	if (st.size == 0) {
+		pr_info_ratelimited("AIKernel: model '%s' rejected: "
+				    "allowlist empty (sha256=%s)\n",
+				    name, hexbuf);
+		return -EPERM;
+	}
+	if (st.size > AI_ALLOWLIST_MAX_SIZE) {
+		pr_info_ratelimited("AIKernel: model '%s' rejected: "
+				    "allowlist oversized (%lld B)\n",
+				    name, (long long)st.size);
+		return -EPERM;
+	}
+
+	asize = (size_t)st.size;
+	abuf = vmalloc(asize + 1);   /* +1：行解析需要 NUL 终止 */
+	if (!abuf)
+		return AI_ERR_MEMORY;   /* 基建错误如实透传（非策略拒） */
+	rd = kernel_read_file_from_path(AI_ALLOWLIST_PATH, 0, &abuf, asize,
+					&asize, READING_POLICY);
+	if (rd < 0 || (size_t)rd != asize) {
+		pr_info_ratelimited("AIKernel: model '%s' rejected: "
+				    "allowlist read failed (%zd/%zu)\n",
+				    name, rd, asize);
+		vfree(abuf);
+		return -EPERM;
+	}
+	((char *)abuf)[asize] = '\0';
+
+	p = abuf;
+	while (p && *p) {
+		char *line = p;
+		char *eol = strchr(p, '\n');
+		const char *hex, *an; char *cend;
+		size_t hexlen;
+
+		if (eol) {
+			*eol = '\0';
+			p = eol + 1;
+		} else {
+			p = NULL;   /* 末行（无换行符） */
+		}
+		while (*line == ' ' || *line == '\t' || *line == '\r')
+			line++;
+		cend = line + strlen(line);
+		while (cend > line &&
+		       (cend[-1] == ' ' || cend[-1] == '\t' || cend[-1] == '\r'))
+			*--cend = '\0';
+		if (!line[0] || line[0] == '#')
+			continue;   /* 空行/注释 */
+
+		/* 字段 1：64 hex（到首个空白） */
+		hex = line;
+		an = line;
+		while (*an && *an != ' ' && *an != '\t')
+			an++;
+		/* 字段 2：name（剩余段到行尾；名字内空白不支持——
+		 * 模型名白名单本就限定 [A-Za-z0-9._-]） */
+		hexlen = (size_t)(an - hex);
+		while (*an == ' ' || *an == '\t')
+			an++;
+
+		if (*an && hexlen == AI_MODEL_SHA256_LEN * 2 &&
+		    ai_allow_hex_eq(hex, sha) && strcmp(an, name) == 0) {
+			vfree(abuf);
+			return 0;   /* 命中放行 */
+		}
+		/* 其余行（含畸形行）不命中，继续 */
+	}
+
+	pr_info_ratelimited("AIKernel: model '%s' rejected: "
+			    "no allowlist match (sha256=%s)\n",
+			    name, hexbuf);
+	vfree(abuf);
+	return -EPERM;
+}
 
 static int ai_startup_model_create(const char *name, const void *data,
 				   size_t data_len)
@@ -223,6 +391,27 @@ int ai_startup_load_model(const char *name)
 			path, rd, size);
 		vfree(buf);
 		return AI_ERR_INVALID_ARG;
+	}
+
+	/* K6 D1：签名/哈希白名单（kernel_read_file 之后、model_create 之前，
+	 * fail-closed）——算 sha256，对 /etc/aikernel/models.allow 逐行匹配；
+	 * 缺失/不匹配 → -EPERM + pr_info_ratelimited 审计（B 路遥测暂无
+	 * 对应 emit 点，v1 以 pr 审计承载，见施工 A 报告） */
+	{
+		u8 sha[AI_MODEL_SHA256_LEN];
+
+		rc = ai_startup_sha256(buf, size, sha);
+		if (rc) {
+			pr_err("AIKernel: model sha256 failed '%s' (%d)\n",
+				path, rc);
+			vfree(buf);
+			return rc;   /* 无法验证=fail-closed，错误如实透传 */
+		}
+		rc = ai_startup_allow_check(name, sha);
+		if (rc) {
+			vfree(buf);
+			return rc;   /* -EPERM（审计已在 allow_check 内） */
+		}
 	}
 
 	rc = ai_startup_model_create(name, buf, size);

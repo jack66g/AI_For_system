@@ -8,6 +8,9 @@
 # 保证部分配置下编译为空套件。
 
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_runtime_test.o
+# K6：AIKWMDL MLP 模型面（解析/量化数值/推理数值/边界/预算超时/percpu
+# scratch/统计 hash；文件内部按 CONFIG_AIKERNEL_RUNTIME 兜底）
+obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_mlp_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_telemetry_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_policy_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_control_test.o

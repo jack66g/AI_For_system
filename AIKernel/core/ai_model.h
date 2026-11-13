@@ -133,17 +133,24 @@ int ai_model_unload_by_name(const char *name);
 int ai_mlp_model_create(const char *name, const void *data, size_t data_len);
 
 /**
- * ai_model_enumerate() - 按索引枚举已加载模型（/proc/ai/status 用）
+ * ai_model_enumerate() - 按索引枚举已加载模型（/proc/ai/status、
+ * /proc/ai/models 用）
  * @index: 0 起的索引
  * @name: 输出缓冲（AI_MAX_NAME_LEN）
  * @version: 可选输出版本
  * @source: 可选输出来源（enum ai_model_source）
  * @state: 可选输出状态（enum ai_model_state）
+ * @hash: 可选输出 sha256 前 6 字节序数（u64，渲染 %012llx；非 MLP=0）
+ * @bytes: 可选输出模型文件字节数（非 MLP=0）
+ * @infer_n/@last_lat_ns/@timeout_n: 可选输出推理统计（非 MLP=0）
+ * @slot: 可选输出槽位（enum ai_model_slot：0 普通/1 active/2 standby）
  *
  * 返回 AI_OK（有效）或 AI_ERR_NOT_FOUND（越界）。
  */
 int ai_model_enumerate(unsigned int index, char *name, u32 *version,
-		       u32 *source, u32 *state);
+		       u32 *source, u32 *state, u64 *hash, u64 *bytes,
+		       u64 *infer_n, u64 *last_lat_ns, u64 *timeout_n,
+		       u32 *slot);
 
 #else /* !CONFIG_AIKERNEL_RUNTIME */
 
@@ -157,7 +164,10 @@ static inline int ai_mlp_model_create(const char *name, const void *data,
 	return AI_ERR_NOT_IMPLEMENTED;
 }
 static inline int ai_model_enumerate(unsigned int index, char *name,
-				     u32 *version, u32 *source, u32 *state)
+				     u32 *version, u32 *source, u32 *state,
+				     u64 *hash, u64 *bytes, u64 *infer_n,
+				     u64 *last_lat_ns, u64 *timeout_n,
+				     u32 *slot)
 {
 	return AI_ERR_NOT_FOUND;
 }

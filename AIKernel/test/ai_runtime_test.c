@@ -10,6 +10,12 @@
  *   - 在途 infer 持引用时 unload 阻塞，引用释放后才调 ops->unload；
  *   - destroy 逐模型执行 unload（K2）。
  *
+ * K6（KERNEL-K6-DESIGN D2/D4）追加：决策模型 A/B 切换（arm/confirm/
+ * 冒烟失败拒切/-ETIME 回退 builtin 启发式）；「首个 think 模型」旧语义
+ * 对齐「active 指针默认=builtin decide」新语义（既有用例只对齐不删）。
+ * 对施工 A 的接口形态假设（switch 三 API/budget 全局 helper/enumerate
+ * 扩展出参/ops->infer 增 budget_ns 形参）见各段注释与施工报告契约清单。
+ *
  * CONFIG_AIKERNEL=n 时本文件不参与编译（Makefile 门控 obj-$(CONFIG_
  * AIKERNEL_KUNIT_TEST)，该开关 depends on AIKERNEL）→ 无操作零产物；
  * 本文件内部再按 CONFIG_AIKERNEL_RUNTIME 兜底，保证子开关关闭时
@@ -21,6 +27,10 @@
 #include <linux/delay.h>
 #include <linux/completion.h>
 #include <linux/atomic.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/ktime.h>
+#include <linux/unaligned.h>
 #include "../core/ai_types.h"
 #include "../core/ai_model.h"
 #include "../core/ai_runtime.h"
@@ -91,12 +101,13 @@ static void model_load_unload_test(struct kunit *test)
 	KUNIT_EXPECT_GE(test, id, 1);
 	KUNIT_EXPECT_EQ(test, id, (int)m.id);
 
-	/* enumerate 应能枚举到该模型 */
+	/* enumerate 应能枚举到该模型（K6：出参扩展六项，此处不取传 NULL） */
 	{
 		char name[AI_MAX_NAME_LEN];
 		u32 ver = 0, src = 0, st = 0;
 
-		rc = ai_model_enumerate(0, name, &ver, &src, &st);
+		rc = ai_model_enumerate(0, name, &ver, &src, &st,
+					NULL, NULL, NULL, NULL, NULL, NULL);
 		KUNIT_EXPECT_EQ(test, rc, AI_OK);
 	}
 
@@ -147,7 +158,9 @@ static int vis_load(struct ai_model *model)
 
 	vis_enumerate_seen = false;
 	for (i = 0; i < TEST_ENUM_SCAN_MAX; i++) {
-		if (ai_model_enumerate(i, name, &ver, &src, &st) != AI_OK)
+		if (ai_model_enumerate(i, name, &ver, &src, &st,
+				       NULL, NULL, NULL, NULL, NULL,
+				       NULL) != AI_OK)
 			break;
 		if (strcmp(name, model->name) == 0) {
 			vis_enumerate_seen = true;
@@ -156,8 +169,9 @@ static int vis_load(struct ai_model *model)
 	}
 
 	vis_infer_rc = ai_runtime_model_infer_by_name(model->name,
-						     dummy_in, sizeof(dummy_in),
-						     dummy_out, &out_len, NULL);
+						      dummy_in, sizeof(dummy_in),
+						      dummy_out, &out_len,
+						      NULL, 0);
 	return AI_OK;
 }
 
@@ -209,7 +223,9 @@ static bool enumerate_has_name(const char *want)
 	for (i = 0; i < 64; i++) {
 		u32 ver, src, st;
 
-		if (ai_model_enumerate(i, name, &ver, &src, &st) != AI_OK)
+		if (ai_model_enumerate(i, name, &ver, &src, &st,
+				       NULL, NULL, NULL, NULL, NULL,
+				       NULL) != AI_OK)
 			break;
 		if (strcmp(name, want) == 0)
 			return true;
@@ -285,6 +301,8 @@ static struct completion ref_unload_done;
 static atomic_t ref_unload_calls;
 static atomic_t ref_infer_rc;
 
+/* K6 集成勘误：A 冻结 ops->infer 6 参签名（预算走 trampoline 读全局），
+ * mock 回落 6 参（不消费预算） */
 static int ref_infer(struct ai_model *model, const void *input, size_t in_len,
 		     void *output, size_t *out_len, u64 *latency_ns)
 {
@@ -551,6 +569,237 @@ static void runtime_destroy_unloads_models_test(struct kunit *test)
 	rc = ai_runtime_init();
 	KUNIT_EXPECT_EQ(test, rc, AI_OK);
 	KUNIT_EXPECT_GE(test, ai_model_find("decide"), 1);
+
+	/* K6 对齐（只增不删）：active 指针新语义下重 init 后 active 默认
+	 * =builtin decide（旧「首个 think 模型」语义的默认态等价物），
+	 * think 立即可用（decide 直通：sense 载荷原样透传 domain/value）。 */
+	{
+		struct ai_sense_input sense;
+		struct ai_think_result res;
+		struct ai_sense_decision d;
+
+		memset(&sense, 0, sizeof(sense));
+		sense.ts = ktime_get_ns();
+		memset(&d, 0, sizeof(d));
+		d.domain = 1;
+		d.decision_type = 1;
+		d.confidence = 100;
+		d.value = 42;
+		memcpy(sense.data, &d, sizeof(d));
+		sense.data_len = sizeof(d);
+		rc = ai_runtime_think(&sense, &res);
+		KUNIT_EXPECT_EQ(test, rc, AI_OK);
+		KUNIT_EXPECT_EQ(test, res.decision_data[0], 42ULL);
+		/* model_version 跟随 active（=builtin decide，出厂 v1） */
+		KUNIT_EXPECT_EQ(test, res.model_version, 1u);
+	}
+}
+
+/* ---- K6（KERNEL-K6-DESIGN D4）：决策模型 A/B 切换 ---- */
+
+/*
+ * 契约（施工 A 接口形态；对不齐处以集成期契约为准并记施工报告）：
+ *   int ai_runtime_model_switch_arm(const char *name, u64 *token);
+ *     目标必须 LOADED 且冒烟推理（固定微输入）过 → arm 单槽切换窗，
+ *     成功回填非零 token；armed 再 arm → 负错误（K2c 单槽诚实拒）；
+ *   int ai_runtime_model_switch_confirm(u64 token);
+ *     失配/过期 token → 负错误且 active 不动；成功 → active 指针翻转
+ *     （RCU 发布），旧模型 refcount 观察窗保活；
+ *   int ai_runtime_switch_observe(unsigned int n);
+ *     观察窗记账/健康评估入口，空窗/窗内均返回 AI_OK。
+ * enumerate 扩展出参 slot 语义：0=无槽，1=A（active），2=B（arm 待切）。
+ */
+
+/* 测试用最小 AIKWMDL1 模型字节流（单层 in_dim→1，线性，W[0][0]=0.5，
+ * 其余权重/偏置全 0——Q31 精确合法；构造手法同 ai_mlp_test.c） */
+static u8 *sw_build_tiny_model(u32 in_dim, size_t *out_len)
+{
+	size_t len = 24 + ((size_t)in_dim + 1) * 4;
+	u8 *buf = kmalloc(len, GFP_KERNEL);
+
+	if (!buf)
+		return NULL;
+	memcpy(buf, "AIKWMDL1", 8);
+	put_unaligned_le32(1, buf + 8);          /* n_layers */
+	put_unaligned_le32(in_dim, buf + 12);
+	put_unaligned_le32(1, buf + 16);         /* out_dim=1 */
+	put_unaligned_le32(0, buf + 20);         /* act=linear */
+	memset(buf + 24, 0, len - 24);
+	put_unaligned_le32(0x3F000000u, buf + 24);   /* W[0][0]=0.5 */
+	*out_len = len;
+	return buf;
+}
+
+static int sw_find_slot(const char *want, u32 *slot)
+{
+	char name[AI_MAX_NAME_LEN];
+	unsigned int i;
+
+	for (i = 0; i < 64; i++) {
+		u32 ver, src, st, s;
+		u64 h, by, in_n, lat, to;
+
+		if (ai_model_enumerate(i, name, &ver, &src, &st,
+				       &h, &by, &in_n, &lat, &to,
+				       &s) != AI_OK)
+			break;
+		if (strcmp(name, want) == 0) {
+			*slot = s;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* 切换全链：未知模型拒/单槽拒/失配 confirm 拒且不生效/正确 token 生效
+ * （slot 翻转）/观察窗入口冒烟/卸载曾 active 模型后 think 不悬空 */
+static void runtime_model_switch_test(struct kunit *test)
+{
+	u8 *buf;
+	size_t len;
+	u64 tok = 0, tok2 = 0;
+	u32 slot = 0xFFFFFFFFu;
+	struct ai_sense_input sense;
+	struct ai_think_result res;
+	struct ai_sense_decision d;
+	int rc;
+
+	KUNIT_ASSERT_EQ(test, ai_runtime_init(), AI_OK);
+
+	buf = sw_build_tiny_model(1, &len);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, buf);
+	KUNIT_ASSERT_GE(test,
+			ai_mlp_model_create("kunit-sw-a", buf, len), 1);
+
+	/* 未知模型 arm 拒 */
+	rc = ai_runtime_model_switch_arm("no-such-model", &tok2);
+	KUNIT_EXPECT_LT(test, rc, 0);
+
+	/* 合法模型 arm：token 非零 */
+	tok = 0;
+	rc = ai_runtime_model_switch_arm("kunit-sw-a", &tok);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_NE(test, tok, 0ULL);
+
+	/* 单槽：armed 再 arm 拒（照 K2c blast token 模式） */
+	rc = ai_runtime_model_switch_arm("kunit-sw-a", &tok2);
+	KUNIT_EXPECT_LT(test, rc, 0);
+
+	/* 无 confirm 不生效：目标模型仍无槽 */
+	rc = sw_find_slot("kunit-sw-a", &slot);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, slot, 0u);
+
+	/* 失配 token confirm 拒 */
+	tok2 = tok ^ 1;
+	rc = ai_runtime_model_switch_confirm(tok2);
+	KUNIT_EXPECT_LT(test, rc, 0);
+
+	/* 正确 token confirm：active 翻转（A 槽让位 builtin decide） */
+	rc = ai_runtime_model_switch_confirm(tok);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	rc = sw_find_slot("kunit-sw-a", &slot);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, slot, 1u);
+	rc = sw_find_slot("decide", &slot);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_NE(test, slot, 1u);
+
+	/* 观察窗记账入口冒烟（窗口内不炸、AI_OK） */
+	rc = ai_runtime_switch_observe(10);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	/* 卸载曾 active 的模型：决策面不得悬空（think 走 builtin 兜底） */
+	KUNIT_EXPECT_EQ(test, ai_model_unload_by_name("kunit-sw-a"),
+			AI_OK);
+	memset(&sense, 0, sizeof(sense));
+	sense.ts = ktime_get_ns();
+	memset(&d, 0, sizeof(d));
+	d.confidence = 100;
+	memcpy(sense.data, &d, sizeof(d));
+	sense.data_len = sizeof(d);
+	rc = ai_runtime_think(&sense, &res);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+
+	kfree(buf);
+}
+
+/* 冒烟失败拒切：in_dim=1024 的合法模型对任何固定微输入（<4KB）过不了
+ * 维度检查 → arm 拒（-ETIME 同族路径同走此拒），active 不动 */
+static void runtime_model_switch_smoke_fail_test(struct kunit *test)
+{
+	u8 *buf;
+	size_t len;
+	u64 tok = 999;
+	u32 slot = 0xFFFFFFFFu;
+	int rc;
+
+	KUNIT_ASSERT_EQ(test, ai_runtime_init(), AI_OK);
+
+	buf = sw_build_tiny_model(1024, &len);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, buf);
+	KUNIT_ASSERT_GE(test,
+			ai_mlp_model_create("kunit-sw-fail", buf, len), 1);
+
+	rc = ai_runtime_model_switch_arm("kunit-sw-fail", &tok);
+	KUNIT_EXPECT_LT(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, tok, 999ULL);   /* 拒切不回填 token */
+
+	/* active 不动：失败模型无槽 */
+	rc = sw_find_slot("kunit-sw-fail", &slot);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, slot, 0u);
+
+	KUNIT_EXPECT_EQ(test, ai_model_unload_by_name("kunit-sw-fail"),
+			AI_OK);
+	kfree(buf);
+}
+
+/* D2：-ETIME 回退——active=测试模型 + 全局预算压 1ns，think 不得把
+ * -ETIME 透给调用方（回退 builtin 启发式路径），预算原值恢复 */
+static void runtime_model_switch_etime_fallback_test(struct kunit *test)
+{
+	u8 *buf;
+	size_t len;
+	u64 tok = 0, old_budget;
+	struct ai_sense_input sense;
+	struct ai_think_result res;
+	struct ai_sense_decision d;
+	int rc;
+
+	KUNIT_ASSERT_EQ(test, ai_runtime_init(), AI_OK);
+
+	buf = sw_build_tiny_model(1, &len);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, buf);
+	KUNIT_ASSERT_GE(test,
+			ai_mlp_model_create("kunit-sw-et", buf, len), 1);
+
+	rc = ai_runtime_model_switch_arm("kunit-sw-et", &tok);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_runtime_model_switch_confirm(tok);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	/* 全局预算 1ns：模型侧推理（含冒烟/think 内 infer）必 -ETIME，
+	 * runtime think 侧按 D2 回退 builtin 启发式 → 调用方见 AI_OK */
+	old_budget = ai_model_infer_budget_ns_get();
+	ai_model_infer_budget_ns_set(1);
+
+	memset(&sense, 0, sizeof(sense));
+	sense.ts = ktime_get_ns();
+	memset(&d, 0, sizeof(d));
+	d.confidence = 100;
+	memcpy(sense.data, &d, sizeof(d));
+	sense.data_len = sizeof(d);
+	rc = ai_runtime_think(&sense, &res);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, res.status, AI_OK);
+
+	/* 预算原值恢复（对生产面/后续用例零污染） */
+	ai_model_infer_budget_ns_set(old_budget);
+
+	KUNIT_EXPECT_EQ(test, ai_model_unload_by_name("kunit-sw-et"),
+			AI_OK);
+	kfree(buf);
 }
 
 static struct kunit_case runtime_test_cases[] = {
@@ -564,6 +813,11 @@ static struct kunit_case runtime_test_cases[] = {
 	KUNIT_CASE(model_refcount_unload_test),
 	KUNIT_CASE(callback_unregister_sync_test),
 	KUNIT_CASE(runtime_destroy_unloads_models_test),
+	/* K6：A/B 切换置于既有用例后（destroy/init 循环把 active 复位为
+	 * 默认 builtin decide，K6 用例从干净态起测） */
+	KUNIT_CASE(runtime_model_switch_test),
+	KUNIT_CASE(runtime_model_switch_smoke_fail_test),
+	KUNIT_CASE(runtime_model_switch_etime_fallback_test),
 	{}
 };
 

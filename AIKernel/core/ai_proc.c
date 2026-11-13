@@ -193,7 +193,10 @@ u8 ai_proc_classify_hook(struct task_struct *p,
 			 struct kernel_clone_args *args)
 {
 	u8 cls = AI_PROC_CLASS_BATCH;
-	struct ai_proc_slot parent;
+	/* K6 前置修复（K5 B 波发现）：kthread 分支短路跳过 slot_get，
+	 * 尾部 parent.alive 读未初始化栈体（UB）——零初始化兜底，kernel
+	 * 类自然走 NULL 路径，语义不变。 */
+	struct ai_proc_slot parent = { };
 
 	if (!p)
 		return AI_PROC_CLASS_BATCH;

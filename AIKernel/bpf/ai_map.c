@@ -10,18 +10,30 @@
  *   - value_size 上限 1MB（AI 模型参数载荷），max_entries >= 1；
  *   - 单次分配（struct + elems 柔性数组），bpf_map_area_alloc 清零。
  *
+ * K6（KERNEL-K6-DESIGN D5，map 审计收口）：
+ *   - max_entries 独立上限 AI_MODEL_MAP_MAX_ENTRIES=4096（总量内存上限
+ *     之外再拒「巨条目数×小值」形态，alloc_check → -EINVAL）；
+ *   - update_elem 增 capable(CAP_SYS_ADMIN) 特判（无 → -EACCES）：
+ *     v1 单元素写收权 CAP_SYS_ADMIN 持有者；「只允许整表替换」的
+ *     原生等价路径=map 重建重挂（双缓冲整表替换延 v2，诚实登记）；
+ *   - 全局更新计数（ai_model_map_updates_read()，出
+ *     /sys/kernel/ai/stats/ai_map_updates）。
+ *
  * 零回归：本文件仅 CONFIG_AIKERNEL_BPF=y 构建；include/linux/bpf_types.h
  * 的注册行 #ifdef 包裹（n 配置 bpf_map_types[] 该位为 NULL，map_create 返回
  * -EINVAL，与基线一致）；验证器走 map_lookup_elem/map_update_elem 通用默认
  * 路径（check_map_func_compatibility map 视角 default:break），零特判。
  */
 
+#include <linux/atomic.h>
 #include <linux/bpf.h>
 #include <linux/btf_ids.h>
+#include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/filter.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 
@@ -29,6 +41,26 @@
 
 #define AI_MODEL_VALUE_MAX	(1024 * 1024)	/* 单值上限 1MB（模型参数块） */
 #define AI_MODEL_MAP_MEM_MAX	(256ULL * 1024 * 1024)	/* map 总内存上限 256MB */
+/* K6（D5）：条目数独立上限（内存上限之外；>4096 → alloc_check -EINVAL） */
+#define AI_MODEL_MAP_MAX_ENTRIES	4096
+
+/* K6（D5）：map 更新审计计数（成功单元素写 +1；读侧
+ * /sys/kernel/ai/stats/ai_map_updates，属性在 ai_sysfs_stats.c） */
+static atomic64_t ai_model_map_updates;
+
+/**
+ * ai_model_map_updates_read() - 读 AI_MODEL map 累计更新次数
+ *
+ * 数据源为 bpf/ai_map.c 的全局 atomic 计数（定义处见上）；USRIFACE
+ * 与 BPF 为独立 CONFIG，跨目录以标量函数原型解耦（照 ai_bpf.h
+ * 「跨目录类型隔离」约定，声明在使用方 ai_sysfs_stats.c 本地给出）。
+ */
+u64 ai_model_map_updates_read(void);
+u64 ai_model_map_updates_read(void)
+{
+	return atomic64_read(&ai_model_map_updates);
+}
+EXPORT_SYMBOL_GPL(ai_model_map_updates_read);
 
 struct ai_model_map {
 	struct bpf_map map;
@@ -63,8 +95,15 @@ static long ai_model_map_update_elem(struct bpf_map *map, void *key, void *value
 
 	if (flags != BPF_ANY && flags != BPF_NOEXIST && flags != BPF_EXIST)
 		return -EINVAL;
+	/* K6（D5）：单元素写收权——无 CAP_SYS_ADMIN 拒（-EACCES）。
+	 * BPF 程序/helper 侧同闸（运行于发起任务上下文，capable 语义一致；
+	 * root 环境验证以代码路径+计数器代证，如实注记）。 */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EACCES;
 	if (index >= map->max_entries)
 		return -E2BIG;
+
+	atomic64_inc(&ai_model_map_updates);
 
 	elem = ai_model_map_elem_ptr(amap, index);
 	raw_spin_lock_irqsave(&amap->lock, irq_flags);
@@ -97,7 +136,8 @@ static int ai_model_map_alloc_check(union bpf_attr *attr)
 		return -EINVAL;
 	if (attr->value_size == 0 || attr->value_size > AI_MODEL_VALUE_MAX)
 		return -E2BIG;
-	if (attr->max_entries == 0)
+	/* K6（D5）：条目数独立上限（0 与 >4096 均 -EINVAL，验收锚点） */
+	if (attr->max_entries == 0 || attr->max_entries > AI_MODEL_MAP_MAX_ENTRIES)
 		return -EINVAL;
 	if (attr->map_flags)
 		return -EINVAL;

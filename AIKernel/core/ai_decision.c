@@ -197,11 +197,22 @@ void ai_decision_note_effect(enum ai_hook_id hook, s64 aux0, s64 aux1)
 }
 EXPORT_SYMBOL_GPL(ai_decision_note_effect);
 
+/**
+ * ai_decision_set_source() - 替换决策源（第二阶段模型注入）
+ * @fn: 新决策源函数；NULL 恢复启发式 v1
+ *
+ * K6 D6：EXPORT 面仍开，但增 capable(CAP_SYS_ADMIN) 闸——非特权
+ * （含从用户态借道内核接口的调用方）不可换源，返回 -EPERM；
+ * 二阶段模型注入语义不变（K4 冻约）。切换带一行 pr 审计（含操作者）。
+ */
 int ai_decision_set_source(ai_decision_source_fn fn)
 {
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 	WRITE_ONCE(ai_dec_source, fn ? fn : ai_dec_heuristic_v1);
-	pr_info("AIKernel: decision source -> %s\n",
-		fn ? "external (stage-2 model hook)" : "heuristic_v1");
+	pr_info("AIKernel: decision source -> %s (pid=%d comm=%s)\n",
+		fn ? "external (stage-2 model hook)" : "heuristic_v1",
+		task_pid_nr(current), current->comm);
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_decision_set_source);

@@ -7,6 +7,8 @@
  *   decisions   R   AI 最近决策日志（敏感，0400 + CAP_SYS_ADMIN 双保险）
  *   latency     R   决策延迟统计（count/min/max/avg）
  *   hitrate     R   策略命中率（attempts/hits/%）
+ *   models      R   模型治理视图（K6 D3：每模型 name/version/state/slot/
+ *                   hash 前 12hex/bytes/infer_n/last_lat_ns/timeout_n）
  *   telemetry   RW  B 轨实时遥测流出口：读=流式输出全量感知记录；
  *                   写="format=raw|human" 切换模式（默认 human）；
  *                   写="reset" 清空全部 ring（需 CAP_SYS_ADMIN）
@@ -74,7 +76,12 @@ static int ai_proc_status_show(struct seq_file *m, void *v)
 		char name[AI_MAX_NAME_LEN];
 		u32 ver, src, st;
 
-		if (ai_model_enumerate(mi, name, &ver, &src, &st) != AI_OK)
+		/* K6：enumerate 出参扩展（hash/bytes/infer_n/last_lat_ns/
+		 * timeout_n/slot，施工 A 契约）；status 行格式不变，新字段
+		 * 仅供 /proc/ai/models 使用，此处传 NULL 不取。 */
+		if (ai_model_enumerate(mi, name, &ver, &src, &st,
+				       NULL, NULL, NULL, NULL, NULL,
+				       NULL) != AI_OK)
 			break;
 		if (!nmodels)
 			seq_printf(m, "models:\n");
@@ -600,6 +607,51 @@ static const struct proc_ops ai_proc_agents_ops = {
 	.proc_release = single_release,
 };
 
+/* ---- models（K6：模型治理视图，KERNEL-K6-DESIGN D3） ---- */
+
+/*
+ * 每模型一行：name= version= state= slot= hash=<前 12hex> bytes=
+ * infer_n= last_lat_ns= timeout_n=（数据源=A 扩展的 ai_model_enumerate：
+ * registry 基础字段 + ai_mlp_model 内新增统计）。
+ * slot 语义（施工 A/B 契约）：0=无槽，1=A（active 决策模型），
+ * 2=B（arm 待切/观察窗）。hash 为模型权重的 64 位短哈希（A 侧 sha256
+ * 折叠），此处显示前 12 hex；builtin decide 无 infer 统计（恒 0）。
+ */
+static int ai_proc_models_show(struct seq_file *m, void *v)
+{
+	unsigned int i;
+
+	for (i = 0; ; i++) {
+		char name[AI_MAX_NAME_LEN];
+		u32 ver, src, st, slot;
+		u64 hash, bytes, infer_n, last_lat_ns, timeout_n;
+
+		if (ai_model_enumerate(i, name, &ver, &src, &st,
+				       &hash, &bytes, &infer_n, &last_lat_ns,
+				       &timeout_n, &slot) != AI_OK)
+			break;
+		seq_printf(m,
+			   "name=%s version=%u state=%u slot=%u hash=%012llx "
+			   "bytes=%llu infer_n=%llu last_lat_ns=%llu "
+			   "timeout_n=%llu\n",
+			   name, ver, st, slot, hash, bytes, infer_n,
+			   last_lat_ns, timeout_n);
+	}
+	return 0;
+}
+
+static int ai_proc_models_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ai_proc_models_show, NULL);
+}
+
+static const struct proc_ops ai_proc_models_ops = {
+	.proc_open    = ai_proc_models_open,
+	.proc_read    = seq_read,
+	.proc_lseek   = seq_lseek,
+	.proc_release = single_release,
+};
+
 /* ---- 初始化 ---- */
 
 static struct proc_dir_entry *ai_proc_root;
@@ -634,6 +686,8 @@ static int __init ai_procfs_init(void)
 	proc_create("telemetry", 0644, ai_proc_root, &ai_proc_telemetry_ops);
 	/* K3：agent 角色注册表/配额/记账面（追加条目，既有行零改） */
 	proc_create("agents", 0644, ai_proc_root, &ai_proc_agents_ops);
+	/* K6：模型治理视图（D3 七字段+slot；照 agents 节点同款手法追加） */
+	proc_create("models", 0444, ai_proc_root, &ai_proc_models_ops);
 
 	pr_info("AIKernel: /proc/ai/ interface ready\n");
 	return 0;

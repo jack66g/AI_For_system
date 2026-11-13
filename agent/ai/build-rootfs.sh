@@ -151,6 +151,16 @@ fi
 file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl"       "$MNT/usr/local/bin/aik-console" | sed 's/, BuildID.*//'
 ls -la "$MNT/usr/local/bin/"
 
+echo "=== [5.5] K6: /etc/aikernel 模型签名白名单 models.allow ==="
+# K6（KERNEL-K6-DESIGN D1）：fail-closed 白名单随镜像出厂（首批=空表）。
+# 照既有出厂打包链三处 sha256 一致手法：factory 树源文件 → 镜像内
+# /etc/aikernel/models.allow → 本构建日志的 sha256sum 输出（证据值）；
+# install/cmp 任一不一致即构建失败（白名单不允许镜像与仓库漂移）。
+install -D -m644 "$FACTORY/etc/aikernel/models.allow" "$MNT/etc/aikernel/models.allow"
+sha256sum "$FACTORY/etc/aikernel/models.allow" "$MNT/etc/aikernel/models.allow"
+cmp -s "$FACTORY/etc/aikernel/models.allow" "$MNT/etc/aikernel/models.allow" || { echo "models.allow mismatch"; exit 1; }
+head -3 "$MNT/etc/aikernel/models.allow"
+
 echo "=== [6] 拷入 SME (/opt/sme) + python 依赖 ==="
 rm -rf "$MNT/opt/sme"
 cp -a /home/jack66g/sme "$MNT/opt/sme"

@@ -6,6 +6,15 @@
  *   enabled            RW   AI 总开关（写需 CAP_SYS_ADMIN）
  *   model_load         W    下发模型（内置 echo 或 <model_path>/<name>.bin，CAP_SYS_ADMIN）
  *   model_unload       W    按名卸载模型（CAP_SYS_ADMIN）
+ *   model_infer        W    MLP 真前向触发（name + float32 hex 输入）
+ *   model_out          R    最近一次推理结果观测
+ *   model_switch       W    决策模型 A/B 切换 arm（K6 D4：写 <name>，
+ *                           冒烟推理过 → arm 切换窗，token 回显内核日志
+ *                           "ARMED token=%llu"）
+ *   model_switch_confirm W  写 token 生效切换（active 指针翻转 + 旧模型
+ *                           观察窗保活，K6 D4）
+ *   model_infer_budget_ns RW 推理硬上限预算（K6 D2：u64 ns，0=不限；
+ *                           写需 CAP_SYS_ADMIN）
  *   policy/refresh     W    同步策略目录（扫描策略注册表，幂等新建 <name> 文件）
  *   policy/<name>      RW   各策略开关（1/0，写需 CAP_SYS_ADMIN）
  *   stats/             R    累计统计（telemetry 全 CPU 合计 + 决策统计 + runtime 状态）
@@ -57,6 +66,19 @@ static int ai_sysfs_cap_check(void)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	return 0;
+}
+
+/*
+ * K6：返回码出口。AI_ERR_* 域为 -1..-17，与 errno 低区重叠，仅对已知
+ * AI_ERR 码走 ai_error_to_errno() 映射；区间外的负值（如推理预算超时
+ * 的 -ETIME，KERNEL-K6-DESIGN D2）按内核 errno 直通，避免被默认分支
+ * 吞成 -EIO。
+ */
+static int ai_sysfs_rc_to_errno(int rc)
+{
+	if (rc >= AI_ERR_DISABLED && rc <= AI_OK)
+		return ai_error_to_errno(rc);
+	return rc;
 }
 
 /* ---- enabled ---- */
@@ -627,7 +649,8 @@ static ssize_t ai_model_infer_store(struct kobject *kobj,
 
 	mutex_lock(&ai_infer_lock);
 	rc = ai_runtime_model_infer_by_name(name, in, in_len,
-					    ai_infer_out_buf, &out_len, &lat);
+					    ai_infer_out_buf, &out_len, &lat,
+					    ai_model_infer_budget_ns_get());
 	if (rc == AI_OK) {
 		ai_infer_out_len = out_len;
 		strscpy(ai_infer_out_name, name, sizeof(ai_infer_out_name));
@@ -636,7 +659,7 @@ static ssize_t ai_model_infer_store(struct kobject *kobj,
 	}
 	mutex_unlock(&ai_infer_lock);
 	kfree(in);
-	return rc == AI_OK ? (ssize_t)count : ai_error_to_errno(rc);
+	return rc == AI_OK ? (ssize_t)count : ai_sysfs_rc_to_errno(rc);
 
 err_free:
 	/* K2b 修复 K1B-17（Med-4）：4 条早退路径补释放（原每次失败泄 4KB） */
@@ -664,6 +687,114 @@ static struct kobj_attribute ai_model_infer_attr =
 	__ATTR(model_infer, 0200, NULL, ai_model_infer_store);
 static struct kobj_attribute ai_model_out_attr =
 	__ATTR(model_out, 0440, ai_model_out_show, NULL);
+
+/* ---- K6（KERNEL-K6-DESIGN D2/D4）：推理预算 + 决策模型 A/B 切换 ---- */
+
+/*
+ * model_infer_budget_ns（0644 RW，写需 CAP_SYS_ADMIN）：推理硬上限
+ * 预算（u64 ns，0=不限）。全局变量 ai_model_infer_budget_ns 与默认值
+ * （10ms）由 ai_runtime.c 侧定义（施工 A）；本节点只做读写出口。
+ */
+static ssize_t ai_model_infer_budget_show(struct kobject *kobj,
+					  struct kobj_attribute *attr,
+					  char *buf)
+{
+	return sysfs_emit(buf, "%llu\n", ai_model_infer_budget_ns_get());
+}
+
+static ssize_t ai_model_infer_budget_store(struct kobject *kobj,
+					   struct kobj_attribute *attr,
+					   const char *buf, size_t count)
+{
+	u64 val;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+	if (kstrtoull(buf, 0, &val) != 0)
+		return -EINVAL;
+	ai_model_infer_budget_ns_set(val);
+	pr_info("AIKernel: model_infer_budget_ns = %llu (%s)\n", val,
+		val ? "ns cap" : "unlimited");
+	return count;
+}
+static struct kobj_attribute ai_model_infer_budget_attr =
+	__ATTR(model_infer_budget_ns, 0644, ai_model_infer_budget_show,
+	       ai_model_infer_budget_store);
+
+/*
+ * model_switch（0200，CAP_SYS_ADMIN）：写 "<name>" arm 切换窗。
+ * 实现=调 ai_runtime_model_switch_arm()（目标模型必须 LOADED、冒烟推理
+ * 过才 arm，失败/超时拒切且 active 不动——均在 runtime 侧裁决）；arm
+ * 成功后 token 回显内核日志（0200 写_only 节点无读面，回显格式
+ * "ARMED token=%llu"，操作者从 dmesg 取 token 再写 confirm 节点）。
+ * 切换窗/单槽/观察窗语义照 K2c blast token 模式自建于 runtime 侧。
+ */
+static ssize_t ai_model_switch_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	char name[AI_MAX_NAME_LEN];
+	u64 token = 0;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+	rc = ai_sysfs_parse_name(buf, count, name);
+	if (rc)
+		return rc;
+
+	rc = ai_runtime_model_switch_arm(name, &token);
+	if (rc != AI_OK)
+		return ai_sysfs_rc_to_errno(rc);
+	pr_info("AIKernel: ARMED token=%llu (model_switch '%s')\n",
+		token, name);
+	return count;
+}
+static struct kobj_attribute ai_model_switch_attr =
+	__ATTR(model_switch, 0200, NULL, ai_model_switch_store);
+
+/*
+ * model_switch_confirm（0200，CAP_SYS_ADMIN）：写十进制 token 生效
+ * 切换（active 指针 RCU 翻转 + 旧模型观察窗保活）。token 失配/过期由
+ * runtime 侧拒绝；容许尾随空白（sysfs 惯例 echo 带 LF，照 policy
+ * confirm 同款先 trim 再 kstrtoull）。
+ */
+static ssize_t ai_model_switch_confirm_store(struct kobject *kobj,
+					     struct kobj_attribute *attr,
+					     const char *buf, size_t count)
+{
+	u64 token;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+
+	while (count > 0 && isspace((unsigned char)buf[count - 1]))
+		count--;
+	if (count == 0 || count >= 32)
+		return -EINVAL;
+	{
+		char tmp[33];
+
+		memcpy(tmp, buf, count);
+		tmp[count] = '\0';
+		if (kstrtoull(tmp, 0, &token) != 0)
+			return -EINVAL;
+	}
+
+	rc = ai_runtime_model_switch_confirm(token);
+	if (rc != AI_OK)
+		return ai_sysfs_rc_to_errno(rc);
+	pr_info("AIKernel: model switch confirmed (token=%llu)\n", token);
+	return count;
+}
+static struct kobj_attribute ai_model_switch_confirm_attr =
+	__ATTR(model_switch_confirm, 0200, NULL,
+	       ai_model_switch_confirm_store);
 
 /* ---- decision_inject（W3 决策注入全局总开关，默认 0=关=原生行为） ---- */
 
@@ -856,6 +987,9 @@ static struct attribute *ai_attrs[] = {
 	&ai_model_unload_attr.attr,
 	&ai_model_infer_attr.attr,
 	&ai_model_out_attr.attr,
+	&ai_model_infer_budget_attr.attr,
+	&ai_model_switch_attr.attr,
+	&ai_model_switch_confirm_attr.attr,
 	&ai_decision_inject_attr.attr,
 	NULL,
 };

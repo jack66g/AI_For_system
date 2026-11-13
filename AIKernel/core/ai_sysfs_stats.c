@@ -165,6 +165,20 @@ static ssize_t ai_stats_ai_actions_show_fn(char *buf)
 }
 AI_STATS_RO(ai_actions, ai_stats_ai_actions_show_fn);
 
+/* ---- K6（KERNEL-K6-DESIGN D5）：BPF AI_MODEL map 更新审计计数 ----
+ * 计数本体在 bpf/ai_map.c（update_elem 成功单元素写 +1）；USRIFACE 与
+ * BPF 为独立 CONFIG，跨目录标量函数在此本地声明（照 ai_bpf.h「跨目录
+ * 类型隔离」约定，不引入 bpf 侧类型依赖）。BPF=n 时不编译本属性。 */
+#ifdef CONFIG_AIKERNEL_BPF
+u64 ai_model_map_updates_read(void);
+
+static ssize_t ai_stats_ai_map_updates_show_fn(char *buf)
+{
+	return sysfs_emit(buf, "%llu\n", ai_model_map_updates_read());
+}
+AI_STATS_RO(ai_map_updates, ai_stats_ai_map_updates_show_fn);
+#endif /* CONFIG_AIKERNEL_BPF */
+
 static struct attribute *ai_stats_attrs[] = {
 	&telemetry_emitted_attr.attr,
 	&telemetry_dropped_attr.attr,
@@ -174,6 +188,9 @@ static struct attribute *ai_stats_attrs[] = {
 	&decisions_hitrate_permille_attr.attr,
 	&runtime_state_attr.attr,
 	&ai_actions_attr.attr,
+#ifdef CONFIG_AIKERNEL_BPF
+	&ai_map_updates_attr.attr,
+#endif
 	NULL,
 };
 

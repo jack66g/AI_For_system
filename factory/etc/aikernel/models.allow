@@ -1,0 +1,15 @@
+# /etc/aikernel/models.allow - AIKernel 外部模型签名白名单（K6，KERNEL-K6-DESIGN D1）
+#
+# 格式：每行 "<64 位 sha256 hex> <name>"（# 开头为注释，空行忽略）。
+#   <sha256>  模型 .bin 文件全部内容的 SHA-256（64 个小写 hex 字符）
+#   <name>    注册模型名（与 /sys/kernel/ai/model_load 下发的名字一致；
+#             内置 decide 模型不经此表，永不校验）
+#
+# 语义（fail-closed）：
+#   - 本文件缺失 = 拒绝一切外部模型加载（回到无外部模型态，而非敞开）；
+#   - 哈希不匹配 / 名字不匹配 = 拒绝加载（-EPERM + 审计事件）；
+#   - 误删本表的影响 = 外部模型全部不可载，builtin decide 决策不受影响。
+#
+# 出厂首批：空表（只禁外部模型）。登记新模型 = 添加一行，并保持出厂
+# 打包链三处 sha256 一致（factory 树 ↔ 构建镜像内文件 ↔ 构建证据日志，
+# 见 agent/ai/build-rootfs.sh [5.5] 段）。
