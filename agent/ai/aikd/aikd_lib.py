@@ -41,15 +41,16 @@ AI_NL_SENSE_MAX_RECORDS = 4096
 AI_NL_FORMAT_RAW = 0
 AI_NL_PAYLOAD_MAX = 64 * 1024
 
-# 遥测记录头（packed 23B）：
-#   u64 timestamp_ns, u32 pid, u32 tgid, u16 cpu,
-#   u8 category, u8 event_type, u8 severity, u16 data_len
-TEL_HEADER = struct.Struct("=QIIHBBBH")
+# 遥测记录头（packed 44B，K7 统一事件头）：
+#   u64 timestamp_ns, u64 seq, u32 pid, u32 tgid, u16 cpu,
+#   u64 trace, u32 agent, u8 category, u8 event_type, u8 severity,
+#   u8 privacy, u16 data_len
+TEL_HEADER = struct.Struct("=QQIIHQIBBBBH")
 
-# 事件编号上界（对齐 enum ai_event_type：AI_EV_MAX=104）
-AI_EV_MAX_MAX = 104
+# 事件编号上界（对齐 enum ai_event_type：AI_EV_MAX=105——K7 增 18.03 环满）
+AI_EV_MAX_MAX = 105
 AI_TELEMETRY_MAX_DATA_LEN = 4096
-TEL_HEADER_LEN = 23
+TEL_HEADER_LEN = 44
 
 # 决策记录字段名（/proc/ai/decisions 与 chains 同一格式）
 DECISION_RE = re.compile(
@@ -89,8 +90,8 @@ def parse_telemetry_records(data: bytes, start: int = 0):
     n = len(data)
     while pos + TEL_HEADER_LEN <= n:
         hdr = TEL_HEADER.unpack_from(data, pos)
-        (timestamp_ns, pid, tgid, cpu, category, event_type,
-         severity, data_len) = hdr
+        (timestamp_ns, seq, pid, tgid, cpu, trace, agent, category,
+         event_type, severity, privacy, data_len) = hdr
         if pos + TEL_HEADER_LEN + data_len > n:
             break  # 尾部残记录：留待下次（netlink 语义与内核一致）
         # 字段可信性校验（防御传输损坏的误对齐记录）：
@@ -106,12 +107,16 @@ def parse_telemetry_records(data: bytes, start: int = 0):
         payload = data[pos + TEL_HEADER_LEN: pos + TEL_HEADER_LEN + data_len]
         records.append(({
             "timestamp_ns": timestamp_ns,
+            "seq": seq,
             "pid": pid,
             "tgid": tgid,
             "cpu": cpu,
+            "trace": trace,
+            "agent": agent,
             "category": category,
             "event_type": event_type,
             "severity": severity,
+            "privacy": privacy,
             "data_len": data_len,
         }, payload))
         pos += TEL_HEADER_LEN + data_len

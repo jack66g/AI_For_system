@@ -1050,26 +1050,40 @@ int dt_vm_parse_ai(const char *raw, aik_json *o)
  * cat=(\d+)\s+ev=(\d+)\s+sev=(\d+)\s+len=(\d+)"(前缀匹配,尾随不限) */
 static int match_tele_line(const char *line, long long v[7], long long *lenv)
 {
-	static const char *keys[7] = { "ts=", "pid=", "tgid=", "cpu=",
-				       "cat=",  "ev=",  "sev=" };
+	/* K7 44B 头新行序：ts seq pid tgid cpu trace agent cat ev sev
+	 * privacy len——seq/trace/agent/privacy 四字段跳读不进 v
+	 * （trace 为十六进制渲染，skip 走 strcspn 不做十进制校验） */
+	static const char *keys[12] = {
+		"ts=", "seq=", "pid=", "tgid=", "cpu=", "trace=", "agent=",
+		"cat=", "ev=", "sev=", "privacy=", "len="
+	};
+	static const int vidx[12] = { 0, -1, 1, 2, 3, -1, -1, 4, 5, 6, -1, -2 };
 	const char *p = line;
 
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < 12; i++) {
 		size_t klen = strlen(keys[i]);
 
 		if (strncmp(p, keys[i], klen) != 0)
 			return 0;
 		p += klen;
-		if (!(*p >= '0' && *p <= '9'))
-			return 0;
-		v[i] = strtoll(p, NULL, 10);
-		p += strspn(p, "0123456789");
+		if (vidx[i] == -1) {
+			/* skip 字段：值整体越过（至下一空白） */
+			p += strcspn(p, " \t\r\f\v");
+		} else {
+			if (!(*p >= '0' && *p <= '9'))
+				return 0;
+			if (vidx[i] == -2)
+				*lenv = strtoll(p, NULL, 10);
+			else
+				v[vidx[i]] = strtoll(p, NULL, 10);
+			p += strspn(p, "0123456789");
+		}
 		{
 			size_t ws = strspn(p, " \t\r\f\v");
 
 			if (ws == 0)
 				return 0; /* \s+ */
-			if (i == 6) {
+			if (i == 11) {
 				p += ws;
 				goto sev_done;
 			}
@@ -1077,12 +1091,6 @@ static int match_tele_line(const char *line, long long v[7], long long *lenv)
 		}
 	}
 sev_done:
-	if (strncmp(p, "len=", 4) != 0)
-		return 0;
-	p += 4;
-	if (!(*p >= '0' && *p <= '9'))
-		return 0;
-	*lenv = strtoll(p, NULL, 10);
 	return 1;
 }
 

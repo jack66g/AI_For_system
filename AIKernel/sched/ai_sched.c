@@ -46,6 +46,7 @@
 #include "../core/ai_effect.h"
 #include <linux/ai_accessors.h>
 #include "ai_sched.h"
+#include "../bpf/ai_features.h"
 
 /* 调度子系统内部类型（cpu_rq()/struct rq/struct cfs_rq 等）——
  * AIKernel/sched/ 属调度子系统，允许依赖 kernel/sched/sched.h。 */
@@ -375,6 +376,9 @@ EXPORT_SYMBOL_GPL(ai_telemetry_pelt_se_sample);
 
 /* 上一采样周期 kernel_cpustat 快照（固定数组，无运行时分配） */
 static u64 ai_sched_cpustat_prev[NR_CPUS][NR_STATS];
+/* K7 D3：本 CPU 最近 iowait 百分比存档（采样 kthread 单线程写，
+ * 特征发布尾读——ut 载荷不落全局，此处为发布侧轻量桥） */
+static u32 ai_sched_iowait_last[NR_CPUS];
 
 static void ai_sched_sample_cpu_load(void)
 {
@@ -416,6 +420,7 @@ static void ai_sched_sample_cpu_utilization(void)
 				100, total) : 0;
 		ut.iowait_pct = total ? div64_u64(delta[CPUTIME_IOWAIT] * 100,
 						  total) : 0;
+		ai_sched_iowait_last[cpu] = ut.iowait_pct;
 		ut.idle_pct = total ? div64_u64(delta[CPUTIME_IDLE] * 100,
 						total) : 0;
 		ut.steal_pct = total ? div64_u64(delta[CPUTIME_STEAL] * 100,
@@ -571,6 +576,20 @@ static void ai_sched_metrics_sample_once(void)
 	 * 到期 outcome 关窗回填决策 ring）；CONFIG_AIKERNEL_RUNTIME=n
 	 * 时为空内联（零开销）。复用本 kthread 的节拍，不另起定时器。 */
 	ai_effect_tick();
+	/* K7 D3：AI_FEATURES 特征快照发布（1Hz 搭车零新定时器）——
+	 * lat=K4 调度延迟 EWMA（ns）；iowait=本 CPU 最近利用率档值；
+	 * psi=MEM some avg10 原生定点（2048 制，发布侧零换算）。
+	 * CONFIG_AIKERNEL_BPF=n 时空内联。 */
+	{
+		unsigned long psi_some[3] = {};
+		unsigned long psi_full[3] = {};
+
+		if (ai_psi_read(PSI_MEM, psi_some, psi_full) == AI_OK)
+			ai_features_sample_publish(
+				READ_ONCE(ai_k4_lat_ewma),
+				ai_sched_iowait_last[smp_processor_id()],
+				(u32)psi_some[1]);
+	}
 }
 
 static int ai_sched_metrics_sampler(void *unused)

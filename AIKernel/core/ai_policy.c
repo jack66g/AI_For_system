@@ -464,8 +464,12 @@ static int __ai_policy_execute(struct ai_policy_ctx *ctx, void *arg)
 	tp.model_version = rec.model_version;
 	tp.executed = rec.executed;
 	tp.safety_clamped = rec.safety_clamped;
+	/* K7 D1：决策上下文对包段——cat18 决策事件头携带 trace/agent
+	 * （trace_lo=decision_id：链内判别键；hi 为 per-boot 常量 cookie） */
+	ai_telemetry_ctx_set(rec.trace_lo, rec.agent_id);
 	ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_DECISION, AI_SEV_NORMAL,
 			  &tp, sizeof(tp));
+	ai_telemetry_ctx_clear();
 
 	mutex_unlock(&ai_policy_lock);
 
@@ -855,8 +859,11 @@ int ai_policy_execute_batch(const struct ai_batch_op *ops, u32 n_ops,
 	tp.domain = rec.domain;
 	tp.executed = rec.executed;
 	tp.safety_clamped = rec.safety_clamped;
+	/* K7 D1：决策上下文对包段（同 __ai_policy_execute） */
+	ai_telemetry_ctx_set(rec.trace_lo, rec.agent_id);
 	ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_DECISION, AI_SEV_NORMAL,
 			  &tp, sizeof(tp));
+	ai_telemetry_ctx_clear();
 
 	mutex_unlock(&ai_policy_lock);
 
@@ -949,14 +956,18 @@ int ai_policy_outcome_update(u64 decision_id, u8 outcome, s64 metric_delta)
 	chain_rec = *r;   /* 完整因果链记录（trigger→decision→outcome） */
 	spin_unlock_irqrestore(&ai_dec_lock, flags);
 
-	/* AI 自我观测遥测（cat18：结果事件写回 ring buffer） */
+	/* AI 自我观测遥测（cat18：结果事件写回 ring buffer）。
+	 * K7 D1：决策上下文对包段——结果事件头携带原决策的 trace/agent
+	 * （因果链回读值，与决策事件同键可关联） */
 	memset(&tp, 0, sizeof(tp));
 	tp.type = 2;
 	tp.decision_id = decision_id;
 	tp.outcome = outcome;
 	tp.metric_delta = metric_delta;
+	ai_telemetry_ctx_set(chain_rec.trace_lo, chain_rec.agent_id);
 	ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_OUTCOME, AI_SEV_NORMAL,
 			  &tp, sizeof(tp));
+	ai_telemetry_ctx_clear();
 
 	/* 因果链落链（ring + CSV 导出） */
 	ai_causal_chain_push(&chain_rec);

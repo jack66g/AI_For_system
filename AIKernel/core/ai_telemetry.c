@@ -32,7 +32,8 @@
  *     旁路；积压回落低位水位以下逐次衰减位移自动恢复；
  *   - 性能预算：单次写入 < 100ns（ktime_get_ns + 两段 memcpy，无锁无原子 RMW）。
  *
- * 数据原则（all-ai）：24B 定长头 + 原始数据，不脱敏、不哈希、不截断。
+ * 数据原则（all-ai）：44B 定长头（K7 D1 统一事件头）+ 原始数据，
+ * 不脱敏、不哈希、不截断。
  */
 
 #include <linux/kernel.h>
@@ -82,7 +83,34 @@ struct ai_ring_cpu {
 	u64 adapt_skipped;     /* 被自适应降采样跳过的条数（含于 sampled_skip） */
 	u64 adapt_episodes;    /* w58：进入降档（shift 0→>0）的次数 */
 	u64 predrain_dropped;  /* w63：消费者就绪前环满丢弃条数（含于 sampled_skip） */
+	/* ---- K7（D1/D2/D4）尾追：seq/ctx 源、背压计数族、环满告警闩、
+	 *    采样率可解释快照。旧字段偏移/语义不变。 ---- */
+	u64 seq;                /* D1：per-CPU 记录序号（写路径单调递增） */
+	atomic64_t emitted64;   /* D2：emitted 的 64 位原子镜像（写侧双写） */
+	atomic64_t dropped64;   /* D2：dropped 的 64 位原子镜像 */
+	atomic64_t sampled_skip64; /* D2：sampled_skip 的 64 位原子镜像
+				     * （=三源 rate+adapt+predrain 之和） */
+	atomic64_t rate_skipped;   /* D2：rate 表跳过（含 rate=0 关闭） */
+	atomic64_t drain_discards; /* D2：drain_all 读出即丢条数（原只计字节） */
+	atomic64_t sense_overread_dropped; /* D2：SENSE 读侧过读丢弃条数 */
+	atomic64_t resync_races;   /* D2：resync cmpxchg 失败次数 */
+	u8  full_latch;         /* D2：环满告警闩（首次 RING_FULL 置位） */
+	u64 full_episodes;      /* D2：环满告警回合数（闩 0→1 计数） */
+	u32 adapt_last_backlog;     /* D4：上次升降档时积压字节快照 */
+	u64 adapt_last_change_ns;   /* D4：上次升降档时刻（0=从未变档） */
 } ____cacheline_aligned_in_smp;
+
+/*
+ * K7 D1：per-CPU 决策上下文对（trace/agent）。决策/策略 emit 路径
+ * （ai_policy 执行段）ctx_set/clear 包段后，emit_common 在关中断临界区
+ * 内读取填进记录头；未包段的其余 emit 诚实填 0。写侧同样关中断，
+ * 与读侧在同 CPU 上互斥（迁移窗口见 ctx_set 注释）。
+ */
+struct ai_tel_ctx {
+	u64 trace;
+	u32 agent;
+};
+static DEFINE_PER_CPU(struct ai_tel_ctx, ai_tel_ctx);
 
 static DEFINE_PER_CPU(struct ai_ring_cpu, ai_ring_cpus);
 static bool ai_telemetry_ready;
@@ -269,8 +297,12 @@ static u32 ai_ring_discard_backlog(struct ai_ring_cpu *r, u32 tail, u32 head,
 	if (pos != head)
 		corrupt = true;   /* 尾部坏头/残记录：至少再丢 1 条 */
 
-	if (atomic_cmpxchg(&r->tail, tail, head) != tail)
+	if (atomic_cmpxchg(&r->tail, tail, head) != tail) {
+		/* K7 D2：cmpxchg 失败=他方（生产者驱逐/读者）已推进 tail——
+		 * 原实现静默 return 0 不计账，竞争强度不可观测。 */
+		atomic64_inc(&r->resync_races);
 		return 0;
+	}
 
 	if (n)
 		atomic_add(n, &r->dropped);
@@ -412,6 +444,21 @@ int ai_telemetry_init(void)
 		r->adapt_skipped = 0;
 		r->adapt_episodes = 0;
 		r->predrain_dropped = 0;
+		/* K7 尾追字段归零 */
+		r->seq = 0;
+		atomic64_set(&r->emitted64, 0);
+		atomic64_set(&r->dropped64, 0);
+		atomic64_set(&r->sampled_skip64, 0);
+		atomic64_set(&r->rate_skipped, 0);
+		atomic64_set(&r->drain_discards, 0);
+		atomic64_set(&r->sense_overread_dropped, 0);
+		atomic64_set(&r->resync_races, 0);
+		r->full_latch = 0;
+		r->full_episodes = 0;
+		r->adapt_last_backlog = 0;
+		r->adapt_last_change_ns = 0;
+		per_cpu_ptr(&ai_tel_ctx, cpu)->trace = 0;
+		per_cpu_ptr(&ai_tel_ctx, cpu)->agent = 0;
 	}
 	/* 采样率默认全量（1），per (category,event) 覆盖 */
 	{
@@ -506,6 +553,9 @@ static bool ai_ring_sample(struct ai_ring_cpu *r, u16 rate)
 	r->sample_counter++;
 	if ((r->sample_counter % rate) != 0) {
 		r->sampled_skip++;
+		/* K7 D2：sampled_skip 三源拆标之 rate 源 + 64 位镜像 */
+		atomic64_inc(&r->rate_skipped);
+		atomic64_inc(&r->sampled_skip64);
 		return false;
 	}
 	return true;
@@ -612,6 +662,7 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 	unsigned long flags;
 	u16 rate;
 	int rc;
+	bool full_evt = false;   /* K7 D2：本次 emit 触发环满告警闩 0→1 */
 
 	if (!ai_telemetry_ready)
 		return AI_ERR_DISABLED;
@@ -624,8 +675,20 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 
 	rate = READ_ONCE(ai_telemetry_sample_rate[category - 1][event_type - 1]);
 	if (!sampling_done) {
-		if (rate == 0)
+		if (rate == 0) {
+			/*
+			 * K7 D2：rate=0 关闭事件此前完全不可观测（§1 ④）。
+			 * 并入 sampled_skip 家族（rate_skipped 三源列之一）；
+			 * 仅动 per-CPU 静态计数器，不触碰 ring（exit 竞争安全）。
+			 */
+			preempt_disable();
+			r = per_cpu_ptr(&ai_ring_cpus, smp_processor_id());
+			r->sampled_skip++;
+			atomic64_inc(&r->rate_skipped);
+			atomic64_inc(&r->sampled_skip64);
+			preempt_enable();
 			return AI_OK;   /* 该事件被采样关闭 */
+		}
 	}
 
 	/*
@@ -676,9 +739,15 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 				r->adapt_shift++;
 				if (r->adapt_shift > r->adapt_peak_shift)
 					r->adapt_peak_shift = r->adapt_shift;
+				/* K7 D4：升降档可解释——档位实际变化时记
+				 * 积压快照与时刻（/proc/ai/status 行尾渲染） */
+				r->adapt_last_backlog = backlog;
+				r->adapt_last_change_ns = ktime_get_ns();
 			}
 		} else if (backlog < AI_TEL_ADAPT_LOW && r->adapt_shift) {
 			r->adapt_shift--;
+			r->adapt_last_backlog = backlog;
+			r->adapt_last_change_ns = ktime_get_ns();
 		}
 
 		if (r->adapt_shift && severity < AI_SEV_IMPORTANT) {
@@ -686,6 +755,7 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 			if ((r->adapt_counter & ((1u << r->adapt_shift) - 1))) {
 				r->sampled_skip++;
 				r->adapt_skipped++;
+				atomic64_inc(&r->sampled_skip64);   /* K7 D2 */
 				local_irq_restore(flags);
 				return AI_OK;
 			}
@@ -693,6 +763,16 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 	}
 
 	rec.timestamp_ns = ktime_get_ns();
+	/* K7 D1：per-CPU 单调 seq（只发给到达写路径的记录；环满丢弃
+	 * 的 seq 成为读者可见的空洞=诚实丢失）+ 决策上下文对
+	 * （ctx_set 包段的路径携带 trace/agent，其余默认 0） */
+	rec.seq = ++r->seq;
+	{
+		const struct ai_tel_ctx *c = this_cpu_ptr(&ai_tel_ctx);
+
+		rec.trace = c->trace;
+		rec.agent = c->agent;
+	}
 	if (current) {
 		rec.pid = current->pid;
 		rec.tgid = current->tgid;
@@ -704,11 +784,22 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 	rec.category = category;
 	rec.event_type = event_type;
 	rec.severity = severity;
+	rec.privacy = 0;   /* K7 D1：v1 仅字段+渲染，产生侧后波接 */
 	rec.data_len = data_len;
 
 	rc = ai_ring_write(r, &rec, data);
 	if (rc == AI_OK) {
 		r->emitted++;
+		atomic64_inc(&r->emitted64);   /* K7 D2：双写 64 位镜像 */
+		/*
+		 * K7 D2：环满告警闩复位——free 恢复过半才放行下一回合
+		 * （防积压在半环附近抖动时逐条告警）。
+		 */
+		if (unlikely(r->full_latch) &&
+		    ai_ring_free(r, READ_ONCE(r->head),
+				 (u32)atomic_read(&r->tail)) >=
+		    AI_TELEMETRY_RING_SIZE / 2)
+			r->full_latch = 0;
 	} else if (rc == AI_ERR_RING_FULL &&
 		   !READ_ONCE(ai_tel_consumer_ready)) {
 		/*
@@ -720,10 +811,43 @@ static int ai_telemetry_emit_common(u8 category, u8 event_type, u8 severity,
 		 */
 		r->sampled_skip++;
 		r->predrain_dropped++;
+		atomic64_inc(&r->sampled_skip64);   /* K7 D2 */
+		if (!r->full_latch) {
+			r->full_latch = 1;
+			r->full_episodes++;
+			full_evt = true;
+		}
 	} else {
 		atomic_inc(&r->dropped);
+		atomic64_inc(&r->dropped64);   /* K7 D2 */
+		if (rc == AI_ERR_RING_FULL && !r->full_latch) {
+			r->full_latch = 1;
+			r->full_episodes++;
+			full_evt = true;
+		}
 	}
 	local_irq_restore(flags);
+
+	/*
+	 * K7 D2：环满告警一次——首次 RING_FULL（闩 0→1）pr_warn +
+	 * cat18 自遥测一条（18.03）。自遥测走 emit_direct 在锁外补发
+	 * （关中断临界区内不可重入 emit）；环仍满时该事件自身可能被
+	 * 丢弃——闩已置位不会递归告警，损失证据由 full_episodes/
+	 * dropped 计数与 dmesg 承载（best-effort 设计）。
+	 */
+	if (unlikely(full_evt)) {
+		struct ai_tp_ring_full evt;
+
+		pr_warn_ratelimited(
+			"AIKernel: telemetry ring FULL on cpu=%d (episode=%llu dropped=%d)\n",
+			(int)rec.cpu, r->full_episodes,
+			(int)atomic_read(&r->dropped));
+		evt.ts_ns = rec.timestamp_ns;
+		evt.cpu = rec.cpu;
+		evt.dropped = (u32)atomic_read(&r->dropped);
+		ai_telemetry_emit_direct(AI_CAT_AI, AI_EV_AI_RING_FULL,
+					 AI_SEV_IMPORTANT, &evt, sizeof(evt));
+	}
 
 	/* K-B glue：NETLINK EVENT 镜像——ring 发布成功（rc==AI_OK）才推，
 	 * 保证订阅端与 SENSE 出口同源同视图；采样判定在前段已通过。 */
@@ -755,8 +879,18 @@ bool ai_telemetry_sample_take(u8 category, u8 event_type)
 		return false;
 
 	rate = READ_ONCE(ai_telemetry_sample_rate[category - 1][event_type - 1]);
-	if (rate == 0)
+	if (rate == 0) {
+		/* K7 D2：rate=0 关闭事件显式计额（与 emit 路径同口径） */
+		struct ai_ring_cpu *cr;
+
+		preempt_disable();
+		cr = per_cpu_ptr(&ai_ring_cpus, smp_processor_id());
+		cr->sampled_skip++;
+		atomic64_inc(&cr->rate_skipped);
+		atomic64_inc(&cr->sampled_skip64);
+		preempt_enable();
 		return false;
+	}
 
 	preempt_disable();
 	ok = ai_ring_sample(per_cpu_ptr(&ai_ring_cpus, smp_processor_id()),
@@ -889,6 +1023,21 @@ int ai_telemetry_reset(void)
 		r->adapt_skipped = 0;
 		r->adapt_episodes = 0;
 		r->predrain_dropped = 0;
+		/* K7 尾追字段归零 */
+		r->seq = 0;
+		atomic64_set(&r->emitted64, 0);
+		atomic64_set(&r->dropped64, 0);
+		atomic64_set(&r->sampled_skip64, 0);
+		atomic64_set(&r->rate_skipped, 0);
+		atomic64_set(&r->drain_discards, 0);
+		atomic64_set(&r->sense_overread_dropped, 0);
+		atomic64_set(&r->resync_races, 0);
+		r->full_latch = 0;
+		r->full_episodes = 0;
+		r->adapt_last_backlog = 0;
+		r->adapt_last_change_ns = 0;
+		per_cpu_ptr(&ai_tel_ctx, cpu)->trace = 0;
+		per_cpu_ptr(&ai_tel_ctx, cpu)->agent = 0;
 		mutex_unlock(&r->read_lock);
 	}
 	return AI_OK;
@@ -920,9 +1069,120 @@ int ai_telemetry_stats(u32 cpu, struct ai_telemetry_cpu_stats *st)
 	st->adapt_skipped = r->adapt_skipped;
 	st->adapt_episodes = r->adapt_episodes;
 	st->predrain_dropped = r->predrain_dropped;
+	/* K7 尾追：读侧新优先（64 位镜像），旧 u32 字段保留渲染兼容 */
+	st->emitted64 = (u64)atomic64_read(&r->emitted64);
+	st->dropped64 = (u64)atomic64_read(&r->dropped64);
+	st->sampled_skip64 = (u64)atomic64_read(&r->sampled_skip64);
+	st->rate_skipped = (u64)atomic64_read(&r->rate_skipped);
+	st->drain_discards = (u64)atomic64_read(&r->drain_discards);
+	st->sense_overread_dropped =
+		(u64)atomic64_read(&r->sense_overread_dropped);
+	st->resync_races = (u64)atomic64_read(&r->resync_races);
+	st->full_latch = r->full_latch;
+	st->full_episodes = r->full_episodes;
+	st->seq = r->seq;
+	st->adapt_last_backlog = r->adapt_last_backlog;
+	st->adapt_last_change_ns = r->adapt_last_change_ns;
 	return AI_OK;
 }
 EXPORT_SYMBOL_GPL(ai_telemetry_stats);
+
+/* ---- K7：决策上下文对 / 渲染统一 / 读侧计账 ---- */
+
+void ai_telemetry_ctx_set(u64 trace, u32 agent)
+{
+	struct ai_tel_ctx *c;
+	unsigned long flags;
+
+	/*
+	 * 关中断写：与 emit 读侧（同 CPU 关中断临界区）互斥，保证
+	 * trace/agent 成对可见；关中断同时阻断了本 CPU 上的调度迁移，
+	 * pair 不会写一半漂到别的 CPU。set→emit→clear 段内任务仍可能
+	 * 被调度到其他 CPU（clear 在新 CPU 上清的是新 CPU 的槽——旧
+	 * CPU 槽残留至下次覆盖；per-CPU 语义的已知边界，诚实 0 兜底）。
+	 */
+	local_irq_save(flags);
+	c = this_cpu_ptr(&ai_tel_ctx);
+	c->trace = trace;
+	c->agent = agent;
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL_GPL(ai_telemetry_ctx_set);
+
+void ai_telemetry_ctx_clear(void)
+{
+	ai_telemetry_ctx_set(0, 0);
+}
+EXPORT_SYMBOL_GPL(ai_telemetry_ctx_clear);
+
+size_t ai_telemetry_format_human(const struct ai_telemetry_record *rec,
+				 char *buf, size_t cap)
+{
+	const u8 *data = (const u8 *)rec + AI_TELEMETRY_HEADER_LEN;
+	size_t room, n, hex_budget, shown, i;
+
+	if (!rec || !buf || cap < 2)
+		return 0;
+	/* 内容预算 = cap-2：恒留 '\n' 与 NUL，行完整性不破 */
+	room = cap - 2;
+	n = scnprintf(buf, room + 1,
+		      "ts=%llu seq=%llu pid=%u tgid=%u cpu=%u trace=%llx "
+		      "agent=%u cat=%u ev=%u sev=%u privacy=%u len=%u data=",
+		      rec->timestamp_ns, rec->seq, rec->pid, rec->tgid,
+		      rec->cpu, rec->trace, rec->agent, rec->category,
+		      rec->event_type, rec->severity, rec->privacy,
+		      rec->data_len);
+	/* hex 预算：需截断时恒留 "..."（3B） */
+	hex_budget = room - n;
+	shown = min_t(u64, rec->data_len, 16);
+	if (rec->data_len > shown)
+		hex_budget = hex_budget > 3 ? hex_budget - 3 : 0;
+	/* 理论极限前缀（全字段最大宽 ~180B）超预算时降 hex 字节数，
+	 * 而非截断行——K7 偏差登记（现实字段宽下恒满 16 字节） */
+	shown = min_t(size_t, shown, hex_budget / 2);
+	for (i = 0; i < shown; i++)
+		n += scnprintf(buf + n, room + 1 - n, "%02x", data[i]);
+	if (rec->data_len > shown && room - n >= 3)
+		n += scnprintf(buf + n, room + 1 - n, "...");
+	buf[n++] = '\n';
+	buf[n] = '\0';
+	return n;
+}
+EXPORT_SYMBOL_GPL(ai_telemetry_format_human);
+
+void ai_telemetry_note_sense_overread(u32 cpu, u32 records)
+{
+	struct ai_ring_cpu *r;
+
+	if (!ai_telemetry_ready || !records || cpu >= nr_cpu_ids)
+		return;
+	r = per_cpu_ptr(&ai_ring_cpus, cpu);
+	atomic64_add(records, &r->sense_overread_dropped);
+}
+EXPORT_SYMBOL_GPL(ai_telemetry_note_sense_overread);
+
+u32 ai_telemetry_count_records(const void *buf, size_t len)
+{
+	size_t pos = 0;
+	u32 n = 0;
+
+	if (!buf)
+		return 0;
+	while (pos + AI_TELEMETRY_HEADER_LEN <= len) {
+		const u8 *cur = (const u8 *)buf + pos;
+		const struct ai_telemetry_record *rec =
+			(const struct ai_telemetry_record *)cur;
+		size_t total = AI_TELEMETRY_HEADER_LEN + rec->data_len;
+
+		if (rec->data_len > AI_TELEMETRY_MAX_DATA_LEN ||
+		    total > len - pos)
+			break;   /* 坏头/残记录：宁可少计不越界 */
+		n++;
+		pos += total;
+	}
+	return n;
+}
+EXPORT_SYMBOL_GPL(ai_telemetry_count_records);
 
 /* ---- w24：后台排空（消费者常驻化） ----
  * 此前唯一消费者是被动拉取（/proc/ai/telemetry 读 / NETLINK SENSE 拉），
@@ -1028,8 +1288,15 @@ int ai_telemetry_drain_all(void)
 				break;   /* 本 CPU 环已空 */
 			r->consumed += n;
 			this_cpu += n;
-			if (n < AI_TEL_DRAIN_CHUNK)
-				break;   /* 不足一块：也已读空 */
+			/* K7 D2：排空丢弃按条计（原只计字节不计条——K3 波
+			 * 38/42 之谜的答案面：读出即丢此前不可观测） */
+			atomic64_add(
+				ai_telemetry_count_records(ai_tel_drain_buf, n),
+				&r->drain_discards);
+			/* K7 勘误（KUnit 背压实抓）：删「n<CHUNK 即已读空」
+			 * 启发式——大记录（4KB 级）一块只装 ~15 条，62KB
+			 * 分片即 break 而环里还剩数十条；只认 n==0 权威空
+			 * 判（环容量/最小记录=读次上界，无活锁风险）。 */
 		}
 		if (this_cpu > max_bytes)
 			max_bytes = this_cpu;

@@ -135,6 +135,7 @@ BPF_MAP_TYPE(BPF_MAP_TYPE_USER_RINGBUF, user_ringbuf_map_ops)
 BPF_MAP_TYPE(BPF_MAP_TYPE_ARENA, arena_map_ops)
 #ifdef CONFIG_AIKERNEL_BPF
 BPF_MAP_TYPE(BPF_MAP_TYPE_AI_MODEL, ai_model_map_ops)
+BPF_MAP_TYPE(BPF_MAP_TYPE_AI_FEATURES, ai_features_map_ops)
 #endif
 
 BPF_LINK_TYPE(BPF_LINK_TYPE_RAW_TRACEPOINT, raw_tracepoint)

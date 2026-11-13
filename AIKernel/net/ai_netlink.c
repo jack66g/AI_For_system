@@ -271,9 +271,28 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 
 	for (cpu = cpu_from; cpu < cpu_to && records < max_records; cpu++) {
 		size_t n = 0, i;
+		size_t rem, cap;
 		int rrc;
 
-		rrc = ai_telemetry_read(cpu, tmp, AI_NL_PAYLOAD_MAX, &n);
+		/*
+		 * K7 D2：按剩余回传容量限读（原实现整块 AI_NL_PAYLOAD_MAX
+		 * 读出即消费，超出部分 kfree 静默丢——:292 旧注释"留待下次
+		 * 拉取"不实：tail 已推进，无下次）。
+		 *   - raw：cap = 剩余字节（读出即可逐条交付）；
+		 *   - human：单条记录 ≥ 44B 渲染为单行 ≤ 192B，cap 按比例
+		 *     缩放保证读出的记录全部可交付（cap/44*192 ≤ rem）；
+		 *   - cap 放不下一条最小记录时停止读该 CPU——记录留在环内
+		 *     （交排空线程按 drain_discards 计额），不过读。
+		 */
+		rem = AI_NL_PAYLOAD_MAX - sizeof(*ack) - pos;
+		cap = rem;
+		if (req->format != AI_NL_FORMAT_RAW)
+			cap = rem / AI_TELEMETRY_HUMAN_LINE_MAX *
+			      AI_TELEMETRY_HEADER_LEN;
+		if (cap < AI_TELEMETRY_HEADER_LEN)
+			break;   /* 后续 CPU 剩余更少：整段终止 */
+
+		rrc = ai_telemetry_read(cpu, tmp, cap, &n);
 		if (rrc != AI_OK) {
 			if (first_err == AI_OK)
 				first_err = rrc;
@@ -290,7 +309,7 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 			size_t take;
 
 			if (rec_total > n - i)
-				break;   /* 尾部残记录：留待下次拉取 */
+				break;   /* 防御：read 只拷完整记录，理论不可达 */
 
 			if (req->format == AI_NL_FORMAT_RAW) {
 				take = rec_total;
@@ -299,40 +318,15 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 				dst = skb_put(reply, take);
 				memcpy(dst, (u8 *)tmp + i, take);
 			} else {
-				char line[192];
-				size_t shown =
-					min_t(unsigned int, rec->data_len, 16);
-				size_t ln, k;
+				/* K7 D1：共享渲染器（与 /proc/ai/telemetry
+				 * human 同一份实现，两路字节级 golden；
+				 * 行上限 192B=AI_TELEMETRY_HUMAN_LINE_MAX） */
+				char line[AI_TELEMETRY_HUMAN_LINE_MAX];
 
-				ln = snprintf(line, sizeof(line),
-					      "ts=%llu pid=%u tgid=%u cpu=%u cat=%u ev=%u sev=%u len=%u data=",
-					      rec->timestamp_ns, rec->pid,
-					      rec->tgid, rec->cpu, rec->category,
-					      rec->event_type, rec->severity,
-					      rec->data_len);
-				/* K2b 修复 K1B-14：snprintf 返回值钳制——
-				 * 返回值可超缓冲（截断时），不钳制则后续
-				 * sizeof(line) - ln 无符号下溢即 OOB 写。
-				 * 当前字段最大 ~169 < 192 不触发；新增字段
-				 * 即可能踩雷，防御先行（输出逐字节不变） */
-				if (ln >= sizeof(line))
-					ln = sizeof(line) - 1;
-				for (k = 0; k < shown && ln < sizeof(line) - 1;
-				     k++)
-					ln += snprintf(line + ln,
-						       sizeof(line) - ln,
-						       "%02x",
-						       *((u8 *)rec +
-							 AI_TELEMETRY_HEADER_LEN + k));
-				if (ln >= sizeof(line))
-					ln = sizeof(line) - 1;
-				if (rec->data_len > shown &&
-				    ln < sizeof(line) - 1)
-					ln += snprintf(line + ln,
-						       sizeof(line) - ln, "...");
-				line[ln++] = '\n';
-				take = ln;
-				if (pos + sizeof(*ack) + take > AI_NL_PAYLOAD_MAX)
+				take = ai_telemetry_format_human(rec, line,
+								 sizeof(line));
+				if (!take ||
+				    pos + sizeof(*ack) + take > AI_NL_PAYLOAD_MAX)
 					break;
 				dst = skb_put(reply, take);
 				memcpy(dst, line, take);
@@ -341,6 +335,12 @@ static int ai_nl_sense(struct sk_buff *skb, const struct nlmsghdr *nlh)
 			records++;
 			i += rec_total;
 		}
+		/* K7 D2：读出但未交付的记录（max_records 截断/防御 break）
+		 * 计 sense_overread_dropped——诚实计账替代旧的静默丢弃 */
+		if (i < n)
+			ai_telemetry_note_sense_overread(
+				cpu, ai_telemetry_count_records((u8 *)tmp + i,
+								n - i));
 	}
 	kfree(tmp);
 

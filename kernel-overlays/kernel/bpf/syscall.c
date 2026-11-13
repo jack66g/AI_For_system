@@ -1494,6 +1494,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	case BPF_MAP_TYPE_ARENA:
 #ifdef CONFIG_AIKERNEL_BPF
 	case BPF_MAP_TYPE_AI_MODEL:
+	case BPF_MAP_TYPE_AI_FEATURES:
 #endif
 		if (!bpf_token_capable(token, CAP_BPF))
 			goto put_token;

@@ -6,14 +6,15 @@
  * 所有子系统埋点（Prompt 03 起逐模块落进内核）最终都汇聚到
  * per-CPU ring buffer（每 CPU 128KB，无锁，单次写入 < 100ns）。
  *
- * 数据原则（all-ai）：记录携带 24B 定长头 + 原始数据，不脱敏、不哈希、不截断。
+ * 数据原则（all-ai）：记录携带 44B 定长头（K7 D1 由 23B 扩展）+ 原始数据，
+ * 不脱敏、不哈希、不截断。
  *
  * 性能预算：
  *   单次写入      < 100ns（ktime_get_ns() + 两段 memcpy，无锁）
  *   CONFIG_AIKERNEL_TELEMETRY=n 时全部为 static inline 空函数，零开销零回归。
  *
- * 事件体系：17 大类（enum ai_category）~101 子类（enum ai_event_type），
- * 编号对齐《AIKernel_数据源与日志系统计划》01 CPU调度 ~ 17 内核配置。
+ * 事件体系：18 大类（enum ai_category）~105 子类（enum ai_event_type），
+ * 编号对齐《AIKernel_数据源与日志系统计划》01 CPU调度 ~ 18 AI 自我观测。
  */
 
 #ifndef _AIKERNEL_AI_TELEMETRY_H
@@ -42,21 +43,76 @@ enum ai_severity {
 	AI_SEV_CRITICAL   = 3,  /* 关键 */
 };
 
-/* ---- 记录结构（对齐数据计划 23.1 节，全量原始数据零脱敏） ---- */
+/* ---- 记录结构（K7 D1：23B→44B 统一事件头，全量原始数据零脱敏） ---- */
 
+/*
+ * 统一事件头（KERNEL-K7-DESIGN §2 D1）：在旧 23B（ts/pid/tgid/cpu/
+ * cat/ev/sev/len）之上补 seq/trace/agent/privacy 四组决策关联字段。
+ * 零外部 raw 读者（aistreamd 不摄 ring），扩头时机安全；仓内 raw 读者
+ * 清单与对齐状态见 K7 施工记录。
+ * 布局（packed，_Static_assert 钉死）：
+ *   off 0   u64 timestamp_ns   纳秒时间戳
+ *   off 8   u64 seq            per-CPU 单调序号（读者可自算丢失）
+ *   off 16  u32 pid            触发进程 pid
+ *   off 20  u32 tgid           触发进程 tgid
+ *   off 24  u16 cpu            触发 CPU
+ *   off 26  u64 trace          决策链 trace（per-CPU ctx 对携带；无上下文=0）
+ *   off 34  u32 agent          enum ai_agent_id（无上下文=0）
+ *   off 38  u8  category       大类（1~18）
+ *   off 39  u8  event_type     事件子类（1~105 全局唯一）
+ *   off 40  u8  severity       0=调试 1=常规 2=重要 3=关键
+ *   off 41  u8  privacy        隐私位（v1 仅字段+渲染，产生侧后波接）
+ *   off 42  u16 data_len       原始数据长度 0-4096
+ * 注：设计册字段清单含 u16 rsv（合计 46B），与其自设 _Static_assert(==44)
+ * 冲突——以 44B 断言为准（K7 施工偏差登记），去掉 rsv 尾垫。
+ */
 struct ai_telemetry_record {
 	u64 timestamp_ns;   /* 纳秒时间戳 */
+	u64 seq;            /* per-CPU 单调序号（K7 D1） */
 	u32 pid, tgid;      /* 触发进程 */
 	u16 cpu;            /* 触发 CPU */
-	u8  category;       /* 大类（1~17） */
-	u8  event_type;     /* 事件子类（1~101 全局唯一） */
+	u64 trace;          /* 决策链 trace（ctx 对携带，默认 0） */
+	u32 agent;          /* enum ai_agent_id（ctx 对携带，默认 0） */
+	u8  category;       /* 大类（1~18） */
+	u8  event_type;     /* 事件子类（1~105 全局唯一） */
 	u8  severity;       /* 0=调试 1=常规 2=重要 3=关键 */
+	u8  privacy;        /* 隐私位（v1 仅渲染，默认 0） */
 	u16 data_len;       /* 原始数据长度 0-4096 */
 	/* 后随 data_len 字节原始数据，不脱敏不哈希 */
 } __attribute__((packed));
 
-/* 记录定长头字节数 = 23（8+4+4+2+1+1+1+2，packed；计划文档称 24B，以字段为准） */
+/* K7 D1：44B 头钉扎（drift 即编译失败） */
+_Static_assert(sizeof(struct ai_telemetry_record) == 44,
+	       "ai_telemetry_record must be 44B packed (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, seq) == 8,
+	       "seq must sit at offset 8 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, pid) == 16,
+	       "pid must sit at offset 16 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, tgid) == 20,
+	       "tgid must sit at offset 20 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, cpu) == 24,
+	       "cpu must sit at offset 24 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, trace) == 26,
+	       "trace must sit at offset 26 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, agent) == 34,
+	       "agent must sit at offset 34 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, category) == 38,
+	       "category must sit at offset 38 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, event_type) == 39,
+	       "event_type must sit at offset 39 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, severity) == 40,
+	       "severity must sit at offset 40 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, privacy) == 41,
+	       "privacy must sit at offset 41 (K7 D1)");
+_Static_assert(__builtin_offsetof(struct ai_telemetry_record, data_len) == 42,
+	       "data_len must sit at offset 42 (K7 D1)");
+
+/* 记录定长头字节数 = 44（语义保持 = sizeof(struct ai_telemetry_record)） */
 #define AI_TELEMETRY_HEADER_LEN    (sizeof(struct ai_telemetry_record))
+
+/* K7 D1：human 渲染单行上限（含 NUL；procfs/SENSE/测试三处共用，
+ * 行内容见 ai_telemetry_format_human()） */
+#define AI_TELEMETRY_HUMAN_LINE_MAX  192
 
 /* ---- 18 大类（Prompt 13 新增第18类：AI 自我观测——决策与结果） ---- */
 
@@ -81,7 +137,7 @@ enum ai_category {
 	AI_CAT_AI           = 18,  /* 18 AI 自我观测（决策/结果，Prompt 13） */
 };
 
-/* ---- 101 子类事件（编号对齐数据计划：注释标注计划章节号） ---- */
+/* ---- 105 子类事件（编号对齐数据计划：注释标注计划章节号） ---- */
 
 enum ai_event_type {
 	/* 01 CPU与调度（8） */
@@ -219,11 +275,12 @@ enum ai_event_type {
 	AI_EV_SYSCTL,                 /* 17.02 sysctl */
 	AI_EV_BUILD,                  /* 17.03 构建信息 */
 
-	/* 18 AI 自我观测（2，Prompt 13） */
+	/* 18 AI 自我观测（3，Prompt 13 + K7 D2） */
 	AI_EV_AI_DECISION,            /* 18.01 AI 决策（决策记录回写 ring） */
 	AI_EV_AI_OUTCOME,             /* 18.02 AI 决策结果（outcome 事件写回） */
+	AI_EV_AI_RING_FULL,           /* 18.03 环满告警回合（K7 D2 自遥测） */
 
-	AI_EV_MAX,                    /* 事件总数 = 104 */
+	AI_EV_MAX,                    /* 事件总数 = 105 */
 };
 
 /* 合成全局事件 ID（16 位：高 8 位大类 + 低 8 位子类） */
@@ -247,6 +304,16 @@ enum ai_event_type {
  *     的环满丢弃条数。w63 起该窗口的丢弃计入 sampled_skip（按采样跳过
  *     语义，不属于稳态背压），predrain_dropped 保留真实损失观测；消费者
  *     就绪后的环满丢弃仍计入 dropped。
+ *   - K7（KERNEL-K7-DESIGN D1/D2/D4）末尾追加字段（旧字段偏移/语义不变，
+ *     /proc/ai/status 仅追加输出）：emitted64/dropped64/sampled_skip64 为
+ *     旧 u32/atomic 计数的 64 位原子镜像（写侧双写，读侧新优先防回绕）；
+ *     sampled_skip64 = rate_skipped + adapt_skipped + predrain_dropped
+ *     （三源拆标列）；drain_discards=drain_all 读出即丢条数；
+ *     sense_overread_dropped=NETLINK SENSE 读侧过读丢弃条数；
+ *     resync_races=resync cmpxchg 失败次数；full_latch/full_episodes=
+ *     环满告警闩（首次 RING_FULL 置位+告警一次，free 过半复位）与回合数；
+ *     seq=该 CPU 最近发出的记录序号；adapt_last_backlog/adapt_last_change_ns
+ *     =D4 上次升降档时的积压快照与时刻（采样率可解释）。
  */
 struct ai_telemetry_cpu_stats {
 	u32 emitted;        /* 成功写入条数 */
@@ -262,6 +329,20 @@ struct ai_telemetry_cpu_stats {
 	u64 adapt_episodes; /* w58：进入降档（shift 0→>0）的次数 */
 	u64 predrain_dropped; /* w63：消费者就绪前环满丢弃条数（含于
 			       * sampled_skip；dropped 不含） */
+	/* ---- K7 尾追（D1/D2/D4），旧字段偏移/语义不变 ---- */
+	u64 emitted64;      /* D2：emitted 的 64 位原子镜像（防回绕，读侧优先） */
+	u64 dropped64;      /* D2：dropped 的 64 位原子镜像 */
+	u64 sampled_skip64; /* D2：sampled_skip 的 64 位原子镜像
+			     * （=三源 rate+adapt+predrain 之和） */
+	u64 rate_skipped;   /* D2：rate 表跳过条数（含 rate=0 关闭；三源列之一） */
+	u64 drain_discards; /* D2：drain_all 读出即丢条数（原只计字节不计条） */
+	u64 sense_overread_dropped; /* D2：SENSE 读侧过读丢弃条数 */
+	u64 resync_races;   /* D2：resync cmpxchg 失败次数（原 return 0 不计账） */
+	u32 full_latch;     /* D2：环满告警闩当前态（1=告警未复位） */
+	u64 full_episodes;  /* D2：环满告警回合数（闩 0→1 计数） */
+	u64 seq;            /* D1：该 CPU 最近发出的记录序号（单调） */
+	u32 adapt_last_backlog; /* D4：上次升降档时的积压字节快照 */
+	u64 adapt_last_change_ns; /* D4：上次升降档时刻（0=从未变档） */
 };
 
 /* ---- 核心接口 ---- */
@@ -390,6 +471,68 @@ int ai_telemetry_reset(void);
  */
 int ai_telemetry_stats(u32 cpu, struct ai_telemetry_cpu_stats *st);
 
+/* ---- K7（KERNEL-K7-DESIGN D1/D2）：决策上下文对 + 渲染统一 + 读侧计账 ---- */
+
+/**
+ * ai_telemetry_ctx_set() - 设置当前 CPU 的决策上下文对（K7 D1）
+ * @trace: 决策链 trace（写进后续每条记录头 rec->trace）
+ * @agent: enum ai_agent_id（写进 rec->agent）
+ *
+ * 决策/策略 emit 路径（ai_policy 执行段等）在铸造决策记录后包住
+ * ai_telemetry_emit() 调用段：set → emit…→ clear（try/finally 语义，
+ * 提前 return 路径也须 clear）。per-CPU 上下文对：emit 在同 CPU 关中断
+ * 临界区内读取；未 set（或跨 CPU 迁移窗口）时记录头诚实填 0。
+ */
+void ai_telemetry_ctx_set(u64 trace, u32 agent);
+
+/**
+ * ai_telemetry_ctx_clear() - 清除当前 CPU 的决策上下文对（trace/agent 归 0）
+ */
+void ai_telemetry_ctx_clear(void);
+
+/**
+ * ai_telemetry_format_human() - 统一 human 单行渲染（K7 D1：单份实现）
+ * @rec: 记录头指针（其后须紧跟 data_len 字节数据，即环读缓冲中的连续布局）
+ * @buf: 输出缓冲
+ * @cap: 缓冲容量（调用方按 AI_TELEMETRY_HUMAN_LINE_MAX=192 起）
+ *
+ * 行内容：ts/seq/pid/tgid/cpu/trace/agent/cat/ev/sev/privacy/len/data
+ * 前 16 字节 hex（data_len>16 追加 "..."），恒以 '\n' 结尾且 NUL 终止。
+ * procfs（/proc/ai/telemetry human）与 NETLINK SENSE（human）两出口
+ * 字节级同源（K7 验收：两路 golden）。理论极限前缀（全字段最大宽）超
+ * 192B 时按剩余预算降 hex 字节数，行完整性（'\n' 终止）不破——偏差
+ * 登记见 K7 施工记录。返回写入字节数（含 '\n'，不含 NUL）。
+ */
+size_t ai_telemetry_format_human(const struct ai_telemetry_record *rec,
+				 char *buf, size_t cap);
+
+/**
+ * ai_telemetry_note_sense_overread() - SENSE 读侧过读计账（K7 D2）
+ * @cpu: 被读的 CPU ring
+ * @records: 已从 ring 消费但未交付订阅端的记录条数
+ *
+ * SENSE 限读后仍可能因 max_records 截断产生"读出即丢"——tail 已推进，
+ * 无下次可拉。由 ai_netlink.c 回调计额（sense_overread_dropped）。
+ */
+void ai_telemetry_note_sense_overread(u32 cpu, u32 records);
+
+/**
+ * ai_telemetry_count_records() - 统计缓冲中完整记录条数（K7 D2 助手）
+ * @buf: 记录流缓冲（定长头+数据逐条拼接布局）
+ * @len: 缓冲有效字节数
+ *
+ * 按记录头逐条推进（坏头即停，宁可少计不越界）。drain_discards 计额
+ * 与 SENSE 过读计数共用。
+ */
+u32 ai_telemetry_count_records(const void *buf, size_t len);
+
+/* 18.03 环满告警自遥测 payload（K7 D2，emit 侧内部铸造） */
+struct ai_tp_ring_full {
+	u64 ts_ns;          /* 告警回合首次 RING_FULL 时刻 */
+	u32 cpu;            /* 环满 CPU */
+	u32 dropped;        /* 告警时该 CPU 累计 dropped（快照） */
+};
+
 /* ---- w24：消费者常驻化（后台排空） ---- */
 
 /*
@@ -489,6 +632,20 @@ static inline int ai_telemetry_stats(u32 cpu, struct ai_telemetry_cpu_stats *st)
 	if (st)
 		memset(st, 0, sizeof(*st));
 	return AI_OK;
+}
+/* K7：TELEMETRY 关闭时的空实现（零开销零回归） */
+static inline void ai_telemetry_ctx_set(u64 trace, u32 agent) { }
+static inline void ai_telemetry_ctx_clear(void) { }
+static inline size_t
+ai_telemetry_format_human(const struct ai_telemetry_record *rec,
+			  char *buf, size_t cap)
+{
+	return 0;
+}
+static inline void ai_telemetry_note_sense_overread(u32 cpu, u32 records) { }
+static inline u32 ai_telemetry_count_records(const void *buf, size_t len)
+{
+	return 0;
 }
 static inline int ai_telemetry_drain_all(void) { return AI_OK; }
 static inline int ai_telemetry_drain_start(void) { return AI_OK; }

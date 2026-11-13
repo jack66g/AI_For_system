@@ -14,7 +14,9 @@
  *                   写="reset" 清空全部 ring（需 CAP_SYS_ADMIN）
  *
  * 遥测流数据原则（all-ai）：raw 模式输出定长头（struct ai_telemetry_record,
- * packed 23B）+ 原始数据逐条拼接，零脱敏零转换；human 模式每行一条文本。
+ * packed 44B，K7 D1）+ 原始数据逐条拼接，零脱敏零转换；human 模式每行一条
+ * 文本（K7 D1：渲染统一走 ai_telemetry_format_human()，与 NETLINK SENSE
+ * human 字节级同源）。
  * 节点创建以 ai_startup_get_enabled() 为准：ai.enabled=0 启动 → 全部不创建。
  */
 
@@ -96,25 +98,49 @@ static int ai_proc_status_show(struct seq_file *m, void *v)
 		struct ai_telemetry_cpu_stats st;
 		u8 c, e;
 		unsigned int nondefault = 0;
+		u64 adapt_ago_ms = 0;   /* K7 D4：距上次升降档毫秒 */
 
 		if (ai_telemetry_stats(cpu, &st) != AI_OK)
 			continue;
+		if (st.adapt_last_change_ns)
+			adapt_ago_ms = div_u64(ktime_get_ns() -
+					       st.adapt_last_change_ns,
+					       1000000);
 		/* w24/w58/w63 追加字段（语义见 ai_telemetry.h）：consumed=已消费
 		 * 字节 adapt_shift=当前降档级（瞬时） adapt_skipped=自适应跳过
 		 * 条数 resyncs=环错位次数 adapt_peak_shift=历史最高档
 		 * adapt_episodes=进入降档次数 predrain_dropped=消费者就绪前环满
 		 * 丢弃条数（含于 sampled_skip，不计入 dropped）。既有字段
-		 * 顺序/语义不变，仅追加输出。 */
+		 * 顺序/语义不变，仅追加输出。
+		 * K7（D2/D4）尾追：emitted64/dropped64/sampled_skip64=64 位
+		 * 原子镜像（防回绕，读侧优先）；rate_skipped/drain_discards/
+		 * sense_overread_dropped/resync_races=背压计数族；
+		 * full_latch/full_episodes=环满告警闩与回合数；
+		 * adapt: 段=升降档可解释（档位/上次变档积压/距上次变档毫秒）。 */
 		seq_printf(m, "cpu%d: emitted=%u dropped=%u sampled_skip=%u "
 			   "head=%u tail=%u consumed=%llu adapt_shift=%u "
 			   "adapt_skipped=%llu resyncs=%u adapt_peak_shift=%u "
-			   "adapt_episodes=%llu predrain_dropped=%llu\n",
+			   "adapt_episodes=%llu predrain_dropped=%llu "
+			   "emitted64=%llu dropped64=%llu sampled_skip64=%llu "
+			   "rate_skipped=%llu drain_discards=%llu "
+			   "sense_overread_dropped=%llu resync_races=%llu "
+			   "full_latch=%u full_episodes=%llu seq=%llu "
+			   "adapt: shift=%u last_backlog=%zu "
+			   "last_change_ago=%llums\n",
 			   cpu, st.emitted, st.dropped, st.sampled_skip,
 			   st.head, st.tail, st.consumed, st.adapt_shift,
 			   st.adapt_skipped, st.resyncs, st.adapt_peak_shift,
-			   st.adapt_episodes, st.predrain_dropped);
-		/* 采样率：仅列出非默认（非全量）条目 */
-		for (c = 1; c <= AI_CAT_KCONFIG; c++) {
+			   st.adapt_episodes, st.predrain_dropped,
+			   st.emitted64, st.dropped64, st.sampled_skip64,
+			   st.rate_skipped, st.drain_discards,
+			   st.sense_overread_dropped, st.resync_races,
+			   st.full_latch, st.full_episodes, st.seq,
+			   st.adapt_shift, (size_t)st.adapt_last_backlog,
+			   adapt_ago_ms);
+		/* 采样率：仅列出非默认（非全量）条目。
+		 * K7 修：外层上界 AI_CAT_KCONFIG(17) 漏掉第 18 类
+		 * （AI_CAT_AI）的非默认采样率显示。 */
+		for (c = 1; c <= AI_CAT_AI; c++) {
 			for (e = 1; e < AI_EV_MAX; e++) {
 				u32 rate;
 
@@ -374,31 +400,12 @@ static const struct proc_ops ai_proc_hitrate_ops = {
 
 /* ---- telemetry（B 轨出口） ---- */
 
-/* human 模式单行上限：保证"已消费 == 已交付"（见 read 中的 chunk 论证） */
-#define AI_PROC_HUMAN_LINE_MAX  160
-#define AI_PROC_HUMAN_HEX_SHOW  16    /* 每行显示的原始数据字节数 */
-
-/* human 模式：一行一条（原始数据以 %02x 十六进制显示，前 16B + 全长指示） */
-static size_t ai_telemetry_human_record(char *out, size_t cap,
-					const struct ai_telemetry_record *rec,
-					const u8 *data)
-{
-	size_t n = 0;
-	unsigned int i, shown = 0;
-
-	n += scnprintf(out + n, cap - n,
-		       "ts=%llu pid=%u tgid=%u cpu=%u cat=%u ev=%u sev=%u len=%u data=",
-		       rec->timestamp_ns, rec->pid, rec->tgid, rec->cpu,
-		       rec->category, rec->event_type, rec->severity,
-		       rec->data_len);
-	shown = min_t(unsigned int, rec->data_len, AI_PROC_HUMAN_HEX_SHOW);
-	for (i = 0; i < shown; i++)
-		n += scnprintf(out + n, cap - n, "%02x", data[i]);
-	if (rec->data_len > shown)
-		n += scnprintf(out + n, cap - n, "...");
-	n += scnprintf(out + n, cap - n, "\n");
-	return n;
-}
+/*
+ * K7 D1：human 渲染统一——本文件不再持有手写格式串，改调
+ * ai_telemetry_format_human()（与 NETLINK SENSE human 同一份实现，
+ * 两路字节级 golden）。单行上限 AI_TELEMETRY_HUMAN_LINE_MAX=192
+ * （K7 由 160B 扩容：新增 seq/trace/agent/privacy 四字段）。
+ */
 
 static ssize_t ai_proc_telemetry_read(struct file *file, char __user *ubuf,
 				      size_t count, loff_t *ppos)
@@ -429,11 +436,13 @@ static ssize_t ai_proc_telemetry_read(struct file *file, char __user *ubuf,
 
 	/*
 	 * 处理循环：从各 CPU ring 排空到 raw，按模式生成输出。
-	 * 无丢失论证：
+	 * 无丢失论证（K7 头 44B/行 192B 口径）：
 	 *   - raw 模式：chunk_cap = min(count, 64KB)，一次全部交付；
-	 *   - human 模式：chunk_cap ≤ count/16，单行 ≤ 160B、单条记录 ≥ 23B，
-	 *     输出上限 = chunk_cap/23*160 ≈ count*0.43 < count → 整块可交付。
-	 * 因此每次 read 调用"已消费的记录"必然"全部交付"，零丢失。
+	 *   - human 模式：chunk_cap ≤ count/16，单行 ≤ 192B、单条记录 ≥ 44B，
+	 *     输出上限 = chunk_cap/44*192 ≈ count*0.27 < count → 整块可交付。
+	 * 因此每次 read 调用"已消费的记录"必然"全部交付"，零丢失
+	 * （防御分支见循环内 break——理论不可达；已知例外：count 小于
+	 * 单行长度时的首条消费-截断为史前既有行为，K7 施工记录登记）。
 	 */
 	for_each_possible_cpu(cpu) {
 		size_t chunk_cap, n = 0;
@@ -455,28 +464,29 @@ static ssize_t ai_proc_telemetry_read(struct file *file, char __user *ubuf,
 				goto out;
 			}
 			total += n;
-		} else {
-			size_t pos = 0, o = 0;
+			} else {
+				size_t pos = 0, o = 0;
 
-			while (pos < n && o < AI_PROC_TELEMETRY_CHUNK) {
-				struct ai_telemetry_record *rec =
-					(struct ai_telemetry_record *)((u8 *)raw + pos);
-				size_t rec_total = AI_TELEMETRY_HEADER_LEN +
-						   rec->data_len;
-				size_t take;
+				while (pos < n && o < AI_PROC_TELEMETRY_CHUNK) {
+					struct ai_telemetry_record *rec =
+						(struct ai_telemetry_record *)((u8 *)raw + pos);
+					size_t rec_total = AI_TELEMETRY_HEADER_LEN +
+							   rec->data_len;
+					size_t take;
 
-				if (rec_total > n - pos)
-					break;   /* 尾部残记录：留待下次 */
-				take = ai_telemetry_human_record((char *)out + o,
-							AI_PROC_TELEMETRY_CHUNK - o,
-							rec,
-							(u8 *)rec + AI_TELEMETRY_HEADER_LEN);
-				if (o + take > (size_t)(count - total) ||
-				    o + take > AI_PROC_TELEMETRY_CHUNK)
-					break;   /* 防御：理论不可达（见上方论证） */
-				o += take;
-				pos += rec_total;
-			}
+					if (rec_total > n - pos)
+						break;   /* 尾部残记录：留待下次 */
+					/* K7 D1：共享渲染器（与 SENSE human
+					 * 同源；数据紧随记录头连续布局） */
+					take = ai_telemetry_format_human(
+							rec, (char *)out + o,
+							AI_PROC_TELEMETRY_CHUNK - o);
+					if (o + take > (size_t)(count - total) ||
+					    o + take > AI_PROC_TELEMETRY_CHUNK)
+						break;   /* 防御：理论不可达（见上方论证） */
+					o += take;
+					pos += rec_total;
+				}
 			if (o) {
 				if (copy_to_user(ubuf + total, out, o)) {
 					rc = -EFAULT;

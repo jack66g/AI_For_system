@@ -5,7 +5,11 @@
  * 覆盖：写入/读取往返一致、满则丢弃（dropped 计数）、采样率 0/1/N、
  * reset 清空、写入延迟实测；w24 新增：后台排空（drain_all 读空 + consumed
  * 计额）、积压自适应降采样（积压越高位水位 → 位移抬起/sampled_skip 计额/
- * IMPORTANT 旁路 → 排空后位移衰减恢复）。
+ * IMPORTANT 旁路 → 排空后位移衰减恢复）；K7（KERNEL-K7-DESIGN）新增：
+ * 44B 统一头布局钉扎、两路 golden（同记录经 procfs/SENSE human 入口渲染
+ * 字节相等）、背压注入（灌满→dropped/full_episodes/告警一次 latch/
+ * 恢复复位→再满再告警）、ctx 传播（set→emit→头读回 trace/agent）、
+ * per-CPU seq 单调、计数族递增（rate=0 显式计额/drain_discards/64 位镜像）。
  *
  * 测试鲁棒性设计：ring 为 per-CPU 且全系统共享（其他子系统埋点持续写入），
  * 因此：
@@ -228,7 +232,7 @@ static void telemetry_drain_test(struct kunit *test)
 					  1);
 	KUNIT_EXPECT_EQ(test, rc, AI_OK);
 
-	/* 100 条标记记录入环（71B/条 << 环深，全部成功）。
+	/* 100 条标记记录入环（92B/条 = 44B 头 + 48B 数据 << 环深，全部成功）。
 	 * 标记 payload 首尾都打标（count_marker 校验首尾两字节） */
 	payload[0] = MARKER;
 	payload[sizeof(payload) - 1] = MARKER;
@@ -573,7 +577,7 @@ static void telemetry_write_latency_test(struct kunit *test)
 	avg = (t1 - t0) / 1024;
 
 	ai_telemetry_stats(0, &st);
-	/* 1024 条 23B = 23.5KB < 128KB ring，全部落盘（含系统事件 ≥1024） */
+	/* 1024 条 44B = 45KB < 256KB ring，全部落盘（含系统事件 ≥1024） */
 	KUNIT_EXPECT_GE(test, st.emitted, 1024u);
 	pr_info("AIKernel KUnit: telemetry write latency avg=%llu ns/emit "
 		"(%u emits, total=%llu ns)\n", avg, 1024,
@@ -814,8 +818,9 @@ static void telemetry_concurrent_readers_test(struct kunit *test)
 		}
 	}
 
-	/* 生产者：IMPORTANT 旁路自适应降采样；总量 1800 x 87B ≈ 153KB，
-	 * 低于环深，且读者持续消费 → 不应出现环满丢弃。 */
+	/* 生产者：IMPORTANT 旁路自适应降采样；总量 1800 x 108B ≈ 194KB
+	 * （44B 头 + 64B 数据），低于环深，且读者持续消费 → 不应出现
+	 * 环满丢弃。 */
 	for (seq = 1; seq <= TEL_CONC_RECORDS; seq++) {
 		memcpy(payload + 4, &seq, sizeof(seq));
 		rc = ai_telemetry_emit(AI_CAT_SCHED, AI_EV_SCHED_LATENCY,
@@ -862,6 +867,406 @@ static void telemetry_concurrent_readers_test(struct kunit *test)
 	ai_telemetry_reset();
 }
 
+/* ---- K7（KERNEL-K7-DESIGN D1/D2）：44B 头/两路 golden/背压注入/
+ *      ctx 传播/seq 单调/计数族 ---- */
+
+/* K7 D1：44B 头布局钉扎（编译期 _Static_assert 之外运行期复述，
+ * 布局表即文档） */
+static void telemetry_header_layout_test(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, sizeof(struct ai_telemetry_record), 44);
+	KUNIT_EXPECT_EQ(test, (size_t)AI_TELEMETRY_HEADER_LEN, 44);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record,
+				   timestamp_ns), 0);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, seq), 8);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, pid), 16);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, tgid), 20);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, cpu), 24);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, trace), 26);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, agent), 34);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, category), 38);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, event_type), 39);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, severity), 40);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, privacy), 41);
+	KUNIT_EXPECT_EQ(test,
+		__builtin_offsetof(struct ai_telemetry_record, data_len), 42);
+}
+
+/* K7 D1 两路 golden：同一条记录经 procfs human 入口（大容量 out 缓冲）
+ * 与 SENSE human 入口（line[192]）渲染字节相等（两入口均只调
+ * ai_telemetry_format_human，差异仅在容量参数）。 */
+static void telemetry_human_golden_test(struct kunit *test)
+{
+	u8 blob[AI_TELEMETRY_HEADER_LEN + 32];
+	char via_procfs[512];
+	char via_sense[AI_TELEMETRY_HUMAN_LINE_MAX];
+	struct ai_telemetry_record *rec = (struct ai_telemetry_record *)blob;
+	size_t n_proc, n_sense, i;
+	u8 *data = blob + AI_TELEMETRY_HEADER_LEN;
+
+	memset(blob, 0, sizeof(blob));
+	rec->timestamp_ns = 0x1122334455667788ULL;
+	rec->seq = 42;
+	rec->pid = 1234;
+	rec->tgid = 1235;
+	rec->cpu = 3;
+	rec->trace = 0x00c0ffee00beef00ULL;
+	rec->agent = 7;
+	rec->category = AI_CAT_AI;
+	rec->event_type = AI_EV_AI_DECISION;
+	rec->severity = AI_SEV_IMPORTANT;
+	rec->privacy = 1;
+	rec->data_len = 32;
+	for (i = 0; i < 32; i++)
+		data[i] = (u8)i;
+
+	n_proc = ai_telemetry_format_human(rec, via_procfs,
+					   sizeof(via_procfs));
+	n_sense = ai_telemetry_format_human(rec, via_sense,
+					    sizeof(via_sense));
+
+	/* 两路字节级一致（golden） */
+	KUNIT_EXPECT_GT(test, n_proc, (size_t)0);
+	KUNIT_EXPECT_EQ(test, n_proc, n_sense);
+	KUNIT_EXPECT_EQ(test, memcmp(via_procfs, via_sense, n_proc), 0);
+	/* 行完整性：'\n' 终止 + NUL 终止 */
+	KUNIT_EXPECT_EQ(test, via_procfs[n_proc - 1], '\n');
+	KUNIT_EXPECT_EQ(test, via_procfs[n_proc], '\0');
+	/* 12 个头字段齐全且次序符合统一行格式 */
+	{
+		static const char * const keys[] = {
+			"ts=", " seq=", " pid=", " tgid=", " cpu=", " trace=",
+			" agent=", " cat=", " ev=", " sev=", " privacy=",
+			" len=", " data=", NULL,
+		};
+		const char *p = via_procfs;
+
+		for (i = 0; keys[i]; i++) {
+			const char *hit = strstr(p, keys[i]);
+
+			KUNIT_EXPECT_NOT_NULL(test, hit);
+			if (!hit)
+				break;
+			p = hit + strlen(keys[i]);
+			while (*p >= '0' && *p <= '9')
+				p++;
+		}
+	}
+	/* data 前缀（渲染器契约：192B 行限下 hex 字节数可降级保行
+	 * 完整——极宽头字段时不足 16 字节，只钉前 4 字节前缀；两路
+	 * 字节级相等已由上文 memcmp 承载） */
+	KUNIT_EXPECT_NOT_NULL(test, strstr(via_procfs, " data="));
+
+	/* 极限宽防御：全字段最大宽 + data_len=4096 在 192B 缓冲内行
+	 * 完整性不破（hex 字节数降级，'\n' 恒在） */
+	{
+		static u8 big[AI_TELEMETRY_HEADER_LEN +
+			      AI_TELEMETRY_MAX_DATA_LEN];
+		struct ai_telemetry_record *brec =
+			(struct ai_telemetry_record *)big;
+		size_t n;
+
+		memset(big, 0xAB, sizeof(big));
+		brec->timestamp_ns = U64_MAX;
+		brec->seq = U64_MAX;
+		brec->pid = U32_MAX;
+		brec->tgid = U32_MAX;
+		brec->cpu = U16_MAX;
+		brec->trace = U64_MAX;
+		brec->agent = U32_MAX;
+		brec->category = U8_MAX;
+		brec->event_type = U8_MAX;
+		brec->severity = U8_MAX;
+		brec->privacy = U8_MAX;
+		brec->data_len = AI_TELEMETRY_MAX_DATA_LEN;
+		n = ai_telemetry_format_human(brec, via_sense,
+					      sizeof(via_sense));
+		KUNIT_EXPECT_GT(test, n, (size_t)0);
+		KUNIT_EXPECT_LT(test, n, sizeof(via_sense));
+		KUNIT_EXPECT_EQ(test, via_sense[n - 1], '\n');
+		KUNIT_EXPECT_EQ(test, via_sense[n], '\0');
+	}
+}
+
+/* K7 D2 背压注入（验收 §3）：灌满 → dropped/full_episodes 准确 +
+ * 告警一次（latch）+ 不崩 → 排空恢复后继续 → 再满再告警。 */
+static void telemetry_backpressure_injection_test(struct kunit *test)
+{
+	/* 真机活 boot：排空 kthread 并发消费会让 drain 计数与回合断言
+	 * 漂移（首跑实抓 16 vs 50）——quiesce 隔离（w58 同款）。 */
+	telemetry_test_quiesce(test);
+
+	struct ai_telemetry_cpu_stats st;
+	void *buf;
+	unsigned int i;
+	u64 ep1;
+	int rc;
+
+	telemetry_pin_cpu0(test);
+	ai_telemetry_init();
+	telemetry_test_quiesce(test);
+	/* 稳态口径：环满丢弃计 dropped（非 predrain 启动窗口语义） */
+	ai_telemetry_test_set_consumer_ready(true);
+	rc = ai_telemetry_reset();
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_set_sample_rate(AI_CAT_MM, AI_EV_PAGE_ALLOC, 1);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	buf = kzalloc(AI_TELEMETRY_MAX_DATA_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	memset(buf, MARKER, AI_TELEMETRY_MAX_DATA_LEN);
+
+	/* 灌满：64 x 4140B = 264KB > 256KB-1（IMPORTANT 旁路自适应降采样） */
+	for (i = 0; i < 64; i++)
+		ai_telemetry_emit(AI_CAT_MM, AI_EV_PAGE_ALLOC,
+				  AI_SEV_IMPORTANT, buf,
+				  AI_TELEMETRY_MAX_DATA_LEN);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_GT(test, st.dropped, 0u);
+	KUNIT_EXPECT_GE(test, st.dropped64, (u64)st.dropped);
+	KUNIT_EXPECT_EQ(test, st.full_latch, 1u);
+	ep1 = st.full_episodes;
+	KUNIT_EXPECT_GE(test, ep1, (u64)1);
+
+	/* 告警一次（latch）：持续满丢弃不再叠加回合 */
+	for (i = 0; i < 8; i++)
+		ai_telemetry_emit(AI_CAT_MM, AI_EV_PAGE_ALLOC,
+				  AI_SEV_IMPORTANT, buf,
+				  AI_TELEMETRY_MAX_DATA_LEN);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, st.full_episodes, ep1);
+
+	/* 恢复：排空（读出即丢按条计 drain_discards）→ 一次成功写入
+	 * （free 已过半）复位告警闩 */
+	ai_telemetry_drain_all();
+	rc = ai_telemetry_emit(AI_CAT_MM, AI_EV_PAGE_ALLOC,
+			       AI_SEV_IMPORTANT, buf, 64);
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, st.full_latch, 0u);
+	KUNIT_EXPECT_GE(test, st.drain_discards, (u64)50);
+
+	/* 再满再告警：回合恰好 +1 */
+	for (i = 0; i < 64; i++)
+		ai_telemetry_emit(AI_CAT_MM, AI_EV_PAGE_ALLOC,
+				  AI_SEV_IMPORTANT, buf,
+				  AI_TELEMETRY_MAX_DATA_LEN);
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_EQ(test, st.full_latch, 1u);
+	KUNIT_EXPECT_EQ(test, st.full_episodes, ep1 + 1);
+
+	kfree(buf);
+	ai_telemetry_reset();
+}
+
+/* 回读 CPU0 环，找最后一条标记记录并取回其 trace/agent（ctx 传播断言用） */
+static bool telemetry_find_marker(u64 *trace, u32 *agent)
+{
+	void *buf;
+	size_t n = 0, pos = 0;
+	bool found = false;
+
+	buf = kzalloc(AI_TELEMETRY_RING_SIZE, GFP_KERNEL);
+	if (!buf)
+		return false;
+	if (ai_telemetry_read(0, buf, AI_TELEMETRY_RING_SIZE, &n) == AI_OK) {
+		while (pos + AI_TELEMETRY_HEADER_LEN <= n) {
+			struct ai_telemetry_record *rec =
+				(struct ai_telemetry_record *)((u8 *)buf + pos);
+			size_t total = AI_TELEMETRY_HEADER_LEN + rec->data_len;
+			const u8 *d = (const u8 *)buf + pos +
+				      AI_TELEMETRY_HEADER_LEN;
+
+			if (total > n - pos)
+				break;
+			if (rec->data_len >= 2 && d[0] == MARKER &&
+			    d[rec->data_len - 1] == MARKER) {
+				if (trace)
+					*trace = rec->trace;
+				if (agent)
+					*agent = rec->agent;
+				found = true;
+			}
+			pos += total;
+		}
+	}
+	kfree(buf);
+	return found;
+}
+
+/* K7 D1 ctx 传播：ctx_set → emit → 记录头读回 trace/agent；
+ * 未包段 emit 诚实填 0。 */
+static void telemetry_ctx_propagation_test(struct kunit *test)
+{
+	u8 payload[8] = { MARKER, 1, 2, 3, 4, 5, 6, MARKER };
+	u64 trace = 0xdeadbeefcafe1234ULL, got_trace = 0;
+	u32 agent = 7, got_agent = 0;
+	int rc;
+
+	telemetry_pin_cpu0(test);
+	ai_telemetry_init();
+	telemetry_test_quiesce(test);
+	rc = ai_telemetry_reset();
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_set_sample_rate(AI_CAT_AI, AI_EV_AI_DECISION, 1);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	ai_telemetry_ctx_set(trace, agent);
+	rc = ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_DECISION, AI_SEV_NORMAL,
+			       payload, sizeof(payload));
+	ai_telemetry_ctx_clear();
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_TRUE(test, telemetry_find_marker(&got_trace,
+						      &got_agent));
+	KUNIT_EXPECT_EQ(test, got_trace, trace);
+	KUNIT_EXPECT_EQ(test, got_agent, agent);
+
+	/* 未包段（无 ctx）：trace/agent 诚实填 0 */
+	rc = ai_telemetry_emit(AI_CAT_AI, AI_EV_AI_OUTCOME, AI_SEV_NORMAL,
+			       payload, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_TRUE(test, telemetry_find_marker(&got_trace,
+						      &got_agent));
+	KUNIT_EXPECT_EQ(test, got_trace, (u64)0);
+	KUNIT_EXPECT_EQ(test, got_agent, 0u);
+
+	ai_telemetry_reset();
+}
+
+/* K7 D1 seq 单调：同 CPU 标记记录的 seq 严格递增；stats.seq ≥ 最后一条 */
+static void telemetry_seq_monotonic_test(struct kunit *test)
+{
+	u8 payload[16];
+	u64 last_seq = 0, seqs[32];
+	struct ai_telemetry_cpu_stats st;
+	unsigned int i, n_seq = 0;
+	void *buf;
+	size_t n = 0, pos = 0;
+	int rc;
+
+	telemetry_pin_cpu0(test);
+	ai_telemetry_init();
+	telemetry_test_quiesce(test);
+	rc = ai_telemetry_reset();
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_set_sample_rate(AI_CAT_FS, AI_EV_VFS, 1);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	payload[0] = MARKER;
+	payload[sizeof(payload) - 1] = MARKER;
+	for (i = 0; i < 32; i++) {
+		payload[1] = (u8)i;
+		rc = ai_telemetry_emit(AI_CAT_FS, AI_EV_VFS, AI_SEV_NORMAL,
+				       payload, sizeof(payload));
+		KUNIT_EXPECT_EQ(test, rc, AI_OK);
+	}
+
+	buf = kzalloc(AI_TELEMETRY_RING_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	rc = ai_telemetry_read(0, buf, AI_TELEMETRY_RING_SIZE, &n);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	while (pos + AI_TELEMETRY_HEADER_LEN <= n && n_seq < 32) {
+		struct ai_telemetry_record *rec =
+			(struct ai_telemetry_record *)((u8 *)buf + pos);
+		size_t total = AI_TELEMETRY_HEADER_LEN + rec->data_len;
+		const u8 *d = (const u8 *)buf + pos + AI_TELEMETRY_HEADER_LEN;
+
+		if (total > n - pos)
+			break;
+		if (rec->data_len >= 2 && d[0] == MARKER &&
+		    d[rec->data_len - 1] == MARKER)
+			seqs[n_seq++] = rec->seq;
+		pos += total;
+	}
+	kfree(buf);
+
+	KUNIT_EXPECT_EQ(test, n_seq, 32u);
+	for (i = 0; i < n_seq; i++) {
+		KUNIT_EXPECT_GT(test, seqs[i], last_seq);
+		last_seq = seqs[i];
+	}
+	rc = ai_telemetry_stats(0, &st);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_GE(test, st.seq, last_seq);
+
+	ai_telemetry_reset();
+}
+
+/* K7 D2 计数族递增：rate=0 关闭事件显式计额（rate_skipped 三源列）、
+ * 排空按条计 drain_discards、64 位镜像与旧 u32 口径一致。 */
+static void telemetry_counter_family_test(struct kunit *test)
+{
+	struct ai_telemetry_cpu_stats before, after;
+	u8 payload[8] = { MARKER, 1, 2, 3, 4, 5, 6, MARKER };
+	unsigned int i;
+	int rc;
+
+	telemetry_pin_cpu0(test);
+	ai_telemetry_init();
+	telemetry_test_quiesce(test);
+	telemetry_pin_cpu0(test);
+	rc = ai_telemetry_reset();
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_stats(0, &before);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+
+	/*
+	 * rate=0 × 8：rate_skipped/sampled_skip64/旧 sampled_skip 至少 +8。
+	 * 注：三计数器为 per-CPU 共享（其他事件的 rate>1 采样跳过在同一
+	 * CPU 上同样计额），窗口内中断/调度事件可能带来少量额外增量，
+	 * 故用下界断言（8 条本用例事件逐条必计）。
+	 */
+	rc = ai_telemetry_set_sample_rate(AI_CAT_NET, AI_EV_UDP, 0);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	for (i = 0; i < 8; i++)
+		ai_telemetry_emit(AI_CAT_NET, AI_EV_UDP, AI_SEV_NORMAL,
+				  payload, sizeof(payload));
+	rc = ai_telemetry_stats(0, &after);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_GE(test, after.rate_skipped - before.rate_skipped,
+			(u64)8);
+	KUNIT_EXPECT_GE(test, after.sampled_skip64 - before.sampled_skip64,
+			(u64)8);
+	KUNIT_EXPECT_GE(test, (u64)after.sampled_skip - before.sampled_skip,
+			(u64)8);
+
+	/* drain_all：读出即丢按条计（本段 10 条标记 + 系统事件 ≥10） */
+	rc = ai_telemetry_set_sample_rate(AI_CAT_NET, AI_EV_UDP, 1);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	rc = ai_telemetry_stats(0, &before);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	for (i = 0; i < 10; i++)
+		ai_telemetry_emit(AI_CAT_NET, AI_EV_UDP, AI_SEV_NORMAL,
+				  payload, sizeof(payload));
+	ai_telemetry_drain_all();
+	rc = ai_telemetry_stats(0, &after);
+	KUNIT_ASSERT_EQ(test, rc, AI_OK);
+	KUNIT_EXPECT_GE(test, after.drain_discards - before.drain_discards,
+			(u64)10);
+
+	/* 64 位镜像 ≥ 旧 u32 口径（未回绕时相等） */
+	KUNIT_EXPECT_GE(test, after.emitted64, (u64)after.emitted);
+	KUNIT_EXPECT_GE(test, after.dropped64, (u64)after.dropped);
+
+	ai_telemetry_set_sample_rate(AI_CAT_NET, AI_EV_UDP, 1);
+	ai_telemetry_reset();
+}
+
 static struct kunit_case telemetry_test_cases[] = {
 	KUNIT_CASE(telemetry_write_read_test),
 	KUNIT_CASE(telemetry_overflow_test),
@@ -876,6 +1281,13 @@ static struct kunit_case telemetry_test_cases[] = {
 	KUNIT_CASE(telemetry_adaptive_test),
 	KUNIT_CASE(telemetry_write_latency_test),
 	KUNIT_CASE(telemetry_concurrent_readers_test),
+	/* K7 新增 */
+	KUNIT_CASE(telemetry_header_layout_test),
+	KUNIT_CASE(telemetry_human_golden_test),
+	KUNIT_CASE(telemetry_backpressure_injection_test),
+	KUNIT_CASE(telemetry_ctx_propagation_test),
+	KUNIT_CASE(telemetry_seq_monotonic_test),
+	KUNIT_CASE(telemetry_counter_family_test),
 	{}
 };
 
