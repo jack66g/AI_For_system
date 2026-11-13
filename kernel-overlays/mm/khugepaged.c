@@ -2512,12 +2512,9 @@ skip:
 
 #ifdef CONFIG_AIKERNEL_MM
 			{
-				u8 ai_decision = 0;
 				/* 6.18 无 mm->owner/pid：khugepaged 线程 pid + 扫描地址 */
 				u32 ai_pid = task_pid_nr(current);
 
-				ai_mm_thp_hook(mm, khugepaged_scan.address,
-					       &ai_decision);
 				ai_mm_emit_thp_collapse(
 					ai_pid, khugepaged_scan.address,
 					(*result == SCAN_SUCCEED) ? 1 : 0);

@@ -5165,7 +5165,6 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 		u8 access = (vmf->flags & FAULT_FLAG_WRITE) ? 2 :
 			    (vmf->flags & FAULT_FLAG_INSTRUCTION) ? 3 : 1;
 
-		ai_mm_fault_hook(vmf, 1);
 		ai_mm_emit_page_fault(1, access, 0, vmf->address);
 	}
 #endif
@@ -5852,10 +5851,6 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *vm_mm = vma->vm_mm;
 	vm_fault_t ret;
-
-#ifdef CONFIG_AIKERNEL_MM
-	ai_mm_fault_hook(vmf, 2);
-#endif
 
 	/*
 	 * The VMA was not fully populated on mmap() or missing VM_DONTEXPAND

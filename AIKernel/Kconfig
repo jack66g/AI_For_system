@@ -32,9 +32,15 @@ config AIKERNEL_EXPERIMENTAL
 	depends on AIKERNEL
 	default n
 	help
-	  WP-K0 truth table section 5: 17 reserved decision points
-	  (sched 2 / mm 4 / net 2 / io 5 / sec 4).  When disabled every
-	  one degrades to a static inline no-op stub, same zero-cost
+	  WP-K5 (2026-11): after the empty-stub purge this gate now
+	  covers only the two security hooks with real bodies
+	  (seccomp behavior-model observation and key strength
+	  heuristic, both in security/ai_lsm.c).  The 15 pure-stub
+	  decision points (sched 2 / mm 4 / net 2 / io 5 / sec 2)
+	  were removed; see AIKernel/CHANGELOG.md and
+	  work/refactor/KERNEL-K5-DESIGN.md section 3 for the verdict
+	  and revival paths.  When disabled the two remaining hooks
+	  degrade to static inline no-op stubs, same zero-cost
 	  semantics as the master switch.  Enable only for development
 	  or evaluation builds.
 

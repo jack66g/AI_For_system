@@ -2133,13 +2133,6 @@ bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
 
 		WARN_ON_ONCE(hctx != rq->mq_hctx);
 
-#ifdef CONFIG_AIKERNEL_IO
-		/* AI 决策：请求分发顺序优化（空实现返回 true 放行；
-		 * 返回 false 则本次不分发，留在列表等待下轮） */
-		if (!ai_io_dispatch_hook(hctx, rq))
-			break;
-#endif
-
 		prep = blk_mq_prep_dispatch_rq(rq, get_budget);
 		if (prep != PREP_DISPATCH_OK)
 			break;

@@ -437,8 +437,6 @@ static void wb_timer_fn(struct blk_stat_callback *cb)
 	status = latency_exceeded(rwb, cb->stat);
 
 #ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：动态调整写回节流判定（空实现返回原 status） */
-	status = ai_io_wbt_hook(rwb, status);
 	/* AI 遥测：wbt 读写延迟（第3类 3.4 wbt_latency） */
 	ai_io_emit_wbt_latency(rwb->rqos.disk->disk_name,
 			       cb->stat[READ].min, cb->stat[WRITE].min);

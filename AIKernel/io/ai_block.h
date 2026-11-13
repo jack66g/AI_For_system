@@ -213,101 +213,16 @@ struct ai_disk_event_payload {
  * ================================================================== */
 
 struct ai_io_stats {
-	u64 dispatch_hook_calls;
-	u64 merge_hook_calls;
-	u64 wbt_hook_calls;
-	u64 throttle_hook_calls;
-	u64 sched_hook_calls;
 	u64 disk_stats_emitted;
 	u64 disk_errors_emitted;
 };
 
 #ifdef CONFIG_AIKERNEL_IO
 
-/* ---- A 轨：推理/控制 Hook（ai_block.c 实现，全部 EXPORT_SYMBOL_GPL） ---- */
-
-struct rq_wb;	/* block/blk-wbt.h 内部类型，前向声明 */
-struct throtl_grp;	/* block/blk-throttle.h 内部类型，前向声明 */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_io_dispatch_hook() - AI 优化请求分发顺序（EXPERIMENTAL 门控）
- * @hctx: 硬件队列
- * @rq:   待分发请求
- *
- * 返回 false 则本次不分发该请求（留在列表等待下轮）；空实现返回 true 放行。
- */
-bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx, struct request *rq);
-
-/**
- * ai_io_merge_hook() - AI 判断请求是否合并（EXPERIMENTAL 门控）
- * @req:  目标请求
- * @bio:  待合并 bio
- * @back: 1=后向合并 0=前向合并
- *
- * 返回 false 则阻止合并；空实现返回 true（放行内核物理检查结果）。
- */
-bool ai_io_merge_hook(struct request *req, struct bio *bio, int back);
-
-/**
- * ai_io_wbt_hook() - AI 调整写回节流决策（EXPERIMENTAL 门控）
- * @rwb:    wbt 状态
- * @status: 当前 latency 判定（LAT_OK/EXCEEDED/UNKNOWN*）
- *
- * 返回替换后的 status；空实现返回原值。
- */
-int ai_io_wbt_hook(struct rq_wb *rwb, int status);
-
-/**
- * ai_io_throttle_hook() - AI 动态调整 I/O 限制（EXPERIMENTAL 门控）
- * @tg:         cgroup 节流组
- * @bio:        当前 bio
- * @bps_limit:  字节限制（AI 可修改）
- * @iops_limit: IOPS 限制（AI 可修改）
- *
- * 空实现不改（返回原值）。
- */
-void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
-			 u64 *bps_limit, unsigned long *iops_limit);
-
-/**
- * ai_io_sched_hook() - AI I/O 调度器决策接口（EXPERIMENTAL 门控）
- * @hctx: 硬件队列
- * @dir:  建议的下一个分发方向（0=读 1=写）
- *
- * 返回 0 表示不改（按 deadline 默认决策）；返回非 0 表示采纳建议方向。
- */
-int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
-/* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
-static inline bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx,
-				       struct request *rq) { return true; }
-static inline bool ai_io_merge_hook(struct request *req, struct bio *bio,
-				    int back) { return true; }
-static inline int ai_io_wbt_hook(struct rq_wb *rwb, int status)
-{ return status; }
-static inline void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
-				       u64 *bps_limit, unsigned long *iops_limit)
-{ }
-static inline int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir)
-{ return 0; }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
-
-/* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
-
-/**
- * ai_io_predict_merge() - 合并收益预测
- *
- * 占位启发式：同方向且物理相邻 → 建议合并。
- */
-bool ai_io_predict_merge(struct bio *bio, struct request *req, int back);
-
-/**
- * ai_io_adjust_wbt() - 写回阈值建议
- *
- * 占位启发式：按 write 延迟滑动平均建议 scale 方向。
- */
-int ai_io_adjust_wbt(struct rq_wb *rwb, int status);
+/* K5（2026-11）：io 域五个空桩门控钩（dispatch/merge/wbt/throttle/sched
+ * 咨询）与恒等配套（合并收益预测/写回阈值建议）的双桩声明已删除，
+ * 判决与复活路径见 AIKernel/CHANGELOG.md 与 work/refactor/KERNEL-K5-DESIGN.md
+ * §3；io.priority / io.bandwidth 真面与 ai 电梯本体保留。 */
 
 /**
  * ai_io_stats_read() - 决策统计读取
@@ -355,21 +270,6 @@ int ai_io_metrics_sampler(void *unused);
 /* 空函数兜底：CONFIG_AIKERNEL_IO=n 时 block/ 不包含本头文件，
  * 此处兜底仅防御性提供（保证任何遗留引用编译通过且零开销）。 */
 
-static inline bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx,
-				       struct request *rq) { return true; }
-static inline bool ai_io_merge_hook(struct request *req, struct bio *bio,
-				    int back) { return true; }
-static inline int ai_io_wbt_hook(struct rq_wb *rwb, int status)
-{ return status; }
-static inline void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
-				       u64 *bps_limit, unsigned long *iops_limit)
-{ }
-static inline int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir)
-{ return 0; }
-static inline bool ai_io_predict_merge(struct bio *bio, struct request *req,
-				       int back) { return true; }
-static inline int ai_io_adjust_wbt(struct rq_wb *rwb, int status)
-{ return status; }
 static inline void ai_io_stats_read(struct ai_io_stats *st)
 { if (st) memset(st, 0, sizeof(*st)); }
 static inline void ai_io_emit_bio_queue(struct bio *bio,

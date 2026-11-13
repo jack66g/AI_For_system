@@ -5,8 +5,8 @@
  * A 轨：AI 内存决策框架。
  *   - 页面访问预测 / 碎片预测 / KSM 收益预测（占位启发式，后续步骤由
  *     AI Runtime 推理策略替换）；
- *   - 全部 ai_mm_*_hook() 空实现 = 原样放行（返回值不改变内核默认行为），
- *     本步只负责签名落地 + 决策计数 + 遥测采集。
+ *   - readahead 真决策钩（W3 挂点4 预读窗口调整）+ 决策计数 + 遥测采集。
+ *     K5（2026-11）删除四个空桩门控钩，见 AIKernel/CHANGELOG.md。
  *
  * B 轨：第2类 内存管理感知 10 子类的发射辅助（ai_mm_emit_*）。
  *   - 每个辅助先经 ai_telemetry_sample_take() 做采样判定（与 emit 共用
@@ -15,11 +15,11 @@
  *   - 全部路径：不阻塞、不分配（无 GFP_KERNEL）、无锁；
  *   - OOM/错误报告路径埋点只构建栈上 payload + memcpy 入 ring，无分配。
  *
- * 铁律：CONFIG_AIKERNEL_TELEMETRY=n 时本文件仍编译（Hook 计数 + 空放行），
+ * 铁律：CONFIG_AIKERNEL_TELEMETRY=n 时本文件仍编译（决策计数照常），
  * 发射辅助经 sample_take=false 全部跳过（零开销）。
  *
  * 拆分说明：本文件为拆分后的 A 轨决策框架（原 ai_mm.c 913 行）：可控参数
- * mm.swappiness、决策统计、页面访问/碎片/KSM 预测与全部 ai_mm_*_hook 空实现，
+ * mm.swappiness、决策统计、页面访问/碎片/KSM 预测与 readahead 决策钩，
  * 以及子系统 init。B 轨发射辅助拆至 ai_mm_telemetry_alloc.c（分配/缺页）与
  * ai_mm_telemetry_reclaim.c（回收/THP/OOM/内存错误）。对外接口 ai_mm.h 不变。
  */
@@ -194,17 +194,9 @@ int ai_mm_predict_fragmentation(struct zone *zone)
 }
 EXPORT_SYMBOL_GPL(ai_mm_predict_fragmentation);
 
-/* ---- Hook：空实现 = 原样放行 ---- */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type)
-{
-	WRITE_ONCE(ai_mm_stats.fault_hook_calls,
-		   READ_ONCE(ai_mm_stats.fault_hook_calls) + 1);
-	/* AI 推理占位：本步不修改 vmf */
-}
-EXPORT_SYMBOL_GPL(ai_mm_fault_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+/* K5（2026-11）：mm 域四个空桩门控钩（缺页/工作集/分配迁移类型/THP
+ * 咨询）已删除，判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3；readahead 真决策钩保留。 */
 
 unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 				   unsigned long nr_to_read,
@@ -238,34 +230,6 @@ unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 	return nr_to_read;   /* 原样返回 */
 }
 EXPORT_SYMBOL_GPL(ai_mm_readahead_hook);
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-bool ai_mm_workingset_hook(struct folio *folio, void *shadow, bool activate)
-{
-	WRITE_ONCE(ai_mm_stats.workingset_hook_calls,
-		   READ_ONCE(ai_mm_stats.workingset_hook_calls) + 1);
-	return activate;   /* 原样返回 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_workingset_hook);
-
-int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
-		     gfp_t gfp_flags, int migratetype)
-{
-	WRITE_ONCE(ai_mm_stats.alloc_hook_calls,
-		   READ_ONCE(ai_mm_stats.alloc_hook_calls) + 1);
-	return migratetype;   /* 原样返回 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_alloc_hook);
-
-void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address, u8 *decision)
-{
-	WRITE_ONCE(ai_mm_stats.thp_hook_calls,
-		   READ_ONCE(ai_mm_stats.thp_hook_calls) + 1);
-	if (decision)
-		*decision = 0;   /* 本步不干预 */
-}
-EXPORT_SYMBOL_GPL(ai_mm_thp_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ==================================================================
  * K4 效果结算器（K4.1 OOM re-OOM / K4.4 readahead 命中率 /

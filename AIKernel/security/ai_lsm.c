@@ -10,8 +10,10 @@
  *     socket_sendmsg/task_kill/ptrace_access_check）+ 行为建模与异常检测框架；
  *   - W80 三维规则（pid > label > path_prefix）与 per-task 工作区标签
  *     （LSM blob，fork 继承、退出随 blob 释放）；
- *   - ai_sec_seccomp/cap/key/crypto_hook：AI 决策接入点（空实现=原样放行；
- *     sec.seccomp 参数已于 W49 如实降级 reserved，见文末说明）；
+ *   - ai_sec_seccomp/key_hook：AI 决策接入点（seccomp 行为模型观测 +
+ *     key 强度启发式；K5 删除 cap/crypto 两个空桩钩，见
+ *     AIKernel/CHANGELOG.md；sec.seccomp 参数已于 W49 如实降级
+ *     reserved，见文末说明）；
  *   - ai_sec_syscall_name()：syscall 号→名称（低频事件专用）。
  * B 轨（数据计划 第8类）：8.1/8.2/8.3/8.5/8.6/8.8 事件发射全量原始零脱敏。
  * 8.4（审计）由 ai_audit.c 承担；8.7 kmsan/ubsan/kcsan 发射本文件提供，采集点在
@@ -913,8 +915,9 @@ static struct security_hook_list ai_lsm_hooks[] __ro_after_init = {
 };
 
 /* ==================================================================
- * ai_sec_* Hook（AI 决策接入点，空实现 = 原样放行；以下四钩经
- * CONFIG_AIKERNEL_EXPERIMENTAL 门控，默认 n）
+ * ai_sec_* Hook（AI 决策接入点；以下两钩经 CONFIG_AIKERNEL_EXPERIMENTAL
+ * 门控，默认 n。K5（2026-11）删除 cap/crypto 两个空桩钩，判决与复活
+ * 路径见 AIKernel/CHANGELOG.md 与 work/refactor/KERNEL-K5-DESIGN.md §3）
  *
  * 注意：ai_sec_seccomp_hook 只在任务已挂 seccomp 过滤器时被
  * kernel/seccomp.c __seccomp_filter() 调用，且当前调用点不消费 action
@@ -944,13 +947,6 @@ void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 	/* AI 建议规则为空：不改 action */
 }
 
-int ai_sec_cap_hook(const struct cred *cred, struct user_namespace *ns,
-		    int cap, int ret)
-{
-	/* AI 风险评估为空：返回原结果，语义不变 */
-	return ret;
-}
-
 void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
 		     u8 *strength)
 {
@@ -963,11 +959,6 @@ void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
 		*strength = 1;		/* 中 */
 	else
 		*strength = 2;		/* 强 */
-}
-
-void ai_sec_crypto_hook(const char **alg_name, u32 type, u32 mask)
-{
-	/* AI 负载选算法为空：不改算法名 */
 }
 #endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 

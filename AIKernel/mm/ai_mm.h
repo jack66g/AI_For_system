@@ -354,31 +354,17 @@ struct ai_mm_kfence_report_payload {
  * ==================================================================
  */
 
-/* 决策统计（/proc/ai/mm/stats 数据源预留） */
+/* 决策统计（/proc/ai/mm/stats 数据源预留；K5 删除四个空桩钩后仅存
+ * readahead 真决策钩计数） */
 struct ai_mm_stats {
-	u64 fault_hook_calls, fault_ai_changed;
 	u64 readahead_hook_calls, readahead_ai_changed;
-	u64 workingset_hook_calls, workingset_ai_changed;
-	u64 alloc_hook_calls, alloc_ai_changed;
-	u64 thp_hook_calls, thp_ai_changed;
 };
 
 #ifdef CONFIG_AIKERNEL_MM
 
-/* ---- A 轨 Hook（实现见 ai_mm.c；空实现 = 原样放行） ---- */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_mm_fault_hook() - AI 参与缺页处理决策
- * @vmf: 缺页上下文
- * @fault_type: 1=anon 2=file
- *
- * 由 do_anonymous_page()/do_fault() 调用。空实现只计数，不修改任何值。
- */
-void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
-static inline void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type) { }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+/* K5（2026-11）：mm 域四个空桩门控钩（缺页/工作集/分配迁移类型/THP
+ * 咨询）的双桩声明已删除，判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3；readahead 真决策钩保留。 */
 
 /**
  * ai_mm_readahead_hook() - AI 决定预读窗口大小
@@ -391,50 +377,6 @@ static inline void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type) { }
 unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 				   unsigned long nr_to_read,
 				   unsigned long lookahead_size);
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_mm_workingset_hook() - AI 增强工作集重故障激活判断
- * @folio: 重故障的 folio
- * @shadow: 影子条目
- * @activate: 内核当前是否激活
- *
- * 返回 AI 建议的激活值（空实现原样返回 @activate）。
- */
-bool ai_mm_workingset_hook(struct folio *folio, void *shadow, bool activate);
-
-/**
- * ai_mm_alloc_hook() - AI 碎片预测，调整迁移类型
- * @zone: 目标 zone
- * @order: 分配阶
- * @gfp_flags: 分配标志
- * @migratetype: 当前迁移类型
- *
- * 返回 AI 建议的迁移类型（空实现原样返回 @migratetype）。
- */
-int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
-		     gfp_t gfp_flags, int migratetype);
-
-/**
- * ai_mm_thp_hook() - AI 判断 THP 是否合并
- * @mm: 扫描中的 mm
- * @address: 当前扫描地址
- * @decision: 出参建议（0=不干预）
- *
- * 由 khugepaged_scan_mm_slot() 调用。空实现只计数。
- */
-void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address, u8 *decision);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
-static inline bool ai_mm_workingset_hook(struct folio *folio, void *shadow,
-					 bool activate)
-{ return activate; }
-static inline int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
-				   gfp_t gfp_flags, int migratetype)
-{ return migratetype; }
-static inline void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address,
-				  u8 *decision)
-{ if (decision) *decision = 0; }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /* ---- 决策框架（实现见 ai_mm.c；占位启发式，AI 推理后续步骤替换） ---- */
 
@@ -534,20 +476,10 @@ u8 ai_mm_k4_readahead_outcome(unsigned long hit, unsigned long miss,
 
 /* 空函数兜底：CONFIG_AIKERNEL_MM=n 时 mm/ 不包含本头文件，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline void ai_mm_fault_hook(struct vm_fault *vmf, u8 fault_type) { }
 static inline unsigned long ai_mm_readahead_hook(struct readahead_control *ractl,
 						 unsigned long nr_to_read,
 						 unsigned long lookahead_size)
 { return nr_to_read; }
-static inline bool ai_mm_workingset_hook(struct folio *folio, void *shadow,
-					 bool activate)
-{ return activate; }
-static inline int ai_mm_alloc_hook(struct zone *zone, unsigned int order,
-				   gfp_t gfp_flags, int migratetype)
-{ return migratetype; }
-static inline void ai_mm_thp_hook(struct mm_struct *mm, unsigned long address,
-				  u8 *decision)
-{ if (decision) *decision = 0; }
 static inline int ai_mm_predict_page_access(unsigned long address, u8 fault_type)
 { return 0; }
 static inline int ai_mm_predict_fragmentation(struct zone *zone) { return 0; }

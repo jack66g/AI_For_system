@@ -587,8 +587,6 @@ void workingset_refault(struct folio *folio, void *shadow)
 		ai_mm_emit_workingset_refault((mapping && mapping->host) ? mapping->host->i_ino : 0,
 					      folio->index, distance,
 					      recent ? 1 : 0);
-		if (!ai_mm_workingset_hook(folio, shadow, recent))
-			return;
 		if (!recent)
 			return;
 	}

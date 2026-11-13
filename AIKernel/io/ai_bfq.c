@@ -9,10 +9,10 @@
  *   - 数据结构 = 简化 deadline（mq-deadline 语义族）：
  *     每个队列一个 ai_sched_data（elevator_data），sort_list[2] 两棵按
  *     期限（rq->fifo_time）排序的 rb 树 + fifo_list[2] + dispatch 链表；
- *   - AI 决策接口 ai_io_sched_hook()：可建议下一次分发方向；
- *     空实现（AI 无推理/未启用）→ 按 deadline 默认决策
- *     （读优先 + writes_starved 写饥饿保护 + 期限过期优先 + fifo 批），
- *     与 mq-deadline 行为同族 —— 即"回退 mq-deadline 行为"；
+ *   - 决策 = deadline 默认策略（读优先 + writes_starved 写饥饿保护 +
+ *     期限过期优先 + fifo 批），与 mq-deadline 行为同族。K5（2026-11）
+ *     删除空桩分发咨询点（原 AI 方向建议接口），本体保留，
+ *     见 AIKernel/CHANGELOG.md；
  *   - 零回归：CONFIG_AIKERNEL_IO=n 时本文件不参与构建 → 不注册 → 默认
  *     调度器仍为原生 mq-deadline；AI 关闭时该调度器不可见。
  *
@@ -110,7 +110,7 @@ static void ai_sched_move_request(struct ai_sched_data *asd,
 		q->last_merge = NULL;
 }
 
-/* ---- 分发决策（锁内调用；AI hook 仅咨询不持锁） ---- */
+/* ---- 分发决策（锁内调用） ---- */
 
 static struct request *ai_sched_pick(struct blk_mq_hw_ctx *hctx,
 				     struct ai_sched_data *asd)
@@ -118,14 +118,8 @@ static struct request *ai_sched_pick(struct blk_mq_hw_ctx *hctx,
 	struct request *rq;
 	int dir = -1;
 
-	/* 1. AI 决策接口：AI 可建议下一次分发方向（空实现不改 dir） */
-	if (ai_io_sched_hook(hctx, &dir) && (dir == READ || dir == WRITE)) {
-		rq = ai_sched_oldest_request(asd, dir);
-		if (rq)
-			goto pick;
-	}
-
-	/* 2. 回退 = deadline 默认决策（AI 空实现时行为与 mq-deadline 同族） */
+	/* K5：原第 1 步 AI 分发方向咨询点（空桩）已删除 */
+	/* 1. deadline 默认决策（行为与 mq-deadline 同族） */
 	if (!list_empty(&asd->dispatch)) {
 		rq = list_first_entry(&asd->dispatch, struct request,
 				      queuelist);

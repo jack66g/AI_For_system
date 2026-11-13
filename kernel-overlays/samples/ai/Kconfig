@@ -13,14 +13,9 @@ config SAMPLE_AI_SCHED_POLICY
 
 	  If unsure, say N.
 
-config SAMPLE_AI_IO_SCHEDULER
-	tristate "AIKernel AI I/O scheduler sample"
-	depends on AIKERNEL && AIKERNEL_RUNTIME && AIKERNEL_IO && m
-	help
-	  AI I/O 调度器决策接入示例模块：演示 io 域策略注册 +
-	  ai_io_dispatch_hook() 咨询点调用姿势。
-
-	  If unsure, say N.
+# K5（2026-11）：SAMPLE_AI_IO_SCHEDULER（AI I/O 调度器决策接入示例，
+# 引用已删除的 io 域分发咨询空桩钩）已连带删除，
+# 见 AIKernel/CHANGELOG.md 与 work/refactor/KERNEL-K5-DESIGN.md §3。
 
 config SAMPLE_AI_BPF_HELPER
 	tristate "AIKernel AI BPF helper sample"

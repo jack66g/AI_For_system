@@ -1436,11 +1436,6 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_rt_entity *rt_se = &p->rt;
 
-#ifdef CONFIG_AIKERNEL_SCHED
-	/* AI 准入控制（本步只计数放行，决策后续步骤接通） */
-	ai_sched_rt_admission_hook(p);
-#endif
-
 	if (flags & ENQUEUE_WAKEUP)
 		rt_se->timeout = 0;
 

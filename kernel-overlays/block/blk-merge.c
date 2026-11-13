@@ -573,12 +573,6 @@ int ll_back_merge_fn(struct request *req, struct bio *bio, unsigned int nr_segs)
 		return 0;
 	}
 
-#ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：合并预测（空实现返回 true 放行内核判断；false 阻止合并） */
-	if (!ai_io_merge_hook(req, bio, 1))
-		return 0;
-#endif
-
 	{
 		int ret = ll_new_hw_segment(req, bio, nr_segs);
 
@@ -606,12 +600,6 @@ static int ll_front_merge_fn(struct request *req, struct bio *bio,
 		req_set_nomerge(req->q, req);
 		return 0;
 	}
-
-#ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：合并预测（空实现返回 true 放行内核判断；false 阻止合并） */
-	if (!ai_io_merge_hook(req, bio, 0))
-		return 0;
-#endif
 
 	{
 		int ret = ll_new_hw_segment(req, bio, nr_segs);

@@ -256,39 +256,9 @@ struct ai_sched_stats {
 
 #ifdef CONFIG_AIKERNEL_SCHED
 
-/* ---- A 轨 Hook（实现见 ai_sched.c；空实现 = 原样放行） ---- */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_load_balance_hook() - AI 建议任务是否迁移
- * @src_cpu: 源（最忙）CPU
- * @dst_cpu: 目标 CPU
- * @imbalance: 失衡量（环境中的 env.imbalance）
- * @proceed: 出参；true=继续迁移（默认），false=AI 建议跳过本次迁移
- *
- * 由 sched_balance_rq()（=6.18 的 load_balance()）找到最忙队列后调用。
- * 空实现恒置 *proceed = true。
- */
-int ai_load_balance_hook(int src_cpu, int dst_cpu, unsigned long imbalance,
-			 bool *proceed);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
-static inline int ai_load_balance_hook(int src_cpu, int dst_cpu,
-				       unsigned long imbalance, bool *proceed)
-{ if (proceed) *proceed = true; return AI_OK; }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_sched_rt_admission_hook() - RT/DL 任务准入控制
- * @p: 入队任务
- *
- * 由 enqueue_task_rt()/enqueue_task_dl() 入口调用。本步只计数不拦截
- * （返回值 1=允许，为后续 AI 准入决策预留的默认值）。
- */
-int ai_sched_rt_admission_hook(struct task_struct *p);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL（K0b 门控：未开走零开销桩） */
-static inline int ai_sched_rt_admission_hook(struct task_struct *p) { return 1; }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+/* K5（2026-11）：sched 域两个空桩门控钩（负载均衡 veto / RT-DL 准入）
+ * 的双桩声明已删除，判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3。 */
 
 /**
  * ai_sched_query() - sched_ext 可调用的 AI 辅助函数
@@ -352,10 +322,6 @@ u8 ai_k4_wakeup_switch_outcome(u32 prev_pid, u32 wakee_pid, u64 age_ns,
 
 /* 空函数兜底：CONFIG_AIKERNEL_SCHED=n 时 kernel/sched 不包含本头文件，
  * 此处兜底仅供 AIKernel/ 内部其他模块引用时保持可编译。 */
-static inline int ai_load_balance_hook(int src_cpu, int dst_cpu,
-				       unsigned long imbalance, bool *proceed)
-{ if (proceed) *proceed = true; return AI_OK; }
-static inline int ai_sched_rt_admission_hook(struct task_struct *p) { return 1; }
 static inline int ai_sched_query(u32 query_id, const void *in, size_t in_len,
 				 void *out, size_t out_len)
 { return AI_ERR_NOT_IMPLEMENTED; }

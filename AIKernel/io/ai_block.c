@@ -2,17 +2,17 @@
 /*
  * ai_block.c - AIKernel I/O 子系统核心（Prompt 05）
  *
- * A 轨：块层 Hook 空实现（= 原样放行）+ 决策框架占位启发式 + 决策计数。
+ * A 轨：决策统计 + io.priority/io.bandwidth 可控参数（K5 删除五个空桩
+ *       门控钩与恒等配套，见 AIKernel/CHANGELOG.md）。
  * B 轨：第3类 I/O 与存储感知发射辅助（sample_take + emit_direct 直写）
  *       + 每秒磁盘统计采样器。
  *
  * 门控：CONFIG_AIKERNEL_IO。CONFIG_AIKERNEL_TELEMETRY=n 时本文件仍编译
- * （Hook 计数 + 空放行），发射辅助退化为无操作（emit_direct stub）。
+ * （决策计数照常），发射辅助退化为无操作（emit_direct stub）。
  *
  * 铁律：
  *   - 全部发射路径无锁、无分配（GFP_KERNEL）、不睡眠 —— bio_endio /
  *     blk_mq_complete_request / blk_update_request 可能在硬中断上下文；
- *   - 全部 Hook 空实现 = 原样放行（返回值不改变内核默认行为）；
  *   - 感知数据全量原始零脱敏（dev 名 / sector / pid / comm 全保留）。
  */
 
@@ -33,74 +33,14 @@
 #include <linux/ai_accessors.h>
 
 /* ==================================================================
- * A 轨：Hook 空实现（= 原样放行）+ 决策计数
+ * A 轨：决策统计（B 轨发射计数的 per-CPU 累加面）
+ * K5（2026-11）：io 域五个空桩门控钩（dispatch/merge/wbt/throttle/sched
+ * 咨询）与恒等配套（合并收益预测/写回阈值建议）已删除，判决与复活路径
+ * 见 AIKernel/CHANGELOG.md 与 work/refactor/KERNEL-K5-DESIGN.md §3；
+ * io.priority / io.bandwidth 真面与 ai 电梯本体保留。
  * ================================================================== */
 
 static DEFINE_PER_CPU(struct ai_io_stats, ai_io_cnt);
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-bool ai_io_dispatch_hook(struct blk_mq_hw_ctx *hctx, struct request *rq)
-{
-	this_cpu_inc(ai_io_cnt.dispatch_hook_calls);
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_io_dispatch_hook);
-
-bool ai_io_merge_hook(struct request *req, struct bio *bio, int back)
-{
-	this_cpu_inc(ai_io_cnt.merge_hook_calls);
-	return true;
-}
-EXPORT_SYMBOL_GPL(ai_io_merge_hook);
-
-int ai_io_wbt_hook(struct rq_wb *rwb, int status)
-{
-	this_cpu_inc(ai_io_cnt.wbt_hook_calls);
-	return status;
-}
-EXPORT_SYMBOL_GPL(ai_io_wbt_hook);
-
-void ai_io_throttle_hook(struct throtl_grp *tg, struct bio *bio,
-			 u64 *bps_limit, unsigned long *iops_limit)
-{
-	this_cpu_inc(ai_io_cnt.throttle_hook_calls);
-}
-EXPORT_SYMBOL_GPL(ai_io_throttle_hook);
-
-int ai_io_sched_hook(struct blk_mq_hw_ctx *hctx, int *dir)
-{
-	this_cpu_inc(ai_io_cnt.sched_hook_calls);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(ai_io_sched_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
-
-/* ---- 决策框架（占位启发式，AI 推理后续步骤替换） ---- */
-
-bool ai_io_predict_merge(struct bio *bio, struct request *req, int back)
-{
-	if (!bio || !req)
-		return false;
-	/* 占位：同方向（rq_data_dir）且物理相邻 → 建议合并 */
-	if (rq_data_dir(req) == bio_data_dir(bio) &&
-	    bio_sectors(bio) > 0) {
-		if (back && blk_rq_pos(req) + blk_rq_sectors(req) ==
-		    bio->bi_iter.bi_sector)
-			return true;
-		if (!back && bio->bi_iter.bi_sector + bio_sectors(bio) ==
-		    blk_rq_pos(req))
-			return true;
-	}
-	return false;
-}
-EXPORT_SYMBOL_GPL(ai_io_predict_merge);
-
-int ai_io_adjust_wbt(struct rq_wb *rwb, int status)
-{
-	/* 占位：当前不做调整，返回原判定 */
-	return status;
-}
-EXPORT_SYMBOL_GPL(ai_io_adjust_wbt);
 
 void ai_io_stats_read(struct ai_io_stats *st)
 {
@@ -110,11 +50,6 @@ void ai_io_stats_read(struct ai_io_stats *st)
 	for_each_possible_cpu(cpu) {
 		const struct ai_io_stats *c = per_cpu_ptr(&ai_io_cnt, cpu);
 
-		st->dispatch_hook_calls += c->dispatch_hook_calls;
-		st->merge_hook_calls += c->merge_hook_calls;
-		st->wbt_hook_calls += c->wbt_hook_calls;
-		st->throttle_hook_calls += c->throttle_hook_calls;
-		st->sched_hook_calls += c->sched_hook_calls;
 		st->disk_stats_emitted += c->disk_stats_emitted;
 		st->disk_errors_emitted += c->disk_errors_emitted;
 	}

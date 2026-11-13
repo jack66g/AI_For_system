@@ -12037,18 +12037,6 @@ redo:
 
 	env.src_cpu = busiest->cpu;
 	env.src_rq = busiest;
-#ifdef CONFIG_AIKERNEL_SCHED
-	{
-		bool proceed = true;
-
-		/* AI 迁移建议（空实现恒 proceed=true，veto 计数在 hook 内） */
-		ai_load_balance_hook(env.src_cpu, env.dst_cpu, env.imbalance,
-				     &proceed);
-		if (!proceed)
-			goto out_balanced;
-	}
-#endif
-
 	ld_moved = 0;
 	/* Clear this flag as soon as we find a pullable task */
 	env.flags |= LBF_ALL_PINNED;

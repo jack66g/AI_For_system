@@ -772,16 +772,6 @@ static unsigned long tg_within_iops_limit(struct throtl_grp *tg, struct bio *bio
 	int io_allowed;
 	unsigned long jiffy_elapsed, jiffy_wait, jiffy_elapsed_rnd;
 
-#ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：动态调整 I/O 限制（空实现不改 iops_limit） */
-	{
-		unsigned long ai_iops_limit = iops_limit;
-
-		ai_io_throttle_hook(tg, bio, NULL, &ai_iops_limit);
-		iops_limit = (u32)ai_iops_limit;
-	}
-#endif
-
 	jiffy_elapsed = jiffies - tg->slice_start[rw];
 
 	/* Round up to the next throttle slice, wait time must be nonzero */
@@ -806,11 +796,6 @@ static unsigned long tg_within_bps_limit(struct throtl_grp *tg, struct bio *bio,
 	u64 extra_bytes;
 	unsigned long jiffy_elapsed, jiffy_wait, jiffy_elapsed_rnd;
 	unsigned int bio_size = throtl_bio_data_size(bio);
-
-#ifdef CONFIG_AIKERNEL_IO
-	/* AI 决策：动态调整 I/O 限制（空实现不改 bps_limit） */
-	ai_io_throttle_hook(tg, bio, &bps_limit, NULL);
-#endif
 
 	jiffy_elapsed = jiffy_elapsed_rnd = jiffies - tg->slice_start[rw];
 

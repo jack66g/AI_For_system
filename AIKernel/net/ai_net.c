@@ -2,9 +2,8 @@
 /*
  * ai_net.c - AIKernel 网络核心（Prompt 06）
  *
- * A 轨：AI 网络决策框架（流量分类/攻击检测/参数建议）+ nf 观测钩 +
- *       CCA 咨询钩（ai_net_cong/cong_ssthresh_hook，经 CONFIG_AIKERNEL_EXPERIMENTAL
- *       门控；空实现 = 原样放行，不改变内核默认行为）；
+ * A 轨：AI 网络决策框架（流量分类/攻击检测/参数建议）+ nf 观测行为钩
+ *       （K5 删除 cong 域两个空桩咨询钩，见 AIKernel/CHANGELOG.md）；
  * B 轨：第4类 10 子类 26 事件发射（复杂解析在这里做，简单事件为 ai_net.h static inline）
  *       + 子事件采样门控（ai_net_sample_take，per-CPU 无锁；分级策略见设计文档 2.4 定稿）
  *       + socket 生命周期字节计数表（socket_close 的 bytes_sent/recv 数据源）。
@@ -157,39 +156,28 @@ EXPORT_SYMBOL_GPL(ai_net_set_sub_rate);
  * ---- 决策计数 / 异常检测统计（per-CPU，无锁） ----
  */
 
-static DEFINE_PER_CPU(u64, ai_net_hook_cnt[3]);
+static DEFINE_PER_CPU(u64, ai_net_hook_cnt);
 static DEFINE_PER_CPU(u64, ai_net_classify_cnt);
 static DEFINE_PER_CPU(u64, ai_net_anom_syn);
 static DEFINE_PER_CPU(u64, ai_net_anom_retrans);
 static DEFINE_PER_CPU(u64, ai_net_anom_samples);
 
 /*
- * ---- A 轨：Hook 空实现（原样放行） + 决策框架占位 ----
+ * ---- A 轨：真实行为钩 + 决策框架占位 ----
+ * K5（2026-11）：cong 域两个空桩门控钩（cwnd 增量 / ssthresh 咨询）已
+ * 删除（判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3）；ai_cca CCA 本体保留 reno 语义。
  */
 
 unsigned int ai_net_nf_hook(struct sk_buff *skb,
 			    const struct nf_hook_state *state,
 			    unsigned int verdict)
 {
-	this_cpu_inc(ai_net_hook_cnt[0]);
+	this_cpu_inc(ai_net_hook_cnt);
 	ai_net_detect_anomaly(skb, verdict);
 	return verdict;
 }
 EXPORT_SYMBOL_GPL(ai_net_nf_hook);
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc)
-{
-	this_cpu_inc(ai_net_hook_cnt[1]);
-}
-EXPORT_SYMBOL_GPL(ai_net_cong_hook);
-
-void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh)
-{
-	this_cpu_inc(ai_net_hook_cnt[2]);
-}
-EXPORT_SYMBOL_GPL(ai_net_cong_ssthresh_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 u8 ai_net_classify(struct sk_buff *skb)
 {
@@ -220,7 +208,8 @@ void ai_net_detect_anomaly(struct sk_buff *skb, unsigned int verdict)
 {
 #ifdef CONFIG_INET
 	const struct iphdr *iph;
-	struct tcphdr th;
+	struct tcphdr thbuf;
+	const struct tcphdr *th;
 
 	if (!skb || !skb_network_header_len(skb))
 		return;
@@ -228,11 +217,15 @@ void ai_net_detect_anomaly(struct sk_buff *skb, unsigned int verdict)
 	iph = ip_hdr(skb);
 	if (iph->protocol != IPPROTO_TCP)
 		return;
-	if (skb_header_pointer(skb, skb_network_header_len(skb), sizeof(th),
-			       &th)) {
-		if (th.syn && !th.ack) {
+	/* K5 勘误（KUnit ai_hooks 实抓）：skb_header_pointer 线性 skb 返回
+	 * 报文数据直指针，buffer 形参仅非线性 skb 兜底——旧码丢弃返回值
+	 * 读未初始化栈上 th，计数自诞生起按栈垃圾位走。改用返回指针。 */
+	th = skb_header_pointer(skb, skb_network_header_len(skb),
+				sizeof(thbuf), &thbuf);
+	if (th) {
+		if (th->syn && !th->ack) {
 			this_cpu_inc(ai_net_anom_syn);
-		} else if (th.rst) {
+		} else if (th->rst) {
 			this_cpu_inc(ai_net_anom_retrans);
 		}
 	}
@@ -242,14 +235,11 @@ EXPORT_SYMBOL_GPL(ai_net_detect_anomaly);
 
 void ai_net_stats_read(struct ai_net_stats *st)
 {
-	int cpu, i;
+	int cpu;
 
 	memset(st, 0, sizeof(*st));
 	for_each_possible_cpu(cpu) {
-		u64 *cnt = per_cpu_ptr(ai_net_hook_cnt, cpu);
-
-		for (i = 0; i < 3; i++)
-			st->hook_calls[i] += cnt[i];
+		st->nf_hook_calls += per_cpu(ai_net_hook_cnt, cpu);
 		st->classify_calls += per_cpu(ai_net_classify_cnt, cpu);
 		st->anomaly_syn_pkts += per_cpu(ai_net_anom_syn, cpu);
 		st->anomaly_retrans_pkts += per_cpu(ai_net_anom_retrans, cpu);

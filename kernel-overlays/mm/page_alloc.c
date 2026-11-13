@@ -3382,15 +3382,6 @@ struct page *rmqueue(struct zone *preferred_zone,
 {
 	struct page *page;
 
-#ifdef CONFIG_AIKERNEL_MM
-	{
-		int ai_mt = ai_mm_alloc_hook(zone, order, gfp_flags, migratetype);
-
-		if (ai_mt != migratetype && ai_mt >= 0 && ai_mt < MIGRATE_TYPES)
-			migratetype = ai_mt;
-	}
-#endif
-
 	if (likely(pcp_allowed_order(order))) {
 		page = rmqueue_pcplist(preferred_zone, zone, order,
 				       migratetype, alloc_flags);

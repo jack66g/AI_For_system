@@ -61,20 +61,20 @@
 | 目录 | 职责（一句话，源自代码与头部注释） |
 |------|------|
 | `core/` | AI Runtime 中枢：模型注册与推理提交（ai_runtime）、决策策略引擎与决策 ring（ai_policy）、安全边界（ai_policy_safety：global_enable/max_impact/rollback）、可控参数表（ai_control）、因果链（ai_causal）、遥测 ring buffer 核心（ai_telemetry）、进程分类槽表与 A 轨 Hook（ai_proc*）、用户态控制面（ai_sysfs*：/sys/kernel/ai/、ai_procfs：/proc/ai/）、启动装配（ai_startup）、cgroup 接入（ai_cgroup） |
-| `sched/` | 调度子系统 AI 化：进程分类（AI负载/交互式/批处理）、时间片与 vruntime 预测（占位启发式）、`ai_sched_*_hook` 空实现挂接点 + /proc/ai/sched 统计（ai_sched_procfs） |
-| `mm/` | 内存管理 AI 化：页访问/碎片/KSM 收益预测、`ai_mm_*_hook` 空实现（fault/readahead/reclaim/workingset/alloc/thp/ksm/oom/cma）、`mm.swappiness` 立即生效参数（经 mm/vmscan.c 门控访问器）、第2类内存感知发射辅助（ai_mm_telemetry_alloc/reclaim）、AI 内存区预留骨架（ai_zone） |
-| `net/` | 网络 AI 化：NETLINK_AI 协议族（ai_netlink：AI_CMD_SENSE/ACT/REG）、AI 网络核心（ai_net：流量分类/攻击检测/9 个 Hook 空实现 + 子事件采样门控 + socket 字节表）、第4类复杂解析发射（ai_net_telemetry）、HTTP/TLS 内容识别（ai_net_scan）、AI TCP 拥塞控制 ai_cca（ai_tcp_cca） |
-| `vfs/` | 文件系统 AI 化：8 个 AI Hook 空实现（dcache/inode/path/writeback/epoll/aio/dax/rw）+ dentry 复用预测 + 子事件采样率表（ai_vfs）、第7类文件/路径/挂载/锁/poll/错误发射辅助（ai_vfs_telemetry*）、/proc/ai/vfs 统计（ai_vfs_procfs） |
+| `sched/` | 调度子系统 AI 化：进程分类启发式（AI负载/交互式/批处理/内核线程，供决策注入与查询接口）、update_curr 热路径 PELT 采样发射（ai_telemetry_pelt_se_sample，1/64 限频）、K4 效果结算器 + /proc/ai/sched 统计（ai_sched_procfs）；决策挂点经 fair.c VRUNTIME/WAKEUP 真注入位（W3），`ai_sched_*_hook` 空钩族已两波删除（K0b/K5，见 §4.4） |
+| `mm/` | 内存管理 AI 化：预读窗口调整钩（ai_mm_readahead_hook：W3 决策注入真包装）、K4 效果结算器（OOM re-OOM/预读命中率/回收 PSI）、可控参数 mm.swappiness/readahead/thp/reclaim_prio（REAL，经 vmscan/backing-dev/huge_memory/dcache 门控访问器）、第2类内存感知发射辅助（ai_mm_telemetry_alloc/reclaim）、AI 内存区预留骨架（ai_zone）；fault/workingset/alloc/thp 等空钩族已两波删除（K0b/K5） |
+| `net/` | 网络 AI 化：NETLINK_AI 协议族（ai_netlink：AI_CMD_SENSE/ACT/REG）、AI 网络核心（ai_net：流量分类/攻击检测 + ai_net_nf_hook 异常观测钩 + 子事件采样门控 + socket 字节表）、第4类复杂解析发射（ai_net_telemetry）、HTTP/TLS 内容识别（ai_net_scan）、AI TCP 拥塞控制 ai_cca（ai_tcp_cca）；rtt/xdp/qdisc/cong 等空钩族已两波删除（K0b/K5），CCA 本体保留 |
+| `vfs/` | 文件系统 AI 化：dentry 复用预测 + 子事件采样率表（ai_vfs）、第7类文件/路径/挂载/锁/poll/错误发射辅助（ai_vfs_telemetry*）、/proc/ai/vfs 统计（ai_vfs_procfs）；8 个决策空钩（dcache/inode/path/writeback/epoll/aio/dax/rw）K0b 已删——观测由 24 子类遥测承载 |
 | `io/` | 块层与字符设备 AI 化：块层 Hook + AI I/O 调度器类 ai_bfq（简化 deadline 语义族）+ 字符设备 Hook（ai_block/ai_bfq/ai_char） |
 | `security/` | 安全 AI 大脑：AI LSM 模块（行为建模滑动基线 + 规则表 + 异常评估 + LSM 钩子 file_open/task_kill/ptrace + ai_sec_* 接入点，ai_lsm）、第8类安全事件发射（ai_lsm_telemetry）、审计关联与攻击链（ai_audit） |
 | `interrupt/` | 中断管理 AI 化：irq/softirq 感知（per-CPU softirq 起止时间戳槽位）与中断负载统计（ai_irq） |
 | `lock/` | 同步与锁优化：spin/mutex/rwsem 争用埋点（spin 1/256 采样，中断上下文安全）与锁统计（ai_lock） |
 | `time/` | 时间管理 AI 化：定时器/hrtimer/clocksource 感知发射（ai_time） |
-| `power/` | 电源管理 AI 化：AI cpufreq governor `aiguard`（仅显式 echo 才生效，ai_cpufreq）+ 亮度/空闲/能耗模型 Hook（ai_power） |
+| `power/` | 电源管理 AI 化：AI cpufreq governor `aiguard`（仅显式 echo 才生效，ai_cpufreq）+ 电源事件感知发射与 power.freq/cstate/wakeup 参数面（ai_power；空钩族 K0b 已删） |
 | `virt/` | 虚拟化 AI 化：VM Exit/内存气球/virtio 前后端感知（ai_virt/ai_virtio，vcpu_run 热路径仅 per-CPU inc + 分支） |
 | `bpf/` | BPF/Tracing/Perf 协同：AI 决策挂钩 fmod_ret + `BPF_MAP_TYPE_AI_MODEL` map（模型张量驻留内核，ai_bpf/ai_map） |
 | `rag/` | **用户态** RAG 知识库工具：`build_index.py` 生成 12 个接口文档 → 构建 faiss 向量索引 → `ai_rag_query()` Python 检索（供 AI 外层/知识库流程使用，不进入内核） |
-| `test/` | KUnit 测试：ai_runtime/ai_policy/ai_causal/ai_telemetry 四个模块的单测 |
+| `test/` | KUnit 测试：ai_runtime/ai_telemetry/ai_policy/ai_control/ai_decision/ai_effect/ai_causal/ai_netlink/ai_agent/ai_hooks 十套件（各文件按子模块开关兜底为空套件；K5 新增 ai_hooks 保留钩套件） |
 | `docs/` | 空目录（预留，无源码） |
 | `tools/` | 空目录（预留，无源码） |
 
@@ -160,7 +160,7 @@
 上游共 **149 个文件**含 AIKernel 埋点引用（`grep -rln` 核实，覆盖 kernel/、
 mm/、fs/、drivers/、arch/x86/entry、net/、block/、io_uring/、security/、lib/ 等），
 全部通过
-`#include "AIKernel/...头文件"` + 调用空实现 Hook / 遥测发射函数接入。
+`#include "AIKernel/...头文件"` + 调用保留钩 / 遥测发射函数接入。
 **上游文件一律不做物理拆分**：这些文件（如 kernel/sched/core.c 11010 行、
 mm/vmscan.c 8001 行）是主线社区高频修改文件，任何行级重组都会让每一次
 上游同步（git pull / 补丁移植）变成人工冲突解决——埋点必须保持"最小侵入
@@ -180,7 +180,7 @@ AI 从下表"接管点"列处接管决策。
 | drivers/input/input.c（2769） | `ai_proc_input_event` | input_handle_event 是所有输入设备汇聚点，逐字节热路径 | per-CPU 输入状态机（键盘序列/组合键/鼠标/触摸）驱动用户行为感知 |
 | drivers/tty/n_tty.c | `ai_proc_tty_input_focus` / `ai_telemetry_tty_input` / `ai_telemetry_tty_output` | tty 缓冲路径紧贴行规程语义 | 8 槽 tty 焦点窗口表 → user_focus_window 事件（前台应用识别） |
 | kernel/seccomp.c | `ai_sec_seccomp_hook` / `ai_telemetry_seccomp_filter/kill` | seccomp 过滤器检查在 syscall 热路径上 | `ai_sec_seccomp_hook` 只计数（W49 确认调用点不消费 action；seccomp 只允许进程自装，故不承担 sec.seccomp 参数执行） |
-| mm/page_alloc.c（7741） | `ai_mm_alloc_hook` / `ai_mm_emit_page_alloc/free/failure/latency` | 分配器热路径（每秒百万次），只能加分支最少的埋点 | `ai_mm_alloc_hook` 返回 migratetype（空实现=原样返回；AI 分配策略预留） |
+| mm/page_alloc.c（7741） | `ai_mm_emit_page_alloc/free/failure/latency` | 分配器热路径（每秒百万次），只能加分支最少的埋点 | 仅遥测外流（`ai_mm_alloc_hook` 空钩 K5 已删，复活路径见 CHANGELOG） |
 | mm/slub.c（10164） | `ai_mm_emit_slab_alloc/free/grow/shrink/fragmentation` | slab 快路径同理 | 遥测外流（slab 碎片率 → AI 内存压力建模） |
 
 > 拆分原则落点：上游文件零拆分；**项目自有文件**（AIKernel/ 内）按逻辑内聚
@@ -190,19 +190,29 @@ AI 从下表"接管点"列处接管决策。
 
 ## 4. 解耦原则：三种机制
 
-### 4.1 Hook 空实现默认放行（A 轨）
+### 4.1 保留钩现状：13 钩全部非空（K5 空钩治理后）
 
-所有 AI 决策点在内核内只留**签名 + 空实现**：函数体只做
-"计数 + 原样放行"（返回值不改变内核默认行为）。
-例：`ai_proc_classify_hook` 分类入槽（真行为）；
-`ai_mm_readahead_hook` 调预读窗口（真决策路径）；
-`ai_sec_seccomp_hook` 不改 action。W49 复核：该调用点只在任务已挂
-seccomp 过滤器时执行且不消费 action，无法给任意任务强装过滤器（seccomp
-只允许进程自装/clone 继承/同线程组 TSYNC）→ `sec.seccomp` 参数已如实
-降级 reserved（无 REAL、无 apply，仅记录值）；真正的基线应由用户态在
-exec 前对子进程自装过滤器（W51 设计）。
-配套：每个 Hook 都有决策统计计数（`ai_*_stats`/`*_hook_calls`），
-经 /proc/ai/stats、/sys/kernel/ai/stats/ 外流，供 AI 主体评估影响面。
+「签名 + 计数 + 原样放行」的占位空钩时代已终结：K0b/K5 两波删除 69 个
+空挂接点后（删除账见 §4.4），现存钩面收敛为 **13 个保留钩 =
+11 真实/观测 + 2 sec 门控真体**：
+- 真决策包装：`ai_mm_readahead_hook`（W3 决策注入，三层开关默认关 =
+  与原生行为逐位一致）；
+- 真行为：`ai_proc_classify_hook` 分类入槽、`ai_proc_exec_hook` 路径
+  启发式更新分类与 app 记录、`ai_net_nf_hook` 包级异常检测；
+- 真采样/观测：`ai_lock_spin_hook(_done)`（1/256 争用计时）、
+  `ai_bpf_ftrace/kprobe/verifier_hook`、`ai_telemetry_nf_hook`、
+  `ai_telemetry_pelt_se_sample`（1/64 限频）；
+- sec 门控真体（`CONFIG_AIKERNEL_EXPERIMENTAL`，默认 n）：
+  `ai_sec_seccomp_hook`（行为模型观测，不改 action——W49 复核：该调用点
+  只在任务已挂 seccomp 过滤器时执行且不消费 action，无法给任意任务强装
+  过滤器（seccomp 只允许进程自装/clone 继承/同线程组 TSYNC）→
+  `sec.seccomp` 参数如实降级 reserved（无 REAL、无 apply，仅记录值）；
+  真正的基线应由用户态在 exec 前对子进程自装过滤器（W51 设计））、
+  `ai_sec_key_hook`（密钥强度启发式三档，出参被调用方消费）。
+配套：每个保留钩都有决策统计计数（`ai_*_stats`/`*_hook_calls`），
+经 /proc/ai/stats、/sys/kernel/ai/stats/ 外流，供 AI 主体评估影响面；
+KUnit 覆盖见 `test/ai_hooks_test.c`（分类/异常/强度启发式 +
+逐钩指标出口存在性断言）。
 
 ### 4.2 A 轨 / B 轨条件编译
 
@@ -234,6 +244,25 @@ exec 前对子进程自装过滤器（W51 设计）。
 - `vfs/ai_vfs.h`、`mm/ai_mm.h`、`security/ai_lsm.h` 等同模式。
 - 例外说明：`net/ai_net.h` 在 n 配置下调用点本就以 `#ifdef` 剔除，
   其 stub 为防御性兜底（头文件注释自述）。
+K5 后 EXPERIMENTAL 门下仅剩 **sec 两钩真体**（seccomp 行为观测 / key
+强度启发式，`security/ai_lsm.h`）：`CONFIG_AIKERNEL_EXPERIMENTAL=n`
+（出厂缺省）时同样退 static inline 空桩（零开销、语义=原样放行）——
+这是该门控现存的全部 off 桩形态；15 个纯桩钩的「EXPERIMENTAL C 版 +
+off 桩」双桩互斥形态已随 K5 删除（见 CHANGELOG）。
+
+### 4.4 K5 空钩治理（2026-11）：删除账指引
+
+「有个位置能挂」不构成实现理由——K4 效果波实锤（sched 族 0-for-2、
+mm 族 0-for-3，五钩终判全 OFF）后，K5 按 R1（真实消费者）/R2（K 轨
+排期做深地界）/R3（可验收收益四件套）三原则终判，两波删除收口：
+**K0b 删 54**（sched 5/mm 4/vfs 9/net 8/io 2/irq 5/lock 4/time 4/
+virt 5/power 6/proc 2，含 2 个死钩）+ **K5 删 15**（sched 2/mm 4/
+net 2/io 5/sec 2——15 个纯桩「计数+恒等返回」门控钩）。
+逐钩的删除理由与**复活路径**见 `AIKernel/CHANGELOG.md`（WP-K5 删除账），
+符号级总索引见 `KERNEL-K0-TRUTH-TABLE.md` §10；复活任一删除位须先过
+R1~R3 立新案（K6/K7/K8 或新证据）。参数面无随删：mm.thp 经
+huge_memory.c 门控访问器 REAL 生效（ai_mm_thp_apply），与已删的
+khugepaged 咨询桩无涉，参数与工具面文案保留。
 
 ---
 
@@ -268,7 +297,7 @@ sched/ai_sched.c（569）、io/ai_block.c（562）接近但未过 900 必拆线�
 | 能力 | 状态 | 证据 |
 |---|---|---|
 | 遥测 ring buffer + 采样门控 | 已实现 | core/ai_telemetry.c（583 行）、ai_telemetry.h |
-| A 轨 Hook（sched/mm/net/vfs/security/proc/futex/signal/seccomp/irq/lock/time/power/virt/bpf/io） | 已实现（空实现=放行 + 计数） | 各子系统 *_hook 函数与上游埋点 |
+| 保留钩面（K5 后 13 = 11 真实/观测 + 2 sec 门控真体） | 已实现（全部非空有真消费者；EXPERIMENTAL 出厂默认 n） | 各子系统 *_hook 函数与上游埋点；空钩两波删除账见 §4.4/CHANGELOG |
 | 决策策略引擎/决策 ring/因果链 | 已实现 | core/ai_policy.c、ai_causal.c；/proc/ai/decisions、/proc/ai/chains |
 | 可控参数表 | 部分实现 | 4 参数真实生效：mm.swappiness（ai_mm.c:47 经 vmscan 访问器）、sched.nice/affinity、proc.oom_score（ai_control.c:262-338）；注册参数共 17 个，其余 apply=NULL 接口预留 |
 | /sys/kernel/ai/ 控制面（think/outcome/policy/stats） | 内核已实现；agent 侧未接线 | core/ai_sysfs.c；agent/ai 无 /sys 调用 |
@@ -278,7 +307,7 @@ sched/ai_sched.c（569）、io/ai_block.c（562）接近但未过 900 必拆线�
 | 本地 provider（OpenAI 兼容本地端点） | 已实现（2026-09-27，待编译验证） | agent/ai/local/provider_local.c + local_chat.c + local_http.c；local_backend.c 重写 |
 | RAG（接口文档→faiss→检索） | 已实现并验证（2026-09-27 已构建索引，哈希 TF-IDF 嵌入） | rag/build_index.py（ai_rag_query:860）、rag/embeddings/、内核树 AIKernel_Docs/ |
 | aikctl CLI | 已实现 | tools/ai/aikctl{,_kernel,_netlink}.c（编译产物 tools/ai/aikctl） |
-| KUnit 测试 | 已实现（4 个模块） | test/ai_{runtime,policy,causal,telemetry}_test.c |
+| KUnit 测试 | 已实现（10 套件；K5 新增 ai_hooks 保留钩套件） | test/ai_{runtime,telemetry,policy,control,decision,effect,causal,netlink,agent,hooks}_test.c |
 
 ## guest 内 W2 确认→内核执行 连体测试证据（2026-09-29）
 
@@ -488,7 +517,8 @@ ACT 按 domain 广播：agent 设 `mm.swappiness=40` 一次下发 `executed=4`�
 ### 发布前审计（只读，报告独立成文）
 
 `AIKernel_MD文档库/AIKernel_发布前审计_未实现与虚标清单_20260929.md`：
-A 类 Blocker 4 条 / B 类缺口 7 条 / C 类设计预留 9 条（内核 80 个 ai_*_hook 空挂接点清点、
+A 类 Blocker 4 条 / B 类缺口 7 条 / C 类设计预留 9 条（内核 ai_*_hook 空挂接点清点——
+审计时点计 80，K0b/K5 两波删除 69 后现存 13 保留钩（见 §4.1/§4.4）、
 16 个 reserved 参数名单、agent Kconfig 开关虚设等），含宣传口径红线（能说/不能说清单）。
 
 ---
@@ -586,9 +616,12 @@ W2I 揪出：`gen_registry.py` 把 proc.signal/proc.freeze 标 `task=False`（sc
 
 - 可说：**22/23 可控参数真实生效**（唯一例外 net.qdisc 有代码级不可行证据且描述如实）、
   69 工具注册表全通道可用、云/本地双通道真增量流式、KUnit 29 用例内核内自证、
-  模型下发真实推理（Q31 bit-exact）、W2 再校验、80 个决策挂点预埋。
+  模型下发真实推理（Q31 bit-exact）、W2 再校验、决策挂点已由 W3 五点通电
+  （oom/vruntime/wakeup/readahead/reclaim；「80 个挂点预埋」口径随 K5 删除终结）。
 - 仍不可说："AI 接管调度/OOM 决策"（决策=确定性启发式+挂点预留）；power.freq 在 QEMU 内
-  无 cpufreq 可观测（实机即生效）；80 个 ai_*_hook 中 77 个为空挂接点（设计预留，非缺陷）。
+  无 cpufreq 可观测（实机即生效）；「80 个 ai_*_hook 中 77 个为空挂接点」的口径已终结
+  ——K0b/K5 两波删除 69 后现存 13 保留钩（11 真实/观测 + 2 sec 门控真体，
+  删除账见 AIKernel/CHANGELOG.md）。
 
 ---
 

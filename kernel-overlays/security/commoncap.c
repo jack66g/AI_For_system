@@ -134,9 +134,6 @@ int cap_capable(const struct cred *cred, struct user_namespace *target_ns,
 	trace_cap_capable(cred, target_ns, cred_ns, cap, ret);
 
 #ifdef CONFIG_AIKERNEL_SECURITY
-	/* A 轨：AI 风险评估（空实现返回原结果，语义不变） */
-	ret = ai_sec_cap_hook(cred, target_ns, cap, ret);
-
 	/* B 轨 8.3：cap_check_denied——能力拒绝是攻击线索，全量记录 */
 	if (ret < 0)
 		ai_telemetry_cap_check_denied(cap);

@@ -275,7 +275,10 @@ struct ai_sec_stack_overflow_payload {
 
 #ifdef CONFIG_AIKERNEL_SECURITY
 
-/* ---- A 轨：ai_sec_* Hook（空实现 = 原样放行，语义不变） ---- */
+/* ---- A 轨：ai_sec_* Hook（K5 后仅存 seccomp/key 两真体钩，经
+ *      CONFIG_AIKERNEL_EXPERIMENTAL 门控；cap/crypto 两空桩钩已删除，
+ *      判决与复活路径见 AIKernel/CHANGELOG.md 与
+ *      work/refactor/KERNEL-K5-DESIGN.md §3） ---- */
 
 #ifdef CONFIG_AIKERNEL_EXPERIMENTAL
 /**
@@ -292,19 +295,6 @@ void ai_sec_seccomp_hook(int syscall_nr, const struct seccomp_data *sd,
 			 u32 *action);
 
 /**
- * ai_sec_cap_hook() - AI 评估能力授予风险（EXPERIMENTAL 门控）
- * @cred: 被检查的凭证
- * @ns:   目标用户命名空间
- * @cap:  能力号
- * @ret:  原生检查结果
- *
- * 由 security/commoncap.c cap_capable() 调用；返回修改后的结果
- * （空实现返回原 ret，语义不变）。
- */
-int ai_sec_cap_hook(const struct cred *cred, struct user_namespace *ns,
-		    int cap, int ret);
-
-/**
  * ai_sec_key_hook() - AI 评估密钥强度（EXPERIMENTAL 门控）
  * @type:    密钥类型
  * @desc:    密钥描述
@@ -315,29 +305,14 @@ int ai_sec_cap_hook(const struct cred *cred, struct user_namespace *ns,
  */
 void ai_sec_key_hook(const char *type, const char *desc, size_t plen,
 		     u8 *strength);
-
-/**
- * ai_sec_crypto_hook() - AI 按负载选择加密算法（EXPERIMENTAL 门控）
- * @alg_name: 算法名（AI 可改为更优算法名，默认原样）
- * @type:     算法类型
- * @mask:     类型掩码
- *
- * 由 crypto/api.c crypto_alloc_tfm_node() 调用；本步空实现不改。
- */
-void ai_sec_crypto_hook(const char **alg_name, u32 type, u32 mask);
 #else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
 /* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
 static inline void ai_sec_seccomp_hook(int syscall_nr,
 				       const struct seccomp_data *sd,
 				       u32 *action) { }
-static inline int ai_sec_cap_hook(const struct cred *cred,
-				  struct user_namespace *ns, int cap, int ret)
-{ return ret; }
 static inline void ai_sec_key_hook(const char *type, const char *desc,
 				   size_t plen, u8 *strength)
 { if (strength) *strength = 0; }
-static inline void ai_sec_crypto_hook(const char **alg_name, u32 type,
-				      u32 mask) { }
 #endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
 
 /**
@@ -512,14 +487,9 @@ void ai_telemetry_stack_overflow(u64 guard_page_touch, const char *stack_name);
 static inline void ai_sec_seccomp_hook(int syscall_nr,
 				       const struct seccomp_data *sd,
 				       u32 *action) { }
-static inline int ai_sec_cap_hook(const struct cred *cred,
-				  struct user_namespace *ns, int cap, int ret)
-{ return ret; }
 static inline void ai_sec_key_hook(const char *type, const char *desc,
 				   size_t plen, u8 *strength)
 { if (strength) *strength = 0; }
-static inline void ai_sec_crypto_hook(const char **alg_name, u32 type,
-				      u32 mask) { }
 static inline void ai_sec_syscall_name(int nr, char *buf, size_t size)
 { if (buf && size) buf[0] = '\0'; }
 

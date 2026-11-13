@@ -63,8 +63,8 @@ int ai_net_set_sub_rate(u16 sub, u32 rate);
 
 /*
  * ---- A 轨：AI 网络决策 Hook（ai_net.c 实现，全部 EXPORT_SYMBOL_GPL） ----
- * nf 为观测采集钩；cong/cong_ssthresh 为 CCA 咨询钩（EXPERIMENTAL 门控）。
- * 空实现 = 原样放行（不改变内核默认行为）；决策计数经 ai_net_stats_read() 读取。
+ * nf 为真行为钩（异常检测观测）。K5 删除 cong 域两个空桩咨询钩
+ * （见 AIKernel/CHANGELOG.md）；决策计数经 ai_net_stats_read() 读取。
  */
 
 /**
@@ -90,32 +90,12 @@ void ai_net_qdisc_dryrun_set(bool on);
 u8 ai_net_qdisc_pending_get(void);
 #endif
 
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-/**
- * ai_net_cong_hook() - AI 拥塞控制增量决策（EXPERIMENTAL 门控）
- * @sk: 连接 socket
- * @cwnd_inc: 本 ACK 的 cwnd 增量（可改写；慢启动=acked、CA=1）
- *
- * 空实现不改。调用点：ai_tcp_cca.c tcp_ai_cong_avoid()。
- */
-void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc);
-
-/**
- * ai_net_cong_ssthresh_hook() - AI 拥塞慢启动阈值决策（EXPERIMENTAL 门控）
- * @sk: 连接 socket
- * @ssthresh: 丢包后的 ssthresh（可改写；reno 默认折半）
- *
- * 空实现不改。调用点：ai_tcp_cca.c tcp_ai_ssthresh()。
- */
-void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh);
-#else /* !CONFIG_AIKERNEL_EXPERIMENTAL */
-/* EXPERIMENTAL 关：退桩（零开销，语义与空实现一致） */
-static inline void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc) { }
-static inline void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh) { }
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+/* K5（2026-11）：cong 域两个空桩门控钩（cwnd 增量 / ssthresh 咨询）的
+ * 双桩声明已删除（判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3）；ai_cca CCA 本体保留。 */
 
 /*
- * ---- 决策框架（占位启发式，AI 推理后续步骤替换，ai_net.c 实现） ----
+ * ---- 决策框架（占位启发式，AI 推理后续替换，ai_net.c 实现） ----
  */
 
 /**
@@ -136,7 +116,7 @@ u8 ai_net_classify(struct sk_buff *skb);
 void ai_net_detect_anomaly(struct sk_buff *skb, unsigned int verdict);
 
 struct ai_net_stats {
-	u64 hook_calls[3];	/* 0=nf 1=cong 2=cong_ssthresh */
+	u64 nf_hook_calls;	/* netfilter 咨询计数（cong 两槽随 K5 删钩收缩） */
 	u64 classify_calls;
 	u64 anomaly_syn_pkts;
 	u64 anomaly_retrans_pkts;
@@ -471,9 +451,6 @@ static inline unsigned int ai_net_nf_hook(struct sk_buff *skb,
 {
 	return verdict;
 }
-static inline void ai_net_cong_hook(struct sock *sk, u32 *cwnd_inc) { }
-static inline void ai_net_cong_ssthresh_hook(struct sock *sk, u32 *ssthresh) { }
-
 static inline u8 ai_net_classify(struct sk_buff *skb) { return 0; }
 static inline void ai_net_detect_anomaly(struct sk_buff *skb,
 					 unsigned int verdict) { }

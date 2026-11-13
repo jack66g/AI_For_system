@@ -19,3 +19,7 @@ obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_causal_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_netlink_test.o
 # K3：agent 角色注册表/配额准入（文件内部按 CONFIG_AIKERNEL_RUNTIME 兜底）
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_agent_test.o
+# K5：空钩治理后 13 保留钩（11 真实/观测 + 2 sec 门控真体）——分类/
+# 异常/强度启发式与指标出口断言（文件内部按 RUNTIME/MM/LOCK/BPF/NET/
+# TELEMETRY/USRIFACE/EXPERIMENTAL×SECURITY 逐段兜底）
+obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_hooks_test.o

@@ -2262,11 +2262,6 @@ static void dequeue_dl_entity(struct sched_dl_entity *dl_se, int flags)
 
 static void enqueue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 {
-#ifdef CONFIG_AIKERNEL_SCHED
-	/* AI 准入控制（本步只计数放行，决策后续步骤接通） */
-	ai_sched_rt_admission_hook(p);
-#endif
-
 	if (is_dl_boosted(&p->dl)) {
 		/*
 		 * Because of delays in the detection of the overrun of a

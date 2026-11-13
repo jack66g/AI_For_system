@@ -3,8 +3,8 @@
  * ai_tcp_cca.c - AI TCP 拥塞控制算法（注册名 ai_cca，Prompt 06 模块5 任务 5.2）
  *
  * 本步基础版 = reno 族语义（AIMD）：慢启动走 tcp_slow_start，拥塞避免每窗口 +1
- * （增量经 ai_net_cong_hook 咨询，空实现不改 → 与 reno 行为一致族）；
- * ssthresh 丢包折半（ai_net_cong_ssthresh_hook 咨询）；undo_cwnd/min_cwnd 用 reno 语义。
+ * （K5 前经 cong 咨询钩可调增量，钩删除后恒 reno 语义）；
+ * ssthresh 丢包折半；undo_cwnd/min_cwnd 用 reno 语义。
  *
  * 零回归：CONFIG_AIKERNEL_NET=n 时本文件不参与构建 → 不注册 → 系统默认 CCA 仍为
  * CONFIG_DEFAULT_CUBIC（cubic）。仅当用户显式
@@ -58,7 +58,7 @@ EXPORT_SYMBOL_GPL(ai_cca_clamp_hits_read);
  * tcp_ai_cong_avoid() - AI 拥塞避免
  *
  * 慢启动：tcp_slow_start 指数增窗；拥塞避免：分数 AIMD（同 tcp_cong_avoid_ai 语义），
- * 每窗口增窗量默认 1，先经 ai_net_cong_hook 咨询（AI 可调整增窗节奏）。
+ * 每窗口增窗量 1（reno 语义；K5 删除 cong 咨询钩，增量不再可调）。
  * @sk: 目的套接字（取 tcp_sock 读写 cwnd）
  * @ack: 本次确认的序号（reno 拥塞避免不直接消费）
  * @acked: 本次确认累计 ACK 的报文数（慢启动/增窗计数依据）
@@ -78,12 +78,6 @@ static void tcp_ai_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		if (!acked)
 			goto clamp_out;
 	}
-
-	ai_net_cong_hook(sk, &inc);
-	if (!inc)
-		inc = 1;
-	if (inc > tcp_snd_cwnd(tp))
-		inc = tcp_snd_cwnd(tp);
 
 	if (tp->snd_cwnd_cnt >= tcp_snd_cwnd(tp)) {
 		tp->snd_cwnd_cnt = 0;
@@ -108,8 +102,8 @@ clamp_out:
 }
 
 /**
- * tcp_ai_ssthresh() - 丢包后的慢启动阈值（reno 语义折半，AI 可调整）
- * @sk: 目的套接字（按当前 cwnd 折半，经 ai_net_cong_ssthresh_hook 供 AI 调整）
+ * tcp_ai_ssthresh() - 丢包后的慢启动阈值（reno 语义折半）
+ * @sk: 目的套接字（按当前 cwnd 折半）
  *
  * Return: 新 ssthresh（下限 2，受 ai_cca_cwnd_clamp 钳制）
  */
@@ -119,7 +113,6 @@ static u32 tcp_ai_ssthresh(struct sock *sk)
 	u32 ssthresh = max(tcp_snd_cwnd(tp) >> 1U, 2U);
 	u32 clamp = READ_ONCE(ai_cca_cwnd_clamp);
 
-	ai_net_cong_ssthresh_hook(sk, &ssthresh);
 	if (clamp)
 		ssthresh = min(ssthresh, clamp);
 	return max(ssthresh, 2U);

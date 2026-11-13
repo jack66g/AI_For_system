@@ -113,35 +113,9 @@ u64 ai_sched_predict_timeslice(struct task_struct *p)
 }
 EXPORT_SYMBOL_GPL(ai_sched_predict_timeslice);
 
-/* ---- Hook：空实现 = 原样放行 ---- */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-int ai_load_balance_hook(int src_cpu, int dst_cpu, unsigned long imbalance,
-			 bool *proceed)
-{
-	WRITE_ONCE(ai_sched_stats.lb_calls,
-		   READ_ONCE(ai_sched_stats.lb_calls) + 1);
-	if (proceed)
-		*proceed = true;   /* 默认继续迁移 */
-	return AI_OK;
-}
-EXPORT_SYMBOL_GPL(ai_load_balance_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
-
-#ifdef CONFIG_AIKERNEL_EXPERIMENTAL
-int ai_sched_rt_admission_hook(struct task_struct *p)
-{
-	/* 区分 RT/DL 调用来源（按任务策略判定） */
-	if (dl_task(p))
-		WRITE_ONCE(ai_sched_stats.dl_admission_calls,
-			   READ_ONCE(ai_sched_stats.dl_admission_calls) + 1);
-	else
-		WRITE_ONCE(ai_sched_stats.rt_admission_calls,
-			   READ_ONCE(ai_sched_stats.rt_admission_calls) + 1);
-	return 1;   /* 本步允许全部；AI 准入决策后续步骤接通 */
-}
-EXPORT_SYMBOL_GPL(ai_sched_rt_admission_hook);
-#endif /* CONFIG_AIKERNEL_EXPERIMENTAL */
+/* K5（2026-11）：sched 域两个空桩门控钩（负载均衡 veto / RT-DL 准入）
+ * 已删除，判决与复活路径见 AIKernel/CHANGELOG.md 与
+ * work/refactor/KERNEL-K5-DESIGN.md §3。 */
 
 int ai_sched_query(u32 query_id, const void *in, size_t in_len,
 		   void *out, size_t out_len)
