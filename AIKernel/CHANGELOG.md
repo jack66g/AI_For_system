@@ -80,3 +80,7 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
   改写为 sec seccomp/key 两钩现状（17→2）。
 - kernel-overlays/MANIFEST.sha256：按现有格式重算被改文件并移除已删
   sample 条目。
+
+## K9 性能预算与基准（2026-11-14）
+- 新增 ai_perf_test KUnit 套（record_write/chain_append/telemetry_emit p99 升级/decision_query，机读 PERF 行+CI 宽界）；
+- AIKernel/test/perf/{budgets.json,k9_perf.py}：十行预算表单一事实源（absolute/baseline/registered 三模；HW 口径存证不冒充）+单 boot 双层跑表器（门禁件，超界退非零）。

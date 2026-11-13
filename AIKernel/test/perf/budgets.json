@@ -1,0 +1,88 @@
+{
+  "_meta": {
+    "what": "K9 性能预算表单一事实源（KERNEL-K9-DESIGN §2 D1）",
+    "layers": "kernel=ai_perf_test KUnit 机读行; userspace=k9_perf.py 腿; external=既有归口存证",
+    "modes": "absolute=任何环境直判; baseline=tcg 观测基线×factor 回归门; registered=既有面归口",
+    "honesty": "ktb_budget 为 KTB 原值存证（HW 口径），tcg 直测不冒充；禁调期望凑绿"
+  },
+  "kernel": [
+    {
+      "name": "record_write",
+      "ktb_budget_ns": 1000,
+      "ci_bound_ns": 5000,
+      "mode": "absolute",
+      "home": "ai_perf_test（K1 手法）"
+    },
+    {
+      "name": "chain_append",
+      "ktb_budget_ns": null,
+      "ci_bound_ns": 5000,
+      "mode": "absolute",
+      "home": "ai_perf_test（K8 链；KTB 无此行，CI 界自定）"
+    },
+    {
+      "name": "telemetry_emit",
+      "ktb_budget_ns": 2000,
+      "ci_bound_ns": 100000,
+      "mode": "absolute",
+      "home": "ai_perf_test p99 口径（K7 平均口径升级）"
+    },
+    {
+      "name": "decision_query",
+      "ktb_budget_ns": 2000,
+      "ci_bound_ns": 10000,
+      "mode": "absolute",
+      "home": "ai_perf_test；2µs 为 HW 口径存证"
+    }
+  ],
+  "userspace": [
+    {
+      "name": "act_rtt_avg",
+      "ktb_budget_us": 200,
+      "mode": "baseline",
+      "factor": 1.5,
+      "tcg_baseline_us": 2942.7,
+      "home": "k9_perf storm 均值（含 exec 开销上界口径）"
+    },
+    {
+      "name": "proc_decisions_read_4kb",
+      "ktb_budget_us": 50,
+      "mode": "baseline",
+      "factor": 1.5,
+      "tcg_baseline_us": 24141.9,
+      "home": "k9_perf dd 夹逼 ×3 取 min"
+    },
+    {
+      "name": "aikernel_mem",
+      "ktb_budget_mb": 32,
+      "mode": "absolute",
+      "home": "k9_perf 常驻求和（telemetry ring+模型面+链环 576KB）"
+    }
+  ],
+  "external": [
+    {
+      "name": "act_batch_27",
+      "ktb_budget_ms": 10,
+      "mode": "registered",
+      "home": "K2c golden+k2batch rig（实测 p99 0.63-0.75ms）"
+    },
+    {
+      "name": "telemetry_cpu",
+      "ktb_budget_pct": 1,
+      "mode": "registered",
+      "home": "K7 波 KUnit 代位登记（tcg 无 perf）"
+    },
+    {
+      "name": "ebpf_features",
+      "ktb_budget_us_per_batch": 50,
+      "mode": "registered",
+      "home": "k7feat selftest 18/18"
+    },
+    {
+      "name": "mlp_infer",
+      "ktb_budget_us": 100,
+      "mode": "registered",
+      "home": "ai_mlp_test 既有案+lat 出参；v2 抽公共构造"
+    }
+  ]
+}

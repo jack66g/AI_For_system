@@ -29,3 +29,5 @@ obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_hooks_test.o
 # K8：审计链（完整性/篡改定位/驱逐/锚/seed/并发/三层开销/事件对；
 # 文件内部按 CONFIG_AIKERNEL_SECURITY 兜底，SECURITY=n 空套件）
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_chain_test.o
+# K9：性能预算套（四微基准机读 PERF 行；k9_perf.py+budgets.json 同目录 perf/）
+obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_perf_test.o
