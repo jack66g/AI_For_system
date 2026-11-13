@@ -230,7 +230,9 @@ int api_nl_pack_act_batch(unsigned char *out, size_t cap, size_t *out_len,
 	api_nla_put(&p, end, AI_DEC_ATTR_TRACE_HI_B, &u64v, sizeof(u64v));
 	api_nla_put(&p, end, AI_DEC_ATTR_TRACE_LO_B, &u64v, sizeof(u64v));
 	api_nla_put(&p, end, AI_DEC_ATTR_INTENT_B, &u64v, sizeof(u64v));
-	u32v = 0;
+	/* K3 身份补齐: agent 自报从写死 0(KERNEL,记账逃逸口)改为
+	 * AI_AGENT_APIC(4)——uapi enum ai_agent_id;api.h 枚举镜像 */
+	u32v = AI_AGENT_APIC;
 	api_nla_put(&p, end, AI_DEC_ATTR_AGENT_B, &u32v, sizeof(u32v));
 	if (p == out || p > end)
 		return -1;	/* 容量不足/未推进：编码防御 */

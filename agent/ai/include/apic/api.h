@@ -82,6 +82,9 @@ static inline ssize_t api_write_discard(int fd, const void *buf, size_t n)
 #define AI_DEC_ATTR_TRACE_LO_B		9
 #define AI_DEC_ATTR_INTENT_B		10
 #define AI_DEC_ATTR_AGENT_B		12
+/* K3 身份补齐: agent 枚举镜像（uapi linux/ai_netlink.h enum ai_agent_id,
+ * APIC=4=aikernel-api HTTP 网关）——批级自报 AI_AGENT_APIC,不再写死 0 */
+#define AI_AGENT_APIC			4
 #define AI_DEC_ATTR_VALUE_B		14	/* K2 新号（续 EXPECTED=13） */
 #define AI_DEC_ATTR_PID_B		15
 #define NLA_F_NESTED_AI			0x8000	/* uapi netlink.h (1<<15) */

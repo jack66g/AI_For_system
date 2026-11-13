@@ -35,6 +35,7 @@
 #include "ai_policy.h"
 #include "ai_policy_safety.h"
 #include "ai_control.h"
+#include "ai_agent.h"
 #include "ai_telemetry.h"
 #include "ai_causal.h"
 #include "ai_effect.h"
@@ -449,6 +450,7 @@ static int __ai_policy_execute(struct ai_policy_ctx *ctx, void *arg)
 						       : AI_OUTCOME_FAILED;
 
 	ai_policy_record_write(&rec, lat);
+	ai_agent_note_cost(rec.agent_id, rec.cost_ns);   /* K3：agent 成本归集 */
 
 	/* AI 自我观测遥测（cat18：决策事件） */
 	memset(&tp, 0, sizeof(tp));
@@ -842,6 +844,7 @@ int ai_policy_execute_batch(const struct ai_batch_op *ops, u32 n_ops,
 		rec.outcome = AI_OUTCOME_SUCCESS;
 
 	ai_policy_record_write(&rec, lat);
+	ai_agent_note_cost(rec.agent_id, rec.cost_ns);   /* K3：agent 成本归集 */
 
 	/* cat18 遥测（K1 链照旧） */
 	memset(&tp, 0, sizeof(tp));

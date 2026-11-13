@@ -161,6 +161,26 @@ struct ai_nl_reg {
 	__u32 reserved;		/* 必须为 0（前向兼容） */
 };
 
+/*
+ * K3（KERNEL-K3-DESIGN §2/D1）：REG 可选 nlattr 追加段——消息 =
+ * 定长头 struct ai_nl_reg + 可选 attr 区（长度 = nlmsg_len -
+ * sizeof(struct ai_nl_reg)；旧客户端纯头零改动，行为不变）。
+ * 属性号 8/9 为本册 D1 冻结契约（宿主探针自带同号常量；1-7 预留勿占）。
+ * AGENT=角色绑定（u32，必须落 enum ai_agent_id 白名单；KERNEL=0 为
+ * 内核自身不可绑）；CGROUP=角色 cgroup 路径（可缺省；内核只读校验
+ * 存在性，无效 → degraded 记账不限制；有效上限 255 字符+NUL——
+ * 内核侧槽容量，超出 attr 类型 PATH_MAX-1 上限的收紧）。
+ */
+enum {
+	AI_REG_ATTR_UNSPEC = 0,
+	/* 1-7 预留 */
+	AI_REG_ATTR_AGENT = 8,	/* u32：绑定角色（enum ai_agent_id） */
+	AI_REG_ATTR_CGROUP = 9,	/* NLA_NUL_STRING：cgroup 路径 */
+
+	__AI_REG_ATTR_MAX,
+	AI_REG_ATTR_MAX = __AI_REG_ATTR_MAX - 1,
+};
+
 /* ---- 异步事件（AI_CMD_EVENT，内核主动推送给已注册 portid） ---- */
 
 /* 事件大类（category）：只追加不重排 */
@@ -179,7 +199,15 @@ struct ai_nl_reg {
 #define AI_NL_EV_DEVICE		3	/* 设备 probe/remove（遥测 16.01 镜像） */
 #define AI_NL_EV_CPU_HOTPLUG	4	/* CPU 上下线（遥测 01.07 镜像） */
 #define AI_NL_EV_HW_ERROR	5	/* MCE 硬件错误（遥测 16.03 镜像） */
-#define AI_NL_EV_MAX		5
+/*
+ * K3（KERNEL-K3-DESIGN §2/D1/D3）：agent 角色生命周期与配额超限事件
+ * （只追加不重排；param=角色名。bind/unbind：event_id=portid、
+ * code=enum ai_agent_id；limit：event_id=0（无决策产生）、code=-EAGAIN）。
+ */
+#define AI_NL_EV_AGENT_BIND	6	/* agent 角色绑定（REG 追加属性） */
+#define AI_NL_EV_AGENT_UNBIND	7	/* 角色解绑（UNREG/URELEASE） */
+#define AI_NL_EV_AGENT_LIMIT	8	/* 配额超限拒绝（与 -EAGAIN ack 同报） */
+#define AI_NL_EV_MAX		8
 
 /* 严重级 */
 #define AI_NL_EV_SEV_INFO	0

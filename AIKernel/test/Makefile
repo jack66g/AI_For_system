@@ -17,3 +17,5 @@ obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_effect_test.o
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_causal_test.o
 # W63：NETLINK_AI 订阅生命周期（文件内部按 CONFIG_AIKERNEL_NETLINK 兜底）
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_netlink_test.o
+# K3：agent 角色注册表/配额准入（文件内部按 CONFIG_AIKERNEL_RUNTIME 兜底）
+obj-$(CONFIG_AIKERNEL_KUNIT_TEST) += ai_agent_test.o

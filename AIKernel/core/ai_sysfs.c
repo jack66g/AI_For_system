@@ -43,6 +43,7 @@
 #include "ai_causal.h"
 #include "ai_decision.h"
 #include "ai_effect.h"
+#include "ai_agent.h"
 
 static struct kobject *ai_kobj;          /* /sys/kernel/ai/ */
 static struct kobject *ai_policy_kobj;   /* /sys/kernel/ai/policy/ */
@@ -772,6 +773,83 @@ static const struct attribute_group ai_decision_group = {
 	.attrs = ai_decision_attrs,
 };
 
+/* ---- K3（KERNEL-K3-DESIGN D5）：agents/<name>/ 角色配额子目录 ----
+ *
+ * 每角色一目录（内置 7 角色）+ 两 knob：actions_per_win（0=不限，
+ * 默认——出厂零行为变化）/ win_ms（滚动窗，默认 60000）。RW 0644，
+ * 写需 CAP_SYS_ADMIN（ai_sysfs_cap_check）。目录创建照 policy/ 子目录
+ * 手法（静态槽 + 逐 kobject/attr 装配）。 */
+
+struct ai_sysfs_agent_dir {
+	struct kobject *kobj;
+	u32 agent_id;
+	struct kobj_attribute apw_attr;	/* actions_per_win */
+	struct kobj_attribute win_attr;	/* win_ms */
+};
+
+static struct kobject *ai_agents_kobj;
+static struct ai_sysfs_agent_dir ai_sysfs_agent_dirs[16];
+
+static ssize_t ai_agent_apw_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	struct ai_sysfs_agent_dir *d =
+		container_of(attr, struct ai_sysfs_agent_dir, apw_attr);
+	u32 apw = 0, win = 0;
+
+	if (ai_agent_quota_get(d->agent_id, &apw, &win))
+		return -ENOENT;
+	return sysfs_emit(buf, "%u\n", apw);
+}
+
+static ssize_t ai_agent_apw_store(struct kobject *kobj,
+				  struct kobj_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct ai_sysfs_agent_dir *d =
+		container_of(attr, struct ai_sysfs_agent_dir, apw_attr);
+	unsigned int val;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+	if (kstrtouint(buf, 0, &val) != 0)
+		return -EINVAL;
+	rc = ai_agent_set_actions_per_win(d->agent_id, val);	/* 0=不限 */
+	return rc ? rc : (ssize_t)count;
+}
+
+static ssize_t ai_agent_win_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	struct ai_sysfs_agent_dir *d =
+		container_of(attr, struct ai_sysfs_agent_dir, win_attr);
+	u32 apw = 0, win = 0;
+
+	if (ai_agent_quota_get(d->agent_id, &apw, &win))
+		return -ENOENT;
+	return sysfs_emit(buf, "%u\n", win);
+}
+
+static ssize_t ai_agent_win_store(struct kobject *kobj,
+				  struct kobj_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct ai_sysfs_agent_dir *d =
+		container_of(attr, struct ai_sysfs_agent_dir, win_attr);
+	unsigned int val;
+	int rc;
+
+	rc = ai_sysfs_cap_check();
+	if (rc)
+		return rc;
+	if (kstrtouint(buf, 0, &val) != 0)
+		return -EINVAL;
+	rc = ai_agent_set_win_ms(d->agent_id, val);	/* 0=不滚窗=不限 */
+	return rc ? rc : (ssize_t)count;
+}
+
 static struct attribute *ai_attrs[] = {
 	&ai_enabled_attr.attr,
 	&ai_model_load_attr.attr,
@@ -788,6 +866,8 @@ static const struct attribute_group ai_group = {
 
 static int __init ai_sysfs_init(void)
 {
+	struct ai_sysfs_agent_dir *d;
+	unsigned int i;
 	int rc;
 
 	if (!ai_startup_get_enabled())
@@ -854,14 +934,53 @@ static int __init ai_sysfs_init(void)
 	if (rc)
 		goto err_kobj;
 
+	/* K3：agents/<name>/{actions_per_win,win_ms}（照 policy/ 子目录手法） */
+	ai_agents_kobj = kobject_create_and_add("agents", ai_kobj);
+	if (!ai_agents_kobj) {
+		rc = -ENOMEM;
+		goto err_kobj;
+	}
+	for (i = 0; i < ARRAY_SIZE(ai_sysfs_agent_dirs); i++) {
+		const char *name;
+
+		d = &ai_sysfs_agent_dirs[i];
+		if (ai_agent_enumerate(i, &d->agent_id, &name))
+			break;
+		d->kobj = kobject_create_and_add(name, ai_agents_kobj);
+		if (!d->kobj) {
+			rc = -ENOMEM;
+			goto err_kobj;
+		}
+		sysfs_attr_init(&d->apw_attr.attr);
+		d->apw_attr.attr.name = "actions_per_win";
+		d->apw_attr.attr.mode = 0644;
+		d->apw_attr.show = ai_agent_apw_show;
+		d->apw_attr.store = ai_agent_apw_store;
+		rc = sysfs_create_file(d->kobj, &d->apw_attr.attr);
+		if (rc)
+			goto err_kobj;
+		sysfs_attr_init(&d->win_attr.attr);
+		d->win_attr.attr.name = "win_ms";
+		d->win_attr.attr.mode = 0644;
+		d->win_attr.show = ai_agent_win_show;
+		d->win_attr.store = ai_agent_win_store;
+		rc = sysfs_create_file(d->kobj, &d->win_attr.attr);
+		if (rc)
+			goto err_kobj;
+	}
+
 	pr_info("AIKernel: /sys/kernel/ai/ interface ready\n");
 	return 0;
 
 err_kobj:
+	for (i = 0; i < ARRAY_SIZE(ai_sysfs_agent_dirs); i++)
+		kobject_put(ai_sysfs_agent_dirs[i].kobj);
+	kobject_put(ai_agents_kobj);
 	kobject_put(ai_decision_kobj);
 	kobject_put(ai_stats_kobj);
 	kobject_put(ai_policy_kobj);
 	kobject_put(ai_kobj);
+	ai_agents_kobj = NULL;
 	ai_decision_kobj = ai_stats_kobj = ai_policy_kobj = ai_kobj = NULL;
 	return rc;
 }
@@ -869,10 +988,16 @@ subsys_initcall(ai_sysfs_init);
 
 static void __exit ai_sysfs_exit(void)
 {
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ai_sysfs_agent_dirs); i++)
+		kobject_put(ai_sysfs_agent_dirs[i].kobj);
+	kobject_put(ai_agents_kobj);
 	kobject_put(ai_decision_kobj);
 	kobject_put(ai_stats_kobj);
 	kobject_put(ai_policy_kobj);
 	kobject_put(ai_kobj);
+	ai_agents_kobj = NULL;
 	ai_decision_kobj = ai_stats_kobj = ai_policy_kobj = ai_kobj = NULL;
 }
 module_exit(ai_sysfs_exit);

@@ -39,6 +39,7 @@
 #include "../core/ai_startup.h"
 #include "../core/ai_telemetry.h"
 #include "../core/ai_policy.h"
+#include "../core/ai_agent.h"
 
 static struct sock *ai_nl_sock;
 static DEFINE_SPINLOCK(ai_nl_sock_lock);
@@ -146,6 +147,9 @@ static int ai_nl_urelease(u32 portid, int protocol, struct net *net)
 		return NOTIFY_DONE;
 	if (ai_nl_reg_count_get())   /* 空表快速返回（绝大多数 socket 关闭） */
 		ai_nl_reg_del(portid);
+	/* K3：socket 关闭解绑角色（D1 生命周期；幂等）。防 w63 同款死槽：
+	 * 不解绑则 portid 复用后新 socket 被旧角色记账/限额。 */
+	ai_agent_unbind(portid);
 	return NOTIFY_DONE;
 }
 
@@ -402,6 +406,25 @@ static int ai_nl_act(struct sk_buff *skb, const struct nlmsghdr *nlh)
 			return -EINVAL;   /* 超出策略层容量（防御，长度恒等不应触发） */
 	}
 
+	/* K3（KERNEL-K3-DESIGN D3）：配额准入——dispatch 内、execute 之前。
+	 * v1 载荷无 agent 字段=自报恒 0；绑定 socket 的角色覆盖防借道
+	 * legacy ACT 逃逸。超额=ack -EAGAIN（零 ring 写入，blast 拒绝
+	 * 同形态）；白名单外自报 -EINVAL。 */
+	{
+		u32 role = AI_AGENT_KERNEL;
+		int err = ai_agent_admit(skb, AI_AGENT_KERNEL, &role);
+
+		if (err == -EAGAIN) {
+			memset(&ack, 0, sizeof(ack));
+			ack.ai_err = -EAGAIN;
+			ai_nl_reply(skb, AI_CMD_ACT, &ack, sizeof(ack));
+			return 0;
+		}
+		if (err)
+			return err;
+		ctx.agent_id = role;	/* 绑定覆盖；未绑定恒 0=v1 原语义 */
+	}
+
 	executed = ai_policy_execute(&ctx, NULL);
 
 	/* 决策记录由 execute 写入 ring（decision_id 在 ctx 回填）；
@@ -528,6 +551,20 @@ static int ai_nl_act2(struct sk_buff *skb, const struct nlmsghdr *nlh)
 		return err;
 	if (ctx.domain > AI_POLICY_DOMAIN_PROC)
 		return -EINVAL;   /* 与 v1 同闸：domain 钳制 */
+
+	/* K3（KERNEL-K3-DESIGN D3）：配额准入——解析/校验链之后、execute
+	 * 之前。入参出参同址（admit 先读后写）：绑定 socket 的角色覆盖
+	 * 自报 agent；未绑定自报白名单外 → -EINVAL；超额 → ack -EAGAIN
+	 * （零 ring 写入，blast 拒绝同形态；decision_id/trace 诚实零）。 */
+	err = ai_agent_admit(skb, ctx.agent_id, &ctx.agent_id);
+	if (err == -EAGAIN) {
+		memset(&ack, 0, sizeof(ack));
+		ack.ai_err = -EAGAIN;
+		ai_nl_reply(skb, AI_CMD_ACT2, &ack, sizeof(ack));
+		return 0;
+	}
+	if (err)
+		return err;
 
 	ctx.trigger_ts = ktime_get_ns();
 	ctx.source = AI_DEC_SRC_NETLINK;
@@ -659,6 +696,20 @@ static int ai_nl_act_batch(struct sk_buff *skb, const struct nlmsghdr *nlh)
 	if (err)
 		return err;
 
+	/* K3（KERNEL-K3-DESIGN D3）：整批为一个动作计数单位——解析拒绝链
+	 * 之后、批执行之前 admit（拒绝=整批 -EAGAIN，ack 结构零改：
+	 * radius/token=0=未触发语义）；绑定角色覆盖批级自报 agent。 */
+	err = ai_agent_admit(skb, req.opts.agent_id, &req.opts.agent_id);
+	if (err == -EAGAIN) {
+		memset(&ack, 0, sizeof(ack));
+		ack.first_fail_idx = -1;
+		ack.ai_err = -EAGAIN;
+		ai_nl_reply(skb, AI_CMD_ACT_BATCH, &ack, sizeof(ack));
+		return 0;
+	}
+	if (err)
+		return err;
+
 	ai_policy_execute_batch(req.ops, req.n_ops, &req.opts, &ack);
 	ai_nl_reply(skb, AI_CMD_ACT_BATCH, &ack, sizeof(ack));
 	return 0;
@@ -666,15 +717,34 @@ static int ai_nl_act_batch(struct sk_buff *skb, const struct nlmsghdr *nlh)
 
 /* ---- AI_CMD_REG ---- */
 
+/*
+ * K3（KERNEL-K3-DESIGN D1）：REG 属性 policy 表——消息 = 定长头 +
+ * 可选 attr 区（AGENT=8/CGROUP=9，uapi 冻结契约）。旧客户端纯头
+ * （零 attr）零改动兼容；携带 attr 则严格轨（nla_parse）全拒未知项。
+ * CGROUP 长度上限=槽存储容量-1（超长拒收不截断——审计路径静默变形
+ * 比拒绝更糟）。
+ */
+static const struct nla_policy ai_nl_reg_policy[AI_REG_ATTR_MAX + 1] = {
+	[AI_REG_ATTR_AGENT]	= { .type = NLA_U32 },
+	[AI_REG_ATTR_CGROUP]	= { .type = NLA_NUL_STRING,
+				   .len = AI_AGENT_CG_LEN - 1 },
+};
+
 static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
 {
 	const struct ai_nl_reg *req = nlmsg_data(nlh);
+	struct nlattr *reg_tb[AI_REG_ATTR_MAX + 1] = {};
 	struct {
 		__s32 ai_err;
 		__u32 count;
 	} ack;
 	u32 portid = NETLINK_CB(skb).portid;
+	u32 agent = 0;
+	const char *cgroup = NULL;
+	int attrs_len;
+	bool has_agent = false;
 	int rc = AI_OK;
+	int err;
 
 	if (nlmsg_len(nlh) < sizeof(*req))
 		return -EINVAL;
@@ -688,14 +758,47 @@ static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
 	if ((req->flags & ~AI_NL_REG_F_UNREG) || req->reserved)
 		return -EINVAL;
 
+	/* K3：定长头后可选 nlattr 区（长度闸已保 attrs_len >= 0） */
+	attrs_len = nlmsg_len(nlh) - (int)sizeof(*req);
+	if (attrs_len > 0) {
+		err = nla_parse(reg_tb, AI_REG_ATTR_MAX,
+				(struct nlattr *)((u8 *)req + sizeof(*req)),
+				attrs_len, ai_nl_reg_policy, NULL);
+		if (err)
+			return err;
+		if (reg_tb[AI_REG_ATTR_AGENT]) {
+			has_agent = true;
+			agent = nla_get_u32(reg_tb[AI_REG_ATTR_AGENT]);
+		}
+		if (reg_tb[AI_REG_ATTR_CGROUP])
+			cgroup = nla_data(reg_tb[AI_REG_ATTR_CGROUP]);
+	}
+	/* UNREG 携带 AGENT 属矛盾请求（解绑不挑角色，见下）拒收；
+	 * CGROUP 仅随 AGENT 生效，单独携带同样拒收 */
+	if (has_agent && (req->flags & AI_NL_REG_F_UNREG))
+		return -EINVAL;
+	if (cgroup && !has_agent)
+		return -EINVAL;
+
 	if (req->flags & AI_NL_REG_F_UNREG) {
 		ai_nl_reg_del(portid);
+		/* K3：注销同时解绑角色（幂等；该 socket 已声明退出） */
+		ai_agent_unbind(portid);
 		pr_info("AIKernel: NETLINK_AI callback unregistered (portid=%u, total=%u)\n",
 			portid, ai_nl_reg_count_get());
 	} else {
 		rc = ai_nl_reg_add(portid);
 		if (rc != AI_OK)
 			return ai_error_to_errno(rc);
+		if (has_agent) {
+			/* K3：角色绑定/改绑（白名单/防 0 逃逸校验在 bind
+			 * 内，越界 -EINVAL、角色被占 -EBUSY）。绑定失败
+			 * 时事件登记保留先行成功状态（URELEASE 兜底回收，
+			 * 客户端按错误码自行处置）。 */
+			rc = ai_agent_bind(portid, agent, cgroup);
+			if (rc)
+				return rc;
+		}
 		pr_info("AIKernel: NETLINK_AI callback registered (portid=%u, total=%u)\n",
 			portid, ai_nl_reg_count_get());
 	}

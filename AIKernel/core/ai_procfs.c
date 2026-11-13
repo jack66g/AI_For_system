@@ -36,6 +36,7 @@
 #include "ai_causal.h"
 #include "ai_control.h"
 #include "ai_policy_safety.h"
+#include "ai_agent.h"
 
 #define AI_PROC_TELEMETRY_CHUNK   (64 * 1024)   /* 单次 read 处理上限 */
 
@@ -549,6 +550,56 @@ static const struct proc_ops ai_proc_telemetry_ops = {
 	.proc_write = ai_proc_telemetry_write,
 };
 
+/* ---- agents（K3：agent 角色注册表/配额/记账面，KERNEL-K3-DESIGN D4） ---- */
+
+/*
+ * 每角色一行（win=<当前窗动作>/<actions_per_win 上限>；cgroup 可空省略；
+ * degraded 行：配额栏 n/a(记账only) + 行尾 degraded=1(记账only)——
+ * 「静默不限制」是点名反模式）。数据源=ai_agent 静态原子读单次快照
+ * （允许极小撕裂，D4 v1 口径）；不触碰 decisions 等任何既有行字节。
+ */
+static int ai_proc_agents_show(struct seq_file *m, void *v)
+{
+	struct ai_agent_view a;
+	unsigned int i;
+
+	for (i = 0; ai_agent_view_get(i, &a) == 0; i++) {
+		if (a.degraded) {
+			seq_printf(m, "id=%u name=%s bound=%u actions=%llu "
+				   "cost_ns=%llu failures=%llu "
+				   "win=n/a(记账only)",
+				   a.id, a.name, (unsigned int)a.bound,
+				   a.actions, a.cost_ns, a.failures);
+			if (a.cgroup[0])
+				seq_printf(m, " cgroup=%s", a.cgroup);
+			seq_puts(m, " degraded=1(记账only)\n");
+		} else {
+			seq_printf(m, "id=%u name=%s bound=%u actions=%llu "
+				   "cost_ns=%llu failures=%llu "
+				   "win=%llu/%u",
+				   a.id, a.name, (unsigned int)a.bound,
+				   a.actions, a.cost_ns, a.failures,
+				   a.win_used, a.actions_per_win);
+			if (a.cgroup[0])
+				seq_printf(m, " cgroup=%s", a.cgroup);
+			seq_putc(m, '\n');
+		}
+	}
+	return 0;
+}
+
+static int ai_proc_agents_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ai_proc_agents_show, NULL);
+}
+
+static const struct proc_ops ai_proc_agents_ops = {
+	.proc_open    = ai_proc_agents_open,
+	.proc_read    = seq_read,
+	.proc_lseek   = seq_lseek,
+	.proc_release = single_release,
+};
+
 /* ---- 初始化 ---- */
 
 static struct proc_dir_entry *ai_proc_root;
@@ -581,6 +632,8 @@ static int __init ai_procfs_init(void)
 	proc_create("latency", 0444, ai_proc_root, &ai_proc_latency_ops);
 	proc_create("hitrate", 0444, ai_proc_root, &ai_proc_hitrate_ops);
 	proc_create("telemetry", 0644, ai_proc_root, &ai_proc_telemetry_ops);
+	/* K3：agent 角色注册表/配额/记账面（追加条目，既有行零改） */
+	proc_create("agents", 0644, ai_proc_root, &ai_proc_agents_ops);
 
 	pr_info("AIKernel: /proc/ai/ interface ready\n");
 	return 0;

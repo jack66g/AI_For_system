@@ -21,6 +21,10 @@ obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_causal.o
 # ai_effect.o（K4.0 效果归因环）：per-hook 效果窗 + 结算回填决策 ring，
 # RUNTIME 门控与 ai_decision.o 同源（开窗/绑定入口都在决策注入层）。
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_effect.o
+# ai_agent.o（K3 agent 角色注册表）：绑定/准入/记账，admit 挂 netlink ACT
+# 三命令热路径（符号被 ai_netlink/ai_policy/ai_procfs/ai_sysfs 引用，
+# !RUNTIME 时 ai_agent.h 静态桩兜底），RUNTIME 门控与 ai_decision.o 同源。
+obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_agent.o
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_startup.o
 obj-$(CONFIG_AIKERNEL_RUNTIME)	+= ai_model_mlp.o
 # ai_proc*.o：A 轨（RUNTIME）与 B 轨（TELEMETRY）代码按各自 CONFIG 条件编译，
