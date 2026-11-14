@@ -136,6 +136,11 @@ typedef struct {
 	 * 0=无更多/忙/内存上限（occ.c 自行出 notice）。调用方随后自行
 	 * 投递 HIST_CLEAR → 回放事件 → TUI_VIEW_HIST_ANCHOR。 ---- */
 	int (*on_load_more)(void *ud);
+	/* ---- E8：1s 节流 tick（主线程主循环驱动——poll 超时兜底保证
+	 * 到点必醒，无事件窗口不睡死）。occ.c 在此轮询 /tasks 面板异步
+	 * 进度（读库+指纹比对，变化才重绘——见 occ.c tui_app_on_tick）；
+	 * NULL=零钩子零扰动（嵌入方/旧测试不受影响）。 ---- */
+	void (*on_tick)(void *ud);
 } tui_view_hooks;
 
 /* 创建视图（hooks 各回调可 NULL）。非 tty 的判定在 tui_view_run。 */
@@ -185,6 +190,8 @@ void tui_view_close_overlay(tui_view *v);
 void tui_view_overlay_status(tui_view *v, const char *msg, int is_err);
 /* 覆盖层是否打开 */
 int tui_view_overlay_open(const tui_view *v);
+/* E8：覆盖层 ov_id（未开=0）——occ.c 轮询刷新只认自己的面板 */
+int tui_view_overlay_id(const tui_view *v);
 /* 立即渲染一帧（向导阻塞验证前预渲染状态；主线程、run 内调用） */
 void tui_view_paint(tui_view *v);
 /*

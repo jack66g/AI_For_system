@@ -71,6 +71,7 @@ struct tui_view {
 	tui_keymap *km;
 	int leader_pending;		/* leader 键已按、等续键（2s 超时） */
 	uint64_t leader_deadline;
+	uint64_t next_tick;		/* E8：on_tick 到点（0=进屏即 tick 一次） */
 	int cursor_hidden;		/* 列表覆盖层隐藏光标（成对恢复） */
 	char init_notice[2][320];	/* theme/keymap 回落 notice（进屏后打） */
 	/* 事件环（worker post / 主循环 drain） */
@@ -360,7 +361,9 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 	snprintf(buf, cap,
 		 "commands: /exit /clear /help (built-in) · /new /sessions"
 		 " /status /models /rename /tools /sandbox /trace /lease"
-		 " /compact /shell (live)\n"
+		 " /compact /shell (live) · /tasks 任务面板\n"
+		 "/tasks: 编排任务面板（状态/回炉/预算；面板 1s 轮询刷新；"
+		 "Enter=in_review 验收提示）\n"
 		 "/compact: 手动 autocondense 换窗（OCC_AC=on）\n"
 		 "/shell: 退到 bash，exit 返回（turn 运行中拒绝）\n"
 		 "三分：/compact=摘要进新窗 · /clear=归档+换窗（可找回）"
@@ -1599,6 +1602,21 @@ int tui_view_run(tui_view *v)
 			if (timeout < 0 || li < timeout)
 				timeout = li;
 		}
+		/* E8：on_tick 1s 节流（到点必调——poll 超时兜底，无事件
+		 * 窗口不睡死；occ.c 侧自判面板开合，闭态 no-op 零开销） */
+		if (v->hooks.on_tick) {
+			if (now >= v->next_tick) {
+				v->hooks.on_tick(v->hooks.ud);
+				v->next_tick = now + 1000;
+			} else {
+				uint64_t trem = v->next_tick - now;
+
+				if (trem > 0x7fffffffu)
+					trem = 0x7fffffffu;
+				if (timeout < 0 || trem < (uint64_t)timeout)
+					timeout = (int)trem;
+			}
+		}
 
 		pf[0].fd = STDIN_FILENO;
 		pf[0].events = POLLIN;
@@ -1799,6 +1817,12 @@ void tui_view_overlay_status(tui_view *v, const char *msg, int is_err)
 int tui_view_overlay_open(const tui_view *v)
 {
 	return v && tui_overlay_active(v->ov);
+}
+
+/* E8：覆盖层 ov_id（未开=0）——occ.c 轮询刷新只认自己的面板 */
+int tui_view_overlay_id(const tui_view *v)
+{
+	return (v && tui_overlay_active(v->ov)) ? tui_overlay_id(v->ov) : 0;
 }
 
 void tui_view_paint(tui_view *v)

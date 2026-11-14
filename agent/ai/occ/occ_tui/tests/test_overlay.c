@@ -191,6 +191,70 @@ int main(void)
 	OK(strstr(dump, "验证中") != NULL, "render-status");
 	tui_screen_destroy(s);
 
+	/* ---- E8：/tasks 面板形态（ov_id=6；title 带在跑计数/tag=status
+	 * 右对齐/终态 DIM/预算 detail 行/中文标题不炸渲染） ---- */
+	{
+		tui_ov_item t[3];
+
+		memset(t, 0, sizeof(t));
+		snprintf(t[0].text, sizeof(t[0].text), "TASK-ALPHA");
+		snprintf(t[0].tag, sizeof(t[0].tag), "in_review");
+		snprintf(t[0].detail, sizeof(t[0].detail),
+			 "tsk_0000000000000000000000000000aa · rew 1/2 ·"
+			 " 12.0k/34.0k tok · $0.045600");
+		snprintf(t[1].text, sizeof(t[1].text), "TASK-BETA");
+		snprintf(t[1].tag, sizeof(t[1].tag), "done");
+		snprintf(t[1].detail, sizeof(t[1].detail),
+			 "tsk_0000000000000000000000000000bb · rew 0/2 ·"
+			 " 1.0k/2.0k tok");
+		t[1].flags = TUI_OV_DIM;
+		snprintf(t[2].text, sizeof(t[2].text), "TASK-GAMMA");
+		snprintf(t[2].tag, sizeof(t[2].tag), "dispatched");
+		snprintf(t[2].detail, sizeof(t[2].detail),
+			 "tsk_0000000000000000000000000000cc · rew 0/2 ·"
+			 " 0/0 tok");
+		OK(tui_overlay_set_list(ov, 6, "tasks · 跑 1", t, 3, 1,
+					"Enter=验收提示(in_review) ·"
+					" Esc=关闭") == 0, "e8-set-list");
+		OK(tui_overlay_id(ov) == 6, "e8-id");
+		OK(tui_overlay_sel(ov) == 0, "e8-sel-first");
+		OK(tui_overlay_submit_idx(ov) == 0, "e8-submit-idx");
+		/* tag 过滤：status 命中（dispatched 唯一） */
+		OK(tui_overlay_type(ov, "dispatched", 10) ==
+		   TUI_OVA_HANDLED, "e8-type-query");
+		OK(tui_overlay_submit_idx(ov) == 2, "e8-filter-tag-idx");
+		while (tui_overlay_query(ov)[0])
+			(void)tui_overlay_backspace(ov);
+		/* 渲染：标题（中文+跑计数）/任务行/status tag/detail 预算段 */
+		s = tui_screen_create(24, 80);
+		OK(s != NULL, "e8-screen-create");
+		tui_overlay_render(ov, s, &cr, &cc);
+		dump_screen(s, dump, sizeof(dump));
+		OK(strstr(dump, "tasks") != NULL &&
+		   strstr(dump, "跑 1") != NULL, "e8-render-title-running");
+		OK(strstr(dump, "TASK-ALPHA") != NULL &&
+		   strstr(dump, "TASK-BETA") != NULL &&
+		   strstr(dump, "TASK-GAMMA") != NULL, "e8-render-rows");
+		OK(strstr(dump, "in_review") != NULL &&
+		   strstr(dump, "done") != NULL &&
+		   strstr(dump, "dispatched") != NULL,
+		   "e8-render-status-tags");
+		OK(strstr(dump, "rew 1/2") != NULL &&
+		   strstr(dump, "$0.045600") != NULL,
+		   "e8-render-detail-budget");
+		OK(strstr(dump, "验收提示") != NULL, "e8-render-footer");
+		tui_screen_destroy(s);
+		/* 状态行（面板内验收提示语义——E8 R3） */
+		tui_overlay_status(ov, "验收：对模型用 task 工具 return"
+				" 提交裁决（面板只读，不代行）", 0);
+		s = tui_screen_create(24, 80);
+		tui_overlay_render(ov, s, &cr, &cc);
+		dump_screen(s, dump, sizeof(dump));
+		OK(strstr(dump, "task 工具") != NULL &&
+		   strstr(dump, "return") != NULL, "e8-render-verdict-hint");
+		tui_screen_destroy(s);
+	}
+
 	/* ---- 关闭 ---- */
 	tui_overlay_clear(ov);
 	OK(!tui_overlay_active(ov), "cleared");

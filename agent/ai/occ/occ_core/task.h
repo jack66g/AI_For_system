@@ -131,6 +131,21 @@ int occ_task_list(occ_db *db, const char *parent_session,
 		  occ_task_row **rows, size_t *n, char *err, size_t errlen);
 
 /*
+ * occ_task_list_recent - E8 追加（/tasks 面板 + headless `occ tasks`
+ * 供数）：updated 降序 LIMIT N（最近动态在前——面板异步进度/CLI 表
+ * 的活跃视角；与 occ_task_list 的 created 降序并存互不影响）。
+ * parent_session NULL=全部任务；非 NULL=该主会话名下。total_out/
+ * running_out 可 NULL；非 NULL 时回填过滤范围内真值总数与在跑数
+ * （status=dispatched）——侧栏「tasks:N 跑 M」摘要与面板标题计数用
+ * （SUM 单查一条 SQL；范围与 LIMIT 无关，不受截断影响）。
+ * *rows heap（值拷贝），*n=返回行数；错 -1。limit<=0 → bad args。
+ */
+int occ_task_list_recent(occ_db *db, const char *parent_session, int limit,
+			 occ_task_row **rows, size_t *n,
+			 int *total_out, int *running_out,
+			 char *err, size_t errlen);
+
+/*
  * occ_task_dispatch - 派发（pending|rework → dispatched；事件 dispatch）。
  * child_session：子会话 id（R4 进程隔离=子会话 id 派发后填）；
  * NULL=保持原值（rework 回炉再派同子）。其余状态拒绝。

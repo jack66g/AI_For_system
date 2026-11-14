@@ -76,6 +76,10 @@ struct mock {
 	 * ANCHOR 时序；初始 22 条 + 「更早 8 条」分隔，加载后 30 条无分隔） */
 	int loadmore;
 	int load_calls;
+	/* E8：/tasks 面板（ov_id=6 假数据）+ on_tick 到点计数 + 侧栏
+	 * tasks 摘要开关（/sbtasks 命令切真数据并拉快照） */
+	int tick_seen;
+	int sb_tasks;
 };
 
 #define LOAD_MSGS 30
@@ -112,6 +116,19 @@ static void *mock_slow_turn(void *arg)
 				    "OCC · mock · timeout", 0, NULL, 0);
 	}
 	return NULL;
+}
+
+/* E8：on_tick 到点（主循环 1s 节流驱动；进屏首迭代即 tick 一次——
+ * next_tick 初值 0）。标记走事件队列（post→drain→同轮渲染——直调
+ * tui_view_notice 的渲染帧与外部按键注入存在竞态，事件路确定出帧） */
+static void mock_on_tick(void *ud)
+{
+	struct mock *m = ud;
+
+	m->tick_seen++;
+	if (m->tick_seen == 1)
+		(void)tui_view_post(m->view, TUI_VIEW_NOTICE,
+				    "TICK_SEEN", 0, NULL, 0);
 }
 
 static int mock_submit(void *ud, const char *text, size_t len)
@@ -239,6 +256,39 @@ static int mock_command(void *ud, const char *line)
 		tui_view_notice(m->view, "汉字宽度测试");
 		return 0;
 	}
+	if (!strcmp(line, "/tasks")) {
+		/* E8：模拟 occ.c cmd_tasks_overlay（ov_id=6；任务行=
+		 * status tag + 终态 DIM + 预算 detail——真 db 面由
+		 * occ 级 test_task/test_orch 承） */
+		tui_ov_item it[3];
+
+		memset(it, 0, sizeof(it));
+		snprintf(it[0].text, sizeof(it[0].text), "TASK-ALPHA");
+		snprintf(it[0].tag, sizeof(it[0].tag), "in_review");
+		snprintf(it[0].detail, sizeof(it[0].detail),
+			 "tsk_e8aa · rew 1/2 · 12.0k/34.0k tok");
+		snprintf(it[1].text, sizeof(it[1].text), "TASK-BETA");
+		snprintf(it[1].tag, sizeof(it[1].tag), "done");
+		snprintf(it[1].detail, sizeof(it[1].detail),
+			 "tsk_e8bb · rew 0/2 · 1.0k/2.0k tok");
+		it[1].flags = TUI_OV_DIM;
+		snprintf(it[2].text, sizeof(it[2].text), "TASK-GAMMA");
+		snprintf(it[2].tag, sizeof(it[2].tag), "dispatched");
+		snprintf(it[2].detail, sizeof(it[2].detail),
+			 "tsk_e8cc · rew 0/2 · 0/0 tok");
+		(void)tui_view_open_list(m->view, 6, "tasks · 跑 1", it, 3,
+					 1, "Enter=验收提示 · Esc=关闭");
+		return 0;
+	}
+	if (!strcmp(line, "/sbtasks")) {
+		/* E8：侧栏 tasks 摘要开关（填 sb_data.tasks_* 真数据并拉
+		 * 快照——模拟 occ.c fill_sessions 计数路径） */
+		m->sb_tasks = !m->sb_tasks;
+		tui_view_refresh_sessions(m->view);
+		tui_view_notice(m->view, m->sb_tasks ?
+				"SB_TASKS_ON" : "SB_TASKS_OFF");
+		return 0;
+	}
 	return 1;			/* 未知 → view 提示 */
 }
 
@@ -247,6 +297,19 @@ static int mock_overlay_submit(void *ud, int ov_id, int idx)
 {
 	struct mock *m = ud;
 
+	if (ov_id == 6) {
+		/* E8：/tasks 面板提交（idx 0=in_review → R3 验收提示留步；
+		 * 其它=浏览态详情行——面板均保持打开） */
+		if (idx == 0)
+			tui_view_overlay_status(m->view,
+						"验收：对模型用 task 工具"
+						" return 提交裁决"
+						"（面板只读，不代行）", 0);
+		else
+			tui_view_overlay_status(m->view,
+						"E8-BROWSE-DETAIL", 0);
+		return 0;
+	}
 	if (ov_id != 99)
 		return 1;
 	if (idx == 1)
@@ -388,7 +451,8 @@ static int mock_status(void *ud, char *buf, size_t cap)
 
 static void mock_sessions(void *ud, tui_sb_data *out)
 {
-	(void)ud;
+	struct mock *m = ud;
+
 	memset(out, 0, sizeof(*out));
 	snprintf(out->rows[0].id, sizeof(out->rows[0].id), "ses_aaaaaaaa");
 	snprintf(out->rows[0].title, sizeof(out->rows[0].title), "first");
@@ -398,6 +462,11 @@ static void mock_sessions(void *ud, tui_sb_data *out)
 	out->n = 2;
 	out->tokens_total = 1000;
 	out->pct = 1;
+	/* E8：任务摘要计数（/sbtasks 切换——零值=不渲染该行） */
+	if (m->sb_tasks) {
+		out->tasks_n = 3;
+		out->tasks_running = 1;
+	}
 }
 
 /* T2：模拟 occ.c 回放投递——SEP? + m[from..to) 的 HIST_USER 消息。
@@ -501,6 +570,7 @@ static int child_main(void)
 	h.on_overlay_input = mock_overlay_input;
 	h.on_overlay_key = mock_overlay_key;
 	h.on_async_result = mock_async_result;
+	h.on_tick = mock_on_tick;		/* E8：/tasks 轮询驱动 */
 	if (getenv("MOCK_NEWUI")) {		/* UXAB A+B 新布局场景 */
 		h.fill_topbar = mock_topbar;
 		h.fill_usage = mock_usage;
@@ -686,6 +756,7 @@ static int run_scenario(const char *keys, size_t keys_len,
 	 * 按键字节——必须等 raw 模式就绪（enter 序列在 tcsetattr 之后发出） */
 	if (read_until_contains(pt.master, out, OUT_CAP, &have,
 				"\x1b[?1049h", 5000) != 0) {
+		printf("  dbg: enter seq missing (have=%d)\n", have);
 		rc = -1;
 	} else if (keys_len > 0) {
 		if (write(pt.master, keys, keys_len) < 0)
@@ -811,6 +882,9 @@ int main(void)
 		OK(find_bytes(out, out_len,
 			      "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
 			      "\xe2\x94\x80") != NULL, "A-sidebar-rule");
+		/* E8：无任务时侧栏零 tasks 摘要行（零扰动） */
+		OK(find_bytes(out, out_len, "tasks:") == NULL,
+		   "A-sidebar-no-tasks-when-none");
 	}
 
 	/* ---- B. 输入编辑：键入 → 输入框回显进字节流 ---- */
@@ -1042,18 +1116,21 @@ int main(void)
 				  exit_keys, sizeof(exit_keys) - 1,
 				  out, &out_len, 0);
 		OK(rc == 0, "K-wiz-async-cancel");
-		/* spinner 帧字节（E 半块 █▌▎）：busy 窗口内（「验证中」到
-		 * 「已取消」之间）覆盖层全屏、底图静行不重绘——其间出现的
-		 * 半块帧只可能来自 busy spinner（含状态行换文案时的 sp 前缀；
-		 * ▸ U+25B8 不撞帧字节）。 */
+		/* spinner 帧字节（E 半块 █▌▎）：busy 窗口内覆盖层全屏、底图
+		 * 静行不重绘——「验证中」之后流内出现的半块帧只可能来自
+		 * busy spinner（含状态行换文案时的 sp 前缀；▸ U+25B8 不撞
+		 * 帧字节；本场景空 chat 无滚动条滑块 █ 源）。
+		 * 右界放宽到流尾（原「已取消」截断）：取消链可亚帧完成
+		 * （Esc 注入与 needle 命中存在 0-50ms 检测竞态）——区间
+		 * 内可能 0 渲染帧；busy spinner 帧可在「已取消」渲染帧的
+		 * 同帧前缀出现（sp 前缀同帧随状态行换文案重绘）。 */
 		{
 			const char *p1 = find_bytes(out, out_len, "验证中");
-			const char *p2 = find_bytes(out, out_len, "已取消");
 			int alive = 0;
 
-			if (p1 && p2 && p2 > p1) {
+			if (p1) {
 				const char *q = p1 + 9;	/* 越过首个状态文本 */
-				int n = (int)(p2 - q);
+				int n = (int)((out + out_len) - q);
 
 				if (n > 0)
 					alive = find_bytes(q, n,
@@ -1429,6 +1506,59 @@ int main(void)
 		   "T2O-notice-visible");
 		OK(find_bytes(out, out_len, "AIKernel \xc2\xb7 occ") != NULL,
 		   "T2O-empty-panel-visible");
+	}
+
+	/* ---- T. E8 /tasks 任务面板：进屏空转先收 on_tick 首点（TICK_SEEN
+	 * 渲染需面板未开——keys 分批注入避免「进屏即开面板」把 notice 帧
+	 * 盖掉）→ /tasks 开面板 → 任务行/status tag/在跑计数标题 → Enter
+	 * （in_review 行）= R3 验收提示留步（面板只读，不代行）→ 面板保持
+	 * 打开（后续行仍可见）→ Esc 关面板 + /exit 退出 ---- */
+	{
+		const char *needles[] = {
+			"TICK_SEEN",		/* on_tick 首点（事件队列渲染） */
+			"TASK-ALPHA",		/* 面板开+首行渲染 */
+			"\xe6\x8f\x90\xe4\xba\xa4\xe8\xa3\x81\xe5\x86\xb3",
+						/* 「提交裁决」（Enter 提示） */
+			"TASK-GAMMA"		/* 面板保持打开 */
+		};
+		static const char keys2[] = "/tasks\r";
+		static const char enter[] = "\r";
+		static const char exit_keys[] = "\x1b/exit\r";
+
+		rc = run_scenario("", 0, needles, 4, 0,
+				  keys2, sizeof(keys2) - 1,
+				  1, enter, sizeof(enter) - 1,
+				  exit_keys, sizeof(exit_keys) - 1,
+				  out, &out_len, 0);
+		OK(rc == 0, "T-tasks-overlay-scenario");
+		OK(find_bytes(out, out_len, "TICK_SEEN") != NULL,
+		   "T-on-tick-driven");		/* E8 轮询钩子进屏即到点 */
+		OK(find_bytes(out, out_len, "TASK-BETA") != NULL,
+		   "T-task-rows-rendered");
+		OK(find_bytes(out, out_len, "in_review") != NULL,
+		   "T-status-tag-rendered");
+		OK(find_bytes(out, out_len, "tasks") != NULL &&
+		   find_bytes(out, out_len,
+			      "\xe8\xb7\x91 1") != NULL,
+		   "T-running-count-in-title");		/* 跑 1 */
+		OK(find_bytes(out, out_len,
+			      "\xe9\xaa\x8c\xe6\x94\xb6\xe6\x8f\x90\xe7\xa4\xba") !=
+		   NULL, "T-footer-hint");		/* 验收提示 */
+	}
+
+	/* ---- S. E8 侧栏任务摘要：/sbtasks 填计数+拉快照 → `tasks:3 跑1`
+	 * 行进字节流（fill_sessions→tui_sb_data.tasks_* → 渲染全链） ---- */
+	{
+		const char *needles[] = {
+			"SB_TASKS_ON",
+			"tasks:3 \xe8\xb7\x91" "1"	/* tasks:3 跑1 */
+		};
+
+		rc = run_scenario("/sbtasks\r", 9, needles, 2, -1, NULL, 0,
+				  -1, NULL, 0, "/exit\r", 6, out, &out_len, 0);
+		OK(rc == 0, "S-sidebar-tasks-scenario");
+		OK(find_bytes(out, out_len, "tasks:3") != NULL,
+		   "S-sidebar-tasks-line");
 	}
 
 	printf("test_view_pty: %d ok, %d fail\n", n_ok, n_fail);

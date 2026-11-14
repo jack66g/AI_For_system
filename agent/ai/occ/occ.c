@@ -12,6 +12,9 @@
  *   occ retry --session <id>             重发最后一条 user 消息（中断后
  *                                        重发；tail=user/tool 时=重放）
  *   occ sessions                         会话列表（id/标题/token/状态/时间）
+ *   occ tasks [--session <id>] [--json]  任务列表（id/标题/状态/rework/
+ *                                        预算 tokens+cost_usd_ref；--json
+ *                                        机读 JSONL——E8，ORCH §7）
  *   occ -h | occ                         用法
  *
  * 退出码：0 成功（含 ETOOLS——消息已留证）；1 运行错；2 用法错；
@@ -50,6 +53,7 @@
 #include "occ_core/occ_replay.h"
 #include "occ_core/occ_revert.h"
 #include "occ_core/orch.h"			/* E3：编排运行时挂载 */
+#include "occ_core/task.h"			/* E8：/tasks 面板+occ tasks */
 #include "occ_llm/occ_catalog.h"
 #include "occ_llm/occ_registry.h"
 #include "occ_tui/tui_data.h"
@@ -58,6 +62,7 @@
 #include "occ_tui/tui_view.h"
 #include "occ_tui/tui_gate.h"
 #include "occ_zoomrc.h"
+#include "store/store_json.h"			/* E8：occ tasks --json 机读 */
 
 static const char USAGE[] =
 	"occ — AIKernel 编码助手（headless，T9a3+b2）\n"
@@ -68,6 +73,8 @@ static const char USAGE[] =
 	"  occ redo --session <id>              恢复上次 undo\n"
 	"  occ retry --session <id>             重发最后一条 user 消息\n"
 	"  occ sessions                         会话列表\n"
+	"  occ tasks [--session <id>] [--json]  任务列表（状态/rework/预算；"
+	"--json=机读 JSONL）\n"
 	"环境：OCC_MODEL_TOML / OCC_PROVIDER_TOML / OCC_DB / OCC_SNAPROOT 可覆盖；"
 	" 交互模式另支持 OCC_REPLAY_LINES（历史回放行数预算，缺省 1000，0=禁）\n";
 
@@ -451,6 +458,7 @@ enum {
 	OV_TOOLS = 3,
 	OV_TRACE = 4,
 	OV_LEASE = 5,
+	OV_TASKS = 6,			/* E8：/tasks 任务面板 */
 	OV_WIZ_MODEL = 11,		/* 向导 1/4 模型 */
 	OV_WIZ_PROVIDER = 12,		/* 向导 2/4 provider */
 	OV_WIZ_BASE = 13,		/* 向导 2.5 自定义 base_url（输入） */
@@ -570,6 +578,11 @@ struct tui_app {
 	size_t ov_map_n;
 	occ_session_row *ov_rows;	/* /sessions 行（提交期有效） */
 	size_t ov_rows_n;
+
+	/* ---- E8：/tasks 任务面板（OV_TASKS 工作集 + 异步进度轮询态） ---- */
+	occ_task_row *ov_task_rows;	/* 面板行（打开期间有效；换开重分配） */
+	size_t ov_task_rows_n;
+	char tasks_fp[640];		/* 面板内容指纹（变化才重绘） */
 };
 
 static uint64_t tui_now_ms(void)
@@ -1067,6 +1080,197 @@ static int exe_dir_of(char *buf, size_t cap)
 	if (strlen(tmp) + 1 > cap)
 		return -1;
 	memcpy(buf, tmp, strlen(tmp) + 1);
+	return 0;
+}
+
+/* ---- E8：headless `occ tasks`（ORCH §7；差分向量不含——新子命令，
+ * occ -p 既有路径字节零变化） ---- */
+
+/* 任务定价目录（进程惰性一次；搜索链同 app_load_catalog / tools.c
+ * task_catalog：OCC_CATALOG → cwd → exe 目录 → 系统安装位） */
+static occ_catalog *tasks_catalog(void)
+{
+	static occ_catalog cat;
+	static int tried;
+	char path[1100];
+	char exed[1024];
+	const char *env;
+
+	if (tried)
+		return &cat;
+	tried = 1;
+	env = getenv("OCC_CATALOG");
+	if (env && env[0] && occ_catalog_load(&cat, env) == 0)
+		return &cat;
+	if (occ_catalog_load(&cat, "models.dev.snapshot.json") == 0)
+		return &cat;
+	if (exe_dir_of(exed, sizeof(exed)) == 0) {
+		snprintf(path, sizeof(path), "%s/models.dev.snapshot.json",
+			 exed);
+		if (occ_catalog_load(&cat, path) == 0)
+			return &cat;
+	}
+	if (occ_catalog_load(&cat,
+			     "/usr/local/share/aikernel/models.dev.snapshot.json")
+	    == 0)
+		return &cat;
+	return &cat;		/* 零值目录（nmodels=0）=无定价面 */
+}
+
+/*
+ * task_priced - 预算定价参照（E7 budget_json 同源口径）：模型名取
+ * 子会话 model 列（烧 token 的那一端）；目录命中 → 1（两单价+模型名
+ * 写出）；未命中/无子会话 → 0（model[0]='\0'）。只读查询零写面。
+ */
+static int task_priced(occ_db *db, const occ_task_row *t, char *model,
+		       size_t mcap, double *ipm, double *opm)
+{
+	model[0] = '\0';
+	if (t->child_session[0]) {
+		occ_session_row srow;
+
+		if (occ_session_get(db, t->child_session, &srow, NULL, 0)
+		    == 1)
+			snprintf(model, mcap, "%s", srow.model);
+	}
+	if (!model[0])
+		return 0;
+	return occ_catalog_price(tasks_catalog(), model, ipm, opm) == 1;
+}
+
+/* 预算段文本（表格/面板 detail 共用）："12.3k/45.6k tok · $0.012345"
+ * （cost_usd_ref 仅目录命中时追加——定价显示参考，§10 风险 6 口径） */
+static void task_budget_str(occ_db *db, const occ_task_row *t,
+			    char *buf, size_t cap)
+{
+	char ib[16], ob[16], model[96], cb[24];
+	double ipm = 0.0, opm = 0.0;
+
+	tui_usage_fmt(t->budget_in, ib, sizeof(ib));
+	tui_usage_fmt(t->budget_out, ob, sizeof(ob));
+	if (task_priced(db, t, model, sizeof(model), &ipm, &opm)) {
+		snprintf(cb, sizeof(cb), "$%.6f",
+			 occ_catalog_cost_usd(ipm, opm, t->budget_in,
+					      t->budget_out));
+		snprintf(buf, cap, "%s/%s tok · %s", ib, ob, cb);
+	} else {
+		snprintf(buf, cap, "%s/%s tok", ib, ob);
+	}
+}
+
+/* occ tasks --json 单行（JSONL；budget 段字段名与 E7 tools.c
+ * budget_json 同源——机读对账同口径）。0=已打印；-1=OOM（降级不炸） */
+static int task_json_line(const occ_task_row *t, occ_db *db)
+{
+	aik_json *o, *b;
+	char *dump = NULL;
+	size_t dlen = 0;
+	char cbuf[48], model[96];
+	double ipm = 0.0, opm = 0.0;
+
+	o = aik_json_new_obj();
+	if (!o)
+		return -1;
+	if (aik_json_obj_put(o, "id", aik_json_new_str(t->id)) ||
+	    aik_json_obj_put(o, "parent_session",
+			     aik_json_new_str(t->parent_session)) ||
+	    aik_json_obj_put(o, "child_session",
+			     aik_json_new_str(t->child_session)) ||
+	    aik_json_obj_put(o, "title", aik_json_new_str(t->title)) ||
+	    aik_json_obj_put(o, "status", aik_json_new_str(t->status)) ||
+	    aik_json_obj_put(o, "rework_count",
+			     aik_json_new_int(t->rework_count)) ||
+	    aik_json_obj_put(o, "rework_max",
+			     aik_json_new_int(t->rework_max)) ||
+	    aik_json_obj_put(o, "budget_in",
+			     aik_json_new_int(t->budget_in)) ||
+	    aik_json_obj_put(o, "budget_out",
+			     aik_json_new_int(t->budget_out)) ||
+	    aik_json_obj_put(o, "budget_total",
+			     aik_json_new_int(t->budget_in + t->budget_out)) ||
+	    aik_json_obj_put(o, "created", aik_json_new_int(t->created)) ||
+	    aik_json_obj_put(o, "updated", aik_json_new_int(t->updated)))
+		goto oom;
+	b = aik_json_new_obj();
+	if (!b)
+		goto oom;
+	if (aik_json_obj_put(b, "tokens_in",
+			     aik_json_new_int(t->budget_in)) ||
+	    aik_json_obj_put(b, "tokens_out",
+			     aik_json_new_int(t->budget_out)))
+		goto oom;
+	if (task_priced(db, t, model, sizeof(model), &ipm, &opm)) {
+		snprintf(cbuf, sizeof(cbuf), "%.6f",
+			 occ_catalog_cost_usd(ipm, opm, t->budget_in,
+					      t->budget_out));
+		if (aik_json_obj_put(b, "model", aik_json_new_str(model)) ||
+		    aik_json_obj_put(b, "unit",
+				     aik_json_new_str("USD/1M")) ||
+		    aik_json_obj_put(b, "in_per_m", aik_json_new_num(ipm)) ||
+		    aik_json_obj_put(b, "out_per_m",
+				     aik_json_new_num(opm)) ||
+		    aik_json_obj_put(b, "cost_usd_ref",
+				     aik_json_new_str(cbuf)))
+			goto oom;
+	} else if (aik_json_obj_put(b, "pricing",
+				    aik_json_new_str("unavailable"))) {
+		goto oom;
+	}
+	if (aik_json_obj_put(o, "budget", b)) {
+		aik_json_free(b);
+		goto oom;
+	}
+	if (aik_json_dump(o, &dump, &dlen) == 0 && dump) {
+		printf("%s\n", dump);
+		free(dump);
+		aik_json_free(o);
+		return 0;
+	}
+	free(dump);
+	aik_json_free(o);
+	return -1;
+oom:
+	aik_json_free(o);
+	return -1;
+}
+
+/* occ tasks：表格式行（对齐；预算列含 cost_usd_ref 当目录命中）；
+ * as_json=JSONL 机读。session 可 NULL（全部任务）。 */
+static int cmd_tasks(occ_db *db, const char *session, int as_json)
+{
+	occ_task_row *rows = NULL;
+	size_t n = 0, i;
+	char e[160];
+
+	if (occ_task_list_recent(db, session, 200, &rows, &n, NULL, NULL,
+				 e, sizeof(e)) != 0) {
+		fprintf(stderr, "occ tasks: %s\n", e);
+		return 1;
+	}
+	if (as_json) {
+		for (i = 0; i < n; i++)
+			(void)task_json_line(&rows[i], db);
+	} else {
+		printf("%-38s %-24s %-11s %-6s %s\n", "ID", "TITLE",
+		       "STATUS", "REWORK", "BUDGET IN/OUT");
+		for (i = 0; i < n; i++) {
+			char rw[8], bud[64], title_clip[96];
+			int dim = !strcmp(rows[i].status, OCC_TASK_ST_DONE) ||
+				  !strcmp(rows[i].status,
+					  OCC_TASK_ST_ESCALATED);
+
+			snprintf(rw, sizeof(rw), "%d/%d",
+				 rows[i].rework_count, rows[i].rework_max);
+			task_budget_str(db, &rows[i], bud, sizeof(bud));
+			tui_utf8_clip_cols(rows[i].title, 22, title_clip,
+					   sizeof(title_clip));
+			printf("%-38s %-24s %-11s %-6s %s%s\n",
+			       rows[i].id, title_clip, rows[i].status, rw,
+			       bud, dim ? "  ·终态" : "");
+		}
+		printf("(%zu task%s)\n", n, n == 1 ? "" : "s");
+	}
+	occ_task_rows_free(rows, n);
 	return 0;
 }
 
@@ -2037,6 +2241,119 @@ static int cmd_sessions_overlay(struct tui_app *a)
 	return 0;
 }
 
+/* ---- E8：/tasks 任务面板（ORCH §7；R3 验收动作在面板内） ----
+ * 任务行=status 着色（终态 done/escalated=DIM muted，活跃态正常+
+ * tag=status 右对齐）+ 预算段（tokens in/out + cost_usd_ref 当目录
+ * 命中——E7 定价消费同源）；标题带在跑计数；打开/1s 轮询刷新共用。 */
+
+/* 面板内容指纹（djb2 累加：计数+各行 id·status·updated·预算——任一
+ * 变化即指纹变；用于轮询判「变化才重绘」，避免每帧读库/闪烁） */
+static unsigned long long tasks_fingerprint(const occ_task_row *rows,
+					    size_t n, int total, int running)
+{
+	unsigned long long h = 5381;
+	size_t i;
+
+	h = h * 33 + (unsigned long long)(unsigned)total + 1;
+	h = h * 33 + (unsigned long long)(unsigned)running + 1;
+	for (i = 0; i < n; i++) {
+		const char *p;
+
+		for (p = rows[i].id; *p; p++)
+			h = h * 33 + (unsigned char)*p;
+		for (p = rows[i].status; *p; p++)
+			h = h * 33 + (unsigned char)*p;
+		h = h * 33 + (unsigned long long)rows[i].updated + 1;
+		h = h * 33 + (unsigned long long)rows[i].budget_in;
+		h = h * 33 + (unsigned long long)rows[i].budget_out;
+	}
+	return h;
+}
+
+static int cmd_tasks_overlay(struct tui_app *a)
+{
+	tui_ov_item *items;
+	occ_task_row *rows = NULL;
+	size_t n = 0, i;
+	int total = 0, running = 0;
+	char e[160];
+	char title[TUI_OV_TITLE_MAX];
+
+	if (occ_task_list_recent(a->db, NULL, 100, &rows, &n,
+				 &total, &running, e, sizeof(e)) != 0) {
+		tui_view_notice(a->view, e);
+		return 0;
+	}
+	if (n == 0) {
+		tui_view_notice(a->view, "(no tasks)");
+		occ_task_rows_free(rows, n);
+		return 0;
+	}
+	occ_task_rows_free(a->ov_task_rows, a->ov_task_rows_n);
+	a->ov_task_rows = rows;		/* 行数据留提交期（同 ov_rows 口径） */
+	a->ov_task_rows_n = n;
+	items = calloc(n, sizeof(*items));
+	if (!items) {
+		tui_view_notice(a->view, "tasks: OOM");
+		return 0;
+	}
+	snprintf(a->tasks_fp, sizeof(a->tasks_fp), "%016llx",
+		 tasks_fingerprint(rows, n, total, running));
+	for (i = 0; i < n; i++) {
+		char bud[64];
+		int term = !strcmp(rows[i].status, OCC_TASK_ST_DONE) ||
+			   !strcmp(rows[i].status, OCC_TASK_ST_ESCALATED);
+
+		snprintf(items[i].text, sizeof(items[i].text), "%.120s",
+			 rows[i].title[0] ? rows[i].title : "(untitled)");
+		snprintf(items[i].tag, sizeof(items[i].tag), "%s",
+			 rows[i].status);
+		task_budget_str(a->db, &rows[i], bud, sizeof(bud));
+		snprintf(items[i].detail, sizeof(items[i].detail),
+			 "%s · rew %d/%d · %s", rows[i].id,
+			 rows[i].rework_count, rows[i].rework_max, bud);
+		items[i].flags = term ? TUI_OV_DIM : 0;
+	}
+	if (running > 0)
+		snprintf(title, sizeof(title), "tasks · 跑 %d", running);
+	else
+		snprintf(title, sizeof(title), "tasks");
+	(void)tui_view_open_list(a->view, OV_TASKS, title, items, (int)n, 1,
+				 "Enter=验收提示(in_review) · Esc=关闭"
+				 " · 面板 1s 自动刷新");
+	free(items);		/* overlay 已深拷贝；行数据留 ov_task_rows */
+	return 0;
+}
+
+/*
+ * E8：面板异步进度——主循环 on_tick 驱动 1s 节流读库；指纹（在跑数/
+ * 总数/各行 status·updated·预算）变化才重建面板内容，无变化零重绘
+ * （不为刷新而刷新——每帧读库被双重排除：tick 节流+指纹比对）。
+ * 面板未开/非 OV_TASKS=纯 no-op（轮询开销=一次 id 查询）。
+ */
+static void tui_app_on_tick(void *ud)
+{
+	struct tui_app *a = ud;
+	occ_task_row *rows = NULL;
+	size_t n = 0;
+	int total = 0, running = 0;
+	char e[160];
+	char fp[24];
+
+	if (!tui_view_overlay_open(a->view) ||
+	    tui_view_overlay_id(a->view) != OV_TASKS)
+		return;
+	if (occ_task_list_recent(a->db, NULL, 100, &rows, &n, &total,
+				 &running, e, sizeof(e)) != 0)
+		return;			/* 读失败保持现面板（不闪错） */
+	snprintf(fp, sizeof(fp), "%016llx",
+		 tasks_fingerprint(rows, n, total, running));
+	occ_task_rows_free(rows, n);	/* 轻读只为指纹；变化才全量重开 */
+	if (!strcmp(fp, a->tasks_fp))
+		return;
+	cmd_tasks_overlay(a);		/* 变化 → 重建（dirty 自置重绘） */
+}
+
 /* ---- /tools /trace /lease（读系统现成数据；裁定 8） ---- */
 
 static int cmd_tools(struct tui_app *a)
@@ -2683,6 +3000,8 @@ static int tui_app_on_command(void *ud, const char *line)
 		return cmd_zoom(a, line + 5);
 	if (!strcmp(line, "/sessions"))
 		return cmd_sessions_overlay(a);
+	if (!strcmp(line, "/tasks"))		/* E8：任务面板（ORCH §7） */
+		return cmd_tasks_overlay(a);
 	if (!strcmp(line, "/status")) {
 		char buf[640];
 		char t1[24], t2[24], items[96], pbuf[16];
@@ -2988,6 +3307,30 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 			    sizeof(a->wiz.slot));
 		wiz_open_key(a);
 		return 0;
+	}
+	case OV_TASKS: {
+		const occ_task_row *r;
+
+		/* E8 面板=只读展示+提示（不代行验收——机械判在 E4 task
+		 * 工具面；R3 验收动作在面板内的最小形态）。 */
+		if ((size_t)idx >= a->ov_task_rows_n)
+			return 1;
+		r = &a->ov_task_rows[idx];
+		if (!strcmp(r->status, OCC_TASK_ST_IN_REVIEW))
+			tui_view_overlay_status(a->view,
+						"验收：对模型用 task 工具"
+						" return 提交裁决"
+						"（面板只读，不代行）", 0);
+		else {
+			char bud[64], det[TUI_OV_DETAIL_MAX];
+
+			task_budget_str(a->db, r, bud, sizeof(bud));
+			snprintf(det, sizeof(det), "%s · rew %d/%d · %s",
+				 r->id, r->rework_count, r->rework_max,
+				 bud);
+			tui_view_overlay_status(a->view, det, 0);
+		}
+		return 0;		/* 面板保持打开（浏览态） */
 	}
 	case OV_TOOLS:
 	case OV_TRACE:
@@ -3326,6 +3669,20 @@ static void tui_app_fill_sessions(void *ud, tui_sb_data *out)
 	/* T1：真值总数（>n 时侧栏末行显示 `⋯ +N 个（/sessions）`） */
 	out->total = n > (size_t)0x7fffffff ? 0x7fffffff : (int)n;
 	free(rows);
+	/* E8：任务摘要行计数（occ_task_list_recent 真值；零任务=
+	 * tasks_n=0 → 侧栏不渲染该行——零扰动） */
+	{
+		occ_task_row *tr = NULL;
+		size_t tn = 0;
+		int tot = 0, run = 0;
+
+		if (occ_task_list_recent(a->db, NULL, 1, &tr, &tn, &tot,
+					 &run, e, sizeof(e)) == 0) {
+			out->tasks_n = tot;
+			out->tasks_running = run;
+			occ_task_rows_free(tr, tn);
+		}
+	}
 }
 
 static void tui_app_on_shutdown(void *ud)
@@ -3455,6 +3812,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	h.on_overlay_close = tui_app_on_overlay_close;
 	h.on_async_result = tui_app_on_async_result;	/* OCC-DEBT */
 	h.on_load_more = tui_app_on_load_more;		/* T2：到顶增量加载 */
+	h.on_tick = tui_app_on_tick;			/* E8：/tasks 面板轮询 */
 
 		/* T9e：view 生命周期循环——/shell 退屏跑 bash 后重建 view 续跑。
 		 * ctx_fallback 提示只在首屏发一次（每轮重发会刷屏）。 */
@@ -3670,6 +4028,34 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[1], "sessions")) {
 		rc = cmd_sessions(db);
+		goto out;
+	}
+	if (!strcmp(argv[1], "tasks")) {
+		/* E8：任务列表子命令（ORCH §7）；标志任意位置：
+		 * --session <id> 过滤 + --json 机读 JSONL */
+		const char *sid = NULL;
+		int as_json = 0;
+		int i;
+
+		for (i = 2; i < argc; i++) {
+			if (!strcmp(argv[i], "--session")) {
+				if (i + 1 >= argc) {
+					fprintf(stderr, "occ tasks: --session"
+						" missing value\n");
+					rc = 2;
+					goto out;
+				}
+				sid = argv[++i];
+			} else if (!strcmp(argv[i], "--json")) {
+				as_json = 1;
+			} else {
+				fprintf(stderr, "occ tasks: unknown option"
+					" '%s'\n", argv[i]);
+				rc = 2;
+				goto out;
+			}
+		}
+		rc = cmd_tasks(db, sid, as_json);
 		goto out;
 	}
 	if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {

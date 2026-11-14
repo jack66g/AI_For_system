@@ -35,6 +35,11 @@ typedef struct tui_sb_data {
 	int total;			/* 会话总数（真值；>n=列表已截断） */
 	long long tokens_total;		/* 底部 tokens 行 */
 	int pct;			/* token 水位 %；<0=未知 */
+	/* E8：任务摘要行（occ_task_list_recent 计数；tasks_n<=0 不渲染
+	 * 该行——无任务零扰动）。行文本 `tasks:N 跑M`（muted；旧形态在
+	 * 会话列表与底部 tokens 行之间，面板形态在列表末位）。 */
+	int tasks_n;			/* 任务总数（过滤范围真值） */
+	int tasks_running;		/* 在跑数（status=dispatched） */
 } tui_sb_data;
 
 /*
@@ -42,6 +47,7 @@ typedef struct tui_sb_data {
  * 标题行 `sessions` + dim 细线；会话行只显标题（21 列内裁剪，末列留给
  * 视图层分隔线/滚动条）；当前行 `▎`+FG 加粗；status=error 用 ERROR 色
  * + 行尾 ×、interrupted 行尾 …；条数溢出时末行 `… +N 个（/sessions）`。
+ * E8：有任务时 tokens 行上方一行 `tasks:N 跑M`（muted）。
  * 底部 `12.3k · 6%` 行。
  */
 void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
@@ -51,6 +57,8 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
  * E 方案：框线面板内的会话列表（rect (x,y,w,h)=框内净区，框线由
  * tui_view 原语围出）。零栏目名/零计数——只渲会话行（▎当前条 / ×error /
  * …interrupted / 溢出 `… +N 个（/sessions）`），样式沿用 T1。
+ * E8：有任务时列表末位一行 `tasks:N 跑M`（muted；tasks_n<=0 不渲染
+ * ——零扰动）。
  */
 void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 			      int x, int y, int w, int h,

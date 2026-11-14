@@ -43,6 +43,7 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 	tui_attr a_title, a_cur, a_dim, a_bottom, a_err;
 	int maxw = TUI_SB_WIDTH - 1;	/* 内容宽（末列留给分隔线） */
 	int first, avail, show, overflow;
+	int task_row;			/* E8：tasks 摘要行（-1=不渲染） */
 
 	if (!d || !s || rows < 1)
 		return;
@@ -64,9 +65,14 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 	if (rows > 1)
 		(void)tui_screen_put(s, 1, 0, rule, (size_t)maxw * 3, a_dim);
 
-	/* 会话行：y=2 .. rows-2（末行 rows-1 是 tokens 行） */
+	/* E8：tasks 摘要行占 tokens 行上方一行（tasks_n<=0 零渲染——
+	 * 无任务侧栏形态与 E8 前逐字节一致） */
+	task_row = (d->tasks_n > 0 && rows >= 3) ? rows - 2 : -1;
+
+	/* 会话行：y=2 .. rows-2（末行 rows-1 是 tokens 行；tasks 行再占
+	 * rows-2 时列表相应让位） */
 	first = 2;
-	avail = (rows - 1) - first;
+	avail = (rows - 1) - first - (task_row >= 0 ? 1 : 0);
 	if (avail < 0)
 		avail = 0;
 	show = d->n < avail ? d->n : avail;
@@ -124,6 +130,14 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 				     a_bottom);
 	}
 
+	/* E8：tasks 摘要行（`tasks:N 跑M`；muted；无任务零渲染） */
+	if (task_row >= 0) {
+		snprintf(line, sizeof(line), "tasks:%d 跑%d",
+			 d->tasks_n, d->tasks_running);
+		(void)tui_screen_put(s, task_row, 0, line, strlen(line),
+				     a_bottom);
+	}
+
 	/* 底部 token 水位行（倒数第 1 行；UXAB：` · ` 分隔） */
 	if (rows >= 2) {
 		char pct[20];
@@ -150,6 +164,7 @@ void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 	int i;
 	tui_attr a_cur, a_dim, a_bottom, a_err;
 	int first, avail, show, overflow;
+	int task_row;			/* E8：tasks 摘要行（-1=不渲染） */
 
 	if (!d || !s || w < 2 || h < 1)
 		return;
@@ -163,8 +178,12 @@ void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 	a_bottom = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
 	a_err = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
 
+	/* E8：tasks 摘要行占列表末位（tasks_n<=0 零渲染——无任务面板
+	 * 形态与 E8 前逐字节一致） */
+	task_row = (d->tasks_n > 0 && h >= 2) ? y + h - 1 : -1;
+
 	first = y;
-	avail = h;
+	avail = h - (task_row >= 0 ? 1 : 0);
 	show = d->n < avail ? d->n : avail;
 	overflow = d->total > show;
 	if (overflow && avail > 0 && show == avail)
@@ -213,6 +232,15 @@ void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 		snprintf(ovf, sizeof(ovf), "… +%d 个（/sessions）", n);
 		tui_utf8_clip_cols(ovf, (size_t)w, clip, sizeof(clip));
 		(void)tui_screen_put(s, first + show, x, clip, strlen(clip),
+				     a_bottom);
+	}
+	/* E8：tasks 摘要行（`tasks:N 跑M`；muted；无任务零渲染） */
+	if (task_row >= 0) {
+		char tl[48];
+
+		snprintf(tl, sizeof(tl), "tasks:%d 跑%d",
+			 d->tasks_n, d->tasks_running);
+		(void)tui_screen_put(s, task_row, x, tl, strlen(tl),
 				     a_bottom);
 	}
 }

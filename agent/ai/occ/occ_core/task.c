@@ -407,6 +407,89 @@ int occ_task_list(occ_db *db, const char *parent_session,
 	return 0;
 }
 
+/* E8：/tasks 面板+headless occ tasks 供数（见 task.h 头注） */
+int occ_task_list_recent(occ_db *db, const char *parent_session, int limit,
+			 occ_task_row **rows, size_t *n,
+			 int *total_out, int *running_out,
+			 char *err, size_t errlen)
+{
+	char sql[320];
+	sqlite3 *h;
+	sqlite3_stmt *st = NULL;
+	occ_task_row *v = NULL;
+	size_t cnt = 0, cap = 0;
+
+	if (!db || !rows || !n || limit <= 0) {
+		set_err(err, errlen, "occ_task_list_recent: bad args");
+		return -1;
+	}
+	*rows = NULL;
+	*n = 0;
+	h = occ_db_sqlite(db);
+	/* 计数先行（范围真值，与 LIMIT 无关）：SUM 两值一条 SQL；
+	 * 无行时 SUM=NULL → sqlite3_column_int 取 0（口径=空表零任务） */
+	if (total_out || running_out) {
+		if (sqlite3_prepare_v2(h,
+				       "SELECT COUNT(*),"
+				       "COALESCE(SUM(status='dispatched'),0)"
+				       " FROM occ_task"
+				       " WHERE (?1 IS NULL OR parent_session=?1)",
+				       -1, &st, NULL) != SQLITE_OK) {
+			set_err(err, errlen, "prepare: %s",
+				sqlite3_errmsg(h));
+			return -1;
+		}
+		sqlite3_bind_text(st, 1, parent_session, -1,
+				  SQLITE_TRANSIENT);
+		if (sqlite3_step(st) == SQLITE_ROW) {
+			if (total_out)
+				*total_out = sqlite3_column_int(st, 0);
+			if (running_out)
+				*running_out = sqlite3_column_int(st, 1);
+		}
+		sqlite3_finalize(st);
+		st = NULL;
+	}
+	if (parent_session)
+		snprintf(sql, sizeof(sql),
+			 "SELECT %s FROM occ_task WHERE parent_session=?1"
+			 " ORDER BY updated DESC LIMIT ?2", TASK_COLS);
+	else
+		snprintf(sql, sizeof(sql),
+			 "SELECT %s FROM occ_task"
+			 " ORDER BY updated DESC LIMIT ?2", TASK_COLS);
+	if (sqlite3_prepare_v2(h, sql, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(h));
+		return -1;
+	}
+	if (parent_session)
+		sqlite3_bind_text(st, 1, parent_session, -1,
+				  SQLITE_TRANSIENT);
+	sqlite3_bind_int(st, 2, limit);
+	while (sqlite3_step(st) == SQLITE_ROW) {
+		if (cnt == cap) {
+			occ_task_row *nv;
+
+			cap = cap ? cap * 2 : 8;
+			nv = realloc(v, cap * sizeof(*nv));
+			if (!nv) {
+				free(v);
+				sqlite3_finalize(st);
+				set_err(err, errlen, "oom");
+				return -1;
+			}
+			v = nv;
+		}
+		memset(&v[cnt], 0, sizeof(v[cnt]));
+		task_fill(&v[cnt], st);
+		cnt++;
+	}
+	sqlite3_finalize(st);
+	*rows = v;
+	*n = cnt;
+	return 0;
+}
+
 int occ_task_events(occ_db *db, const char *id,
 		    occ_task_event_row **rows, size_t *n,
 		    char *err, size_t errlen)
