@@ -141,7 +141,7 @@ BIN_OCC := occ
 NORM_SRC := tests/occ_norm.c
 
 .PHONY: all test p-smoke durable-drill recover-drill interrupt-drill \
-	retry-drill b2-drills orch-conc-drill clean
+	retry-drill b2-drills orch-conc-drill orch-drill clean
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
@@ -167,6 +167,13 @@ p-smoke: $(BIN_OCC)
 # （同库并发写=B2 生产路径）+第三路撞限即拒——test_orch 内置 drill 模式
 orch-conc-drill: $(BIN_OCC) tests/test_orch
 	./tests/test_orch --conc-drill ./occ
+
+# E9 回路演练（mock 三角色 LLM+mock ac REST）：headless occ -p 主控
+# （task 工具 spawn→wait→read_result→return）×子两报×E4 机械判「一拒
+# 一改一过」×回炉再派（test_orch --e9-redrive——工具面缺再派参数的
+# 测试侧桥）×E5 压缩/蒸馏×E6 archived×E7 记账——orch_drill.sh 断言
+orch-drill: $(BIN_OCC) tests/test_orch
+	bash tests/orch_drill.sh
 
 # durable 演练（kill -9 流式中途 → 库一致 → --recover 续跑；mock 端点）
 durable-drill: $(BIN_OCC)

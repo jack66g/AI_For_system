@@ -44,6 +44,10 @@
  *   --b2rw <db> <wid> <m> <hot_csv> <outfile>     腿2 worker
  *   --conc-drill <occ_bin>   E2 验收演练：mock LLM 下 orch spawn 2 路
  *       真 occ -p 并发对话（同库并发写=B2 生产路径）+第三路撞限即拒
+ *   --e9-redrive <db> <task_id> <occ_bin> <workdir> <result_path>
+ *       <prompt_file> [timeout_ms]   E9 回路演练回炉再派腿：等任务
+ *       rework → occ_orch_spawn(task_id) 真路再派（工具面无再参——
+ *       产品缺口测试侧桥；orch_drill.sh 消费）
  *
  * 外部验证：独立 sqlite3 连接直查（同 test_task 口径）。
  */
@@ -1800,6 +1804,147 @@ static int conc_drill_main(int argc, char **argv)
 	return fail ? 1 : 0;
 }
 
+/* ---- --e9-redrive：ORCH-E9 回路演练「回炉再派」腿（E9） ----
+ * 工具面 task spawn 无 task_id 再派参数（产品缺口如实登记：再派路
+ * 当前只有 C API occ_orch_spawn(task_id)——TUI 重派/工具面再派均未
+ * 挂），本腿=测试侧桥：等任务进 rework（条件轮询≤60s）→ 公共 API
+ * 真路再派（rework→dispatched→真 occ -p 子进程→终局 collect：
+ * in_review+机械预判+预算记账，全产品路径）。usage：
+ *   test_orch --e9-redrive <db> <task_id> <occ_bin> <workdir> \
+ *             <result_path> <prompt_file> [timeout_ms]
+ * （env 透传：子进程经 env_build 继承本进程 OCC_* 全集） */
+static char *e9_read_file(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	long sz;
+	char *buf;
+
+	if (!f)
+		return NULL;
+	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+		fclose(f);
+		return NULL;
+	}
+	rewind(f);
+	buf = malloc((size_t)sz + 1);
+	if (!buf) {
+		fclose(f);
+		return NULL;
+	}
+	if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+		free(buf);
+		fclose(f);
+		return NULL;
+	}
+	fclose(f);
+	buf[sz] = '\0';
+	return buf;
+}
+
+static int e9_redrive_main(int argc, char **argv)
+{
+	const char *dbp, *tid, *occ_bin, *workdir, *rpath, *pfile;
+	long long tmo = 120000, t0;
+	occ_db *db;
+	occ_orch *o;
+	occ_orch_spawn_opts so;
+	occ_orch_child *c = NULL;
+	occ_orch_result r;
+	occ_task_row trow;
+	char err[256], e2[192];
+	char *prompt;
+	int rc, good = 0, fail = 0;
+
+	if (argc < 8) {
+		printf("usage: %s --e9-redrive <db> <task_id> <occ_bin> "
+		       "<workdir> <result_path> <prompt_file> "
+		       "[timeout_ms]\n", argv[0]);
+		return 2;
+	}
+	dbp = argv[2];
+	tid = argv[3];
+	occ_bin = argv[4];
+	workdir = argv[5];
+	rpath = argv[6];
+	pfile = argv[7];
+	if (argc > 8)
+		tmo = atoll(argv[8]);
+
+	prompt = e9_read_file(pfile);
+	if (!prompt || !prompt[0]) {
+		printf("FAIL e9-redrive-prompt-file\n");
+		return 1;
+	}
+	db = occ_db_open(dbp, err, sizeof(err));
+	if (!db) {
+		printf("FAIL e9-redrive-db: %s\n", err);
+		free(prompt);
+		return 1;
+	}
+	/* 条件等待：任务进 rework（主控 return 拒后）——轮询≤60s */
+	t0 = now_ms();
+	for (;;) {
+		int g = occ_task_get(db, tid, &trow, e2, sizeof(e2));
+		int is_rework = 0;
+
+		if (g == 1) {
+			is_rework = !strcmp(trow.status, OCC_TASK_ST_REWORK);
+			occ_task_row_free(&trow);
+		}
+		if (is_rework)
+			break;
+		if (now_ms() - t0 > 60000) {
+			printf("FAIL e9-redrive-not-rework (60s)\n");
+			occ_db_close(db);
+			free(prompt);
+			return 1;
+		}
+		msleep(200);
+	}
+	printf("ok e9-redrive-saw-rework\n");
+
+	o = occ_orch_new(db);
+	if (!o) {
+		printf("FAIL e9-redrive-orch-new\n");
+		occ_db_close(db);
+		free(prompt);
+		return 1;
+	}
+	memset(&so, 0, sizeof(so));
+	so.prompt = prompt;
+	so.task_id = tid;
+	so.occ_bin = occ_bin;
+	so.workdir = workdir;
+	so.result_path = rpath;
+	so.timeout_ms = tmo;
+	rc = occ_orch_spawn(o, &so, &c, err, sizeof(err));
+	if (rc != OCC_ORCH_OK || !c) {
+		printf("FAIL e9-redrive-spawn (%d): %s\n", rc, err);
+		fail++;
+	} else {
+		printf("ok e9-redrive-spawn pid=%d\n",
+		       (int)occ_orch_child_pid(c));
+		if (occ_orch_wait(c, &r, err, sizeof(err)) != 0) {
+			printf("FAIL e9-redrive-wait: %s\n", err);
+			fail++;
+		} else {
+			good = r.end == OCC_ORCH_END_EXIT && r.exit_code == 0 &&
+			       r.reviewed;
+			printf("%s e9-redrive-end exit=%d reviewed=%d "
+			       "dur=%lldms\n",
+			       good ? "ok" : "FAIL", r.exit_code, r.reviewed,
+			       r.dur_ms);
+			if (!good)
+				fail++;
+			occ_orch_result_free(&r);
+		}
+	}
+	free(prompt);
+	occ_orch_free(o);
+	occ_db_close(db);
+	return fail ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	/* sim 分发键=env 标记（spawn 的 argv 形状与真 occ -p 逐字一致） */
@@ -1809,6 +1954,8 @@ int main(int argc, char **argv)
 		return b2w_main(argc, argv);
 	if (argc >= 2 && !strcmp(argv[1], "--b2rw"))
 		return b2rw_main(argc, argv);
+	if (argc >= 2 && !strcmp(argv[1], "--e9-redrive"))
+		return e9_redrive_main(argc, argv);
 	if (argc >= 2 && !strcmp(argv[1], "--conc-drill")) {
 		if (readlink("/proc/self/exe", self_bin,
 			     sizeof(self_bin) - 1) <= 0) {

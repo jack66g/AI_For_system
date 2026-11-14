@@ -130,6 +130,18 @@ else
     failed+=("audit_capabilities")
 fi
 
+echo "== ORCH-E9 orch loop drill (回路自动化: 派发-验收-回炉-压缩-蒸馏) =="
+# make target 自带 occ/test_orch 依赖构建（首次较慢）；演练全在
+# /tmp 夹具（OCC_DB/OCC_SESSIONS_DIR/OCC_SNAPROOT 指临时目录）。
+if timeout 300 make -C "$agent/occ" orch-drill > /tmp/aik-orch-drill.log 2>&1; then
+    echo "PASS orch_drill"
+    pass=$((pass + 1))
+else
+    echo "FAIL orch_drill (see /tmp/aik-orch-drill.log)"
+    fail=$((fail + 1))
+    failed+=("orch_drill")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then
