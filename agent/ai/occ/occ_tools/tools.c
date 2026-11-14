@@ -34,6 +34,7 @@
 
 #include "occ_core/orch.h"			/* E3：task 工具执行面 */
 #include "occ_core/review.h"			/* E4：return 走验收环 */
+#include "occ_core/occ_ac.h"		/* E5：done→request_compact 闸 */
 
 #include "store/store_json.h"
 
@@ -1985,6 +1986,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	const aik_json *passj;
 	occ_task_row trow;
 	char dbuf[256], stbuf[24];
+	char *distill_txt = NULL;	/* E5：蒸馏文（done 时） */
 	aik_json *pj, *obj;
 
 	if (!tid || !tid[0])
@@ -2032,6 +2034,12 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				   dbuf, sizeof(dbuf)) != 0)
 			return jerr(o, NULL, "return 验收环失败：%s",
 				    dbuf[0] ? dbuf : "库错");
+		/* E5 闸1+蒸馏：验收通过 → 子会话蒸馏归档 + 主会话请求
+		 * 回合收口压缩（defer；force 语义=任务完成触发闸） */
+		distill_txt = !strcmp(state, OCC_TASK_ST_DONE) ?
+			occ_orch_distill(ctx->db, tid) : NULL;
+		if (!strcmp(state, OCC_TASK_ST_DONE))
+			occ_ac_request_compact();
 		obj = aik_json_new_obj();
 		if (!obj ||
 		    aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
@@ -2055,8 +2063,23 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				     brief[0] ? aik_json_new_str(brief) :
 						aik_json_new_null())) {
 			aik_json_free(obj);
+			free(distill_txt);
 			return jerr(o, NULL, "return 结果组装失败（oom）");
 		}
+		if (distill_txt) {
+			/* 蒸馏实体清单随工具结果进主上下文（两级蒸馏第二级） */
+			int pr = aik_json_obj_put(obj, "distill",
+						  aik_json_new_str(
+							  distill_txt));
+
+			if (pr) {
+				aik_json_free(obj);
+				free(distill_txt);
+				return jerr(o, NULL,
+					    "return 结果组装失败（oom）");
+			}
+		}
+		free(distill_txt);
 		{
 			int r = jout(o, obj);
 

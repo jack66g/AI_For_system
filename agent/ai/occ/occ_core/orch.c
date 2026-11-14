@@ -1198,3 +1198,116 @@ const char *occ_orch_child_task(const occ_orch_child *c)
 {
 	return c ? c->task_id : "";
 }
+
+
+/* ---- E5 子会话蒸馏（ORCH §5：子不压缩只蒸馏） ---- */
+#include "occ_sme.h"
+#include "occ_ac.h"
+
+/* E5 闸1 旗营（定义在此：tools/orch 面置旗、ac 收口取用——
+ * 避免 occ_ac.o 拖 LLM/HTTP 级联进轻量测试链接） */
+static int g_compact_req;
+
+void occ_ac_request_compact(void)
+{
+	g_compact_req = 1;
+}
+
+int occ_orch_compact_take(void)
+{
+	int v = g_compact_req;
+
+	g_compact_req = 0;
+	return v;
+}
+
+/* 两级蒸馏第二级：关键实体清单（goal+brief 内引号串=acceptance/
+ * fileset 实体）——第一级报告摘要已由 task 工具 read_result 进主
+ * 上下文。仅 done 态；幂等（已有 distill 事件返回 NULL）。
+ * 副作用：occ_task_distill 审计事件 + child 会话 archived +
+ * SME 记忆条目（尽力，失败不阻塞）。返回蒸馏文（调用方 free）。 */
+char *occ_orch_distill(occ_db *db, const char *task_id)
+{
+	occ_task_row row;
+	occ_task_event_row *evs = NULL;
+	size_t nevs = 0, i, o = 0;
+	char err[192], *out;
+	int already = 0;
+
+	if (!db || !task_id || !task_id[0])
+		return NULL;
+	if (occ_task_get(db, task_id, &row, err, sizeof(err)) != 1)
+		return NULL;
+	if (strcmp(row.status, OCC_TASK_ST_DONE) != 0)
+		return NULL;
+	if (occ_task_events(db, task_id, &evs, &nevs, NULL, 0) == 0) {
+		for (i = 0; i < nevs; i++)
+			if (!strcmp(evs[i].kind, OCC_TASK_EV_DISTILL))
+				already = 1;
+		occ_task_event_rows_free(evs, nevs);
+	}
+	if (already) {
+		occ_task_row_free(&row);
+		return NULL;
+	}
+
+	out = malloc(2048);
+	if (!out) {
+		occ_task_row_free(&row);
+		return NULL;
+	}
+	{
+		/* goal 无独立列——从 brief_json 提取（工具面组包，无内嵌引号） */
+		const char *g = strstr(row.brief_json ? row.brief_json : "",
+				       "\"goal\":\"");
+		char gbuf[224];
+
+		gbuf[0] = '\0';
+		if (g) {
+			size_t gl;
+
+			g += 8;
+			gl = strcspn(g, "\"");
+			if (gl > 200)
+				gl = 200;
+			memcpy(gbuf, g, gl);
+			gbuf[gl] = '\0';
+		}
+		o += (size_t)snprintf(out + o, 2048 - o,
+				      "【任务蒸馏 %s】\n目标：%s\n"
+				      "关键实体：\n", row.id,
+				      gbuf[0] ? gbuf : "(brief 缺 goal)");
+	}
+	/* brief_json 引号串实体扫描（acceptance/fileset 路径与 md5——
+	 * 简扫描不处理转义：实体为路径/hex/断言串，工程上无内嵌引号） */
+	{
+		const char *p = row.brief_json;
+
+		while (p && *p && o < 1600) {
+			const char *q = strchr(p + 1, '"');
+
+			if (*p != '"') {
+				p = q;
+				continue;
+			}
+			if (q && q - p > 2)
+				o += (size_t)snprintf(out + o, 2048 - o,
+						      "- %.160s\n", p + 1);
+			p = q;
+		}
+	}
+	o += (size_t)snprintf(out + o, 2048 - o,
+			      "（子会话 %s 已归档；完整报告走 read_result）\n",
+			      row.child_session[0] ? row.child_session : "-");
+	(void)occ_task_distill(db, task_id, out, err, sizeof(err));
+	if (row.child_session[0])
+		(void)occ_session_set_status(db, row.child_session,
+					     OCC_ST_ARCHIVED, err,
+					     sizeof(err));
+	if (occ_sme_enabled())
+		(void)occ_sme_remember(
+			row.parent_session[0] ? row.parent_session : task_id,
+			"task 蒸馏", out);
+	occ_task_row_free(&row);
+	return out;
+}

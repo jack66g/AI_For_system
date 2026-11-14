@@ -170,9 +170,50 @@ static void *srv_main(void *arg)
 			log_req("commit", body);
 			snprintf(g_commit_body, sizeof(g_commit_body), "%s",
 				 body);
-			respond(c, 200,
-				"{\"ok\":true,\"segments_written\":0,"
-				"\"sme\":{\"stored\":false}}");
+			/* E5 原子闸：落盘真快照并回 snapshot_path（旋钮
+			 * AC_MOCK_SNAP=miss=模拟服务端缺路径→客户端拒换窗） */
+			{
+				const char *knob = getenv("AC_MOCK_SNAP");
+				char path[256], rbody[512];
+				const char *p;
+				FILE *f;
+
+				snprintf(path, sizeof(path),
+					 "/tmp/occ_ac_mock_snap_%ld.md",
+					 (long)getpid());
+				if (!knob) {
+					p = strstr(body, "\"digest_md\":\"");
+					if (p) {
+						p += 13;
+						f = fopen(path, "w");
+						if (f) {
+							for (; *p && *p != '"';
+							     p++) {
+								if (p[0] == '\\' &&
+								    p[1] == 'n') {
+									fputc('\n', f);
+									p++;
+								} else {
+									fputc(*p, f);
+								}
+							}
+							fclose(f);
+						}
+					}
+					snprintf(rbody, sizeof(rbody),
+						 "{\"ok\":true,"
+						 "\"snapshot_path\":\"%s\","
+						 "\"segments_written\":0,"
+						 "\"sme\":{\"stored\":false}}",
+						 path);
+					respond(c, 200, rbody);
+				} else {
+					respond(c, 200,
+						"{\"ok\":true,"
+						"\"segments_written\":0,"
+						"\"sme\":{\"stored\":false}}");
+				}
+			}
 		} else {
 			respond(c, 404, "{\"errors\":[{\"msg\":\"nope\"}]}");
 		}
@@ -604,6 +645,113 @@ int main(void)
 	OK(rc == 0 && compacted == 0, "turn-end-disabled");
 	OK(g_log[0] == '\0', "disabled-zero-http");
 	OK(strcmp(occ_ac_status(), OCC_AC_ST_OFF) == 0, "status-off-when-disabled");
+	/* ---- E5 压缩双闸+蒸馏（ORCH §5） ---- */
+	{
+		occ_ac_turn t2;
+		char snap[512], snap2[512], err2[192];
+		FILE *sf;
+
+		/* mock 已在上节收尾 srv_stop——重启（端口会变）再指 URL */
+		if (srv_start() != 0) {
+			printf("mock restart failed\n");
+			return 2;
+		}
+		snprintf(url, sizeof(url), "http://127.0.0.1:%d", g_port);
+		setenv("OCC_AC_URL", url, 1);
+		setenv("OCC_AC", "1", 1);
+		snprintf(snap, sizeof(snap), "%s/snap_ok.md", tmpdir);
+		sf = fopen(snap, "w");
+		if (sf) {
+			fputs("## 目标\nNEEDLE-7x9-OK 0123456789"
+			      "0123456789012345678901234567890\n", sf);
+			fclose(sf);
+		}
+		OK(occ_ac_snapshot_verify(snap, "NEEDLE-7x9-OK",
+					  err2, sizeof(err2)) == 0,
+		   "e5-verify-ok");
+		OK(occ_ac_snapshot_verify("/nonexistent/snap.md", "x",
+					  err2, sizeof(err2)) != 0,
+		   "e5-verify-missing");
+		snprintf(snap2, sizeof(snap2), "%s/snap_empty.md", tmpdir);
+		sf = fopen(snap2, "w");
+		if (sf)
+			fclose(sf);
+		OK(occ_ac_snapshot_verify(snap2, "x", err2,
+					  sizeof(err2)) != 0,
+		   "e5-verify-empty");
+		snprintf(snap2, sizeof(snap2), "%s/snap_wrong.md", tmpdir);
+		sf = fopen(snap2, "w");
+		if (sf) {
+			fputs("# w\nAAAA-BBBB-CCCC 0123456789012345"
+			      "678901234567890123456789\n", sf);
+			fclose(sf);
+		}
+		OK(occ_ac_snapshot_verify(snap2, "NEEDLE-7x9-OK", err2,
+					  sizeof(err2)) != 0,
+		   "e5-verify-mismatch");
+
+		/* 原子闸负路：commit 响应缺 snapshot_path → 拒换窗 */
+		setenv("AC_MOCK_SNAP", "miss", 1);
+		memset(&t2, 0, sizeof(t2));
+		t2.db = db;
+		t2.session_id = sess.id;
+		t2.cwd = tmpdir;
+		t2.tokens = 999;
+		err[0] = '\0';
+		compacted = 7;
+		rc = occ_ac_compact_now(&t2, err, sizeof(err));
+		OK(rc != 0 && strstr(err, "读回") != NULL,
+		   "e5-atomic-miss-err");
+		OK(compacted != 1, "e5-atomic-miss-no-swap");
+		unsetenv("AC_MOCK_SNAP");
+
+		/* 原子闸正路：mock 落盘真快照 → 换窗 */
+		memset(&t2, 0, sizeof(t2));
+		t2.db = db;
+		t2.session_id = sess.id;
+		t2.cwd = tmpdir;
+		t2.tokens = 1000;
+		err[0] = '\0';
+		compacted = 0;
+		rc = occ_ac_compact_now(&t2, err, sizeof(err));
+		/* compact_now 的 compacted 为内部局部量不外传——正路判据
+		 * =链零错完成（rc==0 且 err 空；换窗四证由全链段覆盖） */
+		OK(rc == 0 && err[0] == '\0', "e5-atomic-ok-swap");
+
+		/* 闸2：进行中快照命中 + 30s 窗防抖 */
+		g_log[0] = '\0';
+		OK(occ_ac_midturn_snapshot(db, sess.id, tmpdir, 500) == 1,
+		   "e5-midturn-begin");
+		OK(strstr(g_log, "begin;") != NULL, "e5-midturn-log");
+		g_log[0] = '\0';
+		OK(occ_ac_midturn_snapshot(db, sess.id, tmpdir, 500) == 0,
+		   "e5-midturn-guard");
+		OK(strstr(g_log, "begin;") == NULL, "e5-midturn-no-dup");
+
+		/* 子会话不压缩：kind=child 收口零 HTTP */
+		{
+			occ_session_row ch;
+
+			if (occ_session_create_kind(db, "e5c",
+						    "child", &ch, err2,
+						    sizeof(err2)) == 0) {
+				occ_ac_turn t3;
+
+				memset(&t3, 0, sizeof(t3));
+				t3.db = db;
+				t3.session_id = ch.id;
+				t3.cwd = tmpdir;
+				t3.tokens = 100;
+				g_log[0] = '\0';
+				compacted = 7;
+				rc = occ_ac_turn_end(&t3, &compacted, err,
+						     sizeof(err));
+				OK(rc == 0 && compacted == 0 &&
+				   g_log[0] == '\0', "e5-child-noac");
+			}
+		}
+	}
+
 	unsetenv("OCC_AC");
 	unsetenv("OCC_AC_URL");
 

@@ -2159,3 +2159,40 @@ int occ_toolcalls_since(occ_db *db, const char *session_id,
 	*n = cnt;
 	return 0;
 }
+
+/* E5 迁自 occ_ac.c：occ_sme 依赖本函数，轻量测试链接不拖 occ_ac.o
+ * （其会级联 LLM/HTTP/system-prompt 对象）。声明在 occ_session.h。 */
+const char *occ_sessions_dir(void)
+{
+	static char dir[512];
+	static int done;
+	const char *env;
+	const char *home;
+
+	if (done)
+		return dir[0] ? dir : NULL;
+	done = 1;
+	env = getenv("OCC_SESSIONS_DIR");
+	if (env && *env) {
+		snprintf(dir, sizeof(dir), "%s", env);
+	} else {
+		home = getenv("HOME");
+		if (!home || !*home)
+			return NULL;
+		snprintf(dir, sizeof(dir), "%s/.occ/sessions", home);
+	}
+	/* 先建父目录（~/.occ 可能不存在）再建本体；已存在不报错 */
+	{
+		char parent[512];
+		char *slash;
+
+		snprintf(parent, sizeof(parent), "%s", dir);
+		slash = strrchr(parent, '/');
+		if (slash && slash != parent) {
+			*slash = '\0';
+			(void)mkdir(parent, 0755);
+		}
+	}
+	(void)mkdir(dir, 0755);
+	return dir;
+}

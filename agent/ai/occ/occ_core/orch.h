@@ -276,4 +276,10 @@ typedef int (*occ_orch_review_hook)(void *ud, occ_db *db,
 void occ_orch_set_review_hook(occ_orch *o, occ_orch_review_hook fn,
 			      void *ud);
 
+
+/* E5（ORCH §5）：done 任务两级蒸馏第二级（关键实体清单）+审计+
+ * child archived+SME 条目；幂等。返回蒸馏文（调用方 free）。 */
+char *occ_orch_distill(occ_db *db, const char *task_id);
+int occ_orch_compact_take(void);	/* E5 闸1：取走压缩请求旗 */
+
 #endif /* _OCC_ORCH_H */

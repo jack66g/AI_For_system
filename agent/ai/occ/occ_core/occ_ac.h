@@ -69,7 +69,6 @@ const char *occ_ac_status(void);	/* 见文件头四个宏 */
 
 /* 会话侧目录：OCC_SESSIONS_DIR > $HOME/.occ/sessions（不存在则建）。
  * 失败返回 NULL（调用方降级：transcript 不落盘但不阻塞对话）。 */
-const char *occ_sessions_dir(void);
 
 /*
  * occ_ac_transcript - ① 落一行 transcript JSONL（role=user|assistant|
@@ -116,6 +115,13 @@ int occ_ac_turn_end(occ_ac_turn *t, int *compacted, char *err,
  * 本棒只交付可调用入口；不碰 occ.c / occ_tui）。
  */
 int occ_ac_compact_now(occ_ac_turn *t, char *err, size_t errlen);
+
+/* E5（ORCH §5 压缩双闸+蒸馏） */
+void occ_ac_request_compact(void);	/* 闸1：任务完成触发（收口 force */
+int occ_ac_midturn_snapshot(occ_db *db, const char *session_id,
+			    const char *cwd, long long tokens);
+int occ_ac_snapshot_verify(const char *path, const char *digest,
+			   char *err, size_t errlen);
 
 /*
  * occ_ac_apply_digest - ③ 换窗本体（单测可直测）：

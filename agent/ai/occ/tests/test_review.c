@@ -615,6 +615,41 @@ static void sec_judge_reject(void)
 	   "f-judge-reject-rework");
 }
 
+/* ============ E5 子会话蒸馏（done 两级蒸馏第二级） ============ */
+
+static void e5_distill_case(void)
+{
+	char tid[64];
+	char *txt;
+	char err[192];
+
+	OK(task_to_review("{\"goal\":\"交付 out_e5.bin\",\"acceptance\":"
+			  "[\"file:out_e5.bin\"],\"rework_max\":2}",
+			  tid, sizeof(tid)) == 0, "e5-setup");
+	/* 直接走状态机到 done（机械判面已由 D/F/G 段覆盖） */
+	OK(occ_task_verdict(g_db, tid, 1, "{\"pass\":true}", err,
+			    sizeof(err)) == 0, "e5-verdict-done");
+	txt = occ_orch_distill(g_db, tid);
+	OK(txt && strstr(txt, "【任务蒸馏") &&
+	   strstr(txt, "file:out_e5.bin"),
+	   "e5-distill-text");
+	free(txt);
+	{
+		occ_task_event_row *evs = NULL;
+		size_t nevs = 0, i;
+		int found = 0;
+
+		if (occ_task_events(g_db, tid, &evs, &nevs, NULL, 0) == 0) {
+			for (i = 0; i < nevs; i++)
+				if (!strcmp(evs[i].kind, OCC_TASK_EV_DISTILL))
+					found = 1;
+			occ_task_event_rows_free(evs, nevs);
+		}
+		OK(found, "e5-distill-event");
+	}
+	OK(occ_orch_distill(g_db, tid) == NULL, "e5-distill-idempotent");
+}
+
 /* ============ G orch 端到端（sim 子进程）+ return 工具面 ============ */
 
 static const char *g_rv_env[2] = { "OCC_RV_SIM=1", NULL };
@@ -900,7 +935,10 @@ static int unit_main(void)
 	sec_hook();
 
 	occ_orch_free(g_o);
-	occ_db_close(g_db);
+		/* E5 蒸馏案（须在关库前——E5 前事故：调用于 close 后=U-C） */
+	e5_distill_case();
+
+occ_db_close(g_db);
 
 	/* 子进程残留自检（同居生产 VM 纪律：测试收尾零残留） */
 	printf("review tests: %d ok / FAIL=%d\n", n_ok, n_fail);

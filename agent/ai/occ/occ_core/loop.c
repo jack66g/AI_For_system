@@ -957,10 +957,17 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 
 				g_ac_reported = now;
 				if (occ_session_get(db, sess.id, &cur, NULL,
-						    0) == 1)
+						    0) == 1) {
 					(void)occ_ac_report(sess.id,
 						opts->workdir,
 						cur.tokens_total);
+					/* E5 闸2：水位高时打进行中快照
+					 * （/begin，不 commit——崩溃兜底；
+					 * child 闸在函数内） */
+					(void)occ_ac_midturn_snapshot(
+						db, sess.id, opts->workdir,
+						cur.tokens_total);
+				}
 			}
 		}
 

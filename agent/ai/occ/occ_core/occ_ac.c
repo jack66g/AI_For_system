@@ -10,7 +10,10 @@
  *     进程内用同一个 provider 完成——ac 内核一行未改。
  */
 #define _POSIX_C_SOURCE 200809L
+#include <time.h>	/* E5：midturn 30s 窗 time() */
 #include "occ_ac.h"
+#include "occ_session.h"	/* E5：child 闸读 kind */
+#include "orch.h"		/* E5：闸1 旗营取用（定义在 orch.c） */
 
 #include "occ_sysprompt.h"
 #include "occ_tokens.h"
@@ -107,40 +110,6 @@ int occ_bind_active(const occ_loop_opts *opts)
 
 /* ---- 会话侧目录 ---- */
 
-const char *occ_sessions_dir(void)
-{
-	static char dir[512];
-	static int done;
-	const char *env;
-	const char *home;
-
-	if (done)
-		return dir[0] ? dir : NULL;
-	done = 1;
-	env = getenv("OCC_SESSIONS_DIR");
-	if (env && *env) {
-		snprintf(dir, sizeof(dir), "%s", env);
-	} else {
-		home = getenv("HOME");
-		if (!home || !*home)
-			return NULL;
-		snprintf(dir, sizeof(dir), "%s/.occ/sessions", home);
-	}
-	/* 先建父目录（~/.occ 可能不存在）再建本体；已存在不报错 */
-	{
-		char parent[512];
-		char *slash;
-
-		snprintf(parent, sizeof(parent), "%s", dir);
-		slash = strrchr(parent, '/');
-		if (slash && slash != parent) {
-			*slash = '\0';
-			(void)mkdir(parent, 0755);
-		}
-	}
-	(void)mkdir(dir, 0755);
-	return dir;
-}
 
 /* ---- ① transcript JSONL ---- */
 
@@ -257,12 +226,10 @@ int occ_ac_transcript(const char *session_id, const char *role,
 static const char *ac_base(void)
 {
 	static char buf[256];
-	static int done;
 	const char *env;
 
-	if (done)
-		return buf;
-	done = 1;
+	/* E5：去 static 锁存——测试会重启 mock 换端口；调用频度低
+	 * （每回合数次），重读 env 无性能代价 */
 	env = getenv("OCC_AC_URL");
 	if (!env || !*env)
 		env = getenv("AUTOCONDENSE_BASE_URL");
@@ -703,8 +670,81 @@ static size_t ac_session_material(occ_ac_turn *t, char *out, size_t cap,
 
 /* ---- /begin → 摘要 → /commit ---- */
 
+/* E5 原子闸：/commit 落盘快照读回校验——文件在、可读、体量非平凡
+ * （>=64B）；原始 md 存储（含换行）时摘要正文必须确实在场。JSON
+ * 单行存储退化为体量校验（字节级等值需服务端回显=登记尾账）。 */
+int occ_ac_snapshot_verify(const char *path, const char *digest,
+			   char *err, size_t errlen)
+{
+	FILE *f;
+	char *buf;
+	char nullerr[8];
+	long sz;
+	size_t rd_;
+
+	if (err && errlen)
+		err[0] = '\0';
+	else {
+		err = nullerr;
+		errlen = sizeof(nullerr);
+	}
+	if (!path || !path[0]) {
+		snprintf(err, errlen, "快照路径缺失");
+		return -1;
+	}
+	f = fopen(path, "rb");
+	if (!f) {
+		snprintf(err, errlen, "快照 %s 不可读", path);
+		return -1;
+	}
+	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+		fclose(f);
+		snprintf(err, errlen, "快照 %s 定位失败", path);
+		return -1;
+	}
+	rewind(f);
+	if (sz < 64) {
+		fclose(f);
+		snprintf(err, errlen, "快照 %s 体量异常（%ldB）", path, sz);
+		return -1;
+	}
+	buf = malloc((size_t)sz + 1);
+	if (!buf) {
+		fclose(f);
+		snprintf(err, errlen, "oom");
+		return -1;
+	}
+	rd_ = fread(buf, 1, (size_t)sz, f);
+	fclose(f);
+	buf[rd_] = '\0';
+	if (memchr(buf, '\n', rd_) && digest && digest[0]) {
+		/* 首行（标题/首节）为针——正文引号在 JSON 转义两侧不对
+		 * 称，全文子串会误判；首行稳定无转义面 */
+		const char *nl = strchr(digest, '\n');
+		size_t nlen = nl ? (size_t)(nl - digest) : strlen(digest);
+		char needle[160];
+
+		if (nlen > sizeof(needle) - 1)
+			nlen = sizeof(needle) - 1;
+		if (nlen < 8)
+			nlen = 0;	/* 过短不构成判据 → 退体量校验 */
+		if (nlen) {
+			memcpy(needle, digest, nlen);
+			needle[nlen] = '\0';
+			if (!strstr(buf, needle)) {
+				free(buf);
+				snprintf(err, errlen,
+					 "快照 %s 摘要首行不符", path);
+				return -1;
+			}
+		}
+	}
+	free(buf);
+	return 0;
+}
+
 static int ac_commit(occ_ac_turn *t, const char *digest, char *err,
-		     size_t errlen)
+		      size_t errlen)
 {
 	aik_json *req;
 	char *dump = NULL, *resp = NULL;
@@ -744,7 +784,33 @@ static int ac_commit(occ_ac_turn *t, const char *digest, char *err,
 		free(resp);
 		return -1;
 	}
-	free(resp);
+	/* E5 原子闸：快照读回校验通过才放行 apply（失败不换窗） */
+	{
+		aik_json *rj = aik_json_parse(resp, strlen(resp), NULL, 0);
+		char pathbuf[512], verr[160];
+		int vrc = -1;
+
+		pathbuf[0] = '\0';
+		if (rj) {
+			const char *s = aik_json_str(aik_json_get(rj,
+								 "snapshot_path"));
+
+			snprintf(pathbuf, sizeof(pathbuf), "%s", s ? s : "");
+			aik_json_free(rj);
+		}
+		if (pathbuf[0])
+			vrc = occ_ac_snapshot_verify(pathbuf, digest,
+						     verr, sizeof(verr));
+		free(resp);
+		if (vrc != 0) {
+			snprintf(err, errlen,
+				 "commit: 快照读回校验失败（%s%s%s）"
+				 "——本轮不换窗",
+				 pathbuf[0] ? pathbuf : "响应缺 snapshot_path",
+				 verr[0] ? "：" : "", verr);
+			return -1;
+		}
+	}
 	return 0;
 }
 
@@ -971,6 +1037,58 @@ static int ac_run_chain(occ_ac_turn *t, int *compacted, char *err,
 	return 0;
 }
 
+/* E5 闸2：长回合水位兜底——/check 报 JUDGE 时打一次 /begin 进行中
+ * 快照（不 digest 不 commit；全流程仍在回合收口链）。30s 窗内至多
+ * 一次；child 会话不驱动（§5 子不压缩只蒸馏）。返回 1=已打快照。 */
+int occ_ac_midturn_snapshot(occ_db *db, const char *session_id,
+			    const char *cwd, long long tokens)
+{
+	static time_t last_snap;
+	char should[32], *dump = NULL, *resp = NULL;
+	aik_json *j;
+	time_t now = time(NULL);
+	size_t n;
+
+	(void)tokens;
+	if (!occ_ac_enabled() || !db || !session_id || !session_id[0])
+		return 0;
+	{
+		occ_session_row krow;
+
+		if (occ_session_get(db, session_id, &krow, NULL, 0) == 1 &&
+		    !strcmp(krow.kind, "child"))
+			return 0;
+	}
+	if (now - last_snap < 30)
+		return 0;
+	if (occ_ac_check(session_id, should, sizeof(should)) != 0 ||
+	    strcmp(should, "JUDGE") != 0)
+		return 0;
+	j = aik_json_new_obj();
+	if (!j)
+		return 0;
+	if (aik_json_obj_put(j, "session_id",
+			     aik_json_new_str(session_id)) != 0 ||
+	    aik_json_obj_put(j, "cwd",
+			     aik_json_new_str(cwd && *cwd ? cwd : ".")) != 0 ||
+	    aik_json_dump(j, &dump, &n) != 0)
+		dump = NULL;
+	aik_json_free(j);
+	if (!dump)
+		return 0;
+	/* 复用 begin 通道（快照=服务端落盘；响应用后即弃） */
+	{
+		int rc = ac_post("/begin", dump, OCC_AC_T_MS, &resp);
+
+		free(dump);
+		free(resp);
+		if (rc != 0)
+			return 0;
+	}
+	last_snap = now;
+	return 1;
+}
+
 int occ_ac_turn_end(occ_ac_turn *t, int *compacted, char *err,
 		    size_t errlen)
 {
@@ -983,6 +1101,19 @@ int occ_ac_turn_end(occ_ac_turn *t, int *compacted, char *err,
 		err[0] = '\0';
 	if (!occ_ac_enabled() || !t || !t->session_id || !t->db)
 		return 0;
+	/* E5 子会话不压缩只蒸馏（ORCH §5）：kind=child 不驱动 ac 链
+	 * （先于 force 旗消费——child 不吞主会话的压缩请求） */
+	{
+		occ_session_row krow;
+
+		if (occ_session_get(t->db, t->session_id, &krow, NULL,
+				    0) == 1 && !strcmp(krow.kind, "child"))
+			return 0;
+	}
+	/* E5 闸1：任务完成触发的压缩请求——defer 到收口执行（中途
+	 * 换窗会撕裂进行中上下文；force 语义等价 compact_now） */
+	if (occ_orch_compact_take())
+		t->force = 1;
 	/* ② 水位 + 轮询（每轮结束必查——「每次大消息后」） */
 	if (occ_ac_report(t->session_id, t->cwd, t->tokens) != 0)
 		return 0;		/* 不可达 → @ac:off，诚实降级不阻塞 */

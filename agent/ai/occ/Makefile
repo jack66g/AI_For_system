@@ -303,6 +303,7 @@ tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		 $(OBJ_DIR)/occ_core/review.o \
 		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
+		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/review.o \
 		$(TOOLS_OBJS) \
@@ -316,6 +317,7 @@ tests/test_review: tests/test_review.c $(OBJ_DIR)/occ_core/review.o \
 		   $(OBJ_DIR)/occ_core/task.o \
 		   $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_review.c \
+		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/review.o $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
 		$(TOOLS_OBJS) \
@@ -341,11 +343,13 @@ tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_
 tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		  $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_core/review.o \
+		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
@@ -388,6 +392,7 @@ tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(OBJ_DIR)/occ_core/review.o \
 		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
+		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/review.o \

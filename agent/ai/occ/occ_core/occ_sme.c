@@ -9,6 +9,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "occ_sme.h"
+#include "occ_session.h"	/* E5：occ_sessions_dir 声明迁此 */
 
 #include "occ_ac.h"		/* occ_sessions_dir（会话侧目录共用） */
 

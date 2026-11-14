@@ -74,6 +74,7 @@ typedef struct sqlite3 sqlite3;
 #define OCC_ST_ERROR "error"		/* 上次环失败（可续接/重试） */
 #define OCC_ST_INTERRUPTED "interrupted"	/* b2：SIGINT 安全点停止
 						 * （可 retry/续接/recover） */
+const char *occ_sessions_dir(void);	/* E5 迁自 occ_ac.c（occ_sme 依赖；轻量链接不拖 occ_ac.o） */
 #define OCC_ST_ARCHIVED "archived"	/* E1：/clear 归档（会话+消息原地
 					 * 保留可找回，/sessions 可续聊） */
 
