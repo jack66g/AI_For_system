@@ -25,7 +25,7 @@
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/ai_netlink.h>
-#include "../core/ai_agent.h"
+#include "../actuators/ai_agent.h"
 
 #ifdef CONFIG_AIKERNEL_RUNTIME
 

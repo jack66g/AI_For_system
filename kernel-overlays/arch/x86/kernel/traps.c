@@ -39,7 +39,7 @@
 #include <linux/smp.h>
 #include <linux/cpu.h>
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../../../AIKernel/security/ai_lsm.h"
+#include "../../../AIKernel/boundary/ai_lsm.h"
 #endif
 #include <linux/io.h>
 #include <linux/hardirq.h>

@@ -33,14 +33,14 @@
 #include <linux/sched/stat.h>	/* nr_threads（D6 radius） */
 #include <linux/types.h>
 #include "ai_policy.h"
-#include "ai_policy_safety.h"
-#include "ai_control.h"
-#include "ai_agent.h"
+#include "../actuators/ai_policy_safety.h"
+#include "../actuators/ai_control.h"
+#include "../actuators/ai_agent.h"
 #include "ai_telemetry.h"
 #include "ai_causal.h"
 #include "ai_effect.h"
-#include "../net/ai_netlink.h"
-#include "../security/ai_chain.h"
+#include "../senses/ai_netlink.h"
+#include "../boundary/ai_chain.h"
 
 /* K1 D3/D8：决策记录尾部扩 8 字段，127→183B packed（drift 即编译
  * 失败；字段与 struct ai_policy_ctx 尾部一一对应，注释锚见 .h） */

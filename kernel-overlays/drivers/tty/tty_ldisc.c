@@ -14,7 +14,7 @@
 #include <linux/proc_fs.h>
 #include <linux/module.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../../AIKernel/core/ai_proc.h"
+#include "../../AIKernel/senses/ai_proc.h"
 #endif
 #include <linux/device.h>
 #include <linux/wait.h>

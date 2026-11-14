@@ -22,7 +22,7 @@
 #include <linux/suspend.h>
 
 #ifdef CONFIG_AIKERNEL_POWER
-#include "../../AIKernel/power/ai_power.h"
+#include "../../AIKernel/subsys/power/ai_power.h"
 #endif
 
 #define CREATE_TRACE_POINTS

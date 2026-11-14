@@ -16,7 +16,7 @@
 #include <linux/bug.h>
 #include <net/page_pool/helpers.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 #include <net/hotdata.h>

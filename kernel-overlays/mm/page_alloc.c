@@ -57,7 +57,7 @@
 #include <linux/pgalloc_tag.h>
 #include <linux/timekeeping.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include <asm/div64.h>
 #include "internal.h"

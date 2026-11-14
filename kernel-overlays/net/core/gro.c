@@ -6,7 +6,7 @@
 #include <trace/events/net.h>
 #include <linux/skbuff_ref.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 #define MAX_GRO_SKBS 8

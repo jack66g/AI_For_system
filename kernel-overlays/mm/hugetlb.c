@@ -23,7 +23,7 @@
 #include <linux/slab.h>
 #include <linux/sched/mm.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include <linux/mmdebug.h>
 #include <linux/sched/signal.h>

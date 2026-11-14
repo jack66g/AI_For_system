@@ -60,7 +60,7 @@
 #include <linux/kasan.h>
 
 #ifdef CONFIG_AIKERNEL_LOCK
-#include "../../AIKernel/lock/ai_lock.h"
+#include "../../AIKernel/subsys/lock/ai_lock.h"
 #endif
 
 #include <asm/sections.h>

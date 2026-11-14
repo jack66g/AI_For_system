@@ -32,8 +32,8 @@
 #include <linux/err.h>
 #include <linux/crypto.h>
 #include <crypto/hash.h>
-#include "ai_model.h"
-#include "ai_model_mlp.h"
+#include "../reflex/ai_model.h"
+#include "../reflex/ai_model_mlp.h"
 #include "ai_runtime.h"
 
 static struct ai_startup_cfg {

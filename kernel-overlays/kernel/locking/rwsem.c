@@ -31,7 +31,7 @@
 #include <trace/events/lock.h>
 
 #ifdef CONFIG_AIKERNEL_LOCK
-#include "../../AIKernel/lock/ai_lock.h"
+#include "../../AIKernel/subsys/lock/ai_lock.h"
 #include <linux/timekeeping.h>
 #endif
 

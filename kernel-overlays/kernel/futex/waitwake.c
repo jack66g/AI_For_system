@@ -5,7 +5,7 @@
 #include <linux/sched/signal.h>
 #include <linux/freezer.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../../AIKernel/core/ai_proc.h"
+#include "../../AIKernel/senses/ai_proc.h"
 #endif
 
 #include "futex.h"

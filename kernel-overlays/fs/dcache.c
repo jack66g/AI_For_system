@@ -33,7 +33,7 @@
 #include <linux/memblock.h>	/* alloc_large_system_hash/hashdist（6.18 无 lglock.h） */
 
 #ifdef CONFIG_AIKERNEL_VFS
-#include "../AIKernel/vfs/ai_vfs.h"
+#include "../AIKernel/subsys/vfs/ai_vfs.h"
 #endif
 
 #include "internal.h"

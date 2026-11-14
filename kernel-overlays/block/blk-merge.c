@@ -18,7 +18,7 @@
 #include "blk-throttle.h"
 
 #ifdef CONFIG_AIKERNEL_IO
-#include "../../AIKernel/io/ai_block.h"
+#include "../../AIKernel/subsys/io/ai_block.h"
 #endif
 
 static inline void bio_get_first_bvec(struct bio *bio, struct bio_vec *bv)

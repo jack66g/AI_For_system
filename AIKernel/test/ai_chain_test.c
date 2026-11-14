@@ -32,7 +32,7 @@
 #include <linux/completion.h>
 #include <linux/string.h>
 
-#include "../security/ai_chain.h"
+#include "../boundary/ai_chain.h"
 #include "../core/ai_policy.h"
 
 #ifdef CONFIG_AIKERNEL_SECURITY

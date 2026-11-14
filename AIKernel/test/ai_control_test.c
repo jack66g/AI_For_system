@@ -20,14 +20,14 @@
 #include <linux/sched.h>
 
 #include "../core/ai_types.h"
-#include "../core/ai_control.h"
+#include "../actuators/ai_control.h"
 #include "../core/ai_policy.h"
 #include <linux/ai_accessors.h>
-#include "../net/ai_net.h"
-#include "../power/ai_power.h"
-#include "../security/ai_audit.h"
-#include "../security/ai_lsm.h"
-#include "../core/ai_policy_safety.h"
+#include "../subsys/net/ai_net.h"
+#include "../subsys/power/ai_power.h"
+#include "../boundary/ai_audit.h"
+#include "../boundary/ai_lsm.h"
+#include "../actuators/ai_policy_safety.h"
 
 /* 翻转类测试前置：翻转验证显式放宽到 100%，测后还原。
  * K65 前 [0..1] 参数在 pct=50 被整幅钳回（span=1 截断，I8-DATA-REPORT

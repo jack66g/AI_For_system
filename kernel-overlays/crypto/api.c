@@ -22,7 +22,7 @@
 #include <linux/string.h>
 #include <linux/completion.h>
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../AIKernel/security/ai_lsm.h"
+#include "../AIKernel/boundary/ai_lsm.h"
 #endif
 #include "internal.h"
 

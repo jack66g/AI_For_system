@@ -28,8 +28,8 @@
 #include <linux/sched.h>
 #include <linux/jiffies.h>
 #include "ai_types.h"
-#include "ai_proc.h"
-#include "ai_control.h"
+#include "../senses/ai_proc.h"
+#include "../actuators/ai_control.h"
 #include "ai_policy.h"
 #include "ai_effect.h"
 #include "ai_decision.h"

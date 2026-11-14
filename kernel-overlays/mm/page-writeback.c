@@ -38,7 +38,7 @@
 #include <linux/sched/rt.h>
 #include <linux/sched/signal.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include <linux/mm_inline.h>
 #include <linux/shmem_fs.h>

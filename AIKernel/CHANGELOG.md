@@ -91,3 +91,7 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 - configs/aikernel_factory.config 出厂 profile 单文件 +
   AIKernel/scripts/k10_config_check.sh 三方校验器（profile↔树↔
   代码行为证据；=y 零行为证据=开着没用 FAIL）。
+
+## K10.1 目录与分层重组（2026-11-14）
+- 六层落地：senses（感知与出口 25 文件）/actuators（参数·事务·回滚·配额 8）/reflex（定点模型 3）/boundary（security 迁入 7）/subsys×11（sched·mm·io·net·vfs·power·interrupt·lock·time·virt·bpf）/core 瘦身至中枢 15；89 git mv、295 处 include 相对路径重写（202 初轮+93 盲区修正——迁出者回指未迁文件类）、132 个 overlays 反引同步、顶层+子 Makefile 重排。
+- 等价性判据（K10a 尺子自证）：构建绿+KUnit not-ok=0+**config_hash 逐位不变 6a36fe4a68743a2f**+k0_truth 48-48+config_check 三方一致。

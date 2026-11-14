@@ -30,7 +30,7 @@
 #include <linux/irq_work.h>
 
 #ifdef CONFIG_AIKERNEL_BPF
-#include "../../AIKernel/bpf/ai_bpf.h"
+#include "../../AIKernel/subsys/bpf/ai_bpf.h"
 #endif
 
 #include "../../lib/kstrtox.h"

@@ -25,7 +25,7 @@
 #include "internals.h"
 
 #ifdef CONFIG_AIKERNEL_INTERRUPT
-#include "../../AIKernel/interrupt/ai_irq.h"
+#include "../../AIKernel/subsys/interrupt/ai_irq.h"
 #endif
 
 #if defined(CONFIG_IRQ_FORCED_THREADING) && !defined(CONFIG_PREEMPT_RT)

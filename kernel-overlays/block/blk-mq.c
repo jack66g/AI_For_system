@@ -40,7 +40,7 @@
 #include "blk-pm.h"
 
 #ifdef CONFIG_AIKERNEL_IO
-#include "../../AIKernel/io/ai_block.h"
+#include "../../AIKernel/subsys/io/ai_block.h"
 #endif
 #include "blk-stat.h"
 #include "blk-mq-sched.h"

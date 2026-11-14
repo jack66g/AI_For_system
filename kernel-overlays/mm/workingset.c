@@ -17,7 +17,7 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include "internal.h"
 

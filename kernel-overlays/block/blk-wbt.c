@@ -32,7 +32,7 @@
 #include "blk.h"
 
 #ifdef CONFIG_AIKERNEL_IO
-#include "../../AIKernel/io/ai_block.h"
+#include "../../AIKernel/subsys/io/ai_block.h"
 #endif
 
 #define CREATE_TRACE_POINTS

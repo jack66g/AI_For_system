@@ -23,7 +23,7 @@
 #include <linux/uaccess.h>
 #include <keys/request_key_auth-type.h>
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../../AIKernel/security/ai_lsm.h"
+#include "../../AIKernel/boundary/ai_lsm.h"
 #endif
 #include "internal.h"
 

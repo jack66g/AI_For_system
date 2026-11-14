@@ -28,7 +28,7 @@
 #include <linux/cpumask.h>
 #include <linux/bpf_mem_alloc.h>
 #ifdef CONFIG_AIKERNEL_BPF
-#include "../../AIKernel/bpf/ai_bpf.h"
+#include "../../AIKernel/subsys/bpf/ai_bpf.h"
 #endif
 #include <net/xdp.h>
 #include <linux/trace_events.h>

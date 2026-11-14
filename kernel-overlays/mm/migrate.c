@@ -44,7 +44,7 @@
 #include <linux/memory-tiers.h>
 #include <linux/pagewalk.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 
 #include <asm/tlbflush.h>

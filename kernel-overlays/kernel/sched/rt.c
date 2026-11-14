@@ -8,7 +8,7 @@
 #include "pelt.h"
 
 #ifdef CONFIG_AIKERNEL_SCHED
-#include "../../AIKernel/sched/ai_sched.h"
+#include "../../AIKernel/subsys/sched/ai_sched.h"
 #endif
 
 int sched_rr_timeslice = RR_TIMESLICE;

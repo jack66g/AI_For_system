@@ -21,8 +21,8 @@
 #include <linux/ai_netlink.h>
 #include "../core/ai_types.h"
 #include "../core/ai_policy.h"
-#include "../core/ai_policy_safety.h"
-#include "../core/ai_control.h"
+#include "../actuators/ai_policy_safety.h"
+#include "../actuators/ai_control.h"
 #include "../core/ai_runtime.h"
 #include "../core/ai_telemetry.h"
 #include <linux/ai_accessors.h>	/* K2a ⑤：vm_swappiness 真值读 */

@@ -92,7 +92,7 @@
 #include "stats.h"
 
 #ifdef CONFIG_AIKERNEL_SCHED
-#include "../../AIKernel/sched/ai_sched.h"
+#include "../../AIKernel/subsys/sched/ai_sched.h"
 #endif
 
 #include "autogroup.h"

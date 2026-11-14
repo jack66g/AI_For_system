@@ -153,7 +153,7 @@ static struct kset *scx_kset;
 #include <trace/events/sched_ext.h>
 
 #ifdef CONFIG_AIKERNEL_SCHED
-#include "../../AIKernel/sched/ai_sched.h"
+#include "../../AIKernel/subsys/sched/ai_sched.h"
 #endif
 
 static void process_ddsp_deferred_locals(struct rq *rq);

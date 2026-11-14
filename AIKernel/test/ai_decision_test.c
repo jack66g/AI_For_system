@@ -20,8 +20,8 @@
 #include <linux/delay.h>
 
 #include "../core/ai_types.h"
-#include "../core/ai_proc.h"
-#include "../core/ai_control.h"
+#include "../senses/ai_proc.h"
+#include "../actuators/ai_control.h"
 #include "../core/ai_policy.h"
 #include "../core/ai_decision.h"
 #include "../core/ai_effect.h"

@@ -23,7 +23,7 @@
 #include <net/net_namespace.h>
 #include "../core/ai_types.h"
 #include "../core/ai_policy.h"
-#include "../net/ai_netlink.h"
+#include "../senses/ai_netlink.h"
 
 #ifdef CONFIG_AIKERNEL_NETLINK
 

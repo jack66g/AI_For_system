@@ -29,7 +29,7 @@
 #include <linux/io.h>
 #include <linux/kmemleak.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include <trace/events/cma.h>
 

@@ -20,7 +20,7 @@
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../../AIKernel/core/ai_proc.h"
+#include "../../AIKernel/senses/ai_proc.h"
 #endif
 #include <linux/seq_file.h>
 #include <linux/pm.h>

@@ -18,7 +18,7 @@
 #include <linux/math64.h>
 
 #ifdef CONFIG_AIKERNEL_POWER
-#include "../../../../AIKernel/power/ai_power.h"
+#include "../../../../AIKernel/subsys/power/ai_power.h"
 #endif
 
 #include "gov.h"

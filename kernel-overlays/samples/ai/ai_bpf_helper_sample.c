@@ -53,7 +53,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include "../AIKernel/bpf/ai_bpf.h"
+#include "../AIKernel/subsys/bpf/ai_bpf.h"
 #include "../AIKernel/core/ai_telemetry.h"
 #include "../AIKernel/core/ai_types.h"
 

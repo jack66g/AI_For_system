@@ -21,7 +21,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/sched/cputime.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../AIKernel/core/ai_proc.h"
+#include "../AIKernel/senses/ai_proc.h"
 #endif
 #include <linux/file.h>
 #include <linux/fs.h>

@@ -33,7 +33,7 @@
 #include "tick-internal.h"
 
 #ifdef CONFIG_AIKERNEL_TIME
-#include "../../AIKernel/time/ai_time.h"
+#include "../../AIKernel/subsys/time/ai_time.h"
 #endif
 
 #include <trace/events/timer.h>

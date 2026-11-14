@@ -19,7 +19,7 @@
 #include <net/tcp_ecn.h>
 #include <trace/events/tcp.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 static DEFINE_SPINLOCK(tcp_cong_list_lock);

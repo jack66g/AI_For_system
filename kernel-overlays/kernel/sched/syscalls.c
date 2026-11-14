@@ -17,7 +17,7 @@
 #include "autogroup.h"
 
 #ifdef CONFIG_AIKERNEL_SCHED
-#include "../../AIKernel/sched/ai_sched.h"
+#include "../../AIKernel/subsys/sched/ai_sched.h"
 #endif
 
 static inline int __normal_prio(int policy, int rt_prio, int nice)

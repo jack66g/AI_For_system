@@ -45,7 +45,7 @@
 #include <keys/dns_resolver-type.h>
 #include <keys/user-type.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 #include "internal.h"

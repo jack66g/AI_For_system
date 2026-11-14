@@ -43,7 +43,7 @@
 #include <linux/posix-timers.h>
 #include <linux/cn_proc.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../AIKernel/core/ai_proc.h"
+#include "../AIKernel/senses/ai_proc.h"
 #endif
 #include <linux/mutex.h>
 #include <linux/futex.h>

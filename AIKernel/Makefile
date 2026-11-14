@@ -13,38 +13,40 @@ obj-$(CONFIG_AIKERNEL)		+= core/
 
 # 网络子系统：Prompt 02 起 NETLINK_AI 协议族落地（net/）；Prompt 06 起 AI 网络核心
 # + AI CCA + 第4类网络感知（net/，CONFIG_AIKERNEL_NET）
-obj-$(CONFIG_AIKERNEL_NETLINK)	+= net/
-obj-$(CONFIG_AIKERNEL_NET)	+= net/
+obj-$(CONFIG_AIKERNEL)		+= senses/
+obj-$(CONFIG_AIKERNEL)		+= actuators/
+obj-$(CONFIG_AIKERNEL)		+= reflex/
 
 # 调度子系统：Prompt 03 起 AI 调度 Hook + 调度感知落地（sched/）
-obj-$(CONFIG_AIKERNEL_SCHED)	+= sched/
+obj-$(CONFIG_AIKERNEL_SCHED)	+= subsys/sched/
+obj-$(CONFIG_AIKERNEL_NET)	+= subsys/net/
 
 # 内存管理子系统：Prompt 04 起 AI 内存 Hook + 内存感知落地（mm/）
-obj-$(CONFIG_AIKERNEL_MM)	+= mm/
+obj-$(CONFIG_AIKERNEL_MM)	+= subsys/mm/
 
 # I/O 子系统：Prompt 05 起 AI 块层/字符设备 Hook + AI 调度器 + 第3类感知（io/）
-obj-$(CONFIG_AIKERNEL_IO)	+= io/
+obj-$(CONFIG_AIKERNEL_IO)	+= subsys/io/
 
 # 安全子系统：Prompt 07 起 AI LSM + AI 审计 + 第8类安全感知（security/）
-obj-$(CONFIG_AIKERNEL_SECURITY)	+= security/
+obj-$(CONFIG_AIKERNEL_SECURITY)	+= boundary/
 
 # VFS 子系统：Prompt 08 起 AI VFS Hook + 缓存/回写/epoll 决策 + 第7类感知（vfs/）
-obj-$(CONFIG_AIKERNEL_VFS)	+= vfs/
+obj-$(CONFIG_AIKERNEL_VFS)	+= subsys/vfs/
 
 # 中断/锁/时间子系统：Prompt 09 起 AI 中断管理/同步锁/时间管理 Hook
 # + 第9/10/11类感知（interrupt/、lock/、time/）
-obj-$(CONFIG_AIKERNEL_INTERRUPT)	+= interrupt/
-obj-$(CONFIG_AIKERNEL_LOCK)		+= lock/
-obj-$(CONFIG_AIKERNEL_TIME)		+= time/
+obj-$(CONFIG_AIKERNEL_INTERRUPT)	+= subsys/interrupt/
+obj-$(CONFIG_AIKERNEL_LOCK)		+= subsys/lock/
+obj-$(CONFIG_AIKERNEL_TIME)		+= subsys/time/
 
 # 电源/虚拟化子系统：Prompt 10 起 AI 电源管理 Hook + aiguard governor
 # + 第12类感知（power/）；AI 虚拟化 Hook + VirtIO AI 设备 + 第13类感知（virt/）
-obj-$(CONFIG_AIKERNEL_POWER)	+= power/
-obj-$(CONFIG_AIKERNEL_VIRT)	+= virt/
+obj-$(CONFIG_AIKERNEL_POWER)	+= subsys/power/
+obj-$(CONFIG_AIKERNEL_VIRT)	+= subsys/virt/
 
 # BPF 子系统：Prompt 11 起 AI + BPF/Tracing 协同（BPF helper/AI_MODEL map/
 # AI 观察 Hook）+ 第14类感知（bpf/）
-obj-$(CONFIG_AIKERNEL_BPF)	+= bpf/
+obj-$(CONFIG_AIKERNEL_BPF)	+= subsys/bpf/
 
 # KUnit 测试套件：Prompt 15 起（模块15.6，AIKernel/test/）
 obj-$(CONFIG_AIKERNEL_KUNIT_TEST)	+= test/

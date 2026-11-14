@@ -29,7 +29,7 @@
 #include <linux/errno.h>
 #include <linux/unaligned.h>
 #include "../core/ai_types.h"
-#include "../core/ai_model.h"
+#include "../reflex/ai_model.h"
 #include "../core/ai_runtime.h"
 
 #ifdef CONFIG_AIKERNEL_RUNTIME

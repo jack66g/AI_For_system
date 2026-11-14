@@ -142,7 +142,7 @@
 #include <linux/netlink.h>
 #include <net/dst_metadata.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 /*

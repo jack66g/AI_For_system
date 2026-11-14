@@ -17,7 +17,7 @@
 #define _AIKERNEL_AI_RUNTIME_H
 
 #include "ai_types.h"
-#include "ai_model.h"
+#include "../reflex/ai_model.h"
 #include <linux/types.h>
 
 /* ---- Runtime 生命周期状态 ---- */

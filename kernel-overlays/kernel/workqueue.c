@@ -57,7 +57,7 @@
 #include <linux/irq_work.h>
 
 #ifdef CONFIG_AIKERNEL_INTERRUPT
-#include "../AIKernel/interrupt/ai_irq.h"
+#include "../AIKernel/subsys/interrupt/ai_irq.h"
 #endif
 
 #include "workqueue_internal.h"

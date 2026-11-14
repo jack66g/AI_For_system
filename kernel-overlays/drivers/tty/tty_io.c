@@ -71,7 +71,7 @@
 #include <linux/signal.h>
 
 #ifdef CONFIG_AIKERNEL_IO
-#include "../../AIKernel/io/ai_char.h"
+#include "../../AIKernel/subsys/io/ai_char.h"
 #endif
 #include <linux/fcntl.h>
 #include <linux/sched/signal.h>

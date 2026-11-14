@@ -31,7 +31,7 @@
 #include <linux/sched/isolation.h>
 
 #ifdef CONFIG_AIKERNEL_INTERRUPT
-#include "../AIKernel/interrupt/ai_irq.h"
+#include "../AIKernel/subsys/interrupt/ai_irq.h"
 #endif
 
 #include <asm/irq_regs.h>

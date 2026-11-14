@@ -45,7 +45,7 @@
 #include <linux/mmu_notifier.h>
 
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #include "../../AIKernel/core/ai_decision.h"
 #endif
 #include <linux/cred.h>

@@ -61,7 +61,7 @@
 #include <linux/timekeeping.h>
 
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #include "../../AIKernel/core/ai_decision.h"
 #endif
 
@@ -208,7 +208,7 @@ struct scan_control {
 int vm_swappiness = 60;
 
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../AIKernel/mm/ai_mm.h"
+#include "../AIKernel/subsys/mm/ai_mm.h"
 /*
  * AI 决策可控制参数表（Prompt 13）访问器：
  * ai_control 域 "mm.swappiness" 的 apply/restore 经本接口读写 vm_swappiness。

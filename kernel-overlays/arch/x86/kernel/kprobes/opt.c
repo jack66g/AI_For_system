@@ -7,7 +7,7 @@
  */
 #include <linux/kprobes.h>
 #ifdef CONFIG_AIKERNEL_BPF
-#include "../../../../AIKernel/bpf/ai_bpf.h"
+#include "../../../../AIKernel/subsys/bpf/ai_bpf.h"
 #endif
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>

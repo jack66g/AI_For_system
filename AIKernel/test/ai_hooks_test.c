@@ -49,7 +49,7 @@
 #include <linux/path.h>
 
 #include "../core/ai_types.h"
-#include "../core/ai_proc.h"
+#include "../senses/ai_proc.h"
 #include "../core/ai_telemetry.h"
 #include "../core/ai_decision.h"
 
@@ -227,7 +227,7 @@ static void proc_stats_outlet_test(struct kunit *test)
  */
 #ifdef CONFIG_AIKERNEL_MM
 
-#include "../mm/ai_mm.h"
+#include "../subsys/mm/ai_mm.h"
 
 static void mm_readahead_hook_and_stats_test(struct kunit *test)
 {
@@ -262,7 +262,7 @@ static void mm_readahead_hook_and_stats_test(struct kunit *test)
  */
 #ifdef CONFIG_AIKERNEL_LOCK
 
-#include "../lock/ai_lock.h"
+#include "../subsys/lock/ai_lock.h"
 
 static DEFINE_RAW_SPINLOCK(hooks_test_lock);
 
@@ -312,7 +312,7 @@ static void lock_spin_hooks_and_stats_test(struct kunit *test)
  */
 #ifdef CONFIG_AIKERNEL_BPF
 
-#include "../bpf/ai_bpf.h"
+#include "../subsys/bpf/ai_bpf.h"
 
 static void bpf_observation_hooks_and_stats_test(struct kunit *test)
 {
@@ -341,7 +341,7 @@ static void bpf_observation_hooks_and_stats_test(struct kunit *test)
  */
 #ifdef CONFIG_AIKERNEL_NET
 
-#include "../net/ai_net.h"
+#include "../subsys/net/ai_net.h"
 
 /* 构造 IP+TCP 测试包：data 即网络头（LOCAL_OUT 形态，异常检测与
  * ai_telemetry_nf_hook 的读取路径同构）；network/transport 头偏移
@@ -504,7 +504,7 @@ static void sysfs_stats_outlets_test(struct kunit *test)
  */
 #if defined(CONFIG_AIKERNEL_EXPERIMENTAL) && defined(CONFIG_AIKERNEL_SECURITY)
 
-#include "../security/ai_lsm.h"
+#include "../boundary/ai_lsm.h"
 
 static void sec_key_hook_strength_test(struct kunit *test)
 {

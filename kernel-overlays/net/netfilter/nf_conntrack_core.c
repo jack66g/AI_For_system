@@ -52,7 +52,7 @@
 #include <net/netns/hash.h>
 #include <net/ip.h>
 #ifdef CONFIG_AIKERNEL_NET
-#include "../../AIKernel/net/ai_net.h"
+#include "../../AIKernel/subsys/net/ai_net.h"
 #endif
 
 #include "nf_internals.h"

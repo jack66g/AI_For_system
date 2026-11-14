@@ -40,7 +40,7 @@
 #include <linux/hugetlb.h>
 
 #ifdef CONFIG_AIKERNEL_VIRT
-#include "../../../../AIKernel/virt/ai_virt.h"
+#include "../../../../AIKernel/subsys/virt/ai_virt.h"
 #endif
 #include <linux/compiler.h>
 #include <linux/srcu.h>

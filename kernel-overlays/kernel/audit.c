@@ -51,7 +51,7 @@
 
 #include <linux/audit.h>
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../AIKernel/security/ai_audit.h"
+#include "../AIKernel/boundary/ai_audit.h"
 #endif
 
 #include <net/sock.h>

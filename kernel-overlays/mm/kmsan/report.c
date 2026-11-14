@@ -14,7 +14,7 @@
 #include <linux/stacktrace.h>
 #include <linux/uaccess.h>
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../../AIKernel/security/ai_lsm.h"
+#include "../../AIKernel/boundary/ai_lsm.h"
 #endif
 
 #include "kmsan.h"

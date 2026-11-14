@@ -16,7 +16,7 @@
 #include "blk-throttle.h"
 
 #ifdef CONFIG_AIKERNEL_IO
-#include "../../AIKernel/io/ai_block.h"
+#include "../../AIKernel/subsys/io/ai_block.h"
 #endif
 
 /* Max dispatch from a group in 1 round */

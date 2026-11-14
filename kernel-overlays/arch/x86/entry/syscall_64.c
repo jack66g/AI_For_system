@@ -9,7 +9,7 @@
 #include <linux/nospec.h>
 #include <asm/syscall.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../../../AIKernel/core/ai_proc.h"
+#include "../../../AIKernel/senses/ai_proc.h"
 #endif
 
 #define __SYSCALL(nr, sym) extern long __x64_##sym(const struct pt_regs *);

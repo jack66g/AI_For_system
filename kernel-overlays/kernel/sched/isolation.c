@@ -11,7 +11,7 @@
 #include "sched.h"
 
 #ifdef CONFIG_AIKERNEL_SCHED
-#include "../../AIKernel/sched/ai_sched.h"
+#include "../../AIKernel/subsys/sched/ai_sched.h"
 #endif
 
 enum hk_flags {

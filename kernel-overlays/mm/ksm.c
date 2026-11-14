@@ -34,7 +34,7 @@
 #include <linux/memory.h>
 #include <linux/mmu_notifier.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 #include <linux/swap.h>
 #include <linux/ksm.h>

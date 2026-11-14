@@ -21,7 +21,7 @@
 #include <linux/printk.h>
 #include <linux/vmpressure.h>
 #ifdef CONFIG_AIKERNEL_MM
-#include "../../AIKernel/mm/ai_mm.h"
+#include "../../AIKernel/subsys/mm/ai_mm.h"
 #endif
 
 /*

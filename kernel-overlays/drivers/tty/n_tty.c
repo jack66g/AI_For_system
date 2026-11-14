@@ -41,7 +41,7 @@
 #include <linux/ratelimit.h>
 #include <linux/sched.h>
 #ifdef CONFIG_AIKERNEL_RUNTIME
-#include "../../AIKernel/core/ai_proc.h"
+#include "../../AIKernel/senses/ai_proc.h"
 #endif
 #include <linux/signal.h>
 #include <linux/slab.h>

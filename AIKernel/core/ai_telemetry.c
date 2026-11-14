@@ -53,9 +53,9 @@
 #include <linux/smp.h>
 #include "ai_telemetry.h"
 /* K-B glue：CPU 热插拔 payload 布局（仅取 struct 定义，无调度逻辑依赖） */
-#include "../sched/ai_sched.h"
+#include "../subsys/sched/ai_sched.h"
 /* K-B glue：NETLINK EVENT 通用推送面（CONFIG_AIKERNEL_NETLINK=n 时为桩） */
-#include "../net/ai_netlink.h"
+#include "../senses/ai_netlink.h"
 
 /*
  * per-CPU ring buffer 布局：

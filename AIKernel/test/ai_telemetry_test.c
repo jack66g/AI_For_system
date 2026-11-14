@@ -33,7 +33,7 @@
 #include "../core/ai_types.h"
 #include "../core/ai_telemetry.h"
 /* K-B glue 回归：CPU 热插拔 payload（ai_cpu_hotplug_payload） */
-#include "../sched/ai_sched.h"
+#include "../subsys/sched/ai_sched.h"
 
 #ifdef CONFIG_AIKERNEL_TELEMETRY
 

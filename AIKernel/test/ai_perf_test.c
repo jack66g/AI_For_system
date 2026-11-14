@@ -18,7 +18,7 @@
 #include "../core/ai_policy.h"
 #include "../core/ai_telemetry.h"
 #include "../core/ai_decision.h"
-#include "../security/ai_chain.h"
+#include "../boundary/ai_chain.h"
 
 static int perf_u64_cmp(const void *x, const void *y)
 {

@@ -53,7 +53,7 @@
 #include <trace/events/ipi.h>
 
 #ifdef CONFIG_AIKERNEL_VIRT
-#include "../../../AIKernel/virt/ai_virt.h"
+#include "../../../AIKernel/subsys/virt/ai_virt.h"
 #endif
 
 #include "capabilities.h"

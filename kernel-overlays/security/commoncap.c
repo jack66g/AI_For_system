@@ -28,7 +28,7 @@
 #include <uapi/linux/lsm.h>
 
 #ifdef CONFIG_AIKERNEL_SECURITY
-#include "../AIKernel/security/ai_lsm.h"
+#include "../AIKernel/boundary/ai_lsm.h"
 #endif
 
 #define CREATE_TRACE_POINTS

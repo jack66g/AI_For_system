@@ -41,11 +41,11 @@
 #include <linux/slab.h>
 #include <generated/utsrelease.h>
 #include "ai_runtime.h"
-#include "ai_model_mlp.h"
+#include "../reflex/ai_model_mlp.h"
 #include "ai_telemetry.h"
 #include "ai_policy.h"
-#include "../net/ai_netlink.h"
-#include "../security/ai_chain.h"
+#include "../senses/ai_netlink.h"
+#include "../boundary/ai_chain.h"
 
 #define AI_RUNTIME_MAX_MODELS      16   /* 模型注册表容量 */
 #define AI_RUNTIME_MAX_CALLBACKS   8    /* 回调表容量 */

@@ -25,11 +25,11 @@
 #include <linux/ktime.h>
 
 #include "../core/ai_types.h"
-#include "../core/ai_proc.h"
+#include "../senses/ai_proc.h"
 #include "../core/ai_policy.h"
 #include "../core/ai_effect.h"
-#include "../mm/ai_mm.h"
-#include "../sched/ai_sched.h"
+#include "../subsys/mm/ai_mm.h"
+#include "../subsys/sched/ai_sched.h"
 
 #ifdef CONFIG_AIKERNEL_RUNTIME
 
