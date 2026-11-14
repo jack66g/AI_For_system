@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include "occ_core/orch.h"			/* E3：task 工具执行面 */
+#include "occ_core/review.h"			/* E4：return 走验收环 */
 
 #include "store/store_json.h"
 
@@ -142,18 +143,22 @@ static const char SCHEMA_BASH[] =
 	"（缺省 60，上限同全局配置）\",\"minimum\":1}"
 	"},\"required\":[\"command\"]}";
 
-/* E3 第七工具（ORCH-DESIGN §3 拍板字段集；仅 OCC_ORCH_TOOLS=1 注册） */
+/* E3 第七工具（ORCH-DESIGN §3 拍板字段集；仅 OCC_ORCH_TOOLS=1 注册）
+ * E4：return 动作升级走验收环——机械判（§4）先行，verdict/pass=裁判
+ * 表态（机械判过才生效）；fail 出整改词（§3 模板）与三路去向。 */
 static const char SCHEMA_TASK[] =
 	"{\"type\":\"object\",\"properties\":{"
 	"\"action\":{\"type\":\"string\",\"enum\":[\"spawn\",\"status\","
 	"\"wait\",\"read_result\",\"return\"],\"description\":\"spawn=建任务"
 	"并派发子智能体；status=查任务状态；wait=限时等待终局；"
-	"read_result=读子报告与终局摘要；return=对结果表态\"},"
+	"read_result=读子报告与终局摘要；return=验收表态（触发验收环："
+	"机械判→回炉整改词/超限升级/通过结项）\"},"
 	"\"brief\":{\"type\":\"object\",\"description\":\"spawn 任务书"
 	"（§3 字段集）：goal 目标一句话（必填）；fileset 授权文件集"
 	"（必填非空数组，独占声明——并发任务声明同一文件会被拒绝）；"
 	"forbidden 禁改清单；deliverables 交付物清单；acceptance 验收标准"
-	"（尽量可机械判）；selfcheck 自检清单；auth_note 授权说明；"
+	"（尽量可机械判——file:/md5:/contains:/exit: 机检令牌会被验收环"
+	"逐条核对）；selfcheck 自检清单；auth_note 授权说明；"
 	"budget 预算配额（可含 wall_ms 墙钟上限毫秒）；context 必要上下文；"
 	"rework_max 回炉上限覆写（1-3，缺省 2）\"},"
 	"\"task_id\":{\"type\":\"string\",\"description\":\"status/wait/"
@@ -162,7 +167,12 @@ static const char SCHEMA_TASK[] =
 	"毫秒（缺省 2000，上限 30000；到点未终局如实返回未终局而非挂死）\","
 	"\"minimum\":100},"
 	"\"verdict\":{\"type\":\"string\",\"description\":\"return 动作："
-	"主会话对结果的表态（通过与否/差距/依据，记入任务事件）\"}"
+	"主会话（裁判）对结果的表态原文（差距/亲跑抽查依据，记入任务"
+	"事件与裁决审计）\"},"
+	"\"pass\":{\"type\":\"boolean\",\"description\":\"return 动作："
+	"裁判表态位（true=认可；缺省按 verdict 文本推断——含「不通过/"
+	"不认可/拒绝」按否决）。仅在机械判通过后生效：机械判 fail 时"
+	"强行 pass 无效（防转述验收，§4）\"}"
 	"},\"required\":[\"action\"]}";
 
 static const occ_tool_def TOOLS[] = {
@@ -1894,6 +1904,7 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 	occ_task_event_row *evs = NULL;
 	size_t nevs = 0, i;
 	const char *last_payload = NULL;
+	const char *last_mv = NULL;
 	char dbuf[256];
 	aik_json *obj;
 
@@ -1908,12 +1919,19 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 	rp = occ_orch_result_path((occ_orch *)ctx->orch, tid);
 	if (rp && rp[0])
 		report = read_file_head(rp, 4096);
-	/* 终局 result 事件摘要（E2 collect 落的 end/exit_code/stdout_path） */
+	/* 终局 result 事件摘要（E2 collect 落的 end/exit_code/stdout_path）
+	 * + E4 机械预判（occ_review_prenote 落的 machine_verdict 事件） */
 	if (occ_task_events(ctx->db, tid, &evs, &nevs, NULL, 0) == 0) {
 		for (i = 0; i < nevs; i++)
-			if (!strcmp(evs[i].kind, OCC_TASK_EV_RESULT) &&
-			    evs[i].payload_json)
-				last_payload = evs[i].payload_json;
+			if (evs[i].payload_json) {
+				if (!strcmp(evs[i].kind, OCC_TASK_EV_RESULT))
+					last_payload = evs[i].payload_json;
+				else if (!strcmp(evs[i].kind,
+						 OCC_TASK_EV_RETURN) &&
+					 strstr(evs[i].payload_json,
+						"\"machine_verdict\""))
+					last_mv = evs[i].payload_json;
+			}
 	}
 	obj = aik_json_new_obj();
 	if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
@@ -1930,7 +1948,10 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 				      aik_json_new_null()) ||
 	    aik_json_obj_put(obj, "result_event",
 			     last_payload ? aik_json_new_str(last_payload) :
-					    aik_json_new_null())) {
+					    aik_json_new_null()) ||
+	    aik_json_obj_put(obj, "machine_verdict",
+			     last_mv ? aik_json_new_str(last_mv) :
+				       aik_json_new_null())) {
 		occ_task_row_free(&trow);
 		occ_task_event_rows_free(evs, nevs);
 		aik_json_free(obj);
@@ -1948,11 +1969,22 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 	}
 }
 
+/*
+ * task_return - E4 升级：从「note 最小实现」走验收环（§4）。
+ *   in_review 态：occ_review_run 机械判（verdict 表逐行+文件在场+
+ *   md5 对照+断言行+退出码——判据表见 review.c 头注）→ 三路
+ *   （done/rework+整改词/escalated+升级词）；judge 表态 pass 仅在
+ *   机械判通过后生效（机械判 fail 强制回炉——防转述验收，报告自称
+ *   完成不采信）。其余状态（未终局/已结项）保持 E3 note 语义
+ *   （只记表态不动状态机，recorded 如实回显）。
+ */
 static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 {
 	const char *tid = args_str(a, "task_id");
 	const char *verdict = args_str(a, "verdict");
-	char dbuf[256];
+	const aik_json *passj;
+	occ_task_row trow;
+	char dbuf[256], stbuf[24];
 	aik_json *pj, *obj;
 
 	if (!tid || !tid[0])
@@ -1963,8 +1995,77 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	if (!ctx->orch || !ctx->db)
 		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
 			    "——task 工具不可用");
-	/* 事件 payload：{"action":"return","verdict":…}（E4 verdict 通道
-	 * 接入前的最小承载——只记事件不动状态机） */
+	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1) {
+		return jerr(o, NULL, "任务 %s 不存在", tid);
+	}
+	snprintf(stbuf, sizeof(stbuf), "%s", trow.status);
+	if (!strcmp(trow.status, OCC_TASK_ST_IN_REVIEW)) {
+		/* E4 验收环：机械判 → 三路（judge.pass 仅机械判过后生效） */
+		occ_review_opts ro;
+		occ_review_verdict rv;
+		char brief[OCC_RV_BRIEF_MAX];
+		char state[24];
+		int jpass = 1;
+
+		passj = a->root ? aik_json_get(a->root, "pass") : NULL;
+		if (passj) {
+			if (aik_json_typeof(passj) != AIK_JSON_BOOL)
+				return jerr(o, NULL, "return 参数 pass 须为"
+					    "布尔（表态位：机械判通过后"
+					    "生效）");
+			jpass = aik_json_bool(passj);
+		} else if (strstr(verdict, "不通过") ||
+			   strstr(verdict, "不认可") ||
+			   strstr(verdict, "拒绝") ||
+			   strncasecmp(verdict, "fail", 4) == 0) {
+			jpass = 0;	/* 表态文本兜底推断（显式 pass 优先） */
+		}
+		memset(&ro, 0, sizeof(ro));
+		ro.result_path = occ_orch_result_path(
+			(occ_orch *)ctx->orch, tid);
+		ro.base_dir = ctx->workdir;
+		ro.judge_note = verdict;
+		ro.judge_pass = jpass;
+		occ_task_row_free(&trow);
+		if (occ_review_run(ctx->db, tid, &ro, &rv, brief,
+				   sizeof(brief), state, sizeof(state),
+				   dbuf, sizeof(dbuf)) != 0)
+			return jerr(o, NULL, "return 验收环失败：%s",
+				    dbuf[0] ? dbuf : "库错");
+		obj = aik_json_new_obj();
+		if (!obj ||
+		    aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "action",
+				     aik_json_new_str("return")) ||
+		    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+		    aik_json_obj_put(obj, "event",
+				     aik_json_new_str("return")) ||
+		    aik_json_obj_put(obj, "recorded",
+				     aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "state", aik_json_new_str(state)) ||
+		    aik_json_obj_put(obj, "machine_pass",
+				     aik_json_new_bool(rv.pass)) ||
+		    aik_json_obj_put(obj, "judge_pass",
+				     aik_json_new_bool(jpass)) ||
+		    aik_json_obj_put(obj, "forced_fail",
+				     aik_json_new_bool(!rv.pass)) ||
+		    aik_json_obj_put(obj, "n_hit",
+				     aik_json_new_int(rv.n_hit)) ||
+		    aik_json_obj_put(obj, "rework_brief",
+				     brief[0] ? aik_json_new_str(brief) :
+						aik_json_new_null())) {
+			aik_json_free(obj);
+			return jerr(o, NULL, "return 结果组装失败（oom）");
+		}
+		{
+			int r = jout(o, obj);
+
+			aik_json_free(obj);
+			return r;
+		}
+	}
+	occ_task_row_free(&trow);
+	/* 非 in_review（未终局/已结项）：E3 note 语义保留（只记表态） */
 	pj = aik_json_new_obj();
 	if (!pj || aik_json_obj_put(pj, "action",
 				    aik_json_new_str("return")) ||
@@ -1994,7 +2095,9 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			     aik_json_new_str("return")) ||
 	    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
 	    aik_json_obj_put(obj, "event", aik_json_new_str("return")) ||
-	    aik_json_obj_put(obj, "recorded", aik_json_new_bool(1))) {
+	    aik_json_obj_put(obj, "recorded", aik_json_new_bool(1)) ||
+	    aik_json_obj_put(obj, "state",
+			     aik_json_new_str(stbuf))) {
 		aik_json_free(obj);
 		return jerr(o, NULL, "return 结果组装失败（oom）");
 	}

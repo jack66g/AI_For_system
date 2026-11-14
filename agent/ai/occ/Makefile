@@ -71,10 +71,12 @@ LLM_CALL_OBJ := $(OBJ_DIR)/occ_llm/llm_call.o
 # E2：+ orch（ORCH §8 子智能体运行时——R4 进程隔离 spawn/回收/取消
 #     两段/超时/并发闸 2+退避 30s；只读消费 E1 会话/任务面）
 #     E3 起内建文件集互斥+结果文件 env 通道+OCC_ORCH_TOOLS 总闸
+# E4：+ review（ORCH §4 验收环——verdict 机械判解析器/整改词渲染/
+#     rework 计数升级三路驱动；只读消费 E1 task API）
 CORE_SRCS := occ_core/session.c occ_core/loop.c occ_core/tokens.c \
 	     occ_core/revert.c occ_core/occ_sme.c occ_core/occ_ac.c \
 	     occ_core/occ_telemetry.c occ_core/replay.c occ_core/task.c \
-	     occ_core/orch.c
+	     occ_core/orch.c occ_core/review.c
 CORE_OBJS := $(CORE_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # T9d 绑定复用对象（只读源码 → 本目录对象；显式规则防模式规则歧义）
@@ -126,11 +128,13 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 #     +B2 并发写库两腿压测→tests/orch_b2_report.txt）
 # E3：test_tools 扩 task 工具开关/参数边界；test_orch 扩 G 文件集互斥
 #     +H task 五动作全链（sim 子进程）；loop.c 判级段默认关零变化
+# E4：test_review（验收环：机械判判据表/整改词渲染/回炉回路「一拒一改
+#     一过」+超限升级+防转述；orch sim 端到端 + task return 工具面）
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
 	     tests/test_ac tests/test_telemetry tests/test_replay \
-	     tests/test_task tests/test_orch
+	     tests/test_task tests/test_orch tests/test_review
 
 BIN_OCC := occ
 
@@ -150,10 +154,10 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
-		  tests/test_orch; do \
+		  tests/test_orch tests/test_review; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
@@ -293,12 +297,28 @@ tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
 # tests/orch_b2_report.txt）。链集合同 test_task（orch.o 只读消费
 # session/task 面）；--sim/--b2w/--b2rw/--conc-drill 为子模式入口。
 # E3：+ TOOLS_OBJS（task 第七工具五动作全链演练经 occ_tool_exec）。
+# E4：+ review.o（orch.o collect 终局机械预判挂点引用）。
 tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		 $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		 $(OBJ_DIR)/occ_core/review.o \
 		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
-		$(OBJ_DIR)/occ_core/task.o $(TOOLS_OBJS) \
+		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/review.o \
+		$(TOOLS_OBJS) \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+
+# review（E4）：验收环——verdict 机械判判据表/整改词渲染/回炉回路
+# 「一拒一改一过」+超限升级+防转述用例（fixture 纯逻辑，不起子进程）
+# + orch sim 端到端（自 exec 子模式同 test_orch）+ task return 工具面。
+tests/test_review: tests/test_review.c $(OBJ_DIR)/occ_core/review.o \
+		   $(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
+		   $(OBJ_DIR)/occ_core/task.o \
+		   $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_review.c \
+		$(OBJ_DIR)/occ_core/review.o $(OBJ_DIR)/occ_core/orch.o \
+		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		$(TOOLS_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tokens：五项账本 + len/4 估算（纯计算，无外部依赖）
@@ -317,12 +337,15 @@ tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_
 # tools（T9b1）：六件套边界 + 快照 + trace + bash 沙箱契约（stub）
 # E3：+ orch.o（task 第七工具开关 occ_orch_tools_enabled 消费）+ 全链
 # 演练在 test_orch（sim 子进程 harness）
+# E4：+ review.o（tools.o task return 走验收环引用）
 tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
 		  $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		$(OBJ_DIR)/occ_core/review.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
@@ -362,11 +385,12 @@ tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		   $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		   $(OBJ_DIR)/occ_core/review.o \
 		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
-		$(OBJ_DIR)/occ_core/orch.o \
+		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/review.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # retry（T9b2）：重试分级矩阵 + 参数族（旋钮/env/缺省）+ 退避曲线

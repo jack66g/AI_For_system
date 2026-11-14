@@ -258,4 +258,22 @@ occ_orch_child *occ_orch_find_task(occ_orch *o, const char *task_id);
  */
 const char *occ_orch_result_path(const occ_orch *o, const char *task_id);
 
+/* ---- E4：终局验收环挂点（ORCH-DESIGN §8 棒 E4；§4 验收环） ---- */
+
+/*
+ * occ_orch_review_hook - 独立评审智能体挂载点（§4「大任务可选独立
+ * 评审智能体（第二双眼，fresh eyes）」——可选件）。子进程终局、
+ * occ_task_review 落 in_review、机械预判（occ_review_prenote）完成后
+ * 回调；回调内自行调 occ_review_run 裁决（裁判权在回调方）。返回值
+ * 忽略（评审失败任务留 in_review 待主会话 return 动作兜底——验收环
+ * 永不因评审挂掉而丢任务）。缺省 NULL=不挂（裁判=主会话，§4 缺省）。
+ */
+typedef int (*occ_orch_review_hook)(void *ud, occ_db *db,
+				    const char *task_id,
+				    const char *result_path,
+				    const char *result_event_json);
+
+void occ_orch_set_review_hook(occ_orch *o, occ_orch_review_hook fn,
+			      void *ud);
+
 #endif /* _OCC_ORCH_H */

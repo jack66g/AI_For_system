@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "orch.h"
+#include "review.h"			/* E4：终局机械预判挂点 */
 
 extern char **environ;
 
@@ -78,6 +79,9 @@ struct occ_orch {
 		int own_result;		/* 1=本运行时自动生成（free 时删） */
 	} *trec;
 	size_t n_trec;
+	/* E4：独立评审智能体挂载点（§4 可选项；缺省 NULL=裁判主会话） */
+	occ_orch_review_hook review_hook;
+	void *review_ud;
 };
 
 /* ---- E3：总闸 ---- */
@@ -470,6 +474,17 @@ occ_orch_child *occ_orch_find_task(occ_orch *o, const char *task_id)
 		    !strcmp(o->live[i]->task_id, task_id))
 			return o->live[i];
 	return NULL;
+}
+
+/* E4：独立评审智能体挂载点（§4 可选项；语义见 orch.h 头注——
+ * 回调在终局 review+机械预判后触发，缺省 NULL=裁判主会话） */
+void occ_orch_set_review_hook(occ_orch *o, occ_orch_review_hook fn,
+			      void *ud)
+{
+	if (!o)
+		return;
+	o->review_hook = fn;
+	o->review_ud = ud;
 }
 
 /* ---- 运行时生命周期 ---- */
@@ -1061,6 +1076,22 @@ static void collect(occ_orch_child *c, int st, occ_orch_result *res)
 			 c->stdout_path ? c->stdout_path : "");
 		r.reviewed = occ_task_review(c->o->db, r.task_id, rj, e2,
 					     sizeof(e2)) == 0;
+		/*
+		 * E4 挂点（§4 验收环）：终局即机械预判（occ_review_prenote
+		 * ——结果文件+brief 验收标准→机械判结论落 kind='return'
+		 * 审计事件，不动状态机；read_result/裁判提前可见）+ 可选
+		 * 独立评审智能体回调（缺省 NULL=裁判主会话）。两者皆
+		 * best-effort：失败不阻断收口、不丢任务（留 in_review 待
+		 * 主会话 task return 动作走验收环兜底）。
+		 */
+		if (r.reviewed) {
+			const char *rp = occ_orch_result_path(c->o, r.task_id);
+
+			occ_review_prenote(c->o->db, r.task_id, rp);
+			if (c->o->review_hook)
+				c->o->review_hook(c->o->review_ud, c->o->db,
+						  r.task_id, rp, rj);
+		}
 	}
 	if (res)
 		*res = r;			/* 所有权移交调用方 */
