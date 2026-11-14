@@ -22,6 +22,8 @@
 #include <unistd.h>
 
 #include <stdio.h>
+
+static void e6_cases(void);	/* E6 记忆分层 */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -371,6 +373,119 @@ int main(void)
 			/* 尽力清理 */
 		}
 	}
+	e6_cases();
+
 	printf("test_sme: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
+}
+
+
+/* ---- E6 记忆分层（ORCH §6 拍板 5/8）：桩桥 + 分层读写/隔离/降权 ---- */
+
+static char e6_last_tags[256];
+static double e6_last_imp;
+static char e6_last_meta[512];
+static int e6_add_calls;
+static int e6_search_calls;
+/* 桩按 tags 含关键字回 canned 响应 */
+static char e6_canned_task[256];
+static char e6_canned_base[256];
+
+#include "ai_types.h"		/* E6：AI_OK */
+#include "memory/sme_client.h"	/* E6 桩桥需 opts 型 */
+
+static int e6_stub_add(struct sme_add_opts *o, char *resp, size_t cap)
+{
+	(void)resp;
+	(void)cap;
+	e6_add_calls++;
+	snprintf(e6_last_tags, sizeof(e6_last_tags), "%s",
+		 o->tags_json ? o->tags_json : "");
+	e6_last_imp = o->has_importance ? o->importance : -1.0;
+	snprintf(e6_last_meta, sizeof(e6_last_meta), "%s",
+		 o->metadata_json ? o->metadata_json : "");
+	return AI_OK;
+}
+
+static int e6_stub_search(struct sme_search_opts *o, char *resp,
+			  size_t cap)
+{
+	const char *body = e6_canned_base;
+	const char *t = o->tags_json ? o->tags_json : "";
+
+	e6_search_calls++;
+	if (strstr(t, "occ_task") || strstr(t, "occ_failed"))
+		body = e6_canned_task[0] ? e6_canned_task
+					 : "{\"results\":[]}";
+	snprintf(resp, cap, "%s", body);
+	return AI_OK;
+}
+
+static void e6_cases(void)
+{
+	struct occ_mem_bridge stub = { e6_stub_search, e6_stub_add };
+
+	occ_sme_test_set_state(1);
+	occ_sme_set_bridge(&stub);
+
+	/* g: 层写——存量族+层 tag */
+	e6_add_calls = 0;
+	OK(occ_sme_remember_ex("ses_e6", "t", "全局要点 g1", NULL,
+			       NULL) == 1, "e6-write-g");
+	OK(e6_add_calls == 1 && strstr(e6_last_tags, "\"occ\"") &&
+	   strstr(e6_last_tags, "\"g:\""), "e6-g-tags");
+	OK(strstr(e6_last_meta, "\"status\":\"ok\""), "e6-g-status");
+
+	/* t: 层写——occ_task 族独占（主检索不可见=隔离） */
+	OK(occ_sme_remember_ex("ses_e6", "t", "任务私有 t1", "t:tsk_x",
+			       NULL) == 1, "e6-write-t");
+	OK(strstr(e6_last_tags, "\"occ_task\"") &&
+	   strstr(e6_last_tags, "\"t:tsk_x\"") &&
+	   !strstr(e6_last_tags, "\"occ\",\"user\""), "e6-t-tags");
+
+	/* failed 写——occ_failed 族+importance 0.3+metadata.status */
+	OK(occ_sme_remember_ex("ses_e6", "t", "失败尝试 f1", "g:",
+			       "failed") == 1, "e6-write-failed");
+	OK(strstr(e6_last_tags, "\"occ_failed\"") &&
+	   e6_last_imp > 0.29 && e6_last_imp < 0.31, "e6-failed-demote");
+	OK(strstr(e6_last_meta, "\"status\":\"failed\""),
+	   "e6-failed-status");
+
+	/* 分层检索：t: 令牌→occ_task 检索（任务命中优先）+基线合并 */
+	snprintf(e6_canned_task, sizeof(e6_canned_task),
+		 "{\"results\":[{\"text\":\"TASKHIT 同域任务教训\"}]}");
+	snprintf(e6_canned_base, sizeof(e6_canned_base),
+		 "{\"results\":[{\"text\":\"BASEHIT 全局记忆\"}]}");
+	{
+		char *blk = occ_sme_lookup_ex("同域", "t:tsk_x");
+
+		OK(blk && strstr(blk, "TASKHIT") &&
+		   strstr(blk, "BASEHIT") &&
+		   strstr(blk, "TASKHIT") < strstr(blk, "BASEHIT"),
+		   "e6-lookup-merge-order");
+		free(blk);
+	}
+
+	/* 清洁检索不见 failed 族（桩 tags 断言） */
+	e6_search_calls = 0;
+	{
+		char *blk = occ_sme_lookup_ex("同域", NULL);
+
+		OK(blk && strstr(blk, "BASEHIT"), "e6-lookup-clean");
+		free(blk);
+	}
+	OK(e6_search_calls == 1, "e6-clean-single-search");
+
+	/* failed 令牌→检索 occ_failed 族 */
+	{
+		char *blk = occ_sme_lookup_ex("失败", "failed");
+
+		OK(blk && strstr(blk, "TASKHIT") &&
+		   !strstr(blk, "BASEHIT"), "e6-lookup-failed-scope");
+		free(blk);
+	}
+
+	occ_sme_set_bridge(NULL);
+	/* 还默认桥后不再触桩 */
+	OK(1, "e6-bridge-restore");
 }

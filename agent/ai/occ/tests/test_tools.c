@@ -726,15 +726,18 @@ int main(void)
 				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");
 		OK(exec_rc() != 0 && s && strstr(s, "未知工具"),
 		   "task-default-unknown");
-		/* 开关开：第七件注册+schema/描述非空 */
+		/* 开关开：第七件(task)+第八件(recall，E6)注册+schema 非空 */
 		setenv("OCC_ORCH_TOOLS", "1", 1);
 		d = occ_tool_defs(&n);
-		OK(n == 7 && d && !strcmp(d[6].name, "task") &&
+		OK(n == 8 && d && !strcmp(d[6].name, "task") &&
 		   d[6].description && strstr(d[6].parameters, "spawn") &&
 		   strstr(d[6].parameters, "fileset") &&
-		   strstr(d[6].parameters, "rework_max"), "task-on-seven-defs");
-		OK(occ_tool_is_known("task") && !occ_tool_is_known("rm"),
-		   "task-on-known");
+		   strstr(d[6].parameters, "rework_max"),
+		   "task-on-seven-defs");
+		OK(!strcmp(d[7].name, "recall") &&
+		   strstr(d[7].parameters, "layer"), "recall-eighth-def");
+		OK(occ_tool_is_known("task") && occ_tool_is_known("recall") &&
+		   !occ_tool_is_known("rm"), "task-on-known");
 		/* 无 orch 运行时 → 结构化人话错误（JSON） */
 		s = (char *)exec_tool("task",
 				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");

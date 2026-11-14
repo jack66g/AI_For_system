@@ -867,6 +867,42 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	}
 	/* E3：结果文件 env 通道（OCC_TASK_RESULT_FILE→子进程报告写它；
 	 * 同名项 env_build 已含调用方附加——此处后写覆盖生效） */
+	/* E6：任务 id 通道（子会话 t: 层记忆注入用） */
+	{
+		char tkv[160];
+
+		snprintf(tkv, sizeof(tkv), "OCC_TASK_ID=%s",
+			 tid[0] ? tid : "");
+		if (env_set(&envp, tkv)) {
+			env_free(envp);
+			unlink(sop);
+			unlink(sep);
+			set_err(err, errlen, "occ_orch_spawn: OCC_TASK_ID env"
+				" 注入失败（oom）");
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "taskid env");
+			return OCC_ORCH_ESPAWN;
+		}
+	}
+	/* E6：任务 id 通道（子会话 t: 层记忆注入用） */
+	{
+		char tkv[160];
+
+		snprintf(tkv, sizeof(tkv), "OCC_TASK_ID=%s",
+			 tid[0] ? tid : "");
+		if (env_set(&envp, tkv)) {
+			env_free(envp);
+			unlink(sop);
+			unlink(sep);
+			set_err(err, errlen, "occ_orch_spawn: OCC_TASK_ID env"
+				" 注入失败（oom）");
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "taskid env");
+			return OCC_ORCH_ESPAWN;
+		}
+	}
 	if (rpath[0]) {
 		char rkv[512];
 
@@ -1304,10 +1340,15 @@ char *occ_orch_distill(occ_db *db, const char *task_id)
 		(void)occ_session_set_status(db, row.child_session,
 					     OCC_ST_ARCHIVED, err,
 					     sizeof(err));
-	if (occ_sme_enabled())
-		(void)occ_sme_remember(
+	/* E6：蒸馏条目入 t:<task_id> 任务层（随任务归档域） */
+	if (occ_sme_enabled()) {
+		char lay[96];
+
+		snprintf(lay, sizeof(lay), "t:%.80s", row.id);
+		(void)occ_sme_remember_ex(
 			row.parent_session[0] ? row.parent_session : task_id,
-			"task 蒸馏", out);
+			"task 蒸馏", out, lay, "ok");
+	}
 	occ_task_row_free(&row);
 	return out;
 }

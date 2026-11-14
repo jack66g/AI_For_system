@@ -90,4 +90,36 @@ int occ_sme_quota_left(const char *session_id);
 /* 单测直置状态（生产勿调用）：0=unknown 1=on 2=off；返回旧值。 */
 int occ_sme_test_set_state(int v);
 
+/* ---- E6 记忆分层（ORCH §6 拍板 5/8） ---- */
+#define OCC_SME_LAYER_GLOBAL "g:"
+#define OCC_SME_LAYER_PROJECT "p:"
+#define OCC_SME_LAYER_TASK "t:"
+#define OCC_SME_TAG_TASK "occ_task"	/* t: 层独占族（主检索不可见） */
+#define OCC_SME_TAG_FAILED "occ_failed"	/* failed/rejected 降权族 */
+
+struct sme_search_opts;
+struct sme_add_opts;
+
+/* 桥抽象：记忆读写可换/外接（默认=sme_client HTTP；测试注桩） */
+struct occ_mem_bridge {
+	int (*search)(struct sme_search_opts *o, char *resp, size_t cap);
+	int (*add)(struct sme_add_opts *o, char *resp, size_t cap);
+};
+void occ_sme_set_bridge(const struct occ_mem_bridge *b);
+
+/* 分层写回：layer="g:"/"p:"/"t:<task_id>"（NULL→g:）；status=
+ * NULL/"ok"/"failed"/"rejected"（failed/rejected→occ_failed 族
+ * +importance 0.3+metadata.status=防污染）。返回 1=写入 0=跳过
+ * （配额/禁用）-1=失败。 */
+int occ_sme_remember_ex(const char *session_id, const char *title,
+			const char *text, const char *layer,
+			const char *status);
+
+/* 分层检索：layer_filter 逗号表——"g:,p:"（=基线，缺省）；"t:<tid>"
+ * 触发任务层附加检索（命中优先排前）；"failed" 检索降权族。合并
+ * top_k=OCC_SME_TOP_K、首 64 字符去重。返回 〈记忆〉 块（free）。 */
+char *occ_sme_lookup_ex(const char *query, const char *layer_filter);
+
+
+
 #endif /* _OCC_SME_H */

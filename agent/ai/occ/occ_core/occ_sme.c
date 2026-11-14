@@ -180,6 +180,31 @@ static char *build_block(const aik_json *root)
 	return blk;
 }
 
+/* E6 桥：默认 sme_client；测试/外接经 occ_sme_set_bridge 替换 */
+static int bridge_search_def(struct sme_search_opts *o, char *resp,
+			     size_t cap)
+{
+	return sme_search_ex(o, resp, cap);
+}
+
+static int bridge_add_def(struct sme_add_opts *o, char *resp, size_t cap)
+{
+	return sme_add_ex(o, resp, cap);
+}
+
+static struct occ_mem_bridge g_bridge = {
+	bridge_search_def, bridge_add_def,
+};
+
+void occ_sme_set_bridge(const struct occ_mem_bridge *b)
+{
+	if (b)
+		g_bridge = *b;
+	else
+		g_bridge = (struct occ_mem_bridge){ bridge_search_def,
+						    bridge_add_def };
+}
+
 char *occ_sme_lookup(const char *query)
 {
 	struct sme_search_opts o;
@@ -199,7 +224,7 @@ char *occ_sme_lookup(const char *query)
 	o.text = q;
 	o.top_k = OCC_SME_TOP_K;
 	o.tags_json = OCC_SME_SEARCH_TAGS;
-	rc = sme_search_ex(&o, resp, OCC_SME_RESP_MAX);
+	rc = g_bridge.search(&o, resp, OCC_SME_RESP_MAX);
 	if (rc == AI_OK) {
 		char err[128];
 		aik_json *root = aik_json_parse(resp, strlen(resp), err,
@@ -291,7 +316,7 @@ int occ_sme_remember(const char *session_id, const char *title,
 	o.has_importance = 1;
 	o.importance = OCC_SME_WRITE_IMPORTANCE;
 	o.source = "occ";
-	rc = sme_add_ex(&o, resp, 8192);
+	rc = g_bridge.add(&o, resp, 8192);
 	free(resp);
 	free(dump);
 	free(full);
@@ -303,4 +328,284 @@ int occ_sme_remember(const char *session_id, const char *title,
 	quota_bump(session_id);
 	ret = 1;
 	return ret;
+}
+
+
+/* ---- E6 分层读写（ORCH §6 拍板 5/8） ---- */
+
+int occ_sme_remember_ex(const char *session_id, const char *title,
+			const char *text, const char *layer,
+			const char *status)
+{
+	char tags[256];
+	int degraded = status && (!strcmp(status, "failed") ||
+				  !strcmp(status, "rejected"));
+	const char *lay = (layer && *layer) ? layer : OCC_SME_LAYER_GLOBAL;
+	struct {
+		const char *text;
+		char *dump;
+		size_t dlen;
+		aik_json *m;
+		struct timeval tv;
+		int bad;
+	} x;
+	char *resp, *full;
+	struct sme_add_opts o;
+	int rc, ret;
+
+	if (!occ_sme_enabled() || !session_id || !text || !*text)
+		return 0;
+	if (!lay && !(lay = OCC_SME_LAYER_GLOBAL))
+		return 0;
+	/* 层→tag 族：
+	 *   g:/p:  → 存量族 occ/user + 层 tag（主检索可见）
+	 *   t:*    → occ_task 族独占（主检索不可见=任务隔离）
+	 *   failed → occ_failed 族（清洁检索不可见；importance 0.3） */
+	if (degraded)
+		snprintf(tags, sizeof(tags), "[\"%s\",\"%s\"]",
+			 OCC_SME_TAG_FAILED, lay);
+	else if (!strncmp(lay, OCC_SME_LAYER_TASK, 2))
+		snprintf(tags, sizeof(tags),
+			 "[\"%s\",\"%s\"]", OCC_SME_TAG_TASK, lay);
+	else
+		snprintf(tags, sizeof(tags),
+			 "%s,\"%s\"]", OCC_SME_WRITE_TAGS, lay);
+	if (occ_sme_quota_left(session_id) <= 0)
+		return 0;
+	full = malloc(strlen(text) + 256);
+	if (!full)
+		return -1;
+	if (title && *title)
+		snprintf(full, strlen(text) + 256, "【会话 %s】\n%s",
+			 title, text);
+	else
+		snprintf(full, strlen(text) + 256, "%s", text);
+	x.bad = 0;
+	x.dump = NULL;
+	x.m = aik_json_new_obj();
+	if (x.m) {
+		aik_json *v;
+
+		gettimeofday(&x.tv, NULL);
+		v = aik_json_new_str("occ");
+		if (!v || aik_json_obj_put(x.m, "src", v) != 0) {
+			aik_json_free(v);
+			x.bad = 1;
+		}
+		v = aik_json_new_str(session_id);
+		if (!v || aik_json_obj_put(x.m, "session", v) != 0) {
+			aik_json_free(v);
+			x.bad = 1;
+		}
+		v = aik_json_new_int((long long)x.tv.tv_sec * 1000 +
+				     x.tv.tv_usec / 1000);
+		if (!v || aik_json_obj_put(x.m, "ts", v) != 0) {
+			aik_json_free(v);
+			x.bad = 1;
+		}
+		v = aik_json_new_str(status && *status ? status : "ok");
+		if (!v || aik_json_obj_put(x.m, "status", v) != 0) {
+			aik_json_free(v);
+			x.bad = 1;
+		}
+		if (x.bad) {
+			aik_json_free(x.m);
+			x.m = NULL;
+		}
+	}
+	if (x.m && aik_json_dump(x.m, &x.dump, &x.dlen) != 0)
+		x.dump = NULL;
+	aik_json_free(x.m);
+	resp = malloc(8192);
+	if (!resp) {
+		free(x.dump);
+		free(full);
+		return -1;
+	}
+	memset(&o, 0, sizeof(o));
+	o.text = full;
+	o.metadata_json = x.dump;
+	o.tags_json = tags;
+	o.has_importance = 1;
+	o.importance = degraded ? 0.3 : OCC_SME_WRITE_IMPORTANCE;
+	o.source = "occ";
+	rc = g_bridge.add(&o, resp, 8192);
+	free(resp);
+	free(x.dump);
+	free(full);
+	if (rc != AI_OK) {
+		g_sme_state = 2;
+		return -1;
+	}
+	g_sme_state = 1;
+	quota_bump(session_id);
+	ret = 1;
+	return ret;
+}
+
+/* 响应 results[].text 收集（任务层优先序由调用序保证） */
+static size_t collect_texts(const char *resp, char **lines, size_t cap,
+			    size_t n)
+{
+	aik_json *root = aik_json_parse(resp, strlen(resp), NULL, 0);
+	const aik_json *results;
+
+	if (!root)
+		return n;
+	results = aik_json_get(root, "results");
+	if (results && aik_json_typeof(results) == AIK_JSON_ARR) {
+		size_t i, cnt = aik_json_count(results);
+
+		for (i = 0; i < cnt && n < cap; i++) {
+			const aik_json *hit = aik_json_at(results, i);
+			const aik_json *tv = hit ? aik_json_get(hit, "text")
+						 : NULL;
+			const char *t;
+			size_t j;
+			int dup = 0;
+
+			if (!tv || aik_json_typeof(tv) != AIK_JSON_STR)
+				continue;
+			t = aik_json_str(tv);
+			if (!t || !*t)
+				continue;
+			for (j = 0; j < n && !dup; j++)
+				if (!strncmp(lines[j], t, 64))
+					dup = 1;
+			if (dup)
+				continue;
+			lines[n] = malloc(strlen(t) + 1);
+			if (lines[n])
+				strcpy(lines[n], t);
+			n++;
+		}
+	}
+	aik_json_free(root);
+	return n;
+}
+
+static int g_e6_failed_only;	/* lookup_ex：failed-only 检索（跳基线） */
+
+char *occ_sme_lookup_ex(const char *query, const char *layer_filter)
+{
+	char *lines[OCC_SME_TOP_K * 2];
+	size_t n = 0, i, used = 0;
+	char *blk;
+	int any = 0;
+	struct {
+		char q[OCC_SME_QUERY_MAX + 8];
+		struct sme_search_opts o;
+		char *resp;
+	} s;
+
+	if (!occ_sme_enabled() || !query || !*query)
+		return NULL;
+	memset(lines, 0, sizeof(lines));
+	memset(&s, 0, sizeof(s));
+	snprintf(s.q, sizeof(s.q), "%s", query);
+	utf8_cut(s.q, OCC_SME_QUERY_MAX);
+
+	/* 任务层/failed 令牌先搜（命中优先排前） */
+	{
+		const char *lf = layer_filter ? layer_filter : "";
+		int had_layer_tok = 0, had_failed = 0;
+
+		for (const char *tok = lf; tok && *tok; ) {
+			const char *comma = strchr(tok, ',');
+			size_t tl = comma ? (size_t)(comma - tok) : strlen(tok);
+			char token[128];
+			char tags[192];
+
+			if (tl >= sizeof(token))
+				tl = sizeof(token) - 1;
+			memcpy(token, tok, tl);
+			token[tl] = '\0';
+			if (!strncmp(token, OCC_SME_LAYER_TASK, 2) ||
+			    !strcmp(token, "failed")) {
+				if (!strcmp(token, "failed"))
+					had_failed = 1;
+				else
+					had_layer_tok = 1;
+				snprintf(tags, sizeof(tags), "[\"%s\"]",
+					 !strcmp(token, "failed") ?
+					 OCC_SME_TAG_FAILED :
+					 OCC_SME_TAG_TASK);
+				/* 任务层须带全 tag：occ_task+t:<tid> */
+				if (!strncmp(token, OCC_SME_LAYER_TASK, 2))
+					snprintf(tags, sizeof(tags),
+						 "[\"%s\",\"%s\"]",
+						 OCC_SME_TAG_TASK, token);
+				s.o.text = s.q;
+				s.o.top_k = OCC_SME_TOP_K;
+				s.o.tags_json = tags;
+				s.resp = malloc(OCC_SME_RESP_MAX);
+				if (s.resp) {
+					if (g_bridge.search(&s.o, s.resp,
+							    OCC_SME_RESP_MAX)
+					    == AI_OK)
+						n = collect_texts(s.resp,
+								  lines,
+								  OCC_SME_TOP_K,
+								  n);
+					free(s.resp);
+					s.resp = NULL;
+				}
+			}
+			tok = comma ? comma + 1 : NULL;
+		}
+		g_e6_failed_only = had_failed && !had_layer_tok;
+	}
+	/* 基线（g:/p:/存量）——failed-only 检索跳过（只查降权族） */
+	if (!g_e6_failed_only) {
+		s.o.text = s.q;
+		s.o.top_k = OCC_SME_TOP_K;
+		s.o.tags_json = OCC_SME_SEARCH_TAGS;
+		s.resp = malloc(OCC_SME_RESP_MAX);
+		if (s.resp) {
+			if (g_bridge.search(&s.o, s.resp,
+					    OCC_SME_RESP_MAX) == AI_OK)
+				g_sme_state = 1;
+			else
+				g_sme_state = 2;
+			n = collect_texts(s.resp, lines, OCC_SME_TOP_K * 2,
+					  n);
+			free(s.resp);
+		}
+	}
+	if (!n)
+		return NULL;
+	blk = malloc(OCC_SME_BLOCK_MAX + 64);
+	if (!blk) {
+		for (i = 0; i < n; i++)
+			free(lines[i]);
+		return NULL;
+	}
+	used = (size_t)snprintf(blk, OCC_SME_BLOCK_MAX + 64,
+				OCC_SME_BLOCK_HEAD
+				"（来自长期记忆，可能过时，仅供参考）\n");
+	for (i = 0; i < n && used < OCC_SME_BLOCK_MAX; i++) {
+		char line[OCC_SME_HIT_MAX + 32];
+		int ln;
+
+		snprintf(line, sizeof(line), "%s", lines[i]);
+		utf8_cut(line, OCC_SME_HIT_MAX);
+		ln = snprintf(blk + used,
+			      OCC_SME_BLOCK_MAX + 64 - used, "- %s\n",
+			      line);
+		if (ln < 0 || (size_t)ln >= OCC_SME_BLOCK_MAX + 64 - used)
+			break;
+		used += (size_t)ln;
+		any = 1;
+		if (i + 1 >= OCC_SME_TOP_K)
+			break;
+	}
+	for (i = 0; i < n; i++)
+		free(lines[i]);
+	if (!any) {
+		free(blk);
+		return NULL;
+	}
+	used += (size_t)snprintf(blk + used, OCC_SME_BLOCK_MAX + 64 - used,
+				 OCC_SME_BLOCK_TAIL);
+	return blk;
 }

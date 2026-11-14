@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include "occ_core/orch.h"			/* E3：task 工具执行面 */
+#include "occ_core/occ_sme.h"	/* E6：recall 记忆检索 */
 #include "occ_core/review.h"			/* E4：return 走验收环 */
 #include "occ_core/occ_ac.h"		/* E5：done→request_compact 闸 */
 
@@ -190,7 +191,19 @@ static const occ_tool_def TOOLS[] = {
  * 构造（只读静态源，无并发写面）；默认路径恒返回 TOOLS 原数组（差分
  * /p-smoke 红线：请求字节零变化）。
  */
-static occ_tool_def TOOLS_ORCH[7];
+	/* E6 第八工具：recall（ORCH §6 拍板 2026-11-12 补——模型侧记忆检索；
+ * 不依赖 orch 运行时；同 OCC_ORCH_TOOLS 闸） */
+static const char SCHEMA_RECALL[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"query\":{\"type\":\"string\",\"description\":\"检索词"
+	"（会话名/主题/任务目标等）\"},"
+	"\"layer\":{\"type\":\"string\",\"description\":\"层过滤："
+	"t:<task_id>=任务层私有记忆；failed=被否决/失败尝试（默认只查"
+	"清洁层——防污染）\"}"
+	"},\"required\":[\"query\"]}";
+
+
+static occ_tool_def TOOLS_ORCH[8];
 static int tools_orch_init;
 
 const occ_tool_def *occ_tool_defs(size_t *n)
@@ -209,6 +222,13 @@ const occ_tool_def *occ_tool_defs(size_t *n)
 				"status 查状态；wait 限时等终局；read_result 读"
 				"子报告；return 对结果表态。返回结构化 JSON。";
 			TOOLS_ORCH[6].parameters = SCHEMA_TASK;
+			TOOLS_ORCH[7].name = OCC_T_RECALL;
+			TOOLS_ORCH[7].description =
+				"长期记忆检索（SME）：按 query 查 〈记忆〉；"
+				"layer=t:<task_id> 查任务层私有；"
+				"include_failed=true 含失败/被否决尝试"
+				"（默认防污染只查清洁层）。";
+			TOOLS_ORCH[7].parameters = SCHEMA_RECALL;
 			tools_orch_init = 1;
 		}
 		if (n)
@@ -228,8 +248,8 @@ int occ_tool_is_known(const char *name)
 		if (!strcmp(TOOLS[i].name, name))
 			return 1;
 	if (occ_orch_tools_enabled() && name &&
-	    !strcmp(OCC_T_TASK, name))
-		return 1;
+	    (!strcmp(OCC_T_TASK, name) || !strcmp(OCC_T_RECALL, name)))
+		return 1;	/* E6：recall 同闸入已知面 */
 	return 0;
 }
 
@@ -2132,6 +2152,29 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	}
 }
 
+/* E6 第八工具实现（SCHEMA/声明在前部 TOOLS_ORCH 区） */
+static int tool_recall(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *query = args_str(a, "query");
+	const char *layer = args_str(a, "layer");
+	char lay[160];
+	char *blk;
+
+	(void)ctx;
+	if (!query || !query[0])
+		return jerr(o, NULL, "recall 缺少参数 query");
+	if (layer && layer[0])
+		snprintf(lay, sizeof(lay), "%.150s", layer);
+	else
+		lay[0] = '\0';
+	blk = occ_sme_lookup_ex(query, lay[0] ? lay : NULL);
+	if (!blk)
+		return jerr(o, NULL, "recall：无命中（或记忆服务不可达）");
+	occ_ob_printf(o, "%s", blk);
+	free(blk);
+	return 0;
+}
+
 static int tool_task(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 {
 	const char *action;
@@ -2369,10 +2412,21 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		} else {
 			rc = tool_task(&c, &a, &o);
 		}
+	} else if (!strcmp(name, OCC_T_RECALL)) {
+		/* E6 第八工具：开关关=未知工具面；开=记忆检索 */
+		if (!occ_orch_tools_enabled()) {
+			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
+				      "read/write/edit/glob/grep/bash）",
+				      name);
+			rc = -1;
+		} else {
+			rc = tool_recall(&c, &a, &o);
+		}
 	} else {
 		occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用：read/write/"
-			      "edit/glob/grep/bash%s）", name,
-			      occ_orch_tools_enabled() ? "/task" : "");
+			      "edit/glob/grep/bash%s%s）", name,
+			      occ_orch_tools_enabled() ? "/task" : "",
+			      occ_orch_tools_enabled() ? "/recall" : "");
 		rc = -1;
 	}
 	args_free(&a);

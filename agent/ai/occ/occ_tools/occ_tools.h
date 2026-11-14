@@ -55,6 +55,12 @@
 #define OCC_T_GLOB  "glob"
 #define OCC_T_GREP  "grep"
 #define OCC_T_BASH  "bash"
+#define OCC_T_RECALL "recall"			/* E6：第八工具
+					 * （OCC_ORCH_TOOLS=1
+					 * 才注册） */
+#define OCC_T_RECALL "recall"			/* E6：第八工具
+					 * （OCC_ORCH_TOOLS=1
+					 * 才注册） */
 #define OCC_T_TASK  "task"			/* E3：第七工具
 						 * （OCC_ORCH_TOOLS=1
 						 * 才注册） */

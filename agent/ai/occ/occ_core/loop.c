@@ -838,7 +838,43 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 
 				sme_build_query(db, sess.id, utext, sess.title,
 						q, sizeof(q));
-				mem_blk = occ_sme_lookup(q);
+				{
+					/* E6：子会话（kind=child，orch 注
+					 * OCC_TASK_ID）走 t: 任务层注入
+					 * ——同域任务记忆优先 */
+					const char *tid_env =
+						getenv("OCC_TASK_ID");
+
+					if (tid_env && *tid_env) {
+						char lay[96];
+
+						snprintf(lay, sizeof(lay),
+							 "t:%.80s",
+							 tid_env);
+						mem_blk = occ_sme_lookup_ex(q,
+									    lay);
+					} else {
+						{
+					/* E6：子会话（kind=child，orch 注
+					 * OCC_TASK_ID）走 t: 任务层注入
+					 * ——同域任务记忆优先 */
+					const char *tid_env =
+						getenv("OCC_TASK_ID");
+
+					if (tid_env && *tid_env) {
+						char lay[96];
+
+						snprintf(lay, sizeof(lay),
+							 "t:%.80s",
+							 tid_env);
+						mem_blk = occ_sme_lookup_ex(q,
+									    lay);
+					} else {
+						mem_blk = occ_sme_lookup(q);
+					}
+				}
+					}
+				}
 				if (mem_blk) {
 					snprintf(cached, sizeof(cached), "%s",
 						 mem_blk);
