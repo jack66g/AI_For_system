@@ -75,4 +75,30 @@ size_t occ_catalog_search(const occ_catalog *c, const char *needle,
 			  int include_deprecated,
 			  const occ_catalog_model **out, size_t outmax);
 
+/*
+ * E7 记账消费点（定价四字段首个只读消费；ORCH-DESIGN §8 棒 E7）：
+ *
+ * occ_catalog_price - 按模型名取输入/输出单价（cost_input_per_m /
+ * cost_output_per_m——美元每 1M token 两档）。匹配次序：
+ *   1) occ_catalog_find 语义（id / canonical_id 全名精确）；
+ *   2) 显示名 name（大小写不敏感精确）。
+ * 返回 1=命中（两单价写出——未标价模型为 0.0）；0=目录无此模型
+ * （model_name 空/NULL 也走此路）。只读查询，无任何写面。
+ */
+int occ_catalog_price(const occ_catalog *c, const char *model_name,
+		      double *in_per_m, double *out_per_m);
+
+/*
+ * occ_catalog_cost_usd - 金额算式（显示参考，不精确计费——§10 风险 6
+ * 「定价时效」对策：定价仅显示参考」）：
+ *
+ *   usd = tokens_in × in_per_m / 1e6 + tokens_out × out_per_m / 1e6
+ *
+ * 单位换算：单价=美元/1M token（catalog 四字段口径），token 量×单价
+ * 再除以 1,000,000。cache_read/write 另档计价不并入（与 occ_tokens
+ * total=input+output 口径一致——cache 命中不计入 total 不双算）。
+ */
+double occ_catalog_cost_usd(double in_per_m, double out_per_m,
+			    long long tokens_in, long long tokens_out);
+
 #endif /* _OCC_CATALOG_H */

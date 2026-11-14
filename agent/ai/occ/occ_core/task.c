@@ -837,3 +837,143 @@ int occ_task_note(occ_db *db, const char *id, const char *payload_json,
 		return -1;
 	return 0;
 }
+
+/*
+ * budget_cols - 事务内读 budget_in/out 两列（E7 记账面）。返回语义
+ * 同 task_state：1=找到；0=不存在；-1=DB 错。
+ */
+static int budget_cols(occ_db *db, const char *id,
+		       long long *bin, long long *bout)
+{
+	static const char *sel =
+		"SELECT budget_in,budget_out FROM occ_task WHERE id=?1";
+	sqlite3 *h = occ_db_sqlite(db);
+	sqlite3_stmt *st = NULL;
+	int rc;
+
+	if (sqlite3_prepare_v2(h, sel, -1, &st, NULL) != SQLITE_OK)
+		return -1;
+	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+	rc = sqlite3_step(st);
+	if (rc == SQLITE_ROW) {
+		*bin = sqlite3_column_int64(st, 0);
+		*bout = sqlite3_column_int64(st, 1);
+		rc = 1;
+	} else {
+		rc = (rc == SQLITE_DONE) ? 0 : -1;
+	}
+	sqlite3_finalize(st);
+	return rc;
+}
+
+/*
+ * occ_task_budget_baseline - E7：spawn 时预算基线入事件流（任务行
+ * 两列不动；语义详见 task.h）。基线 payload 携带当时账面——读账
+ * 失败仍记事件（max_tokens 与 phase 不受影响）。
+ */
+int occ_task_budget_baseline(occ_db *db, const char *id, long long max_tokens,
+			     char *err, size_t errlen)
+{
+	char cur[16];
+	long long bin = 0, bout = 0;
+	char pj[192];
+	int rc, rwc, rwm;
+
+	if (!db || !id || !id[0] || max_tokens <= 0) {
+		set_err(err, errlen,
+			"occ_task_budget_baseline: bad args（max_tokens 须正）");
+		return -1;
+	}
+	if (tx_begin(db, err, errlen))
+		return -1;
+	rc = task_state(db, id, cur, sizeof(cur), &rwc, &rwm);
+	if (rc != 1) {
+		tx_rollback(db);
+		return task_state_fail(rc, id, "occ_task_budget_baseline",
+				       err, errlen);
+	}
+	(void)budget_cols(db, id, &bin, &bout);	/* 尽力：失败 0 如实 */
+	snprintf(pj, sizeof(pj),
+		 "{\"phase\":\"baseline\",\"max_tokens\":%lld,"
+		 "\"budget_in\":%lld,\"budget_out\":%lld}",
+		 max_tokens, bin, bout);
+	if (ev_add(db, id, OCC_TASK_EV_BUDGET, pj)) {
+		tx_rollback(db);
+		set_err(err, errlen, "budget_baseline: 事件落库失败");
+		return -1;
+	}
+	if (tx_commit(db, err, errlen))
+		return -1;
+	return 0;
+}
+
+/*
+ * occ_task_budget_add - E7：budget_in/out 单事务累加+审计（语义详见
+ * task.h——delta 负值钳 0、任意状态可记、payload 带累加后新账面）。
+ */
+int occ_task_budget_add(occ_db *db, const char *id,
+			long long add_in, long long add_out, int estimated,
+			char *err, size_t errlen)
+{
+	static const char *upd =
+		"UPDATE occ_task SET budget_in=budget_in+?1,"
+		" budget_out=budget_out+?2, updated=?3 WHERE id=?4";
+	sqlite3 *h;
+	sqlite3_stmt *st = NULL;
+	char cur[16];
+	long long bin = 0, bout = 0;
+	char pj[256];
+	int rc, rwc, rwm;
+
+	if (!db || !id || !id[0]) {
+		set_err(err, errlen, "occ_task_budget_add: bad args");
+		return -1;
+	}
+	if (add_in < 0)
+		add_in = 0;		/* 账本单调（/undo 收缩不改已记） */
+	if (add_out < 0)
+		add_out = 0;
+	if (add_in == 0 && add_out == 0)
+		return 0;		/* 钳 0 后零增量=无账可记，no-op
+					 * （不落 UPDATE/事件——审计流
+					 * 只记真账） */
+	h = occ_db_sqlite(db);
+	if (tx_begin(db, err, errlen))
+		return -1;
+	rc = task_state(db, id, cur, sizeof(cur), &rwc, &rwm);
+	if (rc != 1) {
+		tx_rollback(db);
+		return task_state_fail(rc, id, "occ_task_budget_add", err,
+				       errlen);
+	}
+	if (sqlite3_prepare_v2(h, upd, -1, &st, NULL) != SQLITE_OK) {
+		tx_rollback(db);
+		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(h));
+		return -1;
+	}
+	sqlite3_bind_int64(st, 1, add_in);
+	sqlite3_bind_int64(st, 2, add_out);
+	sqlite3_bind_int64(st, 3, now_ms());
+	sqlite3_bind_text(st, 4, id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(st) != SQLITE_DONE) {
+		sqlite3_finalize(st);
+		tx_rollback(db);
+		set_err(err, errlen, "step: %s", sqlite3_errmsg(h));
+		return -1;
+	}
+	sqlite3_finalize(st);
+	(void)budget_cols(db, id, &bin, &bout);	/* 同事务读新账面（尽力） */
+	snprintf(pj, sizeof(pj),
+		 "{\"in\":%lld,\"out\":%lld,\"src\":\"%s\","
+		 "\"budget_in\":%lld,\"budget_out\":%lld}",
+		 add_in, add_out, estimated ? "estimated" : "usage",
+		 bin, bout);
+	if (ev_add(db, id, OCC_TASK_EV_BUDGET, pj)) {
+		tx_rollback(db);
+		set_err(err, errlen, "budget_add: 事件落库失败");
+		return -1;
+	}
+	if (tx_commit(db, err, errlen))
+		return -1;
+	return 0;
+}

@@ -17,6 +17,9 @@
  *   F) /clear 库面（occ_session_archive）：归档后 status=archived 且
  *      消息可查回（非删除）、occ_window 回 native 空基线（digest_id
  *      置空）、幂等、不存在人话报错。
+ *   G) E7 预算记账 API：budget 基线事件（两列不动）/budget_add 单事务
+ *      累加（两拍+负 delta 钳 0）/kind='budget' 审计三行（src=
+ *      usage/estimated 标注对齐）/独立连接直查/不存在人话报错。
  *
  * 外部验证：另开独立 sqlite3 连接直查（PRAGMA/sqlite_master）——
  * 产物对任何标准工具可见（同 test_session 口径）。
@@ -474,6 +477,106 @@ int main(void)
 		OK(occ_session_archive(db, "ses_nope", err, sizeof(err)) ==
 		   -1 && strstr(err, "不存在") != NULL,
 		   "archive-nonexist");
+	}
+
+	/* ---- G) E7 预算记账 API：基线事件/单事务累加/审计事件 ---- */
+	{
+		char vq[320];
+		int nbud = 0;
+
+		err[0] = '\0';
+		OK(occ_task_create(db, s.id, "记账任务", "{\"goal\":\"E7\"}",
+				   0, &t, err, sizeof(err)) == 0,
+		   "budget-task-create");
+		/* 基线：只落 kind='budget' 事件，任务行两列不动 */
+		err[0] = '\0';
+		OK(occ_task_budget_baseline(db, t.id, 5000, err,
+					    sizeof(err)) == 0,
+		   "budget-baseline-ok");
+		OK(occ_task_get(db, t.id, &t2, err, sizeof(err)) == 1 &&
+		   t2.budget_in == 0 && t2.budget_out == 0,
+		   "budget-baseline-cols-zero");
+		/* 基线坏参：max_tokens<=0 拒绝 */
+		err[0] = '\0';
+		OK(occ_task_budget_baseline(db, t.id, 0, err,
+					    sizeof(err)) == -1 &&
+		   strstr(err, "bad args") != NULL,
+		   "budget-baseline-badargs");
+		/* 累加两拍：100/200 真值 + 50/0 估算 → 150/200 */
+		err[0] = '\0';
+		OK(occ_task_budget_add(db, t.id, 100, 200, 0, err,
+				       sizeof(err)) == 0, "budget-add-1-ok");
+		err[0] = '\0';
+		OK(occ_task_budget_add(db, t.id, 50, 0, 1, err,
+				       sizeof(err)) == 0, "budget-add-2-ok");
+		OK(occ_task_get(db, t.id, &t2, err, sizeof(err)) == 1 &&
+		   t2.budget_in == 150 && t2.budget_out == 200,
+		   "budget-add-accum-150-200");
+		/* 负 delta 钳 0（账本单调） */
+		err[0] = '\0';
+		OK(occ_task_budget_add(db, t.id, -999, -1, 0, err,
+				       sizeof(err)) == 0 &&
+		   occ_task_get(db, t.id, &t2, err, sizeof(err)) == 1 &&
+		   t2.budget_in == 150 && t2.budget_out == 200,
+		   "budget-add-negative-clamped");
+		/* 审计：kind='budget' 三行（1 基线+2 记账），src 标注对齐 */
+		occ_task_row_free(&t2);
+		nbud = 0;
+		if (occ_task_events(db, t.id, &evs, &n, NULL, 0) == 0) {
+			int nbase = 0, nusage = 0, nest = 0;
+
+			for (i = 0; i < n; i++) {
+				if (strcmp(evs[i].kind, OCC_TASK_EV_BUDGET))
+					continue;
+				nbud++;
+				if (strstr(evs[i].payload_json,
+					   "\"phase\":\"baseline\"") &&
+				    strstr(evs[i].payload_json,
+					   "\"max_tokens\":5000"))
+					nbase = 1;
+				if (strstr(evs[i].payload_json,
+					   "\"in\":100") &&
+				    strstr(evs[i].payload_json,
+					   "\"out\":200") &&
+				    strstr(evs[i].payload_json,
+					   "\"src\":\"usage\""))
+					nusage = 1;
+				if (strstr(evs[i].payload_json,
+					   "\"in\":50") &&
+				    strstr(evs[i].payload_json,
+					   "\"src\":\"estimated\""))
+					nest = 1;
+			}
+			occ_task_event_rows_free(evs, n);
+			evs = NULL;
+			n = 0;
+			OK(nbud == 3, "budget-events-count-3");
+			OK(nbase, "budget-event-baseline-payload");
+			OK(nusage, "budget-event-usage-src");
+			OK(nest, "budget-event-estimated-src");
+		} else {
+			OK(0, "budget-events-read");
+		}
+		/* 独立连接直查（外部验证口径） */
+		snprintf(vq, sizeof(vq),
+			 "SELECT budget_in||'/'||budget_out FROM occ_task"
+			 " WHERE id='%s'", t.id);
+		{
+			char vb[48] = "";
+
+			sql_str(dbpath_of("new.db"), vq, vb, sizeof(vb));
+			OK(!strcmp(vb, "150/200"), "budget-cols-sqlite-view");
+		}
+		/* 不存在任务：-1 */
+		err[0] = '\0';
+		OK(occ_task_budget_add(db, "tsk_nope", 1, 1, 0, err,
+				       sizeof(err)) == -1 &&
+		   strstr(err, "不存在") != NULL,
+		   "budget-add-nonexist");
+		err[0] = '\0';
+		OK(occ_task_budget_baseline(db, "tsk_nope", 100, err,
+					    sizeof(err)) == -1,
+		   "budget-baseline-nonexist");
 	}
 
 	occ_db_close(db);

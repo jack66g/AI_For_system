@@ -18,6 +18,12 @@
  *      spawn（brief 组装+结果文件 env 通道）→wait 限时终局→status
  *      （DB 读回 in_review）→read_result（报告=结果文件内容）→
  *      return（记入任务事件）；工具面互斥（ok:false+EFILESET）。
+ *   I) E7 预算记账：sim:usage 子进程落真 usage（occ_msg_add_assistant
+ *      ——五项口径真值源）→ I1 spawn 基线事件（kind='budget'
+ *      phase=baseline）/I2 终局累加 budget_in/out+tokens_total 对账/
+ *      I3 task 工具 status·read_result budget 段/I4 熔断（在跑探查
+ *      撞线→取消路径+终局记账后 escalate reason=budget_exceeded）/
+ *      I5 spawn 前检查点（已超限任务再派→EBUDGET 拒绝）。
  *   D) 并发闸：上限 2 第三路立即拒绝（ELIMIT）+30s 退避窗（EBACKOFF；
  *      窗内槽位空也拒；窗满自动复位——测试用短窗 400ms 覆写）。
  *   E) B2 并发写库压测（两腿，报告落 tests/orch_b2_report.txt）：
@@ -227,6 +233,50 @@ static int sim_main(int argc, char **argv)
 		const char *v = getenv(prompt + 8);
 
 		printf("SIM-ENV %s=%s\n", prompt + 8, v ? v : "(null)");
+		return 0;
+	}
+	/*
+	 * E7 记账演练：向子会话落一条带真 usage 的 assistant 消息
+	 * （occ_msg_add_assistant——occ_message 五项口径真值源；OCC_DB
+	 * 由 orch spawn 注入=同库）。prompt 形如 "sim:usage 100 200"
+	 *（in/out token 数）；尾缀 "hang <秒>" = 落账后挂起（在跑熔断
+	 * 检查点②演练——探查撞线须子进程还活着）。
+	 */
+	if (!strncmp(prompt, "sim:usage ", 10)) {
+		const char *dbp = getenv("OCC_DB");
+		long long tin = 0, tout = 0;
+		occ_db *db;
+		occ_usage u;
+		char e2[192];
+
+		if (sscanf(prompt + 10, "%lld %lld", &tin, &tout) != 2)
+			return 5;
+		if (!dbp || !dbp[0])
+			return 6;
+		db = occ_db_open(dbp, e2, sizeof(e2));
+		if (!db)
+			return 3;
+		memset(&u, 0, sizeof(u));
+		u.present = 1;
+		u.input = tin;
+		u.output = tout;
+		if (occ_msg_add_assistant(db, sid, "E7 sim usage 记账消息",
+					  NULL, NULL, 0, &u, 0, "stop",
+					  NULL, 0, e2, sizeof(e2)) != 0) {
+			occ_db_close(db);
+			return 4;
+		}
+		occ_db_close(db);
+		printf("SIM-USAGE in=%lld out=%lld sid=%s\n", tin, tout, sid);
+		fflush(stdout);
+		if (strstr(prompt, "hang")) {
+			int s = 20;
+
+			if (sscanf(strstr(prompt, "hang"), "hang %d", &s) != 1 ||
+			    s <= 0)
+				s = 20;
+			sleep(s);
+		}
 		return 0;
 	}
 	/* E3：结果文件 env 通道演练——任务书正文内嵌「sim:report <报告>」
@@ -1274,6 +1324,169 @@ static int unit_main(void)
 		unsetenv("OCC_ORCH_TOOLS");
 		unsetenv("OCC_ORCH_BIN");
 		unsetenv("OCC_ORCH_SIM");
+	}
+
+	/* ===== I E7：预算记账（spawn 基线/终局累加/熔断三断言） =====
+	 * sim:usage 子进程向子会话落真 usage 消息（occ_msg_add_assistant
+	 * ——真值源），orch 终局回收从子会话累加 budget_in/out。 */
+	{
+		occ_orch_spawn_opts io;
+		occ_tool_ctx tc;
+		occ_tool_result tr;
+		occ_orch_child *ic = NULL, *i5 = NULL;
+		char itid[OCC_ID_LEN] = "";
+		char ftid[OCC_ID_LEN] = "";
+		char args[512], q[360];
+
+		/* I1+I2 正常记账：max_tokens 大（不熔断）→ 基线事件 +
+		 * 终局真值累加 */
+		memset(&io, 0, sizeof(io));
+		io.prompt = "sim:usage 100 200";
+		io.parent_session = g_psid;
+		io.occ_bin = self_bin;
+		io.env = g_sim_env;
+		io.max_tokens = 100000;
+		OK(occ_orch_spawn(g_o, &io, &ic, err, sizeof(err)) ==
+		   OCC_ORCH_OK, "i1-spawn");
+		if (ic) {
+			snprintf(itid, sizeof(itid), "%s",
+				 occ_orch_child_task(ic));
+			OK(occ_orch_wait(ic, &r, err, sizeof(err)) == 0 &&
+			   r.end == OCC_ORCH_END_EXIT, "i1-wait");
+			occ_orch_result_free(&r);
+			ic = NULL;
+			/* I1 spawn 基线断言：kind='budget' phase=baseline
+			 * 事件（payload 带 max_tokens；任务行两列不动由
+			 * I2 累加值反证） */
+			{
+				occ_task_event_row *evs = NULL;
+				size_t nevs = 0, k;
+				int base = 0, acct = 0;
+
+				OK(occ_task_events(g_db, itid, &evs, &nevs,
+						   NULL, 0) == 0, "i1-events");
+				for (k = 0; k < nevs; k++) {
+					if (strcmp(evs[k].kind,
+						   OCC_TASK_EV_BUDGET))
+						continue;
+					if (strstr(evs[k].payload_json,
+						   "\"phase\":\"baseline\"") &&
+					    strstr(evs[k].payload_json,
+						   "\"max_tokens\":100000"))
+						base = 1;
+					if (strstr(evs[k].payload_json,
+						   "\"in\":100") &&
+					    strstr(evs[k].payload_json,
+						   "\"out\":200") &&
+					    strstr(evs[k].payload_json,
+						   "\"src\":\"usage\""))
+						acct = 1;
+				}
+				occ_task_event_rows_free(evs, nevs);
+				OK(base, "i1-baseline-event");
+				OK(acct, "i2-account-event");
+			}
+			/* I2 终局累加断言：budget_in=100/out=200 落库 +
+			 * 与子会话 tokens_total 对账（Σ(usage_in+out) 同源） */
+			OK(occ_task_get(g_db, itid, &trow, NULL, 0) == 1 &&
+			   trow.budget_in == 100 && trow.budget_out == 200,
+			   "i2-budget-cols");
+			occ_task_row_free(&trow);
+			snprintf(q, sizeof(q),
+				 "SELECT tokens_total FROM occ_session"
+				 " WHERE id=(SELECT child_session FROM"
+				 " occ_task WHERE id='%s')", itid);
+			OK(sql_int(g_dbpath, q, NULL) == 300,
+			   "i2-reconcile-tokens-total");
+			/* I3 工具面 budget 段（task status/read_result 返回
+			 * 追加；OCC_ORCH_TOOLS 开路=零差分风险） */
+			setenv("OCC_ORCH_TOOLS", "1", 1);
+			memset(&tc, 0, sizeof(tc));
+			tc.db = g_db;
+			tc.session_id = g_psid;
+			tc.workdir = tmpdir;
+			tc.orch = g_o;
+			memset(&tr, 0, sizeof(tr));
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"status\",\"task_id\":\"%s\"}",
+				 itid);
+			OK(occ_tool_exec(&tc, "task", "call_i3a", args,
+					 &tr) == 0 && tr.text &&
+			   strstr(tr.text, "\"budget\":{") &&
+			   strstr(tr.text, "\"tokens_in\":100") &&
+			   strstr(tr.text, "\"tokens_out\":200") &&
+			   strstr(tr.text, "\"tokens_total\":300"),
+			   "i3-status-budget-section");
+			occ_tool_result_free(&tr);
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"read_result\",\"task_id\":"
+				 "\"%s\"}", itid);
+			OK(occ_tool_exec(&tc, "task", "call_i3b", args,
+					 &tr) == 0 && tr.text &&
+			   strstr(tr.text, "\"budget\":{") &&
+			   strstr(tr.text, "\"tokens_in\":100"),
+			   "i3-read-result-budget-section");
+			occ_tool_result_free(&tr);
+			unsetenv("OCC_ORCH_TOOLS");
+		}
+
+		/* I4 熔断：小上限+在跑超限（sim 落账后挂起）→ poll 检查点
+		 * ②探查撞线走取消路径（TERM）→ 终局记账（检查点③）后
+		 * escalate——不静默 */
+		memset(&io, 0, sizeof(io));
+		io.prompt = "sim:usage 90000 1 hang 20";
+		io.parent_session = g_psid;
+		io.occ_bin = self_bin;
+		io.env = g_sim_env;
+		io.max_tokens = 1000;
+		OK(occ_orch_spawn(g_o, &io, &ic, err, sizeof(err)) ==
+		   OCC_ORCH_OK, "i4-spawn");
+		if (ic) {
+			snprintf(ftid, sizeof(ftid), "%s",
+				 occ_orch_child_task(ic));
+			OK(occ_orch_wait(ic, &r, err, sizeof(err)) == 0,
+			   "i4-wait");
+			OK(r.end == OCC_ORCH_END_CANCELLED,
+			   "i4-live-fuse-cancelled");
+			occ_orch_result_free(&r);
+			ic = NULL;
+			/* 终局记账后累计超限 → escalated */
+			OK(occ_task_get(g_db, ftid, &trow, NULL, 0) == 1 &&
+			   !strcmp(trow.status, OCC_TASK_ST_ESCALATED) &&
+			   trow.budget_in == 90000 && trow.budget_out == 1,
+			   "i4-escalated-and-accounted");
+			occ_task_row_free(&trow);
+			{
+				occ_task_event_row *evs = NULL;
+				size_t nevs = 0, k;
+				int esc = 0;
+
+				OK(occ_task_events(g_db, ftid, &evs, &nevs,
+						   NULL, 0) == 0,
+				   "i4-events");
+				for (k = 0; k < nevs; k++)
+					if (!strcmp(evs[k].kind,
+						    OCC_TASK_EV_ESCALATE) &&
+					    evs[k].payload_json &&
+					    strstr(evs[k].payload_json,
+						   "budget_exceeded"))
+						esc = 1;
+				occ_task_event_rows_free(evs, nevs);
+				OK(esc, "i4-escalate-event-reason");
+			}
+			/* I5 熔断检查点①：对已超限任务再派 → EBUDGET 拒绝 */
+			memset(&io, 0, sizeof(io));
+			io.prompt = "sim:ok";
+			io.task_id = ftid;
+			io.occ_bin = self_bin;
+			io.env = g_sim_env;
+			io.max_tokens = 1000;
+			OK(occ_orch_spawn(g_o, &io, &i5, err,
+					  sizeof(err)) == OCC_ORCH_EBUDGET &&
+			   i5 == NULL, "i5-respawn-refused");
+			OK(strstr(err, "预算熔断") != NULL,
+			   "i5-refuse-msg");
+		}
 	}
 
 	/* ===== E/F B2 压测 + WAL 读回 ===== */

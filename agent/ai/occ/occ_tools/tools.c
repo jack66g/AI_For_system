@@ -36,6 +36,9 @@
 #include "occ_core/occ_sme.h"	/* E6：recall 记忆检索 */
 #include "occ_core/review.h"			/* E4：return 走验收环 */
 #include "occ_core/occ_ac.h"		/* E5：done→request_compact 闸 */
+#include "occ_llm/occ_catalog.h"		/* E7：定价四字段消费点
+						 * （task 工具 budget 段
+						 * 显示参考——只读查询） */
 
 #include "store/store_json.h"
 
@@ -161,7 +164,8 @@ static const char SCHEMA_TASK[] =
 	"forbidden 禁改清单；deliverables 交付物清单；acceptance 验收标准"
 	"（尽量可机械判——file:/md5:/contains:/exit: 机检令牌会被验收环"
 	"逐条核对）；selfcheck 自检清单；auth_note 授权说明；"
-	"budget 预算配额（可含 wall_ms 墙钟上限毫秒）；context 必要上下文；"
+	"budget 预算配额（可含 wall_ms 墙钟上限毫秒、max_tokens 任务累计"
+	"输入+输出 token 上限——超限即熔断取消并升级）；context 必要上下文；"
 	"rework_max 回炉上限覆写（1-3，缺省 2）\"},"
 	"\"task_id\":{\"type\":\"string\",\"description\":\"status/wait/"
 	"read_result/return 的目标任务 id（tsk_…，spawn 返回）\"},"
@@ -1312,6 +1316,133 @@ static int jout(occ_obuf *o, aik_json *obj)
 	return 0;
 }
 
+/* ---- E7：预算记账消费点（task 工具 status/read_result 的 budget 段；
+ *      显示参考，不精确计费——§10 风险 6「定价仅显示参考」） ---- */
+
+/*
+ * task_catalog - 目录快照惰性一次（进程生命期；搜索链与 occ.c
+ * app_load_catalog 同源复制——OCC_CATALOG env → cwd →
+ * /proc/self/exe 同目录 → 系统安装位。失败保持零值目录=无定价面，
+ * 查询自然未命中降级「pricing unavailable」，绝不阻断工具返回）。
+ * 只读消费，无写面；不上 free（进程退出回收，同 occ.c cat 生命期）。
+ */
+static occ_catalog *task_catalog(void)
+{
+	static occ_catalog cat;
+	static int tried;
+	char path[1100], exed[1024];
+	const char *env;
+	ssize_t n;
+
+	if (tried)
+		return &cat;
+	tried = 1;
+	env = getenv("OCC_CATALOG");
+	if (env && env[0] && occ_catalog_load(&cat, env) == 0)
+		return &cat;
+	if (occ_catalog_load(&cat, "models.dev.snapshot.json") == 0)
+		return &cat;
+	n = readlink("/proc/self/exe", exed, sizeof(exed) - 1);
+	if (n > 0) {
+		char *slash;
+
+		exed[n] = '\0';
+		slash = strrchr(exed, '/');
+		if (slash) {
+			snprintf(path, sizeof(path),
+				 "%s/models.dev.snapshot.json", exed);
+			if (occ_catalog_load(&cat, path) == 0)
+				return &cat;
+		}
+	}
+	if (occ_catalog_load(
+		    &cat,
+		    "/usr/local/share/aikernel/models.dev.snapshot.json") == 0)
+		return &cat;
+	return &cat;		/* 零值目录（nmodels=0）=无定价面 */
+}
+
+/*
+ * budget_json - budget 段组装（heap JSON obj；oom NULL——调用方降级
+ * 略段不炸整体返回）。金额算式（occ_catalog_cost_usd 同式）：
+ *
+ *   cost_usd_ref = tokens_in × in_per_m / 1e6 + tokens_out × out_per_m / 1e6
+ *
+ * （单价=catalog 定价四字段 in/out 两档，单位 美元/1M token；
+ *   cache_read/write 另档不并入——与 occ_tokens total=in+out 口径
+ *   一致）。模型名取子会话 model 列（烧 token 的那一端）；目录未
+ *   装载/未命中/子会话缺 → pricing="unavailable"（tokens 仍如实）。
+ */
+static aik_json *budget_json(occ_db *db, const occ_task_row *trow)
+{
+	aik_json *b;
+	double ipm = 0.0, opm = 0.0;
+	char model[96];
+	int priced = 0;
+
+	if (!trow)
+		return NULL;
+	model[0] = '\0';
+	if (trow->child_session[0]) {
+		occ_session_row srow;
+
+		if (occ_session_get(db, trow->child_session, &srow, NULL,
+				    0) == 1)
+			snprintf(model, sizeof(model), "%s", srow.model);
+	}
+	if (model[0])
+		priced = occ_catalog_price(task_catalog(), model,
+					   &ipm, &opm) == 1;
+	b = aik_json_new_obj();
+	if (!b)
+		return NULL;
+	if (aik_json_obj_put(b, "tokens_in",
+			     aik_json_new_int(trow->budget_in)) ||
+	    aik_json_obj_put(b, "tokens_out",
+			     aik_json_new_int(trow->budget_out)) ||
+	    aik_json_obj_put(b, "tokens_total", aik_json_new_int(
+				     trow->budget_in + trow->budget_out))) {
+		aik_json_free(b);
+		return NULL;
+	}
+	if (priced) {
+		char cbuf[48];
+
+		/* 量×单价/1M（算式见函数头注；%.6f 美元——显示参考） */
+		snprintf(cbuf, sizeof(cbuf), "%.6f",
+			 occ_catalog_cost_usd(ipm, opm, trow->budget_in,
+					      trow->budget_out));
+		if (aik_json_obj_put(b, "model", aik_json_new_str(model)) ||
+		    aik_json_obj_put(b, "unit",
+				     aik_json_new_str("USD/1M")) ||
+		    aik_json_obj_put(b, "in_per_m",
+				     aik_json_new_num(ipm)) ||
+		    aik_json_obj_put(b, "out_per_m",
+				     aik_json_new_num(opm)) ||
+		    aik_json_obj_put(b, "cost_usd_ref",
+				     aik_json_new_str(cbuf))) {
+			aik_json_free(b);
+			return NULL;
+		}
+	} else {
+		if (aik_json_obj_put(b, "pricing", aik_json_new_str(
+					     "unavailable"))) {
+			aik_json_free(b);
+			return NULL;
+		}
+	}
+	return b;
+}
+
+/* budget 段挂入（oom 降级略段——budget 是显示参考，不炸整体返回） */
+static void budget_put(aik_json *obj, occ_db *db, const occ_task_row *trow)
+{
+	aik_json *bj = budget_json(db, trow);
+
+	if (bj && aik_json_obj_put(obj, "budget", bj) != 0)
+		aik_json_free(bj);	/* 未挂入（或挂失败）才独释 */
+}
+
 /* 错误 JSON：{"ok":false,"error":…[,"code":…]}；文本写出成功也返回
  * -1——错误响应=工具失败（occ_tool_result.rc=1，trace 口径）。 */
 static int jerr(occ_obuf *o, const char *code, const char *fmt, ...)
@@ -1466,7 +1597,7 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	occ_orch_spawn_opts so;
 	occ_orch_child *c = NULL;
 	char err[256], abs[4096];
-	long long rework_max = 2, wall_ms = 0;
+	long long rework_max = 2, wall_ms = 0, max_tokens = 0;
 	int rc;
 
 	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
@@ -1500,6 +1631,9 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		if (aik_json_typeof(budget) == AIK_JSON_OBJ) {
 			wall_ms = aik_json_int(aik_json_get(budget,
 							    "wall_ms"));
+			/* E7：token 预算上限（budget_in+out 累计超限熔断） */
+			max_tokens = aik_json_int(aik_json_get(budget,
+							       "max_tokens"));
 			if (aik_json_dump(budget, &budget_txt, &bl) != 0)
 				budget_txt = NULL;
 		} else {
@@ -1507,6 +1641,8 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		}
 		if (wall_ms < 0)
 			wall_ms = 0;
+		if (max_tokens < 0)
+			max_tokens = 0;
 	}
 	/* 可选清单（错误即返——人话指出字段） */
 	rc = brief_list(brief, "forbidden", &forb, &nforb, "forbidden", o);
@@ -1625,8 +1761,18 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	sb_list(&prompt, selfc, nselfc, "（无）\n");
 	if (auth_note && auth_note[0])
 		sb_printf(&prompt, "授权说明：%s\n", auth_note);
-	if (wall_ms > 0)
-		sb_printf(&prompt, "预算：墙钟上限 %lld ms\n", wall_ms);
+	if (wall_ms > 0 || max_tokens > 0) {
+		sb_puts(&prompt, "预算：");
+		if (wall_ms > 0)
+			sb_printf(&prompt, "墙钟上限 %lld ms", wall_ms);
+		if (wall_ms > 0 && max_tokens > 0)
+			sb_puts(&prompt, "；");
+		if (max_tokens > 0)
+			sb_printf(&prompt, "token 上限 %lld"
+				  "（累计输入+输出超限即熔断取消）",
+				  max_tokens);
+		sb_puts(&prompt, "\n");
+	}
 	if (context && context[0])
 		sb_printf(&prompt, "必要上下文：%s\n", context);
 	sb_printf(&prompt, "回炉上限：%lld 次\n", rework_max);
@@ -1649,6 +1795,7 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	so.nfileset = nfs;
 	so.timeout_ms = wall_ms;
 	so.workdir = ctx->workdir;
+	so.max_tokens = max_tokens;	/* E7：预算熔断（0=不设限） */
 	rc = occ_orch_spawn((occ_orch *)ctx->orch, &so, &c, err, sizeof(err));
 	sb_free(&prompt);
 	if (rc != OCC_ORCH_OK) {
@@ -1683,6 +1830,9 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 					occ_orch_child_task(c)))) == 0 &&
 		      aik_json_obj_put(robj, "rework_max",
 				       aik_json_new_int(rework_max)) == 0;
+		if (okk && max_tokens > 0)	/* E7：预算上限回显（缺省略） */
+			okk = aik_json_obj_put(robj, "max_tokens",
+					       aik_json_new_int(max_tokens)) == 0;
 		if (!okk || aik_json_obj_put(robj, "fileset", rf) != 0) {
 			aik_json_free(rf);	/* 未挂入（或挂失败）才独释 */
 			aik_json_free(robj);
@@ -1738,6 +1888,11 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			aik_json_free(obj);
 			return jerr(o, NULL, "status 结果组装失败（oom）");
 		}
+		/* E7：budget 段（活表路也带账面——在跑期间为最近落账值） */
+		if (occ_task_get(ctx->db, tid, &trow, NULL, 0) == 1) {
+			budget_put(obj, ctx->db, &trow);
+			occ_task_row_free(&trow);
+		}
 		{
 			int r = jout(o, obj);
 
@@ -1769,6 +1924,7 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			aik_json_free(obj);
 			return jerr(o, NULL, "status 结果组装失败（oom）");
 		}
+		budget_put(obj, ctx->db, &trow);	/* E7：budget 段 */
 		{
 			int r = jout(o, obj);
 
@@ -1979,6 +2135,7 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 		free(report);
 		return jerr(o, NULL, "read_result 结果组装失败（oom）");
 	}
+	budget_put(obj, ctx->db, &trow);	/* E7：budget 段（显示参考） */
 	{
 		int r = jout(o, obj);
 

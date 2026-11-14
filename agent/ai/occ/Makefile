@@ -298,28 +298,40 @@ tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
 # session/task 面）；--sim/--b2w/--b2rw/--conc-drill 为子模式入口。
 # E3：+ TOOLS_OBJS（task 第七工具五动作全链演练经 occ_tool_exec）。
 # E4：+ review.o（orch.o collect 终局机械预判挂点引用）。
+# E7：+ catalog.o+tokens.o（tools.o budget 段定价查询；orch.o 记账
+#     估算兜底 occ_tokens_estimate_len 引用）。
 tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		 $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
 		 $(OBJ_DIR)/occ_core/review.o \
+		 $(OBJ_DIR)/occ_llm/catalog.o \
+		 $(OBJ_DIR)/occ_core/tokens.o \
 		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/review.o \
+		$(OBJ_DIR)/occ_llm/catalog.o \
+		$(OBJ_DIR)/occ_core/tokens.o \
 		$(TOOLS_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # review（E4）：验收环——verdict 机械判判据表/整改词渲染/回炉回路
 # 「一拒一改一过」+超限升级+防转述用例（fixture 纯逻辑，不起子进程）
 # + orch sim 端到端（自 exec 子模式同 test_orch）+ task return 工具面。
+# E7：+ catalog.o+tokens.o（tools.o budget 段定价查询；orch.o 记账
+#     估算兜底引用）。
 tests/test_review: tests/test_review.c $(OBJ_DIR)/occ_core/review.o \
 		   $(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
 		   $(OBJ_DIR)/occ_core/task.o \
+		   $(OBJ_DIR)/occ_llm/catalog.o \
+		   $(OBJ_DIR)/occ_core/tokens.o \
 		   $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_review.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/review.o $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		$(OBJ_DIR)/occ_llm/catalog.o \
+		$(OBJ_DIR)/occ_core/tokens.o \
 		$(TOOLS_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
@@ -340,15 +352,21 @@ tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_
 # E3：+ orch.o（task 第七工具开关 occ_orch_tools_enabled 消费）+ 全链
 # 演练在 test_orch（sim 子进程 harness）
 # E4：+ review.o（tools.o task return 走验收环引用）
+# E7：+ catalog.o+tokens.o（tools.o budget 段定价查询；orch.o 记账
+#     估算兜底引用）
 tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_llm/catalog.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		  $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_core/review.o \
+		$(OBJ_DIR)/occ_llm/catalog.o \
+		$(OBJ_DIR)/occ_core/tokens.o \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
@@ -381,7 +399,8 @@ tests/test_telemetry: tests/test_telemetry.c $(OBJ_DIR)/occ_core/occ_telemetry.o
 		$(OBJ_DIR)/occ_core/occ_telemetry.o $(PQ_REUSE_OBJS) $(LDLIBS)
 
 # revert（T9b2）：/undo 三段式 + schema v1→v2 迁移 + 快照回滚（链
-# tools 对象——mangle/快照与执行同口径）
+# tools 对象——mangle/快照与执行同口径；E7 + catalog.o+tokens.o=
+# tools.o budget 段定价查询+orch.o 估算兜底引用）
 # T4 /zoom：fbtermrc 编辑器单测（纯函数）
 tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
@@ -390,12 +409,16 @@ tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		   $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		   $(OBJ_DIR)/occ_core/review.o \
+		   $(OBJ_DIR)/occ_llm/catalog.o \
+		   $(OBJ_DIR)/occ_core/tokens.o \
 		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/review.o \
+		$(OBJ_DIR)/occ_llm/catalog.o \
+		$(OBJ_DIR)/occ_core/tokens.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # retry（T9b2）：重试分级矩阵 + 参数族（旋钮/env/缺省）+ 退避曲线

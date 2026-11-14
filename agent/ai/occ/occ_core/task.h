@@ -31,7 +31,9 @@
  *            status, rework_count, rework_max, verdict_json,
  *            budget_in, budget_out, created, updated)
  *            —— brief_json=§3 任务书全文（goal/fileset/…/rework_max）；
- *               budget_in/out 逐任务记账列（消费点=E7，本棒只建面）
+ *               budget_in/out 逐任务记账列（E1 建面；E7 记账管线消费：
+ *               occ_task_budget_add/baseline 累加+审计，orch.c 终局回
+ *               收从子会话 usage 真值落账——见 orch.h E7 段）
  *   occ_task_event(id AUTOINCREMENT, task_id, kind, payload_json, created)
  *
  * 线程/事务：与 session.c 同口径——每动作单事务（BEGIN IMMEDIATE…
@@ -62,6 +64,10 @@
 						 * 动作表态（不动状态机；
 						 * E4 verdict 通道接入前的
 						 * 最小承载） */
+#define OCC_TASK_EV_BUDGET	"budget"	/* E7 追加：预算记账审计
+						 * （不动状态机；payload
+						 * 见 occ_task_budget_add/
+						 * occ_task_budget_baseline） */
 
 #define OCC_TASK_TITLE_MAX	128		/* title 容量（截断，同 session） */
 #define OCC_TASK_REWORK_MAX_DEF	2		/* R2：缺省回炉上限 */
@@ -171,6 +177,30 @@ int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
  */
 int occ_task_note(occ_db *db, const char *id, const char *payload_json,
 		  char *err, size_t errlen);
+
+/*
+ * occ_task_budget_baseline - E7 追加（预算记账管线）：spawn 时预算
+ * 基线入事件流——kind='budget'、payload={"phase":"baseline",
+ * "max_tokens":N,"budget_in":cur,"budget_out":cur}（任务行两列不动，
+ * 仍由 budget_add 累加）。任意状态可记（调用点=dispatched 后）；
+ * 任务不存在/DB 错 → -1 人话。max_tokens<=0 → bad args。
+ */
+int occ_task_budget_baseline(occ_db *db, const char *id, long long max_tokens,
+			     char *err, size_t errlen);
+
+/*
+ * occ_task_budget_add - E7 追加：budget_in/budget_out 单事务累加
+ * （UPDATE 两列 + kind='budget' 审计事件，payload={"in":din,"out":dout,
+ * "src":"usage"|"estimated","budget_in":new,"budget_out":new}）。
+ * 数据源口径由调用方负责（orch.c：子会话 occ_message usage 真值
+ * 优先，无 usage 时 len/4 估算兜底且 estimated=1）。delta 负值钳 0
+ * （账本单调——消息被 /undo 隐藏等收缩不改已记账面）；钳 0 后两值
+ * 皆零=no-op 返回 0（不落 UPDATE/事件——审计流只记真账）。任意状态
+ * 可记（终局回收/在跑核账都合法）；任务不存在/DB 错 → -1 人话。
+ */
+int occ_task_budget_add(occ_db *db, const char *id,
+			long long add_in, long long add_out, int estimated,
+			char *err, size_t errlen);
 
 /*
  * 事件审计列表（id 升序=时间序）。*rows heap，返回行数（0=*rows=NULL）；

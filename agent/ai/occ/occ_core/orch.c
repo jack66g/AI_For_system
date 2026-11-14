@@ -20,6 +20,14 @@
  *   保留供 read_result）+ OCC_TASK_RESULT_FILE env 通道 + 总闸
  *   occ_orch_tools_enabled + occ_bin 的 OCC_ORCH_BIN env 覆写（测试
  *   注入 stub occ 用；生产进程 /proc/self/exe 同目录优先级不变）。
+ *
+ * E7 追加（§8 棒 E7，语义详见 orch.h 头注 E7 段）：
+ *   逐任务 token 记账管线（budget_in/budget_out 列 E1 已建）——
+ *   spawn 预算基线事件（occ_task_budget_baseline）/终局回收从子会话
+ *   usage 真值累加（child_usage_sum+occ_task_budget_add，无 usage 时
+ *   len/4 估算兜底标 estimated）/max_tokens 熔断三检查点（spawn 前
+ *   拒绝再派、poll 在跑节流探查超限走取消同路径、终局记账后
+ *   escalate——复用既有状态机路，不静默）。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
@@ -38,6 +46,9 @@
 
 #include "orch.h"
 #include "review.h"			/* E4：终局机械预判挂点 */
+#include "occ_tokens.h"			/* E7：估算兜底 len/4 */
+
+#include <sqlite3.h>			/* E7：子会话 usage 汇总直查 */
 
 extern char **environ;
 
@@ -56,6 +67,11 @@ struct occ_orch_child {
 	char *stdout_path;		/* heap；终局读回后释放 */
 	char *stderr_path;
 	int own_files;			/* 1=自动 mkstemp（终局 unlink） */
+	long long max_tokens;		/* E7：预算熔断上限（0=不设限） */
+	long long last_bud_ms;		/* E7：在跑探查节流锚（下次可查时刻） */
+	long long sum_in0;		/* E7：spawn 时子会话 usage 快照（增量
+					 * 记账防 rework 再派同会话双计） */
+	long long sum_out0;
 };
 
 struct occ_orch {
@@ -620,6 +636,48 @@ void occ_orch_free(occ_orch *o)
 	free(o);
 }
 
+/* ---- E7：预算记账（管线语义见 orch.h 头注 E7 段） ---- */
+
+/*
+ * child_usage_sum - 子会话 usage 真值汇总（occ_message 五项口径的
+ * in/out 两项：role='assistant' 且 reverted=0 的消息求和）。est=任一
+ * 消息 usage_est=1（loop 侧无 usage 回传时已按 len/4 估算落库并标记
+ * ——估算兜底经此口径自然携带）。返回 0=查询成功；-1=参数/DB 错。
+ */
+static int child_usage_sum(occ_db *db, const char *session_id,
+			   long long *tin, long long *tout, int *est)
+{
+	static const char *sel =
+		"SELECT COALESCE(SUM(usage_in),0),"
+		"COALESCE(SUM(usage_out),0),COALESCE(MAX(usage_est),0)"
+		" FROM occ_message"
+		" WHERE session_id=?1 AND role='assistant' AND reverted=0";
+	sqlite3 *h;
+	sqlite3_stmt *st = NULL;
+	int rc;
+
+	*tin = 0;
+	*tout = 0;
+	*est = 0;
+	if (!db || !session_id || !session_id[0])
+		return -1;
+	h = occ_db_sqlite(db);
+	if (sqlite3_prepare_v2(h, sel, -1, &st, NULL) != SQLITE_OK)
+		return -1;
+	sqlite3_bind_text(st, 1, session_id, -1, SQLITE_TRANSIENT);
+	rc = sqlite3_step(st);
+	if (rc == SQLITE_ROW) {
+		*tin = sqlite3_column_int64(st, 0);
+		*tout = sqlite3_column_int64(st, 1);
+		*est = sqlite3_column_int(st, 2);
+		rc = 0;
+	} else {
+		rc = -1;
+	}
+	sqlite3_finalize(st);
+	return rc;
+}
+
 /* ---- spawn ---- */
 
 static int temp_path(char *buf, size_t buflen, const char *tag)
@@ -670,6 +728,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	char *argv[6], **envp = NULL;
 	occ_orch_child *c;
 	long long now;
+	long long bin0 = 0, bout0 = 0;	/* E7：spawn 时 usage 快照 */
 	int dispatched = 0;
 	int own_result = 0;		/* E3：结果文件为本运行时生成 */
 
@@ -766,12 +825,71 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	if (tid[0]) {
 		char e2[192];
 
+		/*
+		 * E7 熔断检查点①（spawn 前）：任务累计 budget_in+out 已超
+		 * max_tokens（回炉重派路防越烧越多）→ 拒绝再派 + escalate
+		 * 审计尽力（pending 态迁移非法时以拒绝为准——不静默）。
+		 */
+		if (opts->max_tokens > 0) {
+			occ_task_row trow;
+
+			if (occ_task_get(o->db, tid, &trow, e2,
+					 sizeof(e2)) == 1) {
+				long long used = trow.budget_in +
+						 trow.budget_out;
+
+				occ_task_row_free(&trow);
+				if (used > opts->max_tokens) {
+					char rj[192];
+
+					snprintf(rj, sizeof(rj),
+						 "{\"reason\":"
+						 "\"budget_exceeded\","
+						 "\"max_tokens\":%lld,"
+						 "\"used\":%lld}",
+						 opts->max_tokens, used);
+					(void)occ_task_escalate(o->db, tid,
+								rj, NULL, 0);
+					set_err(err, errlen, "预算熔断：任务"
+						" %s 累计 %lld tokens 已超"
+						"上限 %lld——拒绝再派（已记"
+						" escalate 审计）", tid, used,
+						opts->max_tokens);
+					return OCC_ORCH_EBUDGET;
+				}
+			}
+		}
 		if (occ_task_dispatch(o->db, tid, sid, e2, sizeof(e2)) != 0) {
 			set_err(err, errlen, "occ_orch_spawn: 派发失败"
 				"：%s", e2);
 			return OCC_ORCH_EDB;	/* 任务留 pending，干净 */
 		}
 		dispatched = 1;
+		/*
+		 * E7：预算基线入任务事件流（kind='budget' phase=baseline；
+		 * 任务行两列仍恒由终局 budget_add 累加）。落库失败=账面
+		 * 不可审计 → 与其它 dispatch 后失败同路（escalate 收口）。
+		 */
+		if (opts->max_tokens > 0 &&
+		    occ_task_budget_baseline(o->db, tid, opts->max_tokens, e2,
+					     sizeof(e2)) != 0) {
+			set_err(err, errlen, "occ_orch_spawn: 预算基线落库"
+				"失败：%s", e2);
+			spawn_fail_cleanup(o, tid, "", 0, "budget baseline");
+			return OCC_ORCH_EDB;
+		}
+	}
+	/*
+	 * E7：子会话 usage 快照（fork 前）——终局 delta 记账基准（rework
+	 * 再派同会话只记增量，不双计）。查询失败按 0（终局如实落账）。
+	 */
+	{
+		long long s0in = 0, s0out = 0;
+		int s0est;
+
+		(void)child_usage_sum(o->db, sid, &s0in, &s0out, &s0est);
+		bin0 = s0in;
+		bout0 = s0out;
 	}
 
 	/* ---- E3：结果文件（报告 IPC）+ 登记（fork 前——oom 等失败在
@@ -943,6 +1061,11 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	c->started_ms = mono_ms();
 	c->deadline_ms = opts->timeout_ms > 0 ?
 		c->started_ms + opts->timeout_ms : 0;
+	/* E7：预算面（上限/探查节流锚/usage 快照——终局增量记账基准） */
+	c->max_tokens = opts->max_tokens > 0 ? opts->max_tokens : 0;
+	c->last_bud_ms = c->started_ms + OCC_ORCH_BUDGET_PROBE_MS;
+	c->sum_in0 = bin0;
+	c->sum_out0 = bout0;
 
 	argv[0] = bin;
 	argv[1] = (char *)"-p";
@@ -1128,6 +1251,71 @@ static void collect(occ_orch_child *c, int st, occ_orch_result *res)
 				c->o->review_hook(c->o->review_ud, c->o->db,
 						  r.task_id, rp, rj);
 		}
+		/*
+		 * E7 记账（终局回收）：从子会话 usage 累加 budget_in/out
+		 * ——真值优先（occ_message 五项口径 SUM；估算成分经
+		 * usage_est 标注）；子会话零消息且 stdout 有产出时以
+		 * len/4 估算兜底（src=estimated）。增量口径=终局 sum−
+		 * spawn 快照（rework 再派同会话不双计；负增量钳 0——
+		 * /undo 隐藏等收缩不改已记账面）。单事务 UPDATE+kind=
+		 * 'budget' 审计事件（task.c occ_task_budget_add）；失败
+		 * best-effort 不阻断收口（账面留 0 可由事件流诊断）。
+		 */
+		{
+			long long sin = 0, sout = 0;
+			int est = 0;
+
+			if (child_usage_sum(c->o->db, c->session_id, &sin,
+					    &sout, &est) == 0) {
+				long long din = sin - c->sum_in0;
+				long long dout = sout - c->sum_out0;
+
+				if (din < 0)
+					din = 0;
+				if (dout < 0)
+					dout = 0;
+				if (din + dout == 0 && r.stdout_tail &&
+				    r.stdout_tail[0]) {
+					dout = occ_tokens_estimate_len(
+						r.stdout_tail);
+					est = 1;
+				}
+				if (din + dout > 0)
+					(void)occ_task_budget_add(c->o->db,
+						r.task_id, din, dout, est,
+						e2, sizeof(e2));
+			}
+		}
+		/*
+		 * E7 熔断检查点③（回收终局后）：记账落账面后累计超限 →
+		 * occ_task_escalate（in_review/dispatched→escalated 均合法
+		 * 迁移路；payload reason=budget_exceeded——不许静默）。
+		 */
+		if (c->max_tokens > 0) {
+			occ_task_row trow;
+
+			if (occ_task_get(c->o->db, r.task_id, &trow, NULL,
+					 0) == 1) {
+				long long used = trow.budget_in +
+						 trow.budget_out;
+
+				if (used > c->max_tokens) {
+					snprintf(rj, sizeof(rj),
+						 "{\"reason\":"
+						 "\"budget_exceeded\","
+						 "\"max_tokens\":%lld,"
+						 "\"budget_in\":%lld,"
+						 "\"budget_out\":%lld}",
+						 c->max_tokens,
+						 trow.budget_in,
+						 trow.budget_out);
+					(void)occ_task_escalate(c->o->db,
+								r.task_id,
+								rj, NULL, 0);
+				}
+				occ_task_row_free(&trow);
+			}
+		}
 	}
 	if (res)
 		*res = r;			/* 所有权移交调用方 */
@@ -1145,6 +1333,37 @@ static int poll_once(occ_orch_child *c, occ_orch_result *res)
 	int st;
 	long long now = mono_ms();
 
+	/*
+	 * E7 熔断检查点②（在跑）：节流探查（OCC_ORCH_BUDGET_PROBE_MS
+	 * 上限一次查库）——任务累计账面+本轮子会话增量（spawn 快照起算）
+	 * 超限 → 取消同路径（TERM→宽限→KILL——复用既有取消面；终局
+	 * collect 记账后由检查点③ escalate 收口，不静默）。
+	 */
+	if (!c->cancelling && c->max_tokens > 0 &&
+	    now >= c->last_bud_ms) {
+		long long sin = 0, sout = 0;
+		int est;
+
+		c->last_bud_ms = now + OCC_ORCH_BUDGET_PROBE_MS;
+		if (child_usage_sum(c->o->db, c->session_id, &sin, &sout,
+				    &est) == 0) {
+			long long used = 0;
+
+			if (c->task_id[0]) {
+				occ_task_row trow;
+
+				if (occ_task_get(c->o->db, c->task_id, &trow,
+						 NULL, 0) == 1) {
+					used = trow.budget_in +
+					       trow.budget_out;
+					occ_task_row_free(&trow);
+				}
+			}
+			if (used + (sin - c->sum_in0) +
+			    (sout - c->sum_out0) > c->max_tokens)
+				term_group(c, 0);
+		}
+	}
 	if (!c->cancelling && c->deadline_ms && now >= c->deadline_ms)
 		term_group(c, 1);
 	if (c->cancelling && !c->killed && now >= c->kill_at_ms) {

@@ -322,3 +322,58 @@ size_t occ_catalog_search(const occ_catalog *c, const char *needle,
 	}
 	return n;
 }
+
+/* ---- E7 记账消费点（ORCH-DESIGN §8 棒 E7；语义见 occ_catalog.h） ---- */
+
+/* ASCII 大小写不敏感精确等值（name 档匹配用；与 ci_contains 同降档） */
+static int ci_equal(const char *a, const char *b)
+{
+	while (a && *a && b && *b) {
+		if (tolower((unsigned char)*a) !=
+		    tolower((unsigned char)*b))
+			return 0;
+		a++;
+		b++;
+	}
+	return a && b && *a == '\0' && *b == '\0';
+}
+
+int occ_catalog_price(const occ_catalog *c, const char *model_name,
+		      double *in_per_m, double *out_per_m)
+{
+	const occ_catalog_model *m;
+	size_t i;
+
+	if (in_per_m)
+		*in_per_m = 0.0;
+	if (out_per_m)
+		*out_per_m = 0.0;
+	if (!c || !model_name || !model_name[0])
+		return 0;
+	/* 档1：id/canonical_id 精确（occ_catalog_find 语义） */
+	m = occ_catalog_find(c, NULL, model_name);
+	/* 档2：显示名精确（大小写不敏感） */
+	if (!m) {
+		for (i = 0; i < c->nmodels; i++) {
+			if (ci_equal(c->models[i].name, model_name)) {
+				m = &c->models[i];
+				break;
+			}
+		}
+	}
+	if (!m)
+		return 0;
+	if (in_per_m)
+		*in_per_m = m->cost_input_per_m;
+	if (out_per_m)
+		*out_per_m = m->cost_output_per_m;
+	return 1;
+}
+
+double occ_catalog_cost_usd(double in_per_m, double out_per_m,
+			    long long tokens_in, long long tokens_out)
+{
+	/* 量×单价/1M（算式与单位口径见 occ_catalog.h 头注） */
+	return (double)tokens_in * in_per_m / 1000000.0 +
+	       (double)tokens_out * out_per_m / 1000000.0;
+}

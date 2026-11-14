@@ -81,6 +81,12 @@
 #define OCC_ORCH_ESPAWN		(-4)	/* fork/execve/occ 可执行解析失败 */
 #define OCC_ORCH_EDB		(-5)	/* 会话/任务面（E1 API）失败 */
 #define OCC_ORCH_EFILESET	(-6)	/* E3：文件集与在跑任务独占声明冲突 */
+#define OCC_ORCH_EBUDGET	(-7)	/* E7：预算熔断（任务累计 in+out 已超
+					 * max_tokens——spawn 前拒绝再派） */
+
+/* E7：在跑预算探查节流间隔（poll 活检查点查库频率上限；子会话
+ * usage 由子进程实时写同库——WAL 下读不阻塞写） */
+#define OCC_ORCH_BUDGET_PROBE_MS 1000L
 
 /* 子进程终局分类（结果回收四分开记） */
 typedef enum {
@@ -141,6 +147,9 @@ typedef struct occ_orch_child occ_orch_child;	/* 活子（终局即失效） */
  *   result_path   E3：结果文件（报告 IPC）。NULL+有任务面=自动 /tmp
  *                 mkstemp+env 注入+登记（occ_orch_free 清理）；显式给
  *                 =调用方持有；无任务面时不自动生成
+ *   max_tokens    E7：任务 token 预算上限（brief.budget.max_tokens——
+ *                 任务累计 budget_in+budget_out 超限即熔断；0=不设限。
+ *                 三检查点见下方 E7 段）
  */
 typedef struct occ_orch_spawn_opts {
 	const char *prompt;
@@ -158,6 +167,7 @@ typedef struct occ_orch_spawn_opts {
 	const char *const *fileset;
 	size_t nfileset;
 	const char *result_path;
+	long long max_tokens;		/* E7：预算熔断上限；0=不设限 */
 } occ_orch_spawn_opts;
 
 /* ---- 运行时生命周期 ---- */
@@ -281,5 +291,34 @@ void occ_orch_set_review_hook(occ_orch *o, occ_orch_review_hook fn,
  * child archived+SME 条目；幂等。返回蒸馏文（调用方 free）。 */
 char *occ_orch_distill(occ_db *db, const char *task_id);
 int occ_orch_compact_take(void);	/* E5 闸1：取走压缩请求旗 */
+
+/*
+ * E7 预算记账（ORCH-DESIGN §8 棒 E7；§0 拍板 7 逐任务记账）——
+ * 记账管线（三检查点）：
+ *
+ *   spawn 时   预算基线入事件流（occ_task_budget_baseline：kind=
+ *              'budget' phase=baseline 带 max_tokens；任务行两列不动）
+ *   终局回收   collect 内从子会话 usage 累加 budget_in/out（真值优先
+ *              ——occ_message 五项口径 SUM(in)/SUM(out)，loop 侧无
+ *              usage 回传时已按 len/4 估算落库并标 usage_est=1，经
+ *              MAX(usage_est) 自然携带 estimated 标注；子会话零消息
+ *              时以 stdout 尾窗 len/4 估算兜底；occ_task_budget_add
+ *              单事务 UPDATE+kind='budget' 审计）。增量口径=终局 sum
+ *              −spawn 快照（rework 再派同会话不双计；负增量钳 0）
+ *   熔断       max_tokens>0 时三检查点：
+ *              ① spawn 前——任务累计已超限（回炉重派路）→
+ *                OCC_ORCH_EBUDGET 拒绝+escalate 审计尽力（不静默）；
+ *              ② poll 在跑——节流探查（OCC_ORCH_BUDGET_PROBE_MS）
+ *                任务累计+本轮子会话增量超限 → 取消同路径
+ *                （TERM→宽限→KILL，复用既有取消面）；
+ *              ③ 终局记账后——累计超限 → occ_task_escalate
+ *                （in_review/dispatched→escalated 均合法路；
+ *                payload reason=budget_exceeded）。
+ *
+ * 定价显示参考（catalog 四字段首个消费点）在 tools.c task 工具
+ * status/read_result 的 budget 段（occ_catalog_price/_cost_usd——
+ * 只读查询+展示，不精确计费）。occ_orch_free 收尸路不记账不熔断
+ * （E2 口径：半完成态留 dispatched 可审计）。
+ */
 
 #endif /* _OCC_ORCH_H */
