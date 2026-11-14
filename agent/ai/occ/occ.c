@@ -2537,6 +2537,67 @@ static int tui_app_on_command(void *ud, const char *line)
 				    NULL, 0);
 		return 0;
 	}
+	if (!strcmp(line, "/clear")) {
+		/* E1（ORCH §2 拍板 6）：/clear=归档+换窗+清屏（T9c2 纯清屏
+		 * 升级）。库面半件=occ_session_archive 单事务：会话
+		 * status→archived（消息原地保留——/sessions 可找回续聊，
+		 * 非删除）+ occ_window 回 native 空基线（digest_id 置空
+		 * ——窗口换新而非删历史）；TUI 半件同 /new 态复位+清屏。
+		 * 清屏与归档通知走同一事件队列（先 CLEAR 后 NOTICE——
+		 * 直写 notice 会被队列里的 CLEAR 反序清掉，同 /new 注）。
+		 * headless occ -p 无此路径（TUI 专属命令，差分输出不变）。 */
+		int live;
+		char e[192], nb[336], tt[128];
+		occ_session_row r;
+
+		pthread_mutex_lock(&a->mu);
+		live = a->worker_live;
+		pthread_mutex_unlock(&a->mu);
+		if (live) {
+			tui_view_notice(a->view,
+					"clear: turn 运行中——Esc 中断或收口后再 /clear");
+			return 0;
+		}
+		if (!a->session_id[0]) {
+			(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR,
+					    NULL, 0, NULL, 0);
+			tui_view_notice(a->view,
+					"clear: 尚无会话——已清屏");
+			return 0;
+		}
+		e[0] = '\0';
+		if (occ_session_archive(a->db, a->session_id, e,
+					sizeof(e))) {
+			tui_view_notice(a->view, e[0] ? e : "clear: 归档失败");
+			return 0;
+		}
+		tt[0] = '\0';
+		if (occ_session_get(a->db, a->session_id, &r, NULL, 0) == 1)
+			app_clip_title(r.title, tt, sizeof(tt));
+		/* 换窗：app 态回空（同 /new——下一条消息创建新会话）+
+		 * T2 增量加载状态清零 */
+		pthread_mutex_lock(&a->mu);
+		a->session_id[0] = '\0';
+		a->session_title[0] = '\0';
+		a->tokens_total = 0;
+		a->u_in = a->u_out = a->u_cr = a->u_cw = 0;
+		a->u_est = 0;
+		pthread_mutex_unlock(&a->mu);
+		a->replay_budget = app_replay_lines_budget();
+		a->replay_earlier = 0;
+		a->replay_ok = 0;
+		a->replay_mem_stop = 0;
+		a->earliest_noticed = 0;
+		a->load_busy_noticed = 0;
+		(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
+				    NULL, 0);
+		snprintf(nb, sizeof(nb),
+			 "session 已归档：%s（消息保留，/sessions 可找回续聊）"
+			 "——窗口已换新，下一条消息创建新会话",
+			 tt[0] ? tt : "(无题)");
+		(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb, 0, NULL, 0);
+		return 0;
+	}
 	if (!strcmp(line, "/delete")) {
 		/* O-12：删除当前会话。双发确认门（W2 精神）：首次 /delete
 		 * 只布防，10s 内再发才真删——删除不可恢复。库层

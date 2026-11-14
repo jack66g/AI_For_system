@@ -8,7 +8,7 @@
  * sqlite3 C API 管理 occ 自有 schema（schema 详见 occ_session.h 头注）。
  *
  * PRAGMA 对齐 T2 store_sqlite 约定：busy_timeout=5000；另开
- * foreign_keys=ON（CASCADE）与 user_version=1（迁移锚点）。
+ * foreign_keys=ON（CASCADE）与 user_version=3（迁移锚点；E1 升位）。
  * 崩溃安全：每消息单事务（BEGIN IMMEDIATE…COMMIT；任一步失败即
  * ROLLBACK——kill -9 由 SQLite 自身崩溃恢复保证同样语义：未提交事务
  * 回滚，库中只可能出现整条消息，绝不半条）。
@@ -29,6 +29,7 @@
 
 #include <sqlite3.h>
 
+#include "task.h"			/* E1：occ_task 两表 DDL（迁移装配） */
 #include "store/store_json.h"
 
 struct occ_db {
@@ -141,7 +142,8 @@ static const char OCC_DDL[] =
 	"  status TEXT NOT NULL DEFAULT 'active',"
 	"  updated INTEGER NOT NULL DEFAULT 0,"
 	"  tokens_est INTEGER NOT NULL DEFAULT 0,"
-	"  workdir TEXT NOT NULL DEFAULT ''"
+	"  workdir TEXT NOT NULL DEFAULT '',"
+	"  kind TEXT NOT NULL DEFAULT 'main'"
 	");"
 	"CREATE TABLE IF NOT EXISTS occ_message ("
 	"  id TEXT PRIMARY KEY,"
@@ -244,6 +246,46 @@ static int occ_migrate_v2(occ_db *db, char *err, size_t errlen)
 	return 0;
 }
 
+/*
+ * schema v2→v3 迁移（E1，ORCH-DESIGN §2）：occ_session+kind（子会话
+ * 区分，老行补缺省 'main'——旧值兼容）+ occ_task/occ_task_event 两表
+ * （DDL 归 task.c occ_task_schema_v3——新库/老库统一走该幂等入口）。
+ * 老库（user_version=2）无损升级；v3 库重复打开零副作用（早退不发
+ * 一条 DDL）。ALTER 容忍重复列（新建库 DDL 已含 kind）。
+ */
+static int occ_migrate_v3(occ_db *db, char *err, size_t errlen)
+{
+	sqlite3_stmt *st = NULL;
+	int uv = 0;
+	char *perr = NULL;
+
+	if (sqlite3_prepare_v2(db->h, "PRAGMA user_version", -1, &st, NULL)
+	    != SQLITE_OK) {
+		set_err(err, errlen, "migrate: %s", sqlite3_errmsg(db->h));
+		return -1;
+	}
+	if (sqlite3_step(st) == SQLITE_ROW)
+		uv = sqlite3_column_int(st, 0);
+	sqlite3_finalize(st);
+	if (uv >= 3)
+		return 0;
+	/* duplicate column = 新建库已带列（DDL 先行）——非错误 */
+	sqlite3_exec(db->h, "ALTER TABLE occ_session ADD COLUMN kind"
+		    " TEXT NOT NULL DEFAULT 'main';", NULL, NULL, &perr);
+	sqlite3_free(perr);
+	if (occ_task_schema_v3(db, err, errlen))
+		return -1;
+	perr = NULL;
+	if (sqlite3_exec(db->h, "PRAGMA user_version=3;", NULL, NULL, &perr)
+	    != SQLITE_OK) {
+		set_err(err, errlen, "migrate uv: %s",
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		return -1;
+	}
+	return 0;
+}
+
 static int occ_default_db_path(char *buf, size_t buflen)
 {
 	const char *home = getenv("HOME");
@@ -319,7 +361,8 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 		free(db);
 		return NULL;
 	}
-	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2 迁移。
+	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2→v3 迁移
+	 *（v3=E1：kind 列+occ_task/occ_task_event，见 occ_migrate_v3）。
 	 * B2（T9B2 §8-4 → NEXT-PLAN 波次 B）两处并发面修：
 	 *  a) DDL+迁移包 BEGIN IMMEDIATE——deferred 隐式写事务的
 	 *     SHARED→EXCLUSIVE 升级瞬时 SQLITE_BUSY（死锁回避路径不进
@@ -353,6 +396,8 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 					      &perr) != SQLITE_OK)
 				ec = sqlite3_errcode(db->h);
 			else if (occ_migrate_v2(db, err, errlen))
+				ec = SQLITE_ERROR;
+			else if (occ_migrate_v3(db, err, errlen))
 				ec = SQLITE_ERROR;
 			else if (sqlite3_exec(db->h, "COMMIT", NULL, NULL,
 					      &perr) != SQLITE_OK)
@@ -394,6 +439,13 @@ void occ_db_close(occ_db *db)
 const char *occ_db_path(const occ_db *db)
 {
 	return db ? db->path : "(null)";
+}
+
+/* E1：原生句柄出借（occ_core 内部——task.c 等自有 schema 模块用；
+ * 表所有权仍在 session.c，借用方不得改 occ_session 族表结构） */
+sqlite3 *occ_db_sqlite(occ_db *db)
+{
+	return db ? db->h : NULL;
 }
 
 /* ---- 事务助手 ---- */
@@ -683,10 +735,19 @@ void occ_msg_rows_free(occ_msg_row *rows, size_t n)
 int occ_session_create(occ_db *db, const char *model,
 		       occ_session_row *out, char *err, size_t errlen)
 {
+	return occ_session_create_kind(db, model, OCC_SK_MAIN, out,
+				       err, errlen);
+}
+
+/* E1：kind 版建会话（'main'=用户会话 / 'child'=任务子会话——R4 进程
+ * 隔离派生；其余值拒绝）。其余语义同 occ_session_create。 */
+int occ_session_create_kind(occ_db *db, const char *model, const char *kind,
+			    occ_session_row *out, char *err, size_t errlen)
+{
 	static const char *ins =
 		"INSERT INTO occ_session"
-		"  (id,title,created,model,tokens_total,status,updated)"
-		"  VALUES (?1, '', ?2, ?3, 0, 'active', ?2)";
+		"  (id,title,created,model,tokens_total,status,updated,kind)"
+		"  VALUES (?1, '', ?2, ?3, 0, 'active', ?2, ?4)";
 	static const char *win =
 		"INSERT INTO occ_window(session_id,base_kind)"
 		"  VALUES (?1, 'native')";
@@ -698,6 +759,14 @@ int occ_session_create(occ_db *db, const char *model,
 		memset(out, 0, sizeof(*out));
 	if (!db || !model) {
 		set_err(err, errlen, "occ_session_create: bad args");
+		return -1;
+	}
+	if (!kind || !*kind)
+		kind = OCC_SK_MAIN;
+	if (strcmp(kind, OCC_SK_MAIN) != 0 &&
+	    strcmp(kind, OCC_SK_CHILD) != 0) {
+		set_err(err, errlen, "occ_session_create: kind 非法（%s）"
+			"——仅 main/child", kind);
 		return -1;
 	}
 	if (gen_id(id, sizeof(id), "ses_")) {
@@ -716,6 +785,7 @@ int occ_session_create(occ_db *db, const char *model,
 	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
 	sqlite3_bind_int64(st, 2, now);
 	sqlite3_bind_text(st, 3, model, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(st, 4, kind, -1, SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_DONE) {
 		set_err(err, errlen, "step: %s", sqlite3_errmsg(db->h));
 		sqlite3_finalize(st);
@@ -745,6 +815,7 @@ int occ_session_create(occ_db *db, const char *model,
 		out->created = now;
 		out->updated = now;
 		snprintf(out->status, sizeof(out->status), "%s", OCC_ST_ACTIVE);
+		snprintf(out->kind, sizeof(out->kind), "%s", kind);
 	}
 	return 0;
 }
@@ -768,12 +839,18 @@ static int session_fill(occ_session_row *out, sqlite3_stmt *st)
 		snprintf(out->workdir, sizeof(out->workdir), "%s",
 			 wd ? (const char *)wd : "");
 	}
+	{
+		const unsigned char *kd = sqlite3_column_text(st, 9);
+
+		snprintf(out->kind, sizeof(out->kind), "%s",
+			 kd ? (const char *)kd : OCC_SK_MAIN);
+	}
 	return 1;
 }
 
 static const char SESSION_COLS[] =
 	"id,title,created,model,tokens_total,status,updated,tokens_est,"
-	"workdir";
+	"workdir,kind";
 
 int occ_session_get(occ_db *db, const char *id, occ_session_row *out,
 		    char *err, size_t errlen)
@@ -932,6 +1009,65 @@ int occ_session_set_window_digest(occ_db *db, const char *id,
 		 "UPDATE occ_window SET base_kind='digest', digest_id=?1"
 		 " WHERE session_id='%s'", id);
 	return run_s1(db, sql, digest_id, err, errlen);
+}
+
+/*
+ * E1（ORCH §2 拍板 6）：/clear 的库面半件——归档+换窗，单事务：
+ *   ① occ_session.status→'archived'（会话与消息原地保留——/sessions
+ *      可找回续聊，非删除）；
+ *   ② occ_window 回 native 空基线（base_kind='native'、digest_id 置空
+ *      ——窗口换新而非删历史）。
+ * 幂等语义：对已 archived 会话重复调用无害（再次写同值）。
+ * 不存在 → -1（人话）；DB 错 -1。清屏与 app 态复位由调用方（occ.c
+ * /clear 接线）承担。
+ */
+int occ_session_archive(occ_db *db, const char *id, char *err, size_t errlen)
+{
+	static const char *supd =
+		"UPDATE occ_session SET status='archived', updated=?1"
+		" WHERE id=?2";
+	static const char *wupd =
+		"UPDATE occ_window SET base_kind='native', digest_id=NULL"
+		" WHERE session_id=?1";
+	sqlite3_stmt *st = NULL;
+
+	if (!db || !id) {
+		set_err(err, errlen, "occ_session_archive: bad args");
+		return -1;
+	}
+	if (tx_begin(db, err, errlen))
+		return -1;
+	if (sqlite3_prepare_v2(db->h, supd, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(db->h));
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_bind_int64(st, 1, now_ms());
+	sqlite3_bind_text(st, 2, id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(st) != SQLITE_DONE ||
+	    sqlite3_changes(db->h) == 0) {
+		set_err(err, errlen, "会话 %s 不存在", id);
+		sqlite3_finalize(st);
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_finalize(st);
+	if (sqlite3_prepare_v2(db->h, wupd, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "prepare win: %s", sqlite3_errmsg(db->h));
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(st) != SQLITE_DONE) {
+		set_err(err, errlen, "step win: %s", sqlite3_errmsg(db->h));
+		sqlite3_finalize(st);
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_finalize(st);
+	if (tx_commit(db, err, errlen))
+		return -1;
+	return 0;
 }
 
 /* ---- O-12：会话删除 ---- */

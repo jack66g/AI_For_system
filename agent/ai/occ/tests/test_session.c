@@ -273,11 +273,16 @@ int main(void)
 	OK(table_exists("occ_message"), "schema-occ_message");
 	OK(table_exists("occ_toolcall"), "schema-occ_toolcall-empty");
 	OK(table_exists("occ_window"), "schema-occ_window");
-	/* b2 schema v2：user_version 2 + occ_revert 表 + 两处新列 */
-	OK(user_version() == 2, "schema-user_version=2");
+	/* b2 schema v2：occ_revert 表 + 两处新列；
+	 * E1 schema v3：user_version 3 + occ_task/occ_task_event 表
+	 * + occ_session.kind 列（v2 断言随迁移升位对齐——详见 test_task） */
+	OK(user_version() == 3, "schema-user_version=3");
 	OK(table_exists("occ_revert"), "schema-occ_revert");
 	OK(col_exists("occ_message", "reverted"), "schema-msg-reverted");
 	OK(col_exists("occ_session", "workdir"), "schema-session-workdir");
+	OK(table_exists("occ_task"), "schema-occ_task");
+	OK(table_exists("occ_task_event"), "schema-occ_task_event");
+	OK(col_exists("occ_session", "kind"), "schema-session-kind");
 
 	/* 重复 open 幂等（DDL IF NOT EXISTS） */
 	occ_db_close(g_db);

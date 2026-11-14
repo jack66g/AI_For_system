@@ -239,8 +239,9 @@ static void test_migration(void)
 	OK(db != NULL, "mig-open");
 	if (!db)
 		return;
-	/* 升级证据 */
-	OK(sql_int(v1db, "PRAGMA user_version") == 2, "mig-user-version-2");
+	/* 升级证据（E1：v1 老库直升 v3——v2/v3 迁移链 open 内一次走完；
+	 * v3 全量证据面归 test_task，此处只钉版本与 v2 主件不回退） */
+	OK(sql_int(v1db, "PRAGMA user_version") == 3, "mig-user-version-3");
 	OK(sql_count(v1db,
 		     "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
 		     " AND name='occ_revert'", NULL) == 1, "mig-revert-table");
@@ -564,17 +565,17 @@ int main(void)
 	   "h-undo-no-session");
 	occ_undo_result_free(&r);
 
-	/* 旧的 v1 迁移库再开一次（幂等） */
-	{
-		occ_db *db2 = occ_db_open(dbpath_of("v1.db"), err,
-					  sizeof(err));
+		/* 旧的 v1 迁移库再开一次（幂等；E1：版本钉 v3 不再动） */
+		{
+			occ_db *db2 = occ_db_open(dbpath_of("v1.db"), err,
+						  sizeof(err));
 
-		OK(db2 != NULL && sql_int(dbpath_of("v1.db"),
-					  "PRAGMA user_version") == 2,
-		   "mig-reopen-idempotent");
-		if (db2)
-			occ_db_close(db2);
-	}
+			OK(db2 != NULL && sql_int(dbpath_of("v1.db"),
+						  "PRAGMA user_version") == 3,
+			   "mig-reopen-idempotent");
+			if (db2)
+				occ_db_close(db2);
+		}
 
 	occ_db_close(db);
 out:

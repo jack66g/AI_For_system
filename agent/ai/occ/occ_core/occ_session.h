@@ -10,9 +10,11 @@
  *
  * schema（字段名 PLAN §11，part 键名对齐 opencode v2 message/part）：
  *   occ_session(id, title, created, model, tokens_total, status,
- *               updated, tokens_est, workdir)     时间 epoch ms；
+ *               updated, tokens_est, workdir, kind)  时间 epoch ms；
  *               workdir b2：本会话工具工作目录（undo 相对路径解析须与
- *               执行时同口径——每轮 loop 以 opts->workdir 刷新）
+ *               执行时同口径——每轮 loop 以 opts->workdir 刷新）；
+ *               kind E1（ORCH §2）：会话类型——'main' 用户会话 /
+ *               'child' 任务子会话（R4 进程隔离派生；老行缺省 'main'）
  *   occ_message(id, session_id, role, content_json, usage_in, usage_out,
  *               usage_cache_read, usage_cache_write, usage_est, finish,
  *               created, reverted)                reverted b2：/undo 隐藏位
@@ -45,7 +47,9 @@
  * 未应答调用一律以「未执行」合成结果闭合（工具应答不变量恒成立）。
  *
  * schema 迁移：user_version 1→2（open 时 ALTER ADD COLUMN reverted +
- * CREATE occ_revert；旧库无损升级，test_revert 覆盖）。
+ * CREATE occ_revert；旧库无损升级，test_revert 覆盖）；
+ * 2→3（E1：ALTER occ_session+kind 补缺省 'main' + CREATE occ_task/
+ * occ_task_event——DDL 见 task.c；v3 库重复打开零副作用，test_task 覆盖）。
  *
  * 测试注入（仅单测使用，生产恒 0；occ_db_test_fault）：
  *   bit0：add_user 在 INSERT 后 COMMIT 前失败 → 断言回滚无半条
@@ -58,6 +62,10 @@
 
 #include "occ_llm/occ_llm.h"	/* occ_usage */
 
+/* E1：原生句柄出借声明用（前向类型——与 sqlite3.h 的 typedef 同型，
+ * C11 允许重复 typedef；不强推 sqlite3.h 给全体消费方） */
+typedef struct sqlite3 sqlite3;
+
 #define OCC_ID_LEN 40			/* "ses_"/"msg_" + 32 hex + NUL */
 
 /* 环状态（occ_session.status） */
@@ -66,6 +74,13 @@
 #define OCC_ST_ERROR "error"		/* 上次环失败（可续接/重试） */
 #define OCC_ST_INTERRUPTED "interrupted"	/* b2：SIGINT 安全点停止
 						 * （可 retry/续接/recover） */
+#define OCC_ST_ARCHIVED "archived"	/* E1：/clear 归档（会话+消息原地
+					 * 保留可找回，/sessions 可续聊） */
+
+/* E1（ORCH §2）：会话类型（occ_session.kind） */
+#define OCC_SK_MAIN "main"		/* 用户会话（对话用户；缺省值） */
+#define OCC_SK_CHILD "child"		/* 任务子会话（子智能体执行载体；
+					 * 蒸馏后 archived——E5） */
 
 typedef struct occ_db occ_db;
 
@@ -79,7 +94,9 @@ typedef struct occ_session_row {
 	int tokens_est;			/* 1=会话累计含 len/4 估算值（显示 ~） */
 	char status[16];
 	char workdir[4096];		/* b2：工具工作目录（undo 相对路径
-					 * 解析与执行时同口径；空=未设置） */
+						 * 解析与执行时同口径；空=未设置） */
+	char kind[16];			/* E1：main=用户会话 / child=任务
+						 * 子会话（老行读回 'main'） */
 } occ_session_row;
 
 /*
@@ -120,11 +137,16 @@ void occ_msg_rows_free(occ_msg_row *rows, size_t n);
 /*
  * occ_db_open - 打开（必要时递归建目录+建库）。path NULL = 缺省
  * ~/.occ/sessions.db。PRAGMA busy_timeout=5000（T2 约定）、
- * foreign_keys=ON（CASCADE 生效）、user_version=2（b2；v1 旧库自动迁移）。
+ * foreign_keys=ON（CASCADE 生效）、user_version=3（E1；v1/v2 旧库
+ * 自动迁移）。
  */
 occ_db *occ_db_open(const char *path, char *err, size_t errlen);
 void occ_db_close(occ_db *db);
 const char *occ_db_path(const occ_db *db);	/* 诊断/测试 */
+
+/* E1：原生句柄出借（occ_core 内部——task.c 等自有 schema 模块用；
+ * 借用方不得改 occ_session 族表结构。外部测试勿依赖） */
+sqlite3 *occ_db_sqlite(occ_db *db);
 
 /* 测试注入：置 fault mask（生产勿调用）。返回旧值。 */
 int occ_db_test_fault(int mask);
@@ -134,6 +156,11 @@ int occ_db_test_fault(int mask);
 /* 新建会话（ses_ id 随机、title 空、status=active、occ_window native 行） */
 int occ_session_create(occ_db *db, const char *model,
 		       occ_session_row *out, char *err, size_t errlen);
+
+/* E1：kind 版建会话（'main'/'child'，其余值拒绝；NULL/空=main）。
+ * occ_session_create ≡ create_kind(main)。 */
+int occ_session_create_kind(occ_db *db, const char *model, const char *kind,
+			    occ_session_row *out, char *err, size_t errlen);
 
 int occ_session_get(occ_db *db, const char *id, occ_session_row *out,
 		    char *err, size_t errlen);
@@ -162,6 +189,14 @@ int occ_session_set_tokens(occ_db *db, const char *id, long long total,
 int occ_session_set_window_digest(occ_db *db, const char *id,
 				  const char *digest_id, char *err,
 				  size_t errlen);
+
+/*
+ * E1（ORCH §2 拍板 6）：/clear 的库面半件——归档+换窗，单事务：
+ * status→'archived'（会话+消息原地保留可找回）+ occ_window 回 native
+ * 空基线（digest_id 置空——窗口换新而非删历史）。幂等；不存在 -1。
+ */
+int occ_session_archive(occ_db *db, const char *id, char *err,
+			size_t errlen);
 
 /*
  * O-12：删除会话（级联消息+工具调用+窗口+回滚+transcript 文件）。

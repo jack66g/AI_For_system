@@ -66,9 +66,11 @@ LLM_CALL_OBJ := $(OBJ_DIR)/occ_llm/llm_call.o
 # T9d：+ occ_sme（§8 记忆注入/写回）+ occ_ac（§9 transcript/轮询/换窗）
 #       + occ_telemetry（§9.6 会话遥测 → T8 parquet 链）
 # OCC-DEBT：+ replay（TUI 历史回放规划器——纯函数）
+# E1：+ task（ORCH §2 任务数据面——occ_task/occ_task_event+状态机；
+#     session.c 开库迁移装配其 DDL，链接面随 session.o 成对出现）
 CORE_SRCS := occ_core/session.c occ_core/loop.c occ_core/tokens.c \
 	     occ_core/revert.c occ_core/occ_sme.c occ_core/occ_ac.c \
-	     occ_core/occ_telemetry.c occ_core/replay.c
+	     occ_core/occ_telemetry.c occ_core/replay.c occ_core/task.c
 CORE_OBJS := $(CORE_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # T9d 绑定复用对象（只读源码 → 本目录对象；显式规则防模式规则歧义）
@@ -115,10 +117,12 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 # d1：test_sme（§8 注入/写回配额/降级）+ test_ac（§9 transcript/轮询/换窗）
 #     + test_telemetry（§9.6 会话遥测落 T8 parquet + footer 读回）
 # OCC-DEBT：test_replay（回放规划器——纯规划 + mock db 夹具两相）
+# E1：test_task（任务状态机全路径+schema v3 迁移+/clear 归档库面）
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
-	     tests/test_ac tests/test_telemetry tests/test_replay
+	     tests/test_ac tests/test_telemetry tests/test_replay \
+	     tests/test_task
 
 BIN_OCC := occ
 
@@ -137,10 +141,10 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_tokens tests/test_loop tests/test_tools \
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
-		  tests/test_telemetry tests/test_replay; do \
+		  tests/test_telemetry tests/test_replay tests/test_task; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
@@ -256,9 +260,19 @@ tests/test_registry: tests/test_registry.c $(LLM_OBJS) $(STORE_LIB)
 # ---- occ_core 单测（T9a3） ----
 
 # session：CRUD + 崩溃安全事务 + 回滚注入（sqlite 只读复用 T2 库）
-tests/test_session: tests/test_session.c $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+# E1：session.c 开库迁移调 task.c DDL——链接面成对（task.o 同链）
+tests/test_session: tests/test_session.c $(OBJ_DIR)/occ_core/session.o \
+		    $(OBJ_DIR)/occ_core/task.o $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_session.c \
-		$(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+
+# task（E1）：状态机全路径 + schema v2→v3 迁移 + /clear 归档库面
+tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
+		 $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_task.c \
+		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/session.o \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tokens：五项账本 + len/4 估算（纯计算，无外部依赖）
 tests/test_tokens: tests/test_tokens.c $(OBJ_DIR)/occ_core/tokens.o
@@ -274,9 +288,11 @@ tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_
 		$(LDLIBS)
 
 # tools（T9b1）：六件套边界 + 快照 + trace + bash 沙箱契约（stub）
-tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		$(OBJ_DIR)/occ_core/task.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
@@ -315,10 +331,11 @@ tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 
 tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		   $(OBJ_DIR)/occ_core/task.o \
 		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
-		$(OBJ_DIR)/occ_core/session.o \
+		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # retry（T9b2）：重试分级矩阵 + 参数族（旋钮/env/缺省）+ 退避曲线
@@ -329,9 +346,11 @@ tests/test_retry: tests/test_retry.c $(OBJ_DIR)/occ_llm/retry.o
 
 # replay（OCC-DEBT）：回放规划器——纯规划 + mock db 夹具（链 session）
 tests/test_replay: tests/test_replay.c $(OBJ_DIR)/occ_core/replay.o \
-		   $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+		   $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_replay.c \
 		$(OBJ_DIR)/occ_core/replay.o $(OBJ_DIR)/occ_core/session.o \
+		$(OBJ_DIR)/occ_core/task.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tui_data（T9c3）：tools.json/trace/lease 读取器夹具对拍（aik_json only）

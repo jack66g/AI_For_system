@@ -333,9 +333,12 @@ static void tv_pull_sessions(tui_view *v)
 /* ---- 命令 ---- */
 
 /* /help 文本（动态：exit 绑定与 leader 取自 keymap——覆盖文件生效后不撒谎；
- * /compact//shell 语义与 occ.c 实现对齐：换窗=occ_ac_compact_now
- * （前置门：OCC_AC=on、turn 空闲、已有会话）、/shell=退屏跑 bash 后重建 view；
- * B5：mouse 行如实反映 tui_mouse_enable 结果——off 时注明原因，不假交互） */
+ * /compact//clear//new//shell 语义与 occ.c 实现对齐：换窗=occ_ac_compact_now
+ * （前置门：OCC_AC=on、turn 空闲、已有会话）、/clear=归档+换窗（E1：
+ * occ_session_archive——会话标 archived 可找回、窗口回 native 空基线、
+ * 下一条消息新会话；turn 运行中拒绝）、/shell=退屏跑 bash 后重建 view；
+ * B5：mouse 行如实反映 tui_mouse_enable 结果——off 时注明原因，不假交互；
+ * E1 三分文案（§2 拍板 6）+ 会话 kind 区分（main 用户/child 任务）） */
 static void tv_help_text(tui_view *v, char *buf, size_t cap)
 {
 	char exitb[96];
@@ -358,9 +361,10 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 "commands: /exit /clear /help (built-in) · /new /sessions"
 		 " /status /models /rename /tools /sandbox /trace /lease"
 		 " /compact /shell (live)\n"
-		 "/compact: 手动触发 autocondense 换窗——历史折叠为摘要、"
-		 "token 账本重置为新基线（需 OCC_AC=on、turn 空闲、已有会话）\n"
-		 "/shell: 临时退到 bash，exit 返回 occ（turn 运行中拒绝）\n"
+		 "/compact: 手动 autocondense 换窗（OCC_AC=on）\n"
+		 "/shell: 退到 bash，exit 返回（turn 运行中拒绝）\n"
+		 "三分：/compact=摘要进新窗 · /clear=归档+换窗（可找回）"
+		 " · /new=另起会话 · kind main=用户/child=任务会话\n"
 		 "UI: ▌/◆=消息块头（▌你 / ◆ 模型 · 时间 dim）· ├─=工具树"
 		 "（+ 成功 × 失败）· ○/●=thought 折叠（点击展开/收起）·"
 		 " N%%=上下文水位（70 黄 90 红）· footer ↑输入 ↓输出 c缓存读"
@@ -423,15 +427,28 @@ static void tv_submit(tui_view *v)
 			return;
 		}
 		if (strcmp(text, "/clear") == 0) {
-			tui_chat_clear(v->chat);
+			/* E1（ORCH §2 拍板 6）：/clear=归档+换窗+清屏——
+			 * 库面在 occ.c on_command（需会话库；含 turn 运行
+			 * 拒绝/清屏事件/态复位）。钩子已处理（rc=0）→ 侧栏
+			 * 活拉反映归档；无钩子/未处理（嵌入式用方/旧测试）
+			 * 回落 T9c2 纯清屏行为 */
+			int crc = v->hooks.on_command ?
+				  v->hooks.on_command(v->hooks.ud,
+						      "/clear") : 1;
+
+			if (crc == 0)
+				tv_pull_sessions(v);
+			else
+				tui_chat_clear(v->chat);
 			tui_inputbox_clear(v->ib);
 			v->dirty_needed = 1;
 			return;
 		}
 		if (strcmp(text, "/help") == 0) {
-			/* UXAB 加 UI 符号行：最坏 ~1130B（exitb≤95 +
-			 * leader≤47 + mline≤190 + UI 行 ~290） */
-			char help[1280];
+			/* E1 加三分+kind 行并全线压行：24 行端末聊天区净 17 行
+			 * ——文案超行则顶部（commands/needle 行）滚出视口永不
+			 * 渲染（test_view_pty I/KT2 实证）；最坏 ~1400B */
+			char help[2048];
 
 			tv_help_text(v, help, sizeof(help));
 			tui_chat_add_notice(v->chat, help);
