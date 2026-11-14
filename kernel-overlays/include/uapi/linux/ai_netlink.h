@@ -285,4 +285,8 @@ struct ai_nl_batch_ack {		/* _Static_assert 钉布局（下行） */
 _Static_assert(sizeof(struct ai_nl_batch_ack) == 48,
 		       "ai_nl_batch_ack 布局漂移（K2 冻结契约）");
 
+/* K10.5：ABI 版本（netlink 属性族+/proc 文本族联合号）。
+ * 纪律：属性只增不改；/proc 文本只追加字段；每系列合并升号一次。 */
+#define AI_ABI_VERSION 1
+
 #endif /* _UAPI_LINUX_AI_NETLINK_H */

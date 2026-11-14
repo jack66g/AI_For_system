@@ -26,6 +26,9 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "../security/ai_chain.h"
+#include <linux/xxhash.h>
+#include <linux/ai_netlink.h>
+#include <generated/utsrelease.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/capability.h>
@@ -55,6 +58,55 @@ enum ai_telemetry_fmt {
 static enum ai_telemetry_fmt ai_telemetry_fmt = AI_TELEMETRY_FMT_HUMAN;
 
 /* ---- status ---- */
+
+/* K10.5：配置指纹——AIKERNEL 族符号 name=0/1 串接后 xxh64（运行时
+ * 自证，与 .config 可独立对账；表驱动编译期取值，无构建系统改动） */
+#define AI_CFG_ROW(sym) { #sym, IS_ENABLED(sym) ? 1 : 0 }
+
+static const struct {
+	const char *name;
+	int on;
+} ai_cfg_tab[] = {
+	AI_CFG_ROW(CONFIG_AIKERNEL),
+	AI_CFG_ROW(CONFIG_AIKERNEL_RUNTIME),
+	AI_CFG_ROW(CONFIG_AIKERNEL_SCHED),
+	AI_CFG_ROW(CONFIG_AIKERNEL_MM),
+	AI_CFG_ROW(CONFIG_AIKERNEL_AI_ZONE),
+	AI_CFG_ROW(CONFIG_AIKERNEL_IO),
+	AI_CFG_ROW(CONFIG_AIKERNEL_NET),
+	AI_CFG_ROW(CONFIG_AIKERNEL_SECURITY),
+	AI_CFG_ROW(CONFIG_AIKERNEL_POWER),
+	AI_CFG_ROW(CONFIG_AIKERNEL_VFS),
+	AI_CFG_ROW(CONFIG_AIKERNEL_INTERRUPT),
+	AI_CFG_ROW(CONFIG_AIKERNEL_LOCK),
+	AI_CFG_ROW(CONFIG_AIKERNEL_TIME),
+	AI_CFG_ROW(CONFIG_AIKERNEL_VIRT),
+	AI_CFG_ROW(CONFIG_AIKERNEL_BPF),
+	AI_CFG_ROW(CONFIG_AIKERNEL_TELEMETRY),
+	AI_CFG_ROW(CONFIG_AIKERNEL_USRIFACE),
+	AI_CFG_ROW(CONFIG_AIKERNEL_NETLINK),
+	AI_CFG_ROW(CONFIG_AIKERNEL_CGROUP),
+	AI_CFG_ROW(CONFIG_AIKERNEL_KUNIT_TEST),
+	AI_CFG_ROW(CONFIG_AIKERNEL_EXPERIMENTAL),
+	AI_CFG_ROW(CONFIG_AIKERNEL_AGENT),
+	AI_CFG_ROW(CONFIG_AIKERNEL_CORE),
+	AI_CFG_ROW(CONFIG_AIKERNEL_SHELL),
+	AI_CFG_ROW(CONFIG_AIKERNEL_CLOUD_PROVIDER),
+	AI_CFG_ROW(CONFIG_AIKERNEL_LOCAL_PROVIDER),
+	AI_CFG_ROW(CONFIG_AIKERNEL_STREAM_MODE),
+};
+
+static u64 ai_config_hash(void)
+{
+	char buf[640];
+	size_t off = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ai_cfg_tab); i++)
+		off += scnprintf(buf + off, sizeof(buf) - off, "%s=%d;",
+				 ai_cfg_tab[i].name, ai_cfg_tab[i].on);
+	return xxh64(buf, off, 0x4b313030ULL);   /* "K100" */
+}
 
 static int ai_proc_status_show(struct seq_file *m, void *v)
 {
@@ -157,6 +209,11 @@ static int ai_proc_status_show(struct seq_file *m, void *v)
 		if (!nondefault)
 			seq_printf(m, "  sample_rate: all full (1)\n");
 	}
+
+	/* K10.5：版本三件套（尾部只追加；abi 与 uapi AI_ABI_VERSION 同源） */
+	seq_printf(m, "kernel_ver: %s\n", UTS_RELEASE);
+	seq_printf(m, "abi_ver: %u\n", AI_ABI_VERSION);
+	seq_printf(m, "config_hash: %016llx\n", ai_config_hash());
 	return 0;
 }
 

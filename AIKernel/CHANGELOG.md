@@ -84,3 +84,10 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 ## K9 性能预算与基准（2026-11-14）
 - 新增 ai_perf_test KUnit 套（record_write/chain_append/telemetry_emit p99 升级/decision_query，机读 PERF 行+CI 宽界）；
 - AIKernel/test/perf/{budgets.json,k9_perf.py}：十行预算表单一事实源（absolute/baseline/registered 三模；HW 口径存证不冒充）+单 boot 双层跑表器（门禁件，超界退非零）。
+
+## K10a 工程化首切片（2026-11-14）
+- /proc/ai/status 尾部追加版本三件套 kernel_ver/abi_ver/config_hash（27 符号运行时 xxh64 指纹，只增不改）；
+- uapi 追加 AI_ABI_VERSION=1（属性只增不改/文本只追加/系列升号三纪律入注）；
+- configs/aikernel_factory.config 出厂 profile 单文件 +
+  AIKernel/scripts/k10_config_check.sh 三方校验器（profile↔树↔
+  代码行为证据；=y 零行为证据=开着没用 FAIL）。
