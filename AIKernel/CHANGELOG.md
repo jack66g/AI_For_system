@@ -95,3 +95,7 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 ## K10.1 目录与分层重组（2026-11-14）
 - 六层落地：senses（感知与出口 25 文件）/actuators（参数·事务·回滚·配额 8）/reflex（定点模型 3）/boundary（security 迁入 7）/subsys×11（sched·mm·io·net·vfs·power·interrupt·lock·time·virt·bpf）/core 瘦身至中枢 15；89 git mv、295 处 include 相对路径重写（202 初轮+93 盲区修正——迁出者回指未迁文件类）、132 个 overlays 反引同步、顶层+子 Makefile 重排。
 - 等价性判据（K10a 尺子自证）：构建绿+KUnit not-ok=0+**config_hash 逐位不变 6a36fe4a68743a2f**+k0_truth 48-48+config_check 三方一致。
+
+## K10b REG ABI 版本协商（2026-11-14）
+- uapi AI_REG_ATTR_ABI=10（客户端版本 > 服务端 AI_ABI_VERSION 拒 -EPROTONOSUPPORT，≤ 容忍向前兼容）；struct ai_nl_reg_ack 文档化冻结（ai_err/count 前 8B K3 兼容 + abi_ver/rsv 追加）；
+- aikctl 新增 abi 子命令：UNREG+ABI attr 零副作用双探（真 socket 全链含 CAP 闸），真机 ver=1 回显 PASS / ver=99 -93 拒 PASS。

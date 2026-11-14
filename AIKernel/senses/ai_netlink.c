@@ -728,21 +728,21 @@ static const struct nla_policy ai_nl_reg_policy[AI_REG_ATTR_MAX + 1] = {
 	[AI_REG_ATTR_AGENT]	= { .type = NLA_U32 },
 	[AI_REG_ATTR_CGROUP]	= { .type = NLA_NUL_STRING,
 				   .len = AI_AGENT_CG_LEN - 1 },
+	[AI_REG_ATTR_ABI]	= { .type = NLA_U32 },
 };
 
 static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
 {
 	const struct ai_nl_reg *req = nlmsg_data(nlh);
 	struct nlattr *reg_tb[AI_REG_ATTR_MAX + 1] = {};
-	struct {
-		__s32 ai_err;
-		__u32 count;
-	} ack;
+	struct ai_nl_reg_ack ack;
 	u32 portid = NETLINK_CB(skb).portid;
 	u32 agent = 0;
 	const char *cgroup = NULL;
 	int attrs_len;
 	bool has_agent = false;
+	bool has_abi = false;
+	u32 abi_client = 0;
 	int rc = AI_OK;
 	int err;
 
@@ -772,7 +772,15 @@ static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
 		}
 		if (reg_tb[AI_REG_ATTR_CGROUP])
 			cgroup = nla_data(reg_tb[AI_REG_ATTR_CGROUP]);
+		if (reg_tb[AI_REG_ATTR_ABI]) {
+			has_abi = true;
+			abi_client = nla_get_u32(reg_tb[AI_REG_ATTR_ABI]);
+		}
 	}
+	/* K10b：版本协商——客户端新于服务端即拒（服务端向前兼容旧端）。
+	 * ABI attr 属能力交换非绑定语义，UNREG 携带不冲突（AGENT 仍拒）。 */
+	if (has_abi && abi_client > AI_ABI_VERSION)
+		return -EPROTONOSUPPORT;
 	/* UNREG 携带 AGENT 属矛盾请求（解绑不挑角色，见下）拒收；
 	 * CGROUP 仅随 AGENT 生效，单独携带同样拒收 */
 	if (has_agent && (req->flags & AI_NL_REG_F_UNREG))
@@ -805,6 +813,9 @@ static int ai_nl_reg(struct sk_buff *skb, const struct nlmsghdr *nlh)
 
 	ack.ai_err = AI_OK;
 	ack.count = (u32)ai_nl_reg_count_get();
+	/* K10b：追加式回显（旧读者只读前 8B） */
+	ack.abi_ver = AI_ABI_VERSION;
+	ack.rsv = 0;
 	ai_nl_reply(skb, AI_CMD_REG, &ack, sizeof(ack));
 	return 0;
 }

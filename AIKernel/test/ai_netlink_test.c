@@ -65,6 +65,20 @@ static void netlink_registry_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ai_netlink_test_reg_count(), 0u);
 }
 
+
+/* K10b：REG ABI 协商契约钉扎（attr 号/版本号/ack 追加布局防漂移；
+ * 行为路径由 aikctl abi 真机双探承载——真 socket 含 CAP 全链） */
+static void netlink_reg_abi_const_test(struct kunit *test)
+{
+	struct ai_nl_reg_ack ack = {};
+
+	KUNIT_EXPECT_EQ(test, (int)AI_REG_ATTR_ABI, 10);
+	KUNIT_EXPECT_EQ(test, (int)AI_ABI_VERSION, 1);
+	KUNIT_EXPECT_EQ(test, (unsigned int)sizeof(ack), 16U);
+	ack.abi_ver = AI_ABI_VERSION;
+	KUNIT_EXPECT_EQ(test, ack.rsv, 0);
+}
+
 static void netlink_urelease_cleanup_test(struct kunit *test)
 {
 	ai_netlink_test_reg_clear();
@@ -450,6 +464,7 @@ static void netlink_act_batch_parse_badnest_test(struct kunit *test)
 
 static struct kunit_case netlink_test_cases[] = {
 	KUNIT_CASE(netlink_registry_test),
+	KUNIT_CASE(netlink_reg_abi_const_test),
 	KUNIT_CASE(netlink_urelease_cleanup_test),
 	KUNIT_CASE(netlink_push_empty_test),
 	/* K1：ACT2 nlattr 解析（仅追加，既有用例零删改） */

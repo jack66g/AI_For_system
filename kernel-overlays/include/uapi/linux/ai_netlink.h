@@ -165,7 +165,8 @@ struct ai_nl_reg {
  * K3（KERNEL-K3-DESIGN §2/D1）：REG 可选 nlattr 追加段——消息 =
  * 定长头 struct ai_nl_reg + 可选 attr 区（长度 = nlmsg_len -
  * sizeof(struct ai_nl_reg)；旧客户端纯头零改动，行为不变）。
- * 属性号 8/9 为本册 D1 冻结契约（宿主探针自带同号常量；1-7 预留勿占）。
+ * 属性号 8/9 为本册 D1 冻结契约（宿主探针自带同号常量；1-7 预留勿占）；
+ * 10=ABI 版本协商（K10b，ack 追加式回显，见 struct ai_nl_reg_ack）。
  * AGENT=角色绑定（u32，必须落 enum ai_agent_id 白名单；KERNEL=0 为
  * 内核自身不可绑）；CGROUP=角色 cgroup 路径（可缺省；内核只读校验
  * 存在性，无效 → degraded 记账不限制；有效上限 255 字符+NUL——
@@ -176,9 +177,24 @@ enum {
 	/* 1-7 预留 */
 	AI_REG_ATTR_AGENT = 8,	/* u32：绑定角色（enum ai_agent_id） */
 	AI_REG_ATTR_CGROUP = 9,	/* NLA_NUL_STRING：cgroup 路径 */
+	AI_REG_ATTR_ABI = 10,	/* u32：客户端 ABI 版本（K10b；> 服务端
+				 * AI_ABI_VERSION 拒 -EPROTONOSUPPORT，
+				 * ≤ 则容忍（服务端向前兼容）） */
 
 	__AI_REG_ATTR_MAX,
 	AI_REG_ATTR_MAX = __AI_REG_ATTR_MAX - 1,
+};
+
+/*
+ * K10b：REG ack 体（文档化冻结）。ai_err/count 为 K3 冻结前 8B——
+ * 旧读者只读前 8B 兼容（k3bench parse_ack 同口径）；abi_ver=服务端
+ * AI_ABI_VERSION 回显（恒填）；rsv=0。
+ */
+struct ai_nl_reg_ack {
+	__s32 ai_err;
+	__u32 count;
+	__u32 abi_ver;
+	__u32 rsv;
 };
 
 /* ---- 异步事件（AI_CMD_EVENT，内核主动推送给已注册 portid） ---- */

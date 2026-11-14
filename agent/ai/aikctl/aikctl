@@ -730,6 +730,55 @@ def cmd_selftest(_args):
 
 
 # ------------------------------------------------------------------ main ----
+def cmd_abi(_args):
+    """K10b：REG ABI 版本协商探针（UNREG+ABI attr，零状态副作用）。
+    双探：ver=1 期望 ack OK+abi_ver 回显；ver=99 期望 NLMSG_ERROR
+    -EPROTONOSUPPORT。真 socket 全链（含 CAP_SYS_ADMIN 闸）。"""
+    import socket
+    import struct as _s
+    NETLINK_AI, AI_CMD_REG, F_UNREG, ATTR_ABI = 31, 18, 1, 10
+    EPROTONOSUPPORT = 93
+    ok = fail = 0
+    for ver, want in ((1, "OK"), (99, "REJECT")):
+        try:
+            sk = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW,
+                               NETLINK_AI)
+            sk.bind((0, 0))
+            payload = (_s.pack("<II", F_UNREG, 0)
+                       + _s.pack("<HHI", 8, ATTR_ABI, ver))
+            seq = 100 + ver
+            nlmsg = (_s.pack("=IHHII", 16 + len(payload), AI_CMD_REG,
+                             1, seq, 0) + payload)
+            sk.sendto(nlmsg, (0, 0))
+            sk.settimeout(5)
+            data = sk.recv(4096)
+            sk.close()
+        except OSError as e:
+            print("ABIProbe ver=%d IO_ERR=%s" % (ver, e))
+            fail += 1
+            continue
+        rtype = _s.unpack_from("=IHHII", data, 0)[1]
+        if rtype == 2:      # NLMSG_ERROR
+            err = _s.unpack_from("=i", data, 16)[0]
+            good = want == "REJECT" and err == -EPROTONOSUPPORT
+            print("ABIProbe ver=%d NLMSG_ERROR=%d %s"
+                  % (ver, err, "PASS" if good else "FAIL"))
+        else:
+            ai_err, count, abi_ver, rsv = _s.unpack_from("=iIII",
+                                                        data, 16)
+            good = (want == "OK" and ai_err == 0 and abi_ver == 1
+                    and rsv == 0)
+            print("ABIProbe ver=%d ack ai_err=%d count=%d abi_ver=%d %s"
+                  % (ver, ai_err, count, abi_ver,
+                     "PASS" if good else "FAIL"))
+        if good:
+            ok += 1
+        else:
+            fail += 1
+    print("ABI_RESULT ok=%d fail=%d" % (ok, fail))
+    return 1 if fail else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -737,6 +786,9 @@ def main(argv=None):
 
     st = sub.add_parser('selftest', help='xxh64 向量 + 合成链篡改检出自检')
     st.set_defaults(func=cmd_selftest)
+
+    p_ab = sub.add_parser('abi', help='REG ABI 版本协商双探（K10b）')
+    p_ab.set_defaults(func=cmd_abi)
 
     p_aud = sub.add_parser('audit', help='审计链子族')
     asub = p_aud.add_subparsers(dest='audit_cmd', required=True)
