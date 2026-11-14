@@ -137,8 +137,9 @@ void occ_msg_rows_free(occ_msg_row *rows, size_t n);
 /*
  * occ_db_open - 打开（必要时递归建目录+建库）。path NULL = 缺省
  * ~/.occ/sessions.db。PRAGMA busy_timeout=5000（T2 约定）、
- * foreign_keys=ON（CASCADE 生效）、user_version=3（E1；v1/v2 旧库
- * 自动迁移）。
+ * foreign_keys=ON（CASCADE 生效）、journal_mode=WAL（E2/B2：多进程
+ * 读写不互斥；开库处一次性设置+读回校验，非 wal 报错不降级）、
+ * user_version=3（E1；v1/v2 旧库自动迁移）。
  */
 occ_db *occ_db_open(const char *path, char *err, size_t errlen);
 void occ_db_close(occ_db *db);

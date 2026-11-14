@@ -9,6 +9,9 @@
  *
  * PRAGMA 对齐 T2 store_sqlite 约定：busy_timeout=5000；另开
  * foreign_keys=ON（CASCADE）与 user_version=3（迁移锚点；E1 升位）。
+ * E2（ORCH §8 B2 销账）：journal_mode 升 WAL——多进程（主会话+子智能体
+ * occ -p 并发写同库）读写不互斥，写者仍经 busy_timeout+IMMEDIATE 串行；
+ * 本地盘产品（无 NFS 面），开库处一次性设置+读回校验（见 occ_db_open）。
  * 崩溃安全：每消息单事务（BEGIN IMMEDIATE…COMMIT；任一步失败即
  * ROLLBACK——kill -9 由 SQLite 自身崩溃恢复保证同样语义：未提交事务
  * 回滚，库中只可能出现整条消息，绝不半条）。
@@ -371,7 +374,8 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 	 *  b) 零字节新库初始化竞态：并发首开时 BEGIN IMMEDIATE 对 0 长
 	 *     度文件可能即时 SQLITE_BUSY（另一进程正在建库，pager 立即
 	 *     让位不进 busy handler）——重试环兜底（实测 N=8 并发首开
-	 *     1-3/8 失败 → 重试后全绿；tests/bllm_conc_drill.sh 钉）。 */
+	 *     1-3/8 失败 → 重试后全绿；tests/bllm_conc_drill.sh 钉）。
+	 *  c) E2（B2 销账收口）：journal_mode 升 WAL——见下 pragma 块。*/
 	if (sqlite3_exec(db->h, "PRAGMA busy_timeout=5000;"
 			"PRAGMA foreign_keys=ON;", NULL, NULL, &perr) != SQLITE_OK) {
 		set_err(err, errlen, "occ_db_open[pragma]: %s",
@@ -379,6 +383,60 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 		sqlite3_free(perr);
 		occ_db_close(db);
 		return NULL;
+	}
+	/* E2（ORCH §8 B2 销账）：journal_mode delete→WAL——多进程并发
+	 * 读写同库（主会话+子智能体 occ -p）读不阻塞写/写不阻塞读，写者
+	 * 仍经 busy_timeout+IMMEDIATE 串行（B2 前修 a/b 不变）。WAL 持久
+	 * 存于库头：首次 delete→wal 转换需短暂独占，并发首开竞态下可能
+	 * 瞬时 SQLITE_BUSY——50ms 重试环（同下建库竞态口径）；已是 wal
+	 * 则幂等零争用。读回校验非 wal 即报错（不静默降级——并发语义是
+	 * E2 验收面；本地盘产品，无 NFS 禁忌面）。 */
+	{
+		int wal_ok = 0;
+
+		for (int attempt = 0; attempt < 20 && !wal_ok; attempt++) {
+			sqlite3_stmt *st = NULL;
+			const unsigned char *jm = NULL;
+
+			sqlite3_free(perr);
+			perr = NULL;
+			if (sqlite3_exec(db->h, "PRAGMA journal_mode=WAL;",
+					 NULL, NULL, &perr) != SQLITE_OK) {
+				if (sqlite3_errcode(db->h) == SQLITE_BUSY ||
+				    sqlite3_errcode(db->h) ==
+				    SQLITE_LOCKED) {
+					struct timespec ts50 = {
+						0, 50 * 1000 * 1000
+					};
+
+					nanosleep(&ts50, NULL);
+					continue;
+				}
+				break;
+			}
+			if (sqlite3_prepare_v2(db->h, "PRAGMA journal_mode",
+					       -1, &st, NULL) == SQLITE_OK) {
+				if (sqlite3_step(st) == SQLITE_ROW) {
+					jm = sqlite3_column_text(st, 0);
+					if (jm && !strcmp((const char *)jm,
+							  "wal"))
+						wal_ok = 1;
+				}
+				sqlite3_finalize(st);
+			}
+			if (!wal_ok) {
+				struct timespec ts50 = { 0, 50 * 1000 * 1000 };
+
+				nanosleep(&ts50, NULL);
+			}
+		}
+		if (!wal_ok) {
+			set_err(err, errlen, "occ_db_open[wal]: %s",
+				perr ? perr : "journal_mode != wal");
+			sqlite3_free(perr);
+			occ_db_close(db);
+			return NULL;
+		}
 	}
 	{
 		int attempt;

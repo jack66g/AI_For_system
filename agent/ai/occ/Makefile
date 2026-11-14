@@ -68,9 +68,12 @@ LLM_CALL_OBJ := $(OBJ_DIR)/occ_llm/llm_call.o
 # OCC-DEBT：+ replay（TUI 历史回放规划器——纯函数）
 # E1：+ task（ORCH §2 任务数据面——occ_task/occ_task_event+状态机；
 #     session.c 开库迁移装配其 DDL，链接面随 session.o 成对出现）
+# E2：+ orch（ORCH §8 子智能体运行时——R4 进程隔离 spawn/回收/取消
+#     两段/超时/并发闸 2+退避 30s；只读消费 E1 会话/任务面）
 CORE_SRCS := occ_core/session.c occ_core/loop.c occ_core/tokens.c \
 	     occ_core/revert.c occ_core/occ_sme.c occ_core/occ_ac.c \
-	     occ_core/occ_telemetry.c occ_core/replay.c occ_core/task.c
+	     occ_core/occ_telemetry.c occ_core/replay.c occ_core/task.c \
+	     occ_core/orch.c
 CORE_OBJS := $(CORE_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # T9d 绑定复用对象（只读源码 → 本目录对象；显式规则防模式规则歧义）
@@ -118,18 +121,20 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 #     + test_telemetry（§9.6 会话遥测落 T8 parquet + footer 读回）
 # OCC-DEBT：test_replay（回放规划器——纯规划 + mock db 夹具两相）
 # E1：test_task（任务状态机全路径+schema v3 迁移+/clear 归档库面）
+# E2：test_orch（运行时面：并发闸/退避/取消两段/超时/收尸/结果回收
+#     +B2 并发写库两腿压测→tests/orch_b2_report.txt）
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
 	     tests/test_ac tests/test_telemetry tests/test_replay \
-	     tests/test_task
+	     tests/test_task tests/test_orch
 
 BIN_OCC := occ
 
 NORM_SRC := tests/occ_norm.c
 
 .PHONY: all test p-smoke durable-drill recover-drill interrupt-drill \
-	retry-drill b2-drills clean
+	retry-drill b2-drills orch-conc-drill clean
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
@@ -141,14 +146,20 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_tokens tests/test_loop tests/test_tools \
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
-		  tests/test_telemetry tests/test_replay tests/test_task; do \
+		  tests/test_telemetry tests/test_replay tests/test_task \
+		  tests/test_orch; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
 	bash tests/run_p_smoke.sh
+
+# E2 并发演练（mock LLM）：orch 运行时 spawn 2 路真 occ -p 并发对话
+# （同库并发写=B2 生产路径）+第三路撞限即拒——test_orch 内置 drill 模式
+orch-conc-drill: $(BIN_OCC) tests/test_orch
+	./tests/test_orch --conc-drill ./occ
 
 # durable 演练（kill -9 流式中途 → 库一致 → --recover 续跑；mock 端点）
 durable-drill: $(BIN_OCC)
@@ -272,6 +283,18 @@ tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
 		 $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_task.c \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/session.o \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+
+# orch（E2）：子智能体运行时——并发闸/退避/取消两段/超时/收尸/结果
+# 分类 + B2 并发写库两腿压测（自 exec 多进程 worker；报告落
+# tests/orch_b2_report.txt）。链集合同 test_task（orch.o 只读消费
+# session/task 面）；--sim/--b2w/--b2rw/--conc-drill 为子模式入口。
+tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
+		 $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		 $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
+		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
+		$(OBJ_DIR)/occ_core/task.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tokens：五项账本 + len/4 估算（纯计算，无外部依赖）
