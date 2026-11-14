@@ -1,0 +1,11 @@
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -45,7 +45,7 @@
+ #include <linux/bpf.h>
+ 
+ #ifdef CONFIG_AIKERNEL_BPF
+-#include "../../AIKernel/bpf/ai_bpf.h"
++#include "../../AIKernel/subsys/bpf/ai_bpf.h"
+ #endif
+ #include <linux/filter.h>
+ #include <linux/namei.h>

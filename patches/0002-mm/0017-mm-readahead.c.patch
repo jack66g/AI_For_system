@@ -1,0 +1,11 @@
+--- a/mm/readahead.c
++++ b/mm/readahead.c
+@@ -130,7 +130,7 @@
+ #include <linux/sched/mm.h>
+ 
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ 
+ #define CREATE_TRACE_POINTS

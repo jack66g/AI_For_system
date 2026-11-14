@@ -1,0 +1,20 @@
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -22,7 +22,7 @@
+ #include <linux/mm_types.h>
+ #include <linux/khugepaged.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <linux/freezer.h>
+ #include <linux/mman.h>
+@@ -71,7 +71,7 @@
+ 	(1<<TRANSPARENT_HUGEPAGE_USE_ZERO_PAGE_FLAG);
+ 
+ #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && defined(CONFIG_AIKERNEL_RUNTIME)
+-#include "../AIKernel/mm/ai_mm.h"
++#include "../AIKernel/subsys/mm/ai_mm.h"
+ /*
+  * AIKernel 可控制参数 "mm.thp"（数据计划 20.3）访问器（vmscan.c swappiness
+  * 同范式）：value 0/1/2 = never/madvise/always，改写 enabled 位图 ——

@@ -1,0 +1,20 @@
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -289,7 +289,7 @@
+ #include <trace/events/tcp.h>
+ #include <net/rps.h>
+ #ifdef CONFIG_AIKERNEL_NET
+-#include "../../AIKernel/net/ai_net.h"
++#include "../../AIKernel/subsys/net/ai_net.h"
+ #endif
+ 
+ #include "../core/devmem.h"
+@@ -434,7 +434,7 @@
+ 
+ #if defined(CONFIG_NET) && defined(CONFIG_AIKERNEL_RUNTIME)
+ #include <net/net_namespace.h>
+-#include "../../AIKernel/net/ai_net.h"
++#include "../../AIKernel/subsys/net/ai_net.h"
+ /*
+  * AIKernel 可控制参数 "net.rto"（数据计划 20.3）访问器（vmscan.c swappiness
+  * 同范式）：value 单位毫秒，写 init_net.ipv4.sysctl_tcp_rto_min_us ——

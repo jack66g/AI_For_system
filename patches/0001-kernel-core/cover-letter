@@ -1,0 +1,10 @@
+AIKernel 0001-kernel-core 系列（40 补丁）
+================================
+问题：AIKernel kernel-core 面的内核侧挂钩/插桩（KTB §WP 各波）。
+方案：kernel-overlays/ 覆盖式文件（本目录为对基线的
+  导出 diff；逐文件=逐补丁，可独立回退=恢复基线文件）。
+测试：KUnit 真机 not-ok=0/k0_truth/checkpatch/
+  config_check + 各波 rig（见 T9-LOG 对应波次）。
+风险：与上游同文件演化冲突（overlay 模型固有）；
+  回退=按补丁逆放或恢复基线文件后重建。
+明细：files.txt

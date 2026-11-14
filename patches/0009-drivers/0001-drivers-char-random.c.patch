@@ -1,0 +1,11 @@
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -26,7 +26,7 @@
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
+ #ifdef CONFIG_AIKERNEL_IO
+-#include "../../AIKernel/io/ai_char.h"
++#include "../../AIKernel/subsys/io/ai_char.h"
+ #endif
+ 
+ #include <linux/utsname.h>

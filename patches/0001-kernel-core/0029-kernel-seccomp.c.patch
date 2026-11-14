@@ -1,0 +1,11 @@
+--- a/kernel/seccomp.c
++++ b/kernel/seccomp.c
+@@ -32,7 +32,7 @@
+ #include <asm/syscall.h>
+ 
+ #ifdef CONFIG_AIKERNEL_SECURITY
+-#include "../AIKernel/security/ai_lsm.h"
++#include "../AIKernel/boundary/ai_lsm.h"
+ #endif
+ 
+ /* Not exposed in headers: strictly internal use only. */

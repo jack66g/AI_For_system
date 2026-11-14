@@ -1,0 +1,11 @@
+--- a/security/keys/key.c
++++ b/security/keys/key.c
+@@ -15,7 +15,7 @@
+ #include <linux/random.h>
+ #include <linux/err.h>
+ #ifdef CONFIG_AIKERNEL_SECURITY
+-#include "../../AIKernel/security/ai_lsm.h"
++#include "../../AIKernel/boundary/ai_lsm.h"
+ #endif
+ #include "internal.h"
+ 

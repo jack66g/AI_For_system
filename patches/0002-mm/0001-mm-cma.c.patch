@@ -1,0 +1,22 @@
+--- a/mm/cma.c
++++ b/mm/cma.c
+@@ -29,7 +29,7 @@
+ #include <linux/io.h>
+ #include <linux/kmemleak.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <trace/events/cma.h>
+ 
+@@ -873,10 +873,6 @@
+ 	if (!cma || !cma->count)
+ 		return page;
+ 
+-#ifdef CONFIG_AIKERNEL_MM
+-	count = ai_mm_cma_hook(cma, count);
+-#endif
+-
+ 	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
+ 		(void *)cma, cma->name, count, align);
+ 

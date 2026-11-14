@@ -1,0 +1,11 @@
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -26,7 +26,7 @@
+ #include <trace/events/timestamp.h>
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../AIKernel/vfs/ai_vfs.h"
++#include "../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include "internal.h"

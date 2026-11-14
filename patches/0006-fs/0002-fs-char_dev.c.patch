@@ -1,0 +1,16 @@
+--- a/fs/char_dev.c
++++ b/fs/char_dev.c
+@@ -24,11 +24,11 @@
+ #include <linux/tty.h>
+ 
+ #ifdef CONFIG_AIKERNEL_IO
+-#include "../../AIKernel/io/ai_char.h"
++#include "../../AIKernel/subsys/io/ai_char.h"
+ #endif
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../../AIKernel/vfs/ai_vfs.h"
++#include "../../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include "internal.h"

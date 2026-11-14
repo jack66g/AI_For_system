@@ -1,0 +1,11 @@
+--- a/kernel/locking/spinlock.c
++++ b/kernel/locking/spinlock.c
+@@ -23,7 +23,7 @@
+ #include <linux/export.h>
+ 
+ #ifdef CONFIG_AIKERNEL_LOCK
+-#include "../../AIKernel/lock/ai_lock.h"
++#include "../../AIKernel/subsys/lock/ai_lock.h"
+ #endif
+ 
+ #ifdef CONFIG_MMIOWB

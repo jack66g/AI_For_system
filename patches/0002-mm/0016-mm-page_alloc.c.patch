@@ -1,0 +1,27 @@
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -57,7 +57,7 @@
+ #include <linux/pgalloc_tag.h>
+ #include <linux/timekeeping.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <asm/div64.h>
+ #include "internal.h"
+@@ -3382,15 +3382,6 @@
+ {
+ 	struct page *page;
+ 
+-#ifdef CONFIG_AIKERNEL_MM
+-	{
+-		int ai_mt = ai_mm_alloc_hook(zone, order, gfp_flags, migratetype);
+-
+-		if (ai_mt != migratetype && ai_mt >= 0 && ai_mt < MIGRATE_TYPES)
+-			migratetype = ai_mt;
+-	}
+-#endif
+-
+ 	if (likely(pcp_allowed_order(order))) {
+ 		page = rmqueue_pcplist(preferred_zone, zone, order,
+ 				       migratetype, alloc_flags);

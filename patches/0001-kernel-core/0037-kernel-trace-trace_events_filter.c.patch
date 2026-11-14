@@ -1,0 +1,11 @@
+--- a/kernel/trace/trace_events_filter.c
++++ b/kernel/trace/trace_events_filter.c
+@@ -13,7 +13,7 @@
+ #include <linux/slab.h>
+ 
+ #ifdef CONFIG_AIKERNEL_BPF
+-#include "../../AIKernel/bpf/ai_bpf.h"
++#include "../../AIKernel/subsys/bpf/ai_bpf.h"
+ #endif
+ 
+ #include "trace.h"

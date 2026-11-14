@@ -1,0 +1,19 @@
+--- a/crypto/api.c
++++ b/crypto/api.c
+@@ -22,7 +22,7 @@
+ #include <linux/string.h>
+ #include <linux/completion.h>
+ #ifdef CONFIG_AIKERNEL_SECURITY
+-#include "../AIKernel/security/ai_lsm.h"
++#include "../AIKernel/boundary/ai_lsm.h"
+ #endif
+ #include "internal.h"
+ 
+@@ -649,7 +649,6 @@
+ 	{
+ 		const char *ai_name = alg_name;
+ 
+-		ai_sec_crypto_hook(&ai_name, type, mask);
+ 		ai_telemetry_crypto_request(ai_name, type, mask);
+ 	}
+ #endif

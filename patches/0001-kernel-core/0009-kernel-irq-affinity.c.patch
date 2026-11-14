@@ -1,0 +1,11 @@
+--- a/kernel/irq/affinity.c
++++ b/kernel/irq/affinity.c
+@@ -10,7 +10,7 @@
+ #include <linux/group_cpus.h>
+ 
+ #ifdef CONFIG_AIKERNEL_INTERRUPT
+-#include "../../AIKernel/interrupt/ai_irq.h"
++#include "../../AIKernel/subsys/interrupt/ai_irq.h"
+ #endif
+ 
+ static void default_calc_sets(struct irq_affinity *affd, unsigned int affvecs)

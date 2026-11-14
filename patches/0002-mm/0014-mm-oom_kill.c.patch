@@ -1,0 +1,23 @@
+--- a/mm/oom_kill.c
++++ b/mm/oom_kill.c
+@@ -45,7 +45,7 @@
+ #include <linux/mmu_notifier.h>
+ 
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #include "../../AIKernel/core/ai_decision.h"
+ #endif
+ #include <linux/cred.h>
+@@ -1071,11 +1071,6 @@
+ 	}
+ 	task_unlock(victim);
+ 
+-#ifdef CONFIG_AIKERNEL_MM
+-	/* AI 辅助 OOM 目标选择（本步空实现返回 0 = 接受内核选择） */
+-	ai_mm_oom_hook(oc);
+-#endif
+-
+ 	if (__ratelimit(&oom_rs)) {
+ 		dump_header(oc);
+ 		dump_oom_victim(oc, victim);

@@ -1,0 +1,9 @@
+0001-drivers-char-random.c.patch	drivers/char/random.c
+0002-drivers-cpufreq-cpufreq.c.patch	drivers/cpufreq/cpufreq.c
+0003-drivers-cpuidle-governors-menu.c.patch	drivers/cpuidle/governors/menu.c
+0004-drivers-input-input.c.patch	drivers/input/input.c
+0005-drivers-thermal-thermal_core.c.patch	drivers/thermal/thermal_core.c
+0006-drivers-tty-n_tty.c.patch	drivers/tty/n_tty.c
+0007-drivers-tty-tty_io.c.patch	drivers/tty/tty_io.c
+0008-drivers-tty-tty_ldisc.c.patch	drivers/tty/tty_ldisc.c
+0009-drivers-virtio-virtio_balloon.c.patch	drivers/virtio/virtio_balloon.c

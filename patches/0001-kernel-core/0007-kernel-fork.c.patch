@@ -1,0 +1,11 @@
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -98,7 +98,7 @@
+ #include <linux/randomize_kstack.h>
+ #include <linux/scs.h>
+ #ifdef CONFIG_AIKERNEL_RUNTIME
+-#include "../AIKernel/core/ai_proc.h"
++#include "../AIKernel/senses/ai_proc.h"
+ #endif
+ #include <linux/io_uring.h>
+ #include <linux/bpf.h>

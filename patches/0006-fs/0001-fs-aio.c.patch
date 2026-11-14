@@ -1,0 +1,37 @@
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -44,7 +44,7 @@
+ #include <linux/pseudo_fs.h>
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../AIKernel/vfs/ai_vfs.h"
++#include "../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include <linux/uaccess.h>
+@@ -1974,25 +1974,6 @@
+ 			   struct iocb __user *user_iocb, struct aio_kiocb *req,
+ 			   bool compat)
+ {
+-#ifdef CONFIG_AIKERNEL_VFS
+-	{
+-		int ai_rw;
+-
+-		switch (iocb->aio_lio_opcode) {
+-		case IOCB_CMD_PREAD:
+-		case IOCB_CMD_PREADV:
+-			ai_rw = 0;
+-			break;
+-		case IOCB_CMD_PWRITE:
+-		case IOCB_CMD_PWRITEV:
+-			ai_rw = 1;
+-			break;
+-		default:
+-			ai_rw = 2;
+-		}
+-		ai_vfs_aio_hook(ctx, iocb, ai_rw);
+-	}
+-#endif
+ 	req->ki_filp = fget(iocb->aio_fildes);
+ 	if (unlikely(!req->ki_filp))
+ 		return -EBADF;

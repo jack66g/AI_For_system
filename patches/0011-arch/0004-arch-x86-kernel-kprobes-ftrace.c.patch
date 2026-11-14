@@ -1,0 +1,11 @@
+--- a/arch/x86/kernel/kprobes/ftrace.c
++++ b/arch/x86/kernel/kprobes/ftrace.c
+@@ -7,7 +7,7 @@
+ #include <linux/kprobes.h>
+ #include <linux/ptrace.h>
+ #ifdef CONFIG_AIKERNEL_BPF
+-#include "../../../../AIKernel/bpf/ai_bpf.h"
++#include "../../../../AIKernel/subsys/bpf/ai_bpf.h"
+ #endif
+ #include <linux/hardirq.h>
+ #include <linux/preempt.h>

@@ -1,0 +1,30 @@
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -78,7 +78,7 @@
+ #include <linux/sched/sysctl.h>
+ 
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <linux/timekeeping.h>
+ 
+@@ -5165,7 +5165,6 @@
+ 		u8 access = (vmf->flags & FAULT_FLAG_WRITE) ? 2 :
+ 			    (vmf->flags & FAULT_FLAG_INSTRUCTION) ? 3 : 1;
+ 
+-		ai_mm_fault_hook(vmf, 1);
+ 		ai_mm_emit_page_fault(1, access, 0, vmf->address);
+ 	}
+ #endif
+@@ -5853,10 +5852,6 @@
+ 	struct mm_struct *vm_mm = vma->vm_mm;
+ 	vm_fault_t ret;
+ 
+-#ifdef CONFIG_AIKERNEL_MM
+-	ai_mm_fault_hook(vmf, 2);
+-#endif
+-
+ 	/*
+ 	 * The VMA was not fully populated on mmap() or missing VM_DONTEXPAND
+ 	 */

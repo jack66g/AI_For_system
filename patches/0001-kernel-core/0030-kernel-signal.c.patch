@@ -1,0 +1,22 @@
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -21,7 +21,7 @@
+ #include <linux/sched/task_stack.h>
+ #include <linux/sched/cputime.h>
+ #ifdef CONFIG_AIKERNEL_RUNTIME
+-#include "../AIKernel/core/ai_proc.h"
++#include "../AIKernel/senses/ai_proc.h"
+ #endif
+ #include <linux/file.h>
+ #include <linux/fs.h>
+@@ -1069,9 +1069,7 @@
+ 	lockdep_assert_held(&t->sighand->siglock);
+ 
+ #ifdef CONFIG_AIKERNEL_RUNTIME
+-	/* A 轨 14.5：AI 评估异常信号模式（空实现=放行+计数）
+-	 * B 轨 6.3：signal_generate 全量（发送方/接收方/信号号/编码） */
+-	ai_proc_signal_hook(sig, t, info);
++	/* B 轨 6.3：signal_generate 全量（发送方/接收方/信号号/编码） */
+ 	if (info && !is_si_special(info))
+ 		ai_telemetry_signal_generate(task_tgid_nr(current),
+ 					     current->comm,

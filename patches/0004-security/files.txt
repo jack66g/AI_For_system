@@ -1,0 +1,3 @@
+0001-security-commoncap.c.patch	security/commoncap.c
+0002-security-keys-key.c.patch	security/keys/key.c
+0003-security-keys-keyctl.c.patch	security/keys/keyctl.c

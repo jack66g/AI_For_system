@@ -1,0 +1,19 @@
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -42,7 +42,7 @@
+ #include <linux/uaccess.h>
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../AIKernel/vfs/ai_vfs.h"
++#include "../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include "internal.h"
+@@ -2480,7 +2480,6 @@
+ 		name = hash_name(nd, name, &lastword);
+ #ifdef CONFIG_AIKERNEL_VFS
+ 		ai_components++;
+-		ai_vfs_path_hook(nd->path.dentry, &nd->last, nd->flags);
+ #endif
+ 
+ 		switch(lastword) {

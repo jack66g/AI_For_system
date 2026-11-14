@@ -1,0 +1,11 @@
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -50,7 +50,7 @@
+ #include <asm/div64.h>
+ 
+ #ifdef CONFIG_AIKERNEL_TIME
+-#include "../../AIKernel/time/ai_time.h"
++#include "../../AIKernel/subsys/time/ai_time.h"
+ #include <linux/timekeeping.h>
+ 
+ static DEFINE_PER_CPU(u32, ai_timer_batch_count);

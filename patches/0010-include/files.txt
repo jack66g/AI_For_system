@@ -1,0 +1,3 @@
+0001-include-linux-bpf_types.h.patch	include/linux/bpf_types.h
+0002-include-uapi-linux-ai_netlink.h.patch	include/uapi/linux/ai_netlink.h
+0003-include-uapi-linux-bpf.h.patch	include/uapi/linux/bpf.h

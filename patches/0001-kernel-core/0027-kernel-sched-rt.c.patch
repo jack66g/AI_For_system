@@ -1,0 +1,23 @@
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -8,7 +8,7 @@
+ #include "pelt.h"
+ 
+ #ifdef CONFIG_AIKERNEL_SCHED
+-#include "../../AIKernel/sched/ai_sched.h"
++#include "../../AIKernel/subsys/sched/ai_sched.h"
+ #endif
+ 
+ int sched_rr_timeslice = RR_TIMESLICE;
+@@ -1436,11 +1436,6 @@
+ {
+ 	struct sched_rt_entity *rt_se = &p->rt;
+ 
+-#ifdef CONFIG_AIKERNEL_SCHED
+-	/* AI 准入控制（本步只计数放行，决策后续步骤接通） */
+-	ai_sched_rt_admission_hook(p);
+-#endif
+-
+ 	if (flags & ENQUEUE_WAKEUP)
+ 		rt_se->timeout = 0;
+ 

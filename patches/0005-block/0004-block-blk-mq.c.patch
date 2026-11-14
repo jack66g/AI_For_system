@@ -1,0 +1,25 @@
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -40,7 +40,7 @@
+ #include "blk-pm.h"
+ 
+ #ifdef CONFIG_AIKERNEL_IO
+-#include "../../AIKernel/io/ai_block.h"
++#include "../../AIKernel/subsys/io/ai_block.h"
+ #endif
+ #include "blk-stat.h"
+ #include "blk-mq-sched.h"
+@@ -2133,13 +2133,6 @@
+ 
+ 		WARN_ON_ONCE(hctx != rq->mq_hctx);
+ 
+-#ifdef CONFIG_AIKERNEL_IO
+-		/* AI 决策：请求分发顺序优化（空实现返回 true 放行；
+-		 * 返回 false 则本次不分发，留在列表等待下轮） */
+-		if (!ai_io_dispatch_hook(hctx, rq))
+-			break;
+-#endif
+-
+ 		prep = blk_mq_prep_dispatch_rq(rq, get_budget);
+ 		if (prep != PREP_DISPATCH_OK)
+ 			break;

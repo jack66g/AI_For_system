@@ -1,0 +1,20 @@
+--- a/mm/workingset.c
++++ b/mm/workingset.c
+@@ -17,7 +17,7 @@
+ #include <linux/fs.h>
+ #include <linux/mm.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include "internal.h"
+ 
+@@ -587,8 +587,6 @@
+ 		ai_mm_emit_workingset_refault((mapping && mapping->host) ? mapping->host->i_ino : 0,
+ 					      folio->index, distance,
+ 					      recent ? 1 : 0);
+-		if (!ai_mm_workingset_hook(folio, shadow, recent))
+-			return;
+ 		if (!recent)
+ 			return;
+ 	}

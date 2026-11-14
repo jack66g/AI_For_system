@@ -1,0 +1,48 @@
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -33,7 +33,7 @@
+ #include <linux/memblock.h>	/* alloc_large_system_hash/hashdist（6.18 无 lglock.h） */
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../AIKernel/vfs/ai_vfs.h"
++#include "../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include "internal.h"
+@@ -670,16 +670,6 @@
+ 	struct dentry *parent = NULL;
+ 	bool can_free = true;
+ 
+-#ifdef CONFIG_AIKERNEL_VFS
+-	/*
+-	 * shrink 路径 LRU 驱逐观察点：AI 决策仅记录不干预
+-	 * （收缩列表内部结构，干预会破坏 shrink 流程；实际保留动作
+-	 * 由后续 Prompt 在 shrink_dentry_list 中落地）。
+-	 */
+-	if (dentry->d_flags & DCACHE_SHRINK_LIST)
+-		ai_vfs_dcache_hook(dentry, AI_VFS_EVICT_LRU);
+-#endif
+-
+ 	/*
+ 	 * The dentry is now unrecoverably dead to the world.
+ 	 */
+@@ -941,19 +931,6 @@
+ 	}
+ 	while (lock_for_kill(dentry)) {
+ 		rcu_read_unlock();
+-#ifdef CONFIG_AIKERNEL_VFS
+-		/*
+-		 * AI 驱逐决策：AI 预测该条目未来访问概率高 → 走 retain 路径
+-		 * （置 DCACHE_REFERENCED 放回 LRU，不改变 LRU 顺序语义）。
+-		 * 空实现返回 true（原逻辑）；retain 不可行（DONTCACHE/submount）
+-		 * 时按原逻辑回收，防止 AI 决策造成悬挂。
+-		 */
+-		if (!ai_vfs_dcache_hook(dentry, AI_VFS_EVICT_DENTRY) &&
+-		    retain_dentry(dentry, true)) {
+-			spin_unlock(&dentry->d_lock);
+-			return;
+-		}
+-#endif
+ 		dentry = __dentry_kill(dentry);
+ 		if (!dentry)
+ 			return;

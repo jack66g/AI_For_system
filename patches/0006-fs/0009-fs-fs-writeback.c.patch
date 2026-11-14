@@ -1,0 +1,24 @@
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -30,7 +30,7 @@
+ #include <linux/device.h>
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-#include "../AIKernel/vfs/ai_vfs.h"
++#include "../AIKernel/subsys/vfs/ai_vfs.h"
+ #endif
+ 
+ #include "internal.h"
+@@ -2179,11 +2179,7 @@
+ 	bool queued = false;
+ 
+ #ifdef CONFIG_AIKERNEL_VFS
+-	/*
+-	 * AI 回写决策：AI 决定本轮回写时机/批量（nr_pages=0 → 本轮跳过，
+-	 * 其他值 → 批量上限）。空实现不改 → 原逻辑。
+-	 */
+-	ai_vfs_writeback_hook(wb, &work->nr_pages, work->reason);
++	/* B 轨回写遥测（writeback 子事件采样发射；K0b 删 A 轨空钩） */
+ 	ai_telemetry_writeback(wb, work->nr_pages, work->reason);
+ #endif
+ 

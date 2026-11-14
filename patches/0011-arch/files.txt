@@ -1,0 +1,8 @@
+0001-arch-x86-entry-syscall_64.c.patch	arch/x86/entry/syscall_64.c
+0002-arch-x86-kernel-cfi.c.patch	arch/x86/kernel/cfi.c
+0003-arch-x86-kernel-kprobes-core.c.patch	arch/x86/kernel/kprobes/core.c
+0004-arch-x86-kernel-kprobes-ftrace.c.patch	arch/x86/kernel/kprobes/ftrace.c
+0005-arch-x86-kernel-kprobes-opt.c.patch	arch/x86/kernel/kprobes/opt.c
+0006-arch-x86-kernel-traps.c.patch	arch/x86/kernel/traps.c
+0007-arch-x86-kvm-mmu-mmu.c.patch	arch/x86/kvm/mmu/mmu.c
+0008-arch-x86-kvm-vmx-vmx.c.patch	arch/x86/kvm/vmx/vmx.c

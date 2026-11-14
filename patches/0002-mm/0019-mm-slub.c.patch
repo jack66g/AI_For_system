@@ -1,0 +1,11 @@
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -36,7 +36,7 @@
+ #include <linux/memory.h>
+ #include <linux/math64.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <linux/fault-inject.h>
+ #include <linux/kmemleak.h>

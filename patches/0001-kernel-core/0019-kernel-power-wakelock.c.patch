@@ -1,0 +1,11 @@
+--- a/kernel/power/wakelock.c
++++ b/kernel/power/wakelock.c
+@@ -21,7 +21,7 @@
+ #include <linux/workqueue.h>
+ 
+ #ifdef CONFIG_AIKERNEL_POWER
+-#include "../../AIKernel/power/ai_power.h"
++#include "../../AIKernel/subsys/power/ai_power.h"
+ #endif
+ 
+ #include "power.h"

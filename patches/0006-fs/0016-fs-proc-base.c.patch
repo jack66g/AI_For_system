@@ -1,0 +1,11 @@
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -95,7 +95,7 @@
+ #include <linux/posix-timers.h>
+ 
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include <linux/time_namespace.h>
+ #include <linux/resctrl.h>

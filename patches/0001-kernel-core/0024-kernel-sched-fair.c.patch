@@ -1,0 +1,43 @@
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -59,7 +59,7 @@
+ #include "autogroup.h"
+ 
+ #ifdef CONFIG_AIKERNEL_SCHED
+-#include "../../AIKernel/sched/ai_sched.h"
++#include "../../AIKernel/subsys/sched/ai_sched.h"
+ #include "../../AIKernel/core/ai_decision.h"
+ #endif
+ 
+@@ -9101,12 +9101,6 @@
+ 	p = pick_task_fair(rq);
+ 	if (!p)
+ 		goto idle;
+-#ifdef CONFIG_AIKERNEL_SCHED
+-	/* AI 辅助 CFS 候选排序（空实现原样返回） */
+-	p = ai_cfs_pick_next_hook(prev, p);
+-	if (!p)
+-		goto idle;
+-#endif
+ 	se = &p->se;
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+@@ -12043,18 +12037,6 @@
+ 
+ 	env.src_cpu = busiest->cpu;
+ 	env.src_rq = busiest;
+-#ifdef CONFIG_AIKERNEL_SCHED
+-	{
+-		bool proceed = true;
+-
+-		/* AI 迁移建议（空实现恒 proceed=true，veto 计数在 hook 内） */
+-		ai_load_balance_hook(env.src_cpu, env.dst_cpu, env.imbalance,
+-				     &proceed);
+-		if (!proceed)
+-			goto out_balanced;
+-	}
+-#endif
+-
+ 	ld_moved = 0;
+ 	/* Clear this flag as soon as we find a pullable task */
+ 	env.flags |= LBF_ALL_PINNED;

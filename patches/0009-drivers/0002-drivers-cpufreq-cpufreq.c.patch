@@ -1,0 +1,11 @@
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -33,7 +33,7 @@
+ #include <trace/events/power.h>
+ 
+ #ifdef CONFIG_AIKERNEL_POWER
+-#include "../../AIKernel/power/ai_power.h"
++#include "../../AIKernel/subsys/power/ai_power.h"
+ #endif
+ 
+ static LIST_HEAD(cpufreq_policy_list);

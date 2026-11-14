@@ -1,0 +1,11 @@
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -25,7 +25,7 @@
+ #include <linux/psi.h>
+ #include <linux/cpuset.h>
+ #ifdef CONFIG_AIKERNEL_MM
+-#include "../../AIKernel/mm/ai_mm.h"
++#include "../../AIKernel/subsys/mm/ai_mm.h"
+ #endif
+ #include "internal.h"
+ 

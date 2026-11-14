@@ -1,0 +1,21 @@
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -28,7 +28,7 @@
+ #include <uapi/linux/lsm.h>
+ 
+ #ifdef CONFIG_AIKERNEL_SECURITY
+-#include "../AIKernel/security/ai_lsm.h"
++#include "../AIKernel/boundary/ai_lsm.h"
+ #endif
+ 
+ #define CREATE_TRACE_POINTS
+@@ -134,9 +134,6 @@
+ 	trace_cap_capable(cred, target_ns, cred_ns, cap, ret);
+ 
+ #ifdef CONFIG_AIKERNEL_SECURITY
+-	/* A 轨：AI 风险评估（空实现返回原结果，语义不变） */
+-	ret = ai_sec_cap_hook(cred, target_ns, cap, ret);
+-
+ 	/* B 轨 8.3：cap_check_denied——能力拒绝是攻击线索，全量记录 */
+ 	if (ret < 0)
+ 		ai_telemetry_cap_check_denied(cap);

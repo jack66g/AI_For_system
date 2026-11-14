@@ -1,0 +1,10 @@
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -1027,6 +1027,7 @@
+ 	BPF_MAP_TYPE_CGRP_STORAGE,
+ 	BPF_MAP_TYPE_ARENA,
+ 	BPF_MAP_TYPE_AI_MODEL,
++	BPF_MAP_TYPE_AI_FEATURES,
+ 	__MAX_BPF_MAP_TYPE
+ };
+ 

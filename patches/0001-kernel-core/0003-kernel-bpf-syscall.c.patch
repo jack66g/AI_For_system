@@ -1,0 +1,19 @@
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -42,7 +42,7 @@
+ #include <linux/verification.h>
+ 
+ #ifdef CONFIG_AIKERNEL_BPF
+-#include "../../AIKernel/bpf/ai_bpf.h"
++#include "../../AIKernel/subsys/bpf/ai_bpf.h"
+ #endif
+ 
+ #include <net/netfilter/nf_bpf_link.h>
+@@ -1494,6 +1494,7 @@
+ 	case BPF_MAP_TYPE_ARENA:
+ #ifdef CONFIG_AIKERNEL_BPF
+ 	case BPF_MAP_TYPE_AI_MODEL:
++	case BPF_MAP_TYPE_AI_FEATURES:
+ #endif
+ 		if (!bpf_token_capable(token, CAP_BPF))
+ 			goto put_token;

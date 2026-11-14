@@ -1,0 +1,11 @@
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -60,7 +60,7 @@
+ #include <linux/fs_struct.h>
+ #ifdef CONFIG_AIKERNEL_RUNTIME
+ #include <linux/tty.h>
+-#include "../AIKernel/core/ai_proc.h"
++#include "../AIKernel/senses/ai_proc.h"
+ #endif
+ #include <linux/oom.h>
+ #include <linux/compat.h>

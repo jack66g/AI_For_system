@@ -1,0 +1,23 @@
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -23,7 +23,7 @@
+ #include "pelt.h"
+ 
+ #ifdef CONFIG_AIKERNEL_SCHED
+-#include "../../AIKernel/sched/ai_sched.h"
++#include "../../AIKernel/subsys/sched/ai_sched.h"
+ #endif
+ 
+ /*
+@@ -2262,11 +2262,6 @@
+ 
+ static void enqueue_task_dl(struct rq *rq, struct task_struct *p, int flags)
+ {
+-#ifdef CONFIG_AIKERNEL_SCHED
+-	/* AI 准入控制（本步只计数放行，决策后续步骤接通） */
+-	ai_sched_rt_admission_hook(p);
+-#endif
+-
+ 	if (is_dl_boosted(&p->dl)) {
+ 		/*
+ 		 * Because of delays in the detection of the overrun of a

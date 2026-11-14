@@ -1,0 +1,11 @@
+--- a/block/bio.c
++++ b/block/bio.c
+@@ -25,7 +25,7 @@
+ #include "blk-cgroup.h"
+ 
+ #ifdef CONFIG_AIKERNEL_IO
+-#include "../../AIKernel/io/ai_block.h"
++#include "../../AIKernel/subsys/io/ai_block.h"
+ #endif
+ 
+ #define ALLOC_CACHE_THRESHOLD	16

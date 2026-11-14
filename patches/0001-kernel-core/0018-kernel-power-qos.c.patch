@@ -1,0 +1,11 @@
+--- a/kernel/power/qos.c
++++ b/kernel/power/qos.c
+@@ -34,7 +34,7 @@
+ #include <linux/kernel.h>
+ 
+ #ifdef CONFIG_AIKERNEL_POWER
+-#include "../../AIKernel/power/ai_power.h"
++#include "../../AIKernel/subsys/power/ai_power.h"
+ #endif
+ #include <linux/debugfs.h>
+ #include <linux/seq_file.h>

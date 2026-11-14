@@ -99,3 +99,8 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 ## K10b REG ABI 版本协商（2026-11-14）
 - uapi AI_REG_ATTR_ABI=10（客户端版本 > 服务端 AI_ABI_VERSION 拒 -EPROTONOSUPPORT，≤ 容忍向前兼容）；struct ai_nl_reg_ack 文档化冻结（ai_err/count 前 8B K3 兼容 + abi_ver/rsv 追加）；
 - aikctl 新增 abi 子命令：UNREG+ABI attr 零副作用双探（真 socket 全链含 CAP 闸），真机 ver=1 回显 PASS / ver=99 -93 拒 PASS。
+
+## K10.3 补丁系列（2026-11-14）
+- AIKernel/scripts/k10_patch_series.py 生成器 + patches/ 138 补丁/12 系列导出（基线=alpha-11 出厂树；vanilla 上游系列登记尾账）；每系列 cover-letter（问题/方案/测试/风险/回退）+ files.txt 明细 + SERIES.md 总目；
+- integrity 门禁位：--check-only（overlay↔构建树逐字节，173/173）；
+- W=1 全 AIKernel 零告警 + sparse C=1 零告警（smatch 未装=登记）。

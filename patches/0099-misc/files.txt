@@ -1,0 +1,5 @@
+0001-lib-ubsan.c.patch	lib/ubsan.c
+0002-samples-Makefile.patch	samples/Makefile
+0003-samples-ai-Kconfig.patch	samples/ai/Kconfig
+0004-samples-ai-Makefile.patch	samples/ai/Makefile
+0005-samples-ai-ai_bpf_helper_sample.c.patch	samples/ai/ai_bpf_helper_sample.c

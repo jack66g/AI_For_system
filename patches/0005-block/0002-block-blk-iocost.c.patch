@@ -1,0 +1,11 @@
+--- a/block/blk-iocost.c
++++ b/block/blk-iocost.c
+@@ -186,7 +186,7 @@
+ #include "blk-cgroup.h"
+ 
+ #ifdef CONFIG_AIKERNEL_IO
+-#include "../../AIKernel/io/ai_block.h"
++#include "../../AIKernel/subsys/io/ai_block.h"
+ #endif
+ 
+ #ifdef CONFIG_TRACEPOINTS

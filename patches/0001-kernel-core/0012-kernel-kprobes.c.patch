@@ -1,0 +1,11 @@
+--- a/kernel/kprobes.c
++++ b/kernel/kprobes.c
+@@ -42,7 +42,7 @@
+ #include <linux/cleanup.h>
+ 
+ #ifdef CONFIG_AIKERNEL_BPF
+-#include "../../AIKernel/bpf/ai_bpf.h"
++#include "../../AIKernel/subsys/bpf/ai_bpf.h"
+ #endif
+ 
+ #include <asm/sections.h>
