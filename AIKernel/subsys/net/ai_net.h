@@ -443,7 +443,7 @@ struct nf_conn;
 struct ai_net_stats;
 
 static inline bool ai_net_sample_take(u16 sub) { return false; }
-static inline int ai_net_set_sub_rate(u16 sub, u32 rate) { return AI_OK; }
+static inline int ai_net_set_sub_rate(u16 sub, u32 rate) { return 0; /* AI_OK 宏实不存在（K10.4 实抓）——语义=0 */ }
 
 static inline unsigned int ai_net_nf_hook(struct sk_buff *skb,
 					  const struct nf_hook_state *state,
@@ -533,11 +533,26 @@ static inline void ai_net_http_tls_scan(struct sock *sk, struct sk_buff *skb,
 #ifdef CONFIG_AIKERNEL_RUNTIME
 int ai_tcp_rto_min_get(void);
 int ai_tcp_rto_min_set(int ms);
+#ifdef CONFIG_AIKERNEL_NET
 u32 ai_cca_cwnd_clamp_get(void);
 void ai_cca_cwnd_clamp_set(u32 pkts);
 u64 ai_cca_clamp_hits_read(void);
 bool ai_netfilter_is_enabled(void);
 u64 ai_netfilter_stats_read(bool *on, u64 *pkts, u64 *bytes);
+#else /* NET=n（base 片）：实现不编译，AI 侧访问器零值桩兜底
+ * （K10.4 矩阵实抓；tcp_rto_min 实现于 net/ipv4/tcp.c 随
+ *  RUNTIME 在，不在此列） */
+static inline u32 ai_cca_cwnd_clamp_get(void)
+{ return 0; }
+static inline void ai_cca_cwnd_clamp_set(u32 pkts)
+{ }
+static inline u64 ai_cca_clamp_hits_read(void)
+{ return 0; }
+static inline bool ai_netfilter_is_enabled(void)
+{ return false; }
+static inline u64 ai_netfilter_stats_read(bool *on, u64 *pkts, u64 *bytes)
+{ return 0; }
+#endif /* CONFIG_AIKERNEL_NET */
 #endif /* CONFIG_AIKERNEL_RUNTIME */
 
 #endif /* _AIKERNEL_AI_NET_H */

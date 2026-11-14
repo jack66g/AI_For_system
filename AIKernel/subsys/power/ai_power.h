@@ -171,6 +171,16 @@ static inline void ai_power_stats_read(struct ai_power_stats *st)
 { if (st) memset(st, 0, sizeof(*st)); }
 static inline bool ai_power_sample_take(u32 rate)
 { return false; }
+static inline unsigned int ai_aiguard_freq_max_pct_get(void)
+{ return 0; }
+static inline void ai_aiguard_freq_max_pct_set(unsigned int pct)
+{ }
+static inline void ai_aiguard_freq_stats_read(u64 *requests, u64 *clamped)
+{ }
+static inline bool ai_power_wakeup_capture_is_enabled(void)
+{ return false; }
+static inline void ai_power_wakeup_stats_read(bool *on, u64 *events)
+{ }
 
 #endif /* CONFIG_AIKERNEL_POWER */
 

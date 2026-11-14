@@ -104,3 +104,8 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 - AIKernel/scripts/k10_patch_series.py 生成器 + patches/ 138 补丁/12 系列导出（基线=alpha-11 出厂树；vanilla 上游系列登记尾账）；每系列 cover-letter（问题/方案/测试/风险/回退）+ files.txt 明细 + SERIES.md 总目；
 - integrity 门禁位：--check-only（overlay↔构建树逐字节，173/173）；
 - W=1 全 AIKernel 零告警 + sparse C=1 零告警（smatch 未装=登记）。
+
+## K10.4 测试矩阵（2026-11-14，K10 收口）
+- AIKernel/test/perf/k10_matrix.py 跑表器 + configs/k104_{base,off}.frag（scripts/config 纯参数行，# 注释跳过）：P0 静态四门→P1 KUnit→P2 三配置（strong/base/off 翻转后自证再编，boot 断言：strong 三件套指纹等值/base 三件套在+audit 无+指纹变/off /proc/ai 整树缺席）→P3 storm 500→P4 同源三建 sha256 比对+config 复位 factory 抽取比对；全程计时对 CI<30min 预算。
+- 矩阵实抓四跨配置缺陷（真 config 组合从未编译过=潜伏爆点，全修）：subsys/power/ai_power.h #else 桩区缺 K4/K7 四访问器桩（POWER=n 跨族隐式声明）；subsys/net/ai_net.h AI 侧五访问器声明门 RUNTIME 而实现门 NET 错位（声明内嵌 NET 门+#else 零值桩）；ai_net.h 桩体 return AI_OK 为全树不存在幽灵宏（改字面 0）；off 片须点名 --disable AIKERNEL_AGENT（agent/ai/Kconfig 遗留六家族不依赖总开关，五子随父级联）。
+- base 实测 config_hash=e95e704364d361b5 ≠ strong 6a36fe4a68743a2f（K10a 指纹首次实战区分配置）；P4 三建字节一致 FAIL=内核构建缺省非确定序（预期如实登记；可复现构建全套钉死=尾账）。
