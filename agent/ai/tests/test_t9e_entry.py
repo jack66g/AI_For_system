@@ -43,7 +43,10 @@ def main():
         check(False, "build-rootfs-sh-exists", BUILD_ROOTFS)
     else:
         s = read(BUILD_ROOTFS)
-        check("exec /usr/local/bin/occ" in s,
+        # q17 起接管层=aik-console（tty1=fbterm 内跑 occ）；
+        # 断言对齐：occ 经接管层 exec（ORCH-E9 验尸实锤过期）
+        check("exec aik-console" in s and
+              "occ" in s,
               "rootfs-template-exec-occ")
         check("[ -x /usr/local/bin/occ ]" in s,
               "rootfs-template-guard-occ")
