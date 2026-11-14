@@ -13,6 +13,13 @@
  *   occ_task_dispatch（pending→dispatched）/ occ_task_review
  *   （dispatched→in_review，终局结果回收）/ occ_task_escalate
  *   （spawn 失败审计）。
+ *
+ * E3 追加（§8 棒 E3，语义详见 orch.h 头注 E3 段）：
+ *   文件集互斥登记表（活任务独占声明；spawn 冲突即拒 OCC_ORCH_EFILESET，
+ *   终局/取消/释放自动注销）+ 任务注册表（task_id → 结果文件，终局后
+ *   保留供 read_result）+ OCC_TASK_RESULT_FILE env 通道 + 总闸
+ *   occ_orch_tools_enabled + occ_bin 的 OCC_ORCH_BIN env 覆写（测试
+ *   注入 stub occ 用；生产进程 /proc/self/exe 同目录优先级不变）。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
@@ -22,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -56,7 +64,119 @@ struct occ_orch {
 	long long backoff_ms;		/* 缺省 OCC_ORCH_BACKOFF_MS */
 	long long win_start_ms;		/* 撞限窗起点（0=从未撞限） */
 	int rejects;			/* 窗内拒绝次数（诊断） */
+	/* E3：文件集互斥登记表（在跑任务独占声明；终局自动注销） */
+	struct {
+		char task_id[OCC_ID_LEN];
+		char **files;		/* heap 拷贝（绝对路径串） */
+		size_t nfiles;
+	} *fsx;
+	size_t n_fsx;
+	/* E3：任务注册表（task_id → 结果文件；终局后保留至 free） */
+	struct {
+		char task_id[OCC_ID_LEN];
+		char *result_path;	/* NULL=该任务无结果文件 */
+		int own_result;		/* 1=本运行时自动生成（free 时删） */
+	} *trec;
+	size_t n_trec;
 };
+
+/* ---- E3：总闸 ---- */
+
+int occ_orch_tools_enabled(void)
+{
+	const char *v = getenv("OCC_ORCH_TOOLS");
+
+	return v && v[0] && strcmp(v, "0") != 0 &&
+	       strcasecmp(v, "false") != 0;
+}
+
+/* ---- E3：文件集互斥登记表 ---- */
+
+int occ_orch_fileset_conflict(const occ_orch *o, const char *const *files,
+			      size_t n, char *owner_task, size_t buflen)
+{
+	size_t i, j, k;
+
+	if (owner_task && buflen)
+		owner_task[0] = '\0';
+	if (!o || !files || !n)
+		return 0;
+	for (i = 0; i < o->n_fsx; i++) {
+		for (j = 0; j < o->fsx[i].nfiles; j++) {
+			for (k = 0; k < n; k++) {
+				if (files[k] && o->fsx[i].files[j] &&
+				    !strcmp(o->fsx[i].files[j], files[k])) {
+					if (owner_task && buflen)
+						snprintf(owner_task, buflen,
+							 "%s",
+							 o->fsx[i].task_id);
+					return 1;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+/* fork 前登记（tid 已知）；失败=oom 返回 -1（调用方回滚）。 */
+static int fsx_add(occ_orch *o, const char *task_id,
+		   const char *const *files, size_t n)
+{
+	char **cp;
+	size_t i, j;
+
+	if (!o || !task_id || !task_id[0] || !files || !n)
+		return 0;
+	cp = calloc(n, sizeof(*cp));
+	if (!cp)
+		return -1;
+	for (i = 0; i < n; i++) {
+		cp[i] = strdup(files[i] ? files[i] : "");
+		if (!cp[i]) {
+			for (j = 0; j < i; j++)
+				free(cp[j]);
+			free(cp);
+			return -1;
+		}
+	}
+	{
+		void *nb = realloc(o->fsx, (o->n_fsx + 1) * sizeof(*o->fsx));
+
+		if (!nb) {
+			for (j = 0; j < n; j++)
+				free(cp[j]);
+			free(cp);
+			return -1;
+		}
+		o->fsx = nb;
+	}
+	snprintf(o->fsx[o->n_fsx].task_id, sizeof(o->fsx[0].task_id), "%s",
+		 task_id);
+	o->fsx[o->n_fsx].files = cp;
+	o->fsx[o->n_fsx].nfiles = n;
+	o->n_fsx++;
+	return 0;
+}
+
+/* 任务终局/取消/spawn 失败回滚：注销独占声明（无该任务则无副作用） */
+static void fsx_release(occ_orch *o, const char *task_id)
+{
+	size_t i, j;
+
+	if (!o || !task_id || !task_id[0])
+		return;
+	for (i = 0; i < o->n_fsx; i++) {
+		if (!strcmp(o->fsx[i].task_id, task_id)) {
+			for (j = 0; j < o->fsx[i].nfiles; j++)
+				free(o->fsx[i].files[j]);
+			free(o->fsx[i].files);
+			memmove(&o->fsx[i], &o->fsx[i + 1],
+				(o->n_fsx - i - 1) * sizeof(o->fsx[0]));
+			o->n_fsx--;
+			return;
+		}
+	}
+}
 
 /* ---- 小工具 ---- */
 
@@ -255,15 +375,22 @@ static int resolve_bin(const char *bin, char *out, size_t outlen)
 }
 
 /*
- * default_bin - 缺省 occ 可执行：/proc/self/exe 同目录 occ（主会话
- * 进程即 occ——子进程同厂同版本）；不可执行退 PATH「occ」。
+ * default_bin - 缺省 occ 可执行：OCC_ORCH_BIN env 覆写（测试注入
+ * stub occ；生产勿设）→ /proc/self/exe 同目录 occ（主会话进程即
+ * occ——子进程同厂同版本）→ PATH「occ」。
  */
 static int default_bin(char *out, size_t outlen)
 {
+	const char *env = getenv("OCC_ORCH_BIN");
 	char self[512];
 	ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
 	char *slash;
 
+	if (env && env[0]) {
+		snprintf(out, outlen, "%s", env);
+		if (access(out, X_OK) == 0)
+			return 0;
+	}
 	if (n <= 0)
 		goto path;
 	self[n] = '\0';
@@ -276,6 +403,73 @@ static int default_bin(char *out, size_t outlen)
 		return 0;
 path:
 	return resolve_bin("occ", out, outlen);
+}
+
+/* ---- E3：任务注册表（task_id → 结果文件；终局后保留） ---- */
+
+/* upsert：同 task 覆盖（旧 own_result 文件不删——终局前覆盖属异常路径，
+ * 文件留 /tmp 审计）；失败=oom 返回 -1。 */
+static int trec_add(occ_orch *o, const char *task_id,
+		    const char *result_path, int own_result)
+{
+	size_t i;
+	char *cp = NULL;
+
+	if (!o || !task_id || !task_id[0])
+		return 0;
+	if (result_path && result_path[0]) {
+		cp = strdup(result_path);
+		if (!cp)
+			return -1;
+	}
+	for (i = 0; i < o->n_trec; i++) {
+		if (!strcmp(o->trec[i].task_id, task_id)) {
+			free(o->trec[i].result_path);
+			o->trec[i].result_path = cp;
+			o->trec[i].own_result = own_result;
+			return 0;
+		}
+	}
+	{
+		void *nb = realloc(o->trec, (o->n_trec + 1) * sizeof(*o->trec));
+
+		if (!nb) {
+			free(cp);
+			return -1;
+		}
+		o->trec = nb;
+	}
+	snprintf(o->trec[o->n_trec].task_id, sizeof(o->trec[0].task_id), "%s",
+		 task_id);
+	o->trec[o->n_trec].result_path = cp;
+	o->trec[o->n_trec].own_result = own_result;
+	o->n_trec++;
+	return 0;
+}
+
+const char *occ_orch_result_path(const occ_orch *o, const char *task_id)
+{
+	size_t i;
+
+	if (!o || !task_id)
+		return NULL;
+	for (i = 0; i < o->n_trec; i++)
+		if (!strcmp(o->trec[i].task_id, task_id))
+			return o->trec[i].result_path;
+	return NULL;
+}
+
+occ_orch_child *occ_orch_find_task(occ_orch *o, const char *task_id)
+{
+	int i;
+
+	if (!o || !task_id || !task_id[0])
+		return NULL;
+	for (i = 0; i < o->n_live; i++)
+		if (o->live[i]->task_id[0] &&
+		    !strcmp(o->live[i]->task_id, task_id))
+			return o->live[i];
+	return NULL;
 }
 
 /* ---- 运行时生命周期 ---- */
@@ -331,6 +525,8 @@ static void child_unhook(occ_orch_child *c)
 static void child_free(occ_orch_child *c)
 {
 	child_unhook(c);
+	/* E3：任务终局（含取消/超时/orch_free 收尸）自动注销独占声明 */
+	fsx_release(c->o, c->task_id);
 	if (c->own_files) {
 		if (c->stdout_path)
 			unlink(c->stdout_path);
@@ -384,6 +580,28 @@ void occ_orch_free(occ_orch *o)
 		}
 		child_free(c);
 	}
+	/* E3：登记表/注册表清空；自动生成的结果文件回收（/tmp 纪律） */
+	while (o->n_fsx > 0) {
+		size_t j;
+
+		for (j = 0; j < o->fsx[0].nfiles; j++)
+			free(o->fsx[0].files[j]);
+		free(o->fsx[0].files);
+		memmove(&o->fsx[0], &o->fsx[1],
+			(o->n_fsx - 1) * sizeof(o->fsx[0]));
+		o->n_fsx--;
+	}
+	free(o->fsx);
+	{
+		size_t i;
+
+		for (i = 0; i < o->n_trec; i++) {
+			if (o->trec[i].own_result && o->trec[i].result_path)
+				unlink(o->trec[i].result_path);
+			free(o->trec[i].result_path);
+		}
+		free(o->trec);
+	}
 	free(o);
 }
 
@@ -413,17 +631,34 @@ static void escalate_best_effort(occ_db *db, const char *task_id,
 	occ_task_escalate(db, task_id, rj, NULL, 0);
 }
 
+/*
+ * E3：dispatch 之后的失败路径统一清理——注销独占声明 + 删本运行时
+ * 自动生成的结果文件 + escalate 审计（原 dispatched 分支并入）。
+ */
+static void spawn_fail_cleanup(occ_orch *o, const char *tid,
+			       const char *rpath, int own_result,
+			       const char *why)
+{
+	if (tid && tid[0])
+		fsx_release(o, tid);
+	if (own_result && rpath && rpath[0])
+		unlink(rpath);
+	escalate_best_effort(o->db, tid, why);
+}
+
 int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		   occ_orch_child **out, char *err, size_t errlen)
 {
 	char bin[512], dbkv[600];
 	char sid[OCC_ID_LEN] = "", tid[OCC_ID_LEN] = "";
-	char sop[96], sep[96];
+	char sop[96], sep[96], rpath[192];
 	char *argv[6], **envp = NULL;
 	occ_orch_child *c;
 	long long now;
 	int dispatched = 0;
+	int own_result = 0;		/* E3：结果文件为本运行时生成 */
 
+	rpath[0] = '\0';
 	if (!o || !opts || !opts->prompt || !opts->prompt[0] || !out) {
 		set_err(err, errlen,
 			"occ_orch_spawn: 参数不合法（prompt 必填）");
@@ -455,6 +690,21 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 			OCC_ORCH_MAX_CHILDREN, o->n_live, o->rejects,
 			o->backoff_ms);
 		return OCC_ORCH_ELIMIT;
+	}
+
+	/* ---- E3：文件集互斥（会话/任务面未动，干净拒绝） ---- */
+	if (opts->fileset && opts->nfileset) {
+		char owner[OCC_ID_LEN];
+
+		if (occ_orch_fileset_conflict(o, opts->fileset,
+					      opts->nfileset, owner,
+					      sizeof(owner))) {
+			set_err(err, errlen,
+				"文件集互斥冲突：已由在跑任务 %s 独占声明"
+				"（并发任务不得写同一文件——等其终局或换文件集）",
+				owner);
+			return OCC_ORCH_EFILESET;
+		}
 	}
 
 	/* ---- 会话面：私有 child 会话（已给 id 则复用） ---- */
@@ -509,21 +759,61 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		dispatched = 1;
 	}
 
+	/* ---- E3：结果文件（报告 IPC）+ 登记（fork 前——oom 等失败在
+	 * 此干净回滚，不留半登记状态） ---- */
+	if (opts->result_path && opts->result_path[0]) {
+		snprintf(rpath, sizeof(rpath), "%s", opts->result_path);
+	} else if (tid[0]) {
+		if (temp_path(rpath, sizeof(rpath), "res")) {
+			set_err(err, errlen, "occ_orch_spawn: 结果文件临时"
+				"生成失败：%s", strerror(errno));
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, "", 0,
+						   "result tempfile");
+			return OCC_ORCH_ESPAWN;
+		}
+		own_result = 1;
+	}
+	if (tid[0] && opts->fileset && opts->nfileset) {
+		if (fsx_add(o, tid, opts->fileset, opts->nfileset)) {
+			set_err(err, errlen, "occ_orch_spawn: 文件集登记失败"
+				"（oom）");
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "fsx oom");
+			else if (own_result)
+				unlink(rpath);
+			return OCC_ORCH_ESPAWN;
+		}
+	}
+	if (tid[0] && trec_add(o, tid, rpath[0] ? rpath : NULL, own_result)) {
+		set_err(err, errlen, "occ_orch_spawn: 任务注册失败（oom）");
+		if (dispatched) {
+			spawn_fail_cleanup(o, tid, "", 0, "trec oom");
+		} else {
+			fsx_release(o, tid);	/* 未 dispatch：无 escalate 面 */
+			if (own_result)
+				unlink(rpath);
+		}
+		return OCC_ORCH_ESPAWN;
+	}
+
 	/* ---- 可执行 + 输出文件 + env ---- */
 	if (opts->occ_bin && opts->occ_bin[0]) {
 		if (resolve_bin(opts->occ_bin, bin, sizeof(bin))) {
 			set_err(err, errlen, "occ_orch_spawn: 可执行不可用"
 				" `%.200s'", opts->occ_bin);
 			if (dispatched)
-				escalate_best_effort(o->db, tid,
-						     "occ_bin resolve");
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "occ_bin resolve");
 			return OCC_ORCH_ESPAWN;
 		}
 	} else if (default_bin(bin, sizeof(bin))) {
 		set_err(err, errlen, "occ_orch_spawn: occ 可执行未找到"
-			"（/proc/self/exe 同目录与 PATH 均无）");
+			"（OCC_ORCH_BIN/proc/self/exe 同目录与 PATH 均无）");
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "occ bin not found");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "occ bin not found");
 		return OCC_ORCH_ESPAWN;
 	}
 	if (opts->stdout_path && opts->stdout_path[0]) {
@@ -532,7 +822,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		set_err(err, errlen, "occ_orch_spawn: stdout 临时文件失败"
 			"：%s", strerror(errno));
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "stdout tempfile");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "stdout tempfile");
 		return OCC_ORCH_ESPAWN;
 	}
 	if (opts->stderr_path && opts->stderr_path[0]) {
@@ -542,7 +833,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		set_err(err, errlen, "occ_orch_spawn: stderr 临时文件失败"
 			"：%s", strerror(errno));
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "stderr tempfile");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "stderr tempfile");
 		return OCC_ORCH_ESPAWN;
 	}
 	/* OCC_DB 注入：子会话/任务与运行时同库（B2 并发写库即生产路径；
@@ -554,8 +846,28 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		unlink(sep);
 		set_err(err, errlen, "occ_orch_spawn: env 构建失败（oom）");
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "env oom");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "env oom");
 		return OCC_ORCH_ESPAWN;
+	}
+	/* E3：结果文件 env 通道（OCC_TASK_RESULT_FILE→子进程报告写它；
+	 * 同名项 env_build 已含调用方附加——此处后写覆盖生效） */
+	if (rpath[0]) {
+		char rkv[512];
+
+		snprintf(rkv, sizeof(rkv), "%s=%.480s", OCC_ORCH_RESULT_ENV,
+			 rpath);
+		if (env_set(&envp, rkv)) {
+			env_free(envp);
+			unlink(sop);
+			unlink(sep);
+			set_err(err, errlen, "occ_orch_spawn: 结果文件 env"
+				" 注入失败（oom）");
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "result env oom");
+			return OCC_ORCH_ESPAWN;
+		}
 	}
 
 	/* ---- fork+execve（子侧全 async-signal-safe） ---- */
@@ -566,7 +878,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		unlink(sep);
 		set_err(err, errlen, "occ_orch_spawn: oom");
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "child oom");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "child oom");
 		return OCC_ORCH_ESPAWN;
 	}
 	c->o = o;
@@ -600,7 +913,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		set_err(err, errlen, "occ_orch_spawn: fork 失败：%s",
 			strerror(e));
 		if (dispatched)
-			escalate_best_effort(o->db, tid, "fork failed");
+			spawn_fail_cleanup(o, tid, rpath, own_result,
+					   "fork failed");
 		return OCC_ORCH_ESPAWN;
 	}
 	if (c->pid == 0) {

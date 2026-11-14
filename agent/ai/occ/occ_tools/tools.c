@@ -29,7 +29,10 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "occ_core/orch.h"			/* E3：task 工具执行面 */
 
 #include "store/store_json.h"
 
@@ -139,6 +142,29 @@ static const char SCHEMA_BASH[] =
 	"（缺省 60，上限同全局配置）\",\"minimum\":1}"
 	"},\"required\":[\"command\"]}";
 
+/* E3 第七工具（ORCH-DESIGN §3 拍板字段集；仅 OCC_ORCH_TOOLS=1 注册） */
+static const char SCHEMA_TASK[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"action\":{\"type\":\"string\",\"enum\":[\"spawn\",\"status\","
+	"\"wait\",\"read_result\",\"return\"],\"description\":\"spawn=建任务"
+	"并派发子智能体；status=查任务状态；wait=限时等待终局；"
+	"read_result=读子报告与终局摘要；return=对结果表态\"},"
+	"\"brief\":{\"type\":\"object\",\"description\":\"spawn 任务书"
+	"（§3 字段集）：goal 目标一句话（必填）；fileset 授权文件集"
+	"（必填非空数组，独占声明——并发任务声明同一文件会被拒绝）；"
+	"forbidden 禁改清单；deliverables 交付物清单；acceptance 验收标准"
+	"（尽量可机械判）；selfcheck 自检清单；auth_note 授权说明；"
+	"budget 预算配额（可含 wall_ms 墙钟上限毫秒）；context 必要上下文；"
+	"rework_max 回炉上限覆写（1-3，缺省 2）\"},"
+	"\"task_id\":{\"type\":\"string\",\"description\":\"status/wait/"
+	"read_result/return 的目标任务 id（tsk_…，spawn 返回）\"},"
+	"\"timeout_ms\":{\"type\":\"integer\",\"description\":\"wait 限时"
+	"毫秒（缺省 2000，上限 30000；到点未终局如实返回未终局而非挂死）\","
+	"\"minimum\":100},"
+	"\"verdict\":{\"type\":\"string\",\"description\":\"return 动作："
+	"主会话对结果的表态（通过与否/差距/依据，记入任务事件）\"}"
+	"},\"required\":[\"action\"]}";
+
 static const occ_tool_def TOOLS[] = {
 	{ OCC_T_READ,  "读取文件内容（带行号，支持行窗 offset/limit）。二进制文件拒绝。", SCHEMA_READ },
 	{ OCC_T_WRITE, "整文件写入（覆盖），父目录不存在则递归创建；写前自动快照原文件（可撤销地基）。", SCHEMA_WRITE },
@@ -148,8 +174,36 @@ static const occ_tool_def TOOLS[] = {
 	{ OCC_T_BASH,  "在 aik-sandbox 隔离区（mount/pid/uts namespace，能力裁剪）内执行 shell 命令；沙箱不可用时拒绝执行（绝不裸跑）。", SCHEMA_BASH },
 };
 
+/*
+ * E3：开关组合表——OCC_ORCH_TOOLS=1 时六件套尾部追加 task。首用拷贝
+ * 构造（只读静态源，无并发写面）；默认路径恒返回 TOOLS 原数组（差分
+ * /p-smoke 红线：请求字节零变化）。
+ */
+static occ_tool_def TOOLS_ORCH[7];
+static int tools_orch_init;
+
 const occ_tool_def *occ_tool_defs(size_t *n)
 {
+	if (occ_orch_tools_enabled()) {
+		if (!tools_orch_init) {
+			size_t i;
+
+			for (i = 0; i < sizeof(TOOLS) / sizeof(TOOLS[0]); i++)
+				TOOLS_ORCH[i] = TOOLS[i];
+			TOOLS_ORCH[6].name = OCC_T_TASK;
+			TOOLS_ORCH[6].description =
+				"主从编排（先按 L0/L1/L2 判级决定是否派发）："
+				"spawn 提交 brief 任务书派发子智能体（goal 与"
+				"非空 fileset 必填；fileset 为独占声明）；"
+				"status 查状态；wait 限时等终局；read_result 读"
+				"子报告；return 对结果表态。返回结构化 JSON。";
+			TOOLS_ORCH[6].parameters = SCHEMA_TASK;
+			tools_orch_init = 1;
+		}
+		if (n)
+			*n = sizeof(TOOLS_ORCH) / sizeof(TOOLS_ORCH[0]);
+		return TOOLS_ORCH;
+	}
 	if (n)
 		*n = sizeof(TOOLS) / sizeof(TOOLS[0]);
 	return TOOLS;
@@ -162,6 +216,9 @@ int occ_tool_is_known(const char *name)
 	for (i = 0; i < sizeof(TOOLS) / sizeof(TOOLS[0]); i++)
 		if (!strcmp(TOOLS[i].name, name))
 			return 1;
+	if (occ_orch_tools_enabled() && name &&
+	    !strcmp(OCC_T_TASK, name))
+		return 1;
 	return 0;
 }
 
@@ -377,6 +434,7 @@ static size_t count_occurrences(const char *hay, size_t hlen,
 
 typedef struct {
 	aik_json *root;			/* NULL=无/坏参数 */
+	int bad;			/* E3：原文非空但解析失败（坏 JSON） */
 } occ_args;
 
 static void args_init(occ_args *a, const char *args_json)
@@ -384,10 +442,13 @@ static void args_init(occ_args *a, const char *args_json)
 	char err[128];
 
 	a->root = NULL;
+	a->bad = 0;
 	if (!args_json || !args_json[0] || !strcmp(args_json, "{}"))
 		return;
 	a->root = aik_json_parse(args_json, strlen(args_json),
 				 err, sizeof(err));
+	if (!a->root)
+		a->bad = 1;
 }
 
 static void args_free(occ_args *a)
@@ -1118,6 +1179,858 @@ static int tool_bash(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				timeout_s > 0 ? timeout_s * 1000 : 0, o);
 }
 
+/* ---- task（E3 第七工具；R1=工具层。ORCH-DESIGN §3 派发协议） ---- */
+
+/* 动态字符串（prompt 渲染——任务书全文可超 obuf 8KB 截断域） */
+struct sbuf {
+	char *buf;
+	size_t len, cap;
+	int oom;
+};
+
+static void sb_putn(struct sbuf *b, const char *s, size_t n)
+{
+	if (b->oom || !n)
+		return;
+	if (b->len + n + 1 > b->cap) {
+		size_t nc = b->cap ? b->cap : 512;
+		char *nb;
+
+		while (b->len + n + 1 > nc)
+			nc *= 2;
+		nb = realloc(b->buf, nc);
+		if (!nb) {
+			b->oom = 1;
+			return;
+		}
+		b->buf = nb;
+		b->cap = nc;
+	}
+	memcpy(b->buf + b->len, s, n);
+	b->len += n;
+	b->buf[b->len] = '\0';
+}
+
+static void sb_puts(struct sbuf *b, const char *s)
+{
+	sb_putn(b, s, strlen(s));
+}
+
+static void sb_printf(struct sbuf *b, const char *fmt, ...)
+{
+	char tmp[1024];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(tmp, sizeof(tmp), fmt, ap);
+	va_end(ap);
+	sb_puts(b, tmp);
+}
+
+static void sb_free(struct sbuf *b)
+{
+	free(b->buf);
+	memset(b, 0, sizeof(*b));
+}
+
+/* 文件头窗读取（read_result 报告摘要；失败 NULL） */
+static char *read_file_head(const char *path, size_t max)
+{
+	int fd;
+	char *buf;
+	ssize_t got;
+
+	if (!path || !path[0])
+		return NULL;
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return NULL;
+	buf = malloc(max + 1);
+	if (!buf) {
+		close(fd);
+		return NULL;
+	}
+	got = read(fd, buf, max);
+	close(fd);
+	if (got < 0) {
+		free(buf);
+		return NULL;
+	}
+	/* UTF-8 边界回退（不切多字节） */
+	while (got > 0 && ((unsigned char)buf[got] & 0xC0) == 0x80)
+		got--;
+	buf[got] = '\0';
+	return buf;
+}
+
+/* aik_json 构造 → 紧凑 dump → obuf（工具返回一律结构化 JSON 文本）。
+ * 文本成功写出返回 0；oom → -1（降级人话错误）。 */
+static int jout(occ_obuf *o, aik_json *obj)
+{
+	char *txt = NULL;
+	size_t tl = 0;
+	int rc = aik_json_dump(obj, &txt, &tl);
+
+	if (rc != 0 || !txt) {
+		free(txt);
+		occ_ob_puts(o, "ERROR: task 结果 JSON 序列化失败（oom）");
+		return -1;
+	}
+	occ_ob_put(o, txt, tl);
+	free(txt);
+	return 0;
+}
+
+/* 错误 JSON：{"ok":false,"error":…[,"code":…]}；文本写出成功也返回
+ * -1——错误响应=工具失败（occ_tool_result.rc=1，trace 口径）。 */
+static int jerr(occ_obuf *o, const char *code, const char *fmt, ...)
+{
+	char msg[512];
+	va_list ap;
+	aik_json *obj, *s;
+
+	va_start(ap, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+	obj = aik_json_new_obj();
+	s = aik_json_new_str(msg);
+	if (!obj || !s || aik_json_obj_put(obj, "ok",
+					   aik_json_new_bool(0)) ||
+	    aik_json_obj_put(obj, "error", s)) {
+		aik_json_free(obj);
+		aik_json_free(s);
+		occ_ob_printf(o, "ERROR: task %s", msg);
+		return -1;
+	}
+	if (code && code[0] &&
+	    aik_json_obj_put(obj, "code", aik_json_new_str(code))) {
+		aik_json_free(obj);
+		occ_ob_printf(o, "ERROR: task %s", msg);
+		return -1;
+	}
+	(void)jout(o, obj);
+	aik_json_free(obj);
+	return -1;
+}
+
+static void str_arr_free(char **v, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		free(v[i]);
+	free(v);
+}
+
+/* spawn 错误码 → JSON code 串 */
+static const char *spawn_code(int rc)
+{
+	switch (rc) {
+	case OCC_ORCH_ELIMIT:		return "ELIMIT";
+	case OCC_ORCH_EBACKOFF:		return "EBACKOFF";
+	case OCC_ORCH_EFILESET:		return "EFILESET";
+	case OCC_ORCH_ESPAWN:		return "ESPAWN";
+	case OCC_ORCH_EDB:		return "EDB";
+	case OCC_ORCH_EARGS:		return "EARGS";
+	default:			return "EORCH";
+	}
+}
+
+/* heap 字符串数组 → JSON 数组（brief 列表字段组装） */
+static aik_json *arr_from_vec(char **v, size_t n)
+{
+	aik_json *arr = aik_json_new_arr();
+	size_t i;
+
+	if (!arr)
+		return NULL;
+	for (i = 0; i < n; i++) {
+		if (aik_json_arr_push(arr, aik_json_new_str(v[i]))) {
+			aik_json_free(arr);
+			return NULL;
+		}
+	}
+	return arr;
+}
+
+/* ---- task 动作体 ---- */
+
+/* brief 列表字段（fileset 之外的四个可选清单）取值+任务书渲染共用 */
+static int brief_list(const aik_json *brief, const char *key, char ***out,
+		      size_t *n, const char *label, occ_obuf *o)
+{
+	const aik_json *arr = aik_json_get(brief, key);
+	size_t i, cnt;
+	char **vec;
+
+	*out = NULL;
+	*n = 0;
+	if (!arr)
+		return 0;			/* 缺省=无该清单 */
+	if (aik_json_typeof(arr) != AIK_JSON_ARR)
+		return jerr(o, NULL, "brief.%s 须为字符串数组", label);
+	cnt = 0;
+	while (aik_json_at(arr, cnt))
+		cnt++;
+	vec = calloc(cnt ? cnt : 1, sizeof(*vec));
+	if (!vec)
+		return jerr(o, NULL, "内存不足（brief.%s 解析）", label);
+	for (i = 0; i < cnt; i++) {
+		const char *s = aik_json_str(aik_json_at(arr, i));
+
+		if (!s) {
+			str_arr_free(vec, i);
+			return jerr(o, NULL, "brief.%s 元素须为字符串", label);
+		}
+		vec[i] = strdup(s);
+		if (!vec[i]) {
+			str_arr_free(vec, i);
+			return jerr(o, NULL, "内存不足（brief.%s 解析）", label);
+		}
+	}
+	*out = vec;
+	*n = cnt;
+	return 0;
+}
+
+/* 列表 → 任务书渲染（行式） */
+static void sb_list(struct sbuf *b, char **v, size_t n, const char *empty)
+{
+	size_t i;
+
+	if (!n) {
+		sb_puts(b, empty);
+		return;
+	}
+	for (i = 0; i < n; i++)
+		sb_printf(b, " %zu. %s\n", i + 1, v[i]);
+}
+
+/* task_spawn 中间产物统一清理（fs 只清前 n_have 个——半构状态安全） */
+static void spawn_cleanup(char **forb, size_t nforb, char **deliv,
+			  size_t ndeliv, char **acc, size_t nacc,
+			  char **selfc, size_t nselfc, char **fs, size_t nfs,
+			  char *budget_txt, char *brief_txt)
+{
+	str_arr_free(forb, nforb);
+	str_arr_free(deliv, ndeliv);
+	str_arr_free(acc, nacc);
+	str_arr_free(selfc, nselfc);
+	str_arr_free(fs, nfs);
+	free(budget_txt);
+	free(brief_txt);
+}
+
+static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const aik_json *brief, *fsj, *budget;
+	const char *goal, *auth_note, *context, *s;
+	char *budget_txt = NULL, *brief_txt = NULL;
+	char **forb = NULL, **deliv = NULL, **acc = NULL, **selfc = NULL;
+	char **fs_abs = NULL;
+	size_t nfs = 0, nforb = 0, ndeliv = 0, nacc = 0, nselfc = 0;
+	size_t i, bl;
+	aik_json *bo, *sub;
+	struct sbuf prompt = { NULL, 0, 0, 0 };
+	occ_orch_spawn_opts so;
+	occ_orch_child *c = NULL;
+	char err[256], abs[4096];
+	long long rework_max = 2, wall_ms = 0;
+	int rc;
+
+	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
+	if (!brief || aik_json_typeof(brief) != AIK_JSON_OBJ)
+		return jerr(o, NULL, "spawn 缺少参数 brief（任务书对象——"
+			    "字段集：goal/fileset/forbidden/deliverables/"
+			    "acceptance/selfcheck/auth_note/budget/context/"
+			    "rework_max）");
+	goal = aik_json_str(aik_json_get(brief, "goal"));
+	if (!goal || !goal[0])
+		return jerr(o, NULL, "brief.goal 必填（目标一句话）");
+	fsj = aik_json_get(brief, "fileset");
+	if (!fsj || aik_json_typeof(fsj) != AIK_JSON_ARR)
+		return jerr(o, NULL, "brief.fileset 必填（授权文件集数组——"
+			    "独占声明，互斥依据）");
+	while (aik_json_at(fsj, nfs))
+		nfs++;
+	if (!nfs)
+		return jerr(o, NULL, "brief.fileset 不能为空数组"
+			    "（独占声明至少一个文件）");
+	auth_note = aik_json_str(aik_json_get(brief, "auth_note"));
+	context = aik_json_str(aik_json_get(brief, "context"));
+	rework_max = aik_json_int(aik_json_get(brief, "rework_max"));
+	if (rework_max == 0)
+		rework_max = OCC_TASK_REWORK_MAX_DEF;	/* R2 缺省 2 */
+	if (rework_max < 1 || rework_max > OCC_TASK_REWORK_MAX_HI)
+		return jerr(o, NULL, "brief.rework_max 越界（1-%d；缺省 %d）",
+			    OCC_TASK_REWORK_MAX_HI, OCC_TASK_REWORK_MAX_DEF);
+	budget = aik_json_get(brief, "budget");
+	if (budget) {
+		if (aik_json_typeof(budget) == AIK_JSON_OBJ) {
+			wall_ms = aik_json_int(aik_json_get(budget,
+							    "wall_ms"));
+			if (aik_json_dump(budget, &budget_txt, &bl) != 0)
+				budget_txt = NULL;
+		} else {
+			wall_ms = aik_json_int(budget);
+		}
+		if (wall_ms < 0)
+			wall_ms = 0;
+	}
+	/* 可选清单（错误即返——人话指出字段） */
+	rc = brief_list(brief, "forbidden", &forb, &nforb, "forbidden", o);
+	if (!rc)
+		rc = brief_list(brief, "deliverables", &deliv, &ndeliv,
+				"deliverables", o);
+	if (!rc)
+		rc = brief_list(brief, "acceptance", &acc, &nacc,
+				"acceptance", o);
+	if (!rc)
+		rc = brief_list(brief, "selfcheck", &selfc, &nselfc,
+				"selfcheck", o);
+	if (rc) {
+		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+			      selfc, nselfc, NULL, 0, budget_txt, NULL);
+		return -1;
+	}
+	/* 环境检查（参数校验后置——模型先拿到具体的参数错误） */
+	if (!ctx->session_id || !ctx->session_id[0]) {
+		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+			      selfc, nselfc, NULL, 0, budget_txt, NULL);
+		return jerr(o, NULL, "task spawn 需要会话上下文"
+			    "（任务要挂在主会话名下——当前工具执行无 session）");
+	}
+	if (!ctx->orch) {
+		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+			      selfc, nselfc, NULL, 0, budget_txt, NULL);
+		return jerr(o, NULL, "编排未启用（occ_tool_ctx.orch 为空或"
+			    " OCC_ORCH_TOOLS 未开）——task 工具不可用");
+	}
+	/* fileset 归一化（相对路径按工作目录→绝对；互斥登记按归一键） */
+	fs_abs = calloc(nfs, sizeof(*fs_abs));
+	if (!fs_abs) {
+		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+			      selfc, nselfc, NULL, 0, budget_txt, NULL);
+		return jerr(o, NULL, "内存不足（fileset 解析）");
+	}
+	for (i = 0; i < nfs; i++) {
+		s = aik_json_str(aik_json_at(fsj, i));
+		if (!s || !s[0] || resolve_arg_path(ctx, s, abs,
+						    sizeof(abs))) {
+			spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+				      selfc, nselfc, fs_abs, i, budget_txt,
+				      NULL);
+			return jerr(o, NULL, "brief.fileset[%zu] 路径无法解析"
+				    "：%.120s", i, s ? s : "(空)");
+		}
+		fs_abs[i] = strdup(abs);
+		if (!fs_abs[i]) {
+			spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+				      selfc, nselfc, fs_abs, i, budget_txt,
+				      NULL);
+			return jerr(o, NULL, "内存不足（fileset 拷贝）");
+		}
+	}
+
+	/* brief_json 组装（§3 拍板字段集，键序=字面序；UTF-8 JSON） */
+	bo = aik_json_new_obj();
+	if (!bo)
+		goto oom;
+	if (aik_json_obj_put(bo, "goal", aik_json_new_str(goal)))
+		goto oom;
+	sub = arr_from_vec(fs_abs, nfs);
+	if (!sub || aik_json_obj_put(bo, "fileset", sub)) {
+		aik_json_free(sub);
+		goto oom;
+	}
+	sub = arr_from_vec(forb, nforb);
+	if (!sub || aik_json_obj_put(bo, "forbidden", sub)) {
+		aik_json_free(sub);
+		goto oom;
+	}
+	sub = arr_from_vec(deliv, ndeliv);
+	if (!sub || aik_json_obj_put(bo, "deliverables", sub)) {
+		aik_json_free(sub);
+		goto oom;
+	}
+	sub = arr_from_vec(acc, nacc);
+	if (!sub || aik_json_obj_put(bo, "acceptance", sub)) {
+		aik_json_free(sub);
+		goto oom;
+	}
+	sub = arr_from_vec(selfc, nselfc);
+	if (!sub || aik_json_obj_put(bo, "selfcheck", sub)) {
+		aik_json_free(sub);
+		goto oom;
+	}
+	if ((auth_note && aik_json_obj_put(bo, "auth_note",
+					   aik_json_new_str(auth_note))) ||
+	    (budget_txt && aik_json_obj_put(bo, "budget",
+					    aik_json_new_str(budget_txt))) ||
+	    (context && aik_json_obj_put(bo, "context",
+					 aik_json_new_str(context))) ||
+	    aik_json_obj_put(bo, "rework_max",
+			     aik_json_new_int(rework_max)))
+		goto oom;
+	if (aik_json_dump(bo, &brief_txt, &bl) != 0)
+		goto oom;
+	aik_json_free(bo);
+	bo = NULL;
+
+	/* 任务书渲染（发给 `occ -p` 的指令文本；子进程另经
+	 * OCC_TASK_RESULT_FILE 收报告） */
+	sb_puts(&prompt, "【子智能体任务书（brief）】\n");
+	sb_printf(&prompt, "目标：%s\n", goal);
+	sb_puts(&prompt, "授权文件集（独占声明，只许改这些文件）：\n");
+	for (i = 0; i < nfs; i++)
+		sb_printf(&prompt, " %zu. %s\n", i + 1, fs_abs[i]);
+	sb_puts(&prompt, "禁改清单：\n");
+	sb_list(&prompt, forb, nforb, "（无）\n");
+	sb_puts(&prompt, "交付物：\n");
+	sb_list(&prompt, deliv, ndeliv, "（见验收标准）\n");
+	sb_puts(&prompt, "验收标准：\n");
+	sb_list(&prompt, acc, nacc, "（见目标与交付物）\n");
+	sb_puts(&prompt, "自检清单（完成前逐条自查）：\n");
+	sb_list(&prompt, selfc, nselfc, "（无）\n");
+	if (auth_note && auth_note[0])
+		sb_printf(&prompt, "授权说明：%s\n", auth_note);
+	if (wall_ms > 0)
+		sb_printf(&prompt, "预算：墙钟上限 %lld ms\n", wall_ms);
+	if (context && context[0])
+		sb_printf(&prompt, "必要上下文：%s\n", context);
+	sb_printf(&prompt, "回炉上限：%lld 次\n", rework_max);
+	sb_puts(&prompt, "报告要求：完成后把最终报告（结论/关键证据/自检结果）"
+		"写入环境变量 " OCC_ORCH_RESULT_ENV " 指向的文件，"
+		"并在标准输出打印一行完成摘要。\n");
+	if (prompt.oom) {
+		sb_free(&prompt);
+		goto oom_soft;
+	}
+	sb_printf(&prompt, "——brief_json 原文（机器可读）：%s\n",
+		  brief_txt ? brief_txt : "{}");
+
+	/* 派发（走 orch 闸：并发 2+退避+文件集互斥） */
+	memset(&so, 0, sizeof(so));
+	so.prompt = prompt.buf;
+	so.parent_session = ctx->session_id;
+	so.title = goal;
+	so.fileset = (const char *const *)fs_abs;
+	so.nfileset = nfs;
+	so.timeout_ms = wall_ms;
+	so.workdir = ctx->workdir;
+	rc = occ_orch_spawn((occ_orch *)ctx->orch, &so, &c, err, sizeof(err));
+	sb_free(&prompt);
+	if (rc != OCC_ORCH_OK) {
+		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+			      selfc, nselfc, fs_abs, nfs, budget_txt,
+			      brief_txt);
+		return jerr(o, spawn_code(rc), "%s", err);
+	}
+	/* 成功输出（robj/rf：fileset 数组最后挂入——失败面无双 free） */
+	{
+		aik_json *robj = aik_json_new_obj();
+		aik_json *rf = aik_json_new_arr();
+		int okk = robj && rf;
+
+		for (i = 0; okk && i < nfs; i++)
+			okk = aik_json_arr_push(rf,
+						aik_json_new_str(fs_abs[i])) == 0;
+		okk = okk &&
+		      aik_json_obj_put(robj, "ok",
+				       aik_json_new_bool(1)) == 0 &&
+		      aik_json_obj_put(robj, "action",
+				       aik_json_new_str("spawn")) == 0 &&
+		      aik_json_obj_put(robj, "task_id", aik_json_new_str(
+				occ_orch_child_task(c))) == 0 &&
+		      aik_json_obj_put(robj, "session_id", aik_json_new_str(
+				occ_orch_child_session(c))) == 0 &&
+		      aik_json_obj_put(robj, "pid", aik_json_new_int(
+				occ_orch_child_pid(c))) == 0 &&
+		      aik_json_obj_put(robj, "result_file",
+				       aik_json_new_str(occ_orch_result_path(
+					(occ_orch *)ctx->orch,
+					occ_orch_child_task(c)))) == 0 &&
+		      aik_json_obj_put(robj, "rework_max",
+				       aik_json_new_int(rework_max)) == 0;
+		if (!okk || aik_json_obj_put(robj, "fileset", rf) != 0) {
+			aik_json_free(rf);	/* 未挂入（或挂失败）才独释 */
+			aik_json_free(robj);
+			goto oom_soft;
+		}
+		{
+			int r2 = jout(o, robj);
+
+			aik_json_free(robj);
+			spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
+				      selfc, nselfc, fs_abs, nfs, budget_txt,
+				      brief_txt);
+			return r2;
+		}
+	}
+oom:
+	if (bo)
+		aik_json_free(bo);
+	sb_free(&prompt);
+oom_soft:
+	spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc, selfc, nselfc,
+		      fs_abs, nfs, budget_txt, brief_txt);
+	return jerr(o, NULL, "task spawn 组装失败（oom）");
+}
+
+static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *tid = args_str(a, "task_id");
+	occ_orch_child *c;
+	occ_task_row trow;
+	char dbuf[256];
+	aik_json *obj;
+
+	if (!tid || !tid[0])
+		return jerr(o, NULL, "status 缺少参数 task_id");
+	if (!ctx->orch || !ctx->db)
+		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
+			    "——task 工具不可用");
+	c = occ_orch_find_task((occ_orch *)ctx->orch, tid);
+	if (c) {
+		obj = aik_json_new_obj();
+		if (!obj || aik_json_obj_put(obj, "ok",
+					     aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "action",
+				     aik_json_new_str("status")) ||
+		    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+		    aik_json_obj_put(obj, "state",
+				     aik_json_new_str("running")) ||
+		    aik_json_obj_put(obj, "pid",
+				     aik_json_new_int(occ_orch_child_pid(c))) ||
+		    aik_json_obj_put(obj, "session_id",
+				     aik_json_new_str(occ_orch_child_session(c)))) {
+			aik_json_free(obj);
+			return jerr(o, NULL, "status 结果组装失败（oom）");
+		}
+		{
+			int r = jout(o, obj);
+
+			aik_json_free(obj);
+			return r;
+		}
+	}
+	{
+		int g = occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf));
+
+		if (g != 1) {
+			return jerr(o, NULL, "任务 %s 不存在（活表与任务库均无）",
+				    tid);
+		}
+		obj = aik_json_new_obj();
+		if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "action",
+				     aik_json_new_str("status")) ||
+		    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+		    aik_json_obj_put(obj, "state",
+				     aik_json_new_str(trow.status)) ||
+		    aik_json_obj_put(obj, "child_session",
+				     aik_json_new_str(trow.child_session)) ||
+		    aik_json_obj_put(obj, "rework_count",
+				     aik_json_new_int(trow.rework_count)) ||
+		    aik_json_obj_put(obj, "rework_max",
+				     aik_json_new_int(trow.rework_max))) {
+			occ_task_row_free(&trow);
+			aik_json_free(obj);
+			return jerr(o, NULL, "status 结果组装失败（oom）");
+		}
+		{
+			int r = jout(o, obj);
+
+			aik_json_free(obj);
+			occ_task_row_free(&trow);
+			return r;
+		}
+	}
+}
+
+static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *tid = args_str(a, "task_id");
+	long long tmo = args_int(a, "timeout_ms", 2000);
+	long long t0, elapsed;
+	occ_orch_child *c;
+	occ_orch_result r;
+	occ_task_row trow;
+	char dbuf[256];
+	aik_json *obj;
+
+	if (!tid || !tid[0])
+		return jerr(o, NULL, "wait 缺少参数 task_id");
+	if (tmo < 100)
+		tmo = 100;
+	if (tmo > 30000)
+		tmo = 30000;			/* 主进程不死等 */
+	if (!ctx->orch || !ctx->db)
+		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
+			    "——task 工具不可用");
+	c = occ_orch_find_task((occ_orch *)ctx->orch, tid);
+	if (c) {
+		int done = 0;
+
+		t0 = occ_monotonic_ms();
+		while (occ_monotonic_ms() - t0 < tmo) {
+			if (occ_orch_poll(c, &r) == 1) {
+				done = 1;
+				break;
+			}
+			{
+				struct timespec ts = { 0, 20 * 1000 * 1000 };
+
+				nanosleep(&ts, NULL);
+			}
+		}
+		elapsed = occ_monotonic_ms() - t0;
+		if (!done) {
+			obj = aik_json_new_obj();
+			if (!obj || aik_json_obj_put(obj, "ok",
+						     aik_json_new_bool(1)) ||
+			    aik_json_obj_put(obj, "action",
+					     aik_json_new_str("wait")) ||
+			    aik_json_obj_put(obj, "task_id",
+					     aik_json_new_str(tid)) ||
+			    aik_json_obj_put(obj, "done",
+					     aik_json_new_bool(0)) ||
+			    aik_json_obj_put(obj, "pid",
+					     aik_json_new_int(
+						occ_orch_child_pid(c))) ||
+			    aik_json_obj_put(obj, "waited_ms",
+					     aik_json_new_int(elapsed))) {
+				aik_json_free(obj);
+				return jerr(o, NULL, "wait 结果组装失败（oom）");
+			}
+			{
+				int rr = jout(o, obj);
+
+				aik_json_free(obj);
+				return rr;
+			}
+		}
+		/* 终局：终局摘要 + 任务面落点 */
+		{
+			const char *ts = "in_review";
+
+			if (occ_task_get(ctx->db, tid, &trow, dbuf,
+					 sizeof(dbuf)) == 1) {
+				snprintf(dbuf, sizeof(dbuf), "%s", trow.status);
+				ts = dbuf;
+				occ_task_row_free(&trow);
+			}
+			obj = aik_json_new_obj();
+			if (!obj ||
+			    aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+			    aik_json_obj_put(obj, "action",
+					     aik_json_new_str("wait")) ||
+			    aik_json_obj_put(obj, "task_id",
+					     aik_json_new_str(tid)) ||
+			    aik_json_obj_put(obj, "done",
+					     aik_json_new_bool(1)) ||
+			    aik_json_obj_put(obj, "end", aik_json_new_str(
+					r.end == OCC_ORCH_END_EXIT ? "exit" :
+					r.end == OCC_ORCH_END_SIGNAL ? "signal" :
+					r.end == OCC_ORCH_END_CANCELLED ?
+					"cancelled" : "timeout")) ||
+			    aik_json_obj_put(obj, "exit_code",
+					     aik_json_new_int(r.exit_code)) ||
+			    aik_json_obj_put(obj, "dur_ms",
+					     aik_json_new_int(r.dur_ms)) ||
+			    aik_json_obj_put(obj, "reviewed",
+					     aik_json_new_bool(r.reviewed)) ||
+			    aik_json_obj_put(obj, "task_state",
+					     aik_json_new_str(ts))) {
+				aik_json_free(obj);
+				occ_orch_result_free(&r);
+				return jerr(o, NULL, "wait 结果组装失败（oom）");
+			}
+			{
+				int rr = jout(o, obj);
+
+				aik_json_free(obj);
+				occ_orch_result_free(&r);
+				return rr;
+			}
+		}
+	}
+	/* 不在活表：查任务面（已终局）或不存在 */
+	{
+		int g = occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf));
+
+		if (g != 1)
+			return jerr(o, NULL, "任务 %s 不存在（活表与任务库均无）",
+				    tid);
+		obj = aik_json_new_obj();
+		if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "action",
+				     aik_json_new_str("wait")) ||
+		    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+		    aik_json_obj_put(obj, "done", aik_json_new_bool(1)) ||
+		    aik_json_obj_put(obj, "task_state",
+				     aik_json_new_str(trow.status))) {
+			occ_task_row_free(&trow);
+			aik_json_free(obj);
+			return jerr(o, NULL, "wait 结果组装失败（oom）");
+		}
+		{
+			int rr = jout(o, obj);
+
+			aik_json_free(obj);
+			occ_task_row_free(&trow);
+			return rr;
+		}
+	}
+}
+
+static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
+			    occ_obuf *o)
+{
+	const char *tid = args_str(a, "task_id");
+	const char *rp;
+	char *report = NULL;
+	occ_task_row trow;
+	occ_task_event_row *evs = NULL;
+	size_t nevs = 0, i;
+	const char *last_payload = NULL;
+	char dbuf[256];
+	aik_json *obj;
+
+	if (!tid || !tid[0])
+		return jerr(o, NULL, "read_result 缺少参数 task_id");
+	if (!ctx->orch || !ctx->db)
+		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
+			    "——task 工具不可用");
+	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1)
+		return jerr(o, NULL, "任务 %s 不存在", tid);
+	/* 结果文件（运行时注册表——进程生命期内有效） */
+	rp = occ_orch_result_path((occ_orch *)ctx->orch, tid);
+	if (rp && rp[0])
+		report = read_file_head(rp, 4096);
+	/* 终局 result 事件摘要（E2 collect 落的 end/exit_code/stdout_path） */
+	if (occ_task_events(ctx->db, tid, &evs, &nevs, NULL, 0) == 0) {
+		for (i = 0; i < nevs; i++)
+			if (!strcmp(evs[i].kind, OCC_TASK_EV_RESULT) &&
+			    evs[i].payload_json)
+				last_payload = evs[i].payload_json;
+	}
+	obj = aik_json_new_obj();
+	if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+	    aik_json_obj_put(obj, "action",
+			     aik_json_new_str("read_result")) ||
+	    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+	    aik_json_obj_put(obj, "task_state",
+			     aik_json_new_str(trow.status)) ||
+	    aik_json_obj_put(obj, "result_file",
+			     rp && rp[0] ? aik_json_new_str(rp) :
+					   aik_json_new_null()) ||
+	    aik_json_obj_put(obj, "report",
+			     report ? aik_json_new_str(report) :
+				      aik_json_new_null()) ||
+	    aik_json_obj_put(obj, "result_event",
+			     last_payload ? aik_json_new_str(last_payload) :
+					    aik_json_new_null())) {
+		occ_task_row_free(&trow);
+		occ_task_event_rows_free(evs, nevs);
+		aik_json_free(obj);
+		free(report);
+		return jerr(o, NULL, "read_result 结果组装失败（oom）");
+	}
+	{
+		int r = jout(o, obj);
+
+		aik_json_free(obj);
+		occ_task_row_free(&trow);
+		occ_task_event_rows_free(evs, nevs);
+		free(report);
+		return r;
+	}
+}
+
+static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *tid = args_str(a, "task_id");
+	const char *verdict = args_str(a, "verdict");
+	char dbuf[256];
+	aik_json *pj, *obj;
+
+	if (!tid || !tid[0])
+		return jerr(o, NULL, "return 缺少参数 task_id");
+	if (!verdict || !verdict[0])
+		return jerr(o, NULL, "return 缺少参数 verdict"
+			    "（对结果的表态：通过与否/差距/依据）");
+	if (!ctx->orch || !ctx->db)
+		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
+			    "——task 工具不可用");
+	/* 事件 payload：{"action":"return","verdict":…}（E4 verdict 通道
+	 * 接入前的最小承载——只记事件不动状态机） */
+	pj = aik_json_new_obj();
+	if (!pj || aik_json_obj_put(pj, "action",
+				    aik_json_new_str("return")) ||
+	    aik_json_obj_put(pj, "verdict", aik_json_new_str(verdict))) {
+		aik_json_free(pj);
+		return jerr(o, NULL, "return 事件组装失败（oom）");
+	}
+	{
+		char *txt = NULL;
+		size_t tl = 0;
+		int rc;
+
+		if (aik_json_dump(pj, &txt, &tl) != 0 || !txt) {
+			aik_json_free(pj);
+			return jerr(o, NULL, "return 事件组装失败（oom）");
+		}
+		aik_json_free(pj);
+		rc = occ_task_note(ctx->db, tid, txt, dbuf, sizeof(dbuf));
+		free(txt);
+		if (rc != 0)
+			return jerr(o, NULL, "return 记录失败：%s",
+				    dbuf[0] ? dbuf : "任务不存在或库错");
+	}
+	obj = aik_json_new_obj();
+	if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
+	    aik_json_obj_put(obj, "action",
+			     aik_json_new_str("return")) ||
+	    aik_json_obj_put(obj, "task_id", aik_json_new_str(tid)) ||
+	    aik_json_obj_put(obj, "event", aik_json_new_str("return")) ||
+	    aik_json_obj_put(obj, "recorded", aik_json_new_bool(1))) {
+		aik_json_free(obj);
+		return jerr(o, NULL, "return 结果组装失败（oom）");
+	}
+	{
+		int r = jout(o, obj);
+
+		aik_json_free(obj);
+		return r;
+	}
+}
+
+static int tool_task(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *action;
+
+	if (a->bad)
+		return jerr(o, NULL, "task 参数不是合法 JSON"
+			    "（拒绝执行——请给出合法 JSON 参数）");
+	action = args_str(a, "action");
+	if (!action || !action[0])
+		return jerr(o, NULL, "task 缺少参数 action"
+			    "（spawn/status/wait/read_result/return）");
+	if (!strcmp(action, "spawn"))
+		return task_spawn(ctx, a, o);
+	if (!strcmp(action, "status"))
+		return task_status(ctx, a, o);
+	if (!strcmp(action, "wait"))
+		return task_wait(ctx, a, o);
+	if (!strcmp(action, "read_result"))
+		return task_read_result(ctx, a, o);
+	if (!strcmp(action, "return"))
+		return task_return(ctx, a, o);
+	return jerr(o, NULL, "未知 action「%s」"
+		    "（可用：spawn/status/wait/read_result/return）", action);
+}
+
 /* ---- 快照 stage ---- */
 
 /*
@@ -1320,9 +2233,20 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		rc = tool_grep(&c, &a, &o);
 	} else if (!strcmp(name, OCC_T_BASH)) {
 		rc = tool_bash(&c, &a, &o);
+	} else if (!strcmp(name, OCC_T_TASK)) {
+		/* E3 第七工具：开关关=未知工具面（清单不含 task）；
+		 * 开=五动作（内部再校验 ctx->orch） */
+		if (!occ_orch_tools_enabled()) {
+			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
+				      "read/write/edit/glob/grep/bash）", name);
+			rc = -1;
+		} else {
+			rc = tool_task(&c, &a, &o);
+		}
 	} else {
 		occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用：read/write/"
-			      "edit/glob/grep/bash）", name);
+			      "edit/glob/grep/bash%s）", name,
+			      occ_orch_tools_enabled() ? "/task" : "");
 		rc = -1;
 	}
 	args_free(&a);

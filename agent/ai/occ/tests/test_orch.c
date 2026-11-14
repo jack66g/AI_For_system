@@ -11,6 +11,13 @@
  *      只断目标子（另一路在取消期间存活）；取消后进程表零残留
  *      （kill 0=ESRCH + waitpid=ECHILD + 进程组探零）。
  *   C) 超时：per-任务 deadline→取消同路径（TIMEOUT+TERM/KILL 段）。
+ *   G) E3 文件集互斥：登记前无冲突；声明占用（含公共文件撞车检出+
+ *      持有者回填）；并发第二任务声明同文件 spawn 即拒（EFILESET）；
+ *      不同文件放行；取消/正常终局自动注销（同集可再声明）。
+ *   H) E3 task 第七工具五动作全链（OCC_ORCH_TOOLS=1 打开态演练）：
+ *      spawn（brief 组装+结果文件 env 通道）→wait 限时终局→status
+ *      （DB 读回 in_review）→read_result（报告=结果文件内容）→
+ *      return（记入任务事件）；工具面互斥（ok:false+EFILESET）。
  *   D) 并发闸：上限 2 第三路立即拒绝（ELIMIT）+30s 退避窗（EBACKOFF；
  *      窗内槽位空也拒；窗满自动复位——测试用短窗 400ms 覆写）。
  *   E) B2 并发写库压测（两腿，报告落 tests/orch_b2_report.txt）：
@@ -55,6 +62,7 @@
 #include <sqlite3.h>
 
 #include "occ_core/orch.h"
+#include "occ_tools/occ_tools.h"	/* E3：task 工具全链演练 */
 
 static int n_fail;
 static int n_ok;
@@ -220,6 +228,32 @@ static int sim_main(int argc, char **argv)
 
 		printf("SIM-ENV %s=%s\n", prompt + 8, v ? v : "(null)");
 		return 0;
+	}
+	/* E3：结果文件 env 通道演练——任务书正文内嵌「sim:report <报告>」
+	 * 标记：把报告写往 OCC_TASK_RESULT_FILE 并打印摘要行 */
+	{
+		const char *mark = strstr(prompt, "sim:report ");
+
+		if (mark) {
+			const char *rf = getenv(OCC_ORCH_RESULT_ENV);
+			const char *body = mark + strlen("sim:report ");
+			char *nlp = strchr(body, '\n');
+
+			if (rf && rf[0]) {
+				FILE *f = fopen(rf, "w");
+
+				if (f) {
+					fprintf(f, "%.*s\n",
+						nlp ? (int)(nlp - body) :
+						      (int)strlen(body), body);
+					fclose(f);
+				}
+				printf("SIM-REPORT file=%s\n", rf);
+			} else {
+				printf("SIM-REPORT nofile\n");
+			}
+			return 0;
+		}
 	}
 	printf("SIM-OK sid=%s\n", sid);		/* sim:ok 及缺省 */
 	return 0;
@@ -1012,6 +1046,234 @@ static int unit_main(void)
 		OK(r.end == OCC_ORCH_END_TIMEOUT && r.signal == SIGKILL,
 		   "c2-timeout-kill-stage");
 		occ_orch_result_free(&r);
+	}
+
+	/* ===== G E3：文件集互斥（运行时登记+冲突拒绝+终局注销） ===== */
+	{
+		occ_orch_spawn_opts opts;
+		occ_orch_child *ga = NULL, *gb = NULL;
+		char owner[OCC_ID_LEN];
+		char outg[192];
+		const char *fsa[2] = { "/tmp/occ_fsx_g1.c",
+				       "/tmp/occ_fsx_common.h" };
+		const char *fsb[2] = { "/tmp/occ_fsx_g2.c",
+				       "/tmp/occ_fsx_common.h" };
+		const char *fsc[1] = { "/tmp/occ_fsx_g3.c" };
+
+		snprintf(outg, sizeof(outg), "%s/g_hang.out", tmpdir);
+		OK(occ_orch_fileset_conflict(g_o, fsa, 2, owner,
+					     sizeof(owner)) == 0,
+		   "g-pre-no-conflict");
+		/* 声明占用：hang 子进程持有 fsa（含公共文件） */
+		memset(&opts, 0, sizeof(opts));
+		opts.prompt = "sim:hang 30";
+		opts.parent_session = g_psid;
+		opts.occ_bin = self_bin;
+		opts.env = g_sim_env;
+		opts.fileset = fsa;
+		opts.nfileset = 2;
+		opts.stdout_path = outg;
+		OK(occ_orch_spawn(g_o, &opts, &ga, err, sizeof(err)) ==
+		   OCC_ORCH_OK, "g-spawn-hold");
+		if (ga) {
+			OK(wait_marker(outg, "SIM-HANG-READY", 10000) == 0,
+			   "g-ready");
+			/* API 面：撞车检出+持有者回填 */
+			OK(occ_orch_fileset_conflict(g_o, fsb, 2, owner,
+						     sizeof(owner)) == 1 &&
+			   owner[0] == 't', "g-conflict-api");
+			/* 并发第二个任务声明同文件 = spawn 拒绝（EFILESET） */
+			memset(&opts, 0, sizeof(opts));
+			opts.prompt = "sim:ok";
+			opts.parent_session = g_psid;
+			opts.occ_bin = self_bin;
+			opts.env = g_sim_env;
+			opts.fileset = fsb;
+			opts.nfileset = 2;
+			OK(occ_orch_spawn(g_o, &opts, &gb, err,
+					  sizeof(err)) == OCC_ORCH_EFILESET,
+			   "g-second-rejected");
+			OK(gb == NULL && strstr(err, "独占"), "g-reject-msg");
+			/* 不同文件不冲突 */
+			opts.fileset = fsc;
+			opts.nfileset = 1;
+			OK(occ_orch_spawn(g_o, &opts, &gb, err,
+					  sizeof(err)) == OCC_ORCH_OK,
+			   "g-distinct-ok");
+			if (gb) {
+				occ_orch_wait(gb, &r, err, sizeof(err));
+				occ_orch_result_free(&r);
+				gb = NULL;
+			}
+			/* 取消（终局）自动注销 → fsa 可再声明 */
+			OK(occ_orch_cancel(ga, &r, err, sizeof(err)) == 0,
+			   "g-cancel");
+			occ_orch_result_free(&r);
+			ga = NULL;
+			OK(occ_orch_fileset_conflict(g_o, fsa, 2, owner,
+						     sizeof(owner)) == 0,
+			   "g-released-after-cancel");
+			/* 正常终局路径注销：再 spawn fsa（sim:ok 即退）→
+			 * wait 收口 → 第三次 spawn 同集仍应成功 */
+			memset(&opts, 0, sizeof(opts));
+			opts.prompt = "sim:ok";
+			opts.parent_session = g_psid;
+			opts.occ_bin = self_bin;
+			opts.env = g_sim_env;
+			opts.fileset = fsa;
+			opts.nfileset = 2;
+			OK(occ_orch_spawn(g_o, &opts, &ga, err,
+					  sizeof(err)) == OCC_ORCH_OK,
+			   "g-respawn-same-fileset");
+			if (ga) {
+				occ_orch_wait(ga, &r, err, sizeof(err));
+				occ_orch_result_free(&r);
+				ga = NULL;
+				OK(occ_orch_fileset_conflict(g_o, fsa, 2,
+							     owner,
+							     sizeof(owner)) ==
+				   0, "g-released-after-exit");
+			}
+		} else {
+			printf("FAIL g-ready-sync\n");
+			n_fail++;
+		}
+	}
+
+	/* ===== H E3：task 第七工具五动作全链（sim 子进程；OCC_ORCH_TOOLS
+	 * 开关打开态演练——spawn→wait→status→read_result→return） ===== */
+	{
+		occ_tool_ctx tc;
+		occ_tool_result tr;
+		char args[1600];
+		char tid[OCC_ID_LEN] = "";
+		occ_orch_child *hc = NULL;
+		occ_orch_spawn_opts ho;
+		const char *fsh[1] = { "/tmp/occ_fsx_h_zz.c" };
+		const char *q, *body;
+		char *e;
+
+		setenv("OCC_ORCH_TOOLS", "1", 1);
+		setenv("OCC_ORCH_BIN", self_bin, 1);	/* 子进程=本 sim */
+		setenv("OCC_ORCH_SIM", "1", 1);		/* 分发键随 env 继承 */
+		memset(&tc, 0, sizeof(tc));
+		tc.db = g_db;
+		tc.session_id = g_psid;
+		tc.workdir = tmpdir;
+		tc.orch = g_o;
+		memset(&tr, 0, sizeof(tr));
+
+		/* H1 spawn：brief 组装→派发（goal 内嵌 sim:report 触发词） */
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"spawn\",\"brief\":{\"goal\":"
+			 "\"sim:report 子任务完成：目标达成，证据完整\","
+			 "\"fileset\":[\"h_t1.c\"],\"forbidden\":[\"Makefile\"],"
+			 "\"acceptance\":[\"exit=0\"],\"rework_max\":2}}");
+		OK(occ_tool_exec(&tc, "task", "call_h1", args, &tr) == 0 &&
+		   tr.text && strstr(tr.text, "\"ok\":true") &&
+		   strstr(tr.text, "\"action\":\"spawn\"") &&
+		   strstr(tr.text, "\"task_id\":\"tsk_") &&
+		   strstr(tr.text, "\"result_file\":\"/tmp/") &&
+		   strstr(tr.text, "\"rework_max\":2"), "h1-tool-spawn");
+		if (tr.text) {
+			q = strstr(tr.text, "\"task_id\":\"");
+			if (q) {
+				q += strlen("\"task_id\":\"");
+				e = strchr(q, '"');
+				if (e && (size_t)(e - q) < sizeof(tid)) {
+					memcpy(tid, q, (size_t)(e - q));
+					tid[e - q] = '\0';
+				}
+			}
+		}
+		OK(tid[0] == 't', "h1-tid-extracted");
+		occ_tool_result_free(&tr);
+
+		/* H2 wait：限时等终局（sim:report 写结果文件后即退） */
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"wait\",\"task_id\":\"%s\","
+			 "\"timeout_ms\":15000}", tid);
+		OK(occ_tool_exec(&tc, "task", "call_h2", args, &tr) == 0 &&
+		   tr.text && strstr(tr.text, "\"done\":true") &&
+		   strstr(tr.text, "\"end\":\"exit\"") &&
+		   strstr(tr.text, "\"exit_code\":0") &&
+		   strstr(tr.text, "\"task_state\":\"in_review\""),
+		   "h2-tool-wait");
+		occ_tool_result_free(&tr);
+
+		/* H3 status：出活表后 DB 读回 in_review */
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"status\",\"task_id\":\"%s\"}", tid);
+		OK(occ_tool_exec(&tc, "task", "call_h3", args, &tr) == 0 &&
+		   tr.text && strstr(tr.text, "\"state\":\"in_review\"") &&
+		   strstr(tr.text, "\"rework_max\":2"), "h3-tool-status");
+		occ_tool_result_free(&tr);
+
+		/* H4 read_result：报告=结果文件内容（env 通道闭环） */
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"read_result\",\"task_id\":\"%s\"}",
+			 tid);
+		OK(occ_tool_exec(&tc, "task", "call_h4", args, &tr) == 0 &&
+		   tr.text && strstr(tr.text, "目标达成") &&
+		   strstr(tr.text, "\"result_event\":") &&
+		   strstr(tr.text, "\"task_state\":\"in_review\""),
+		   "h4-tool-read-result");
+		body = tr.text;
+		(void)body;
+		printf("drill task read_result: %.360s\n",
+		       tr.text ? tr.text : "(null)");
+		occ_tool_result_free(&tr);
+
+		/* H5 return：表态记入任务事件（最小实现；E4 接 verdict） */
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"return\",\"task_id\":\"%s\","
+			 "\"verdict\":\"认可：exit=0，报告完整达标\"}", tid);
+		OK(occ_tool_exec(&tc, "task", "call_h5", args, &tr) == 0 &&
+		   tr.text && strstr(tr.text, "\"recorded\":true"),
+		   "h5-tool-return");
+		occ_tool_result_free(&tr);
+		{
+			occ_task_event_row *evs = NULL;
+			size_t nevs = 0, k;
+			int found = 0;
+
+			if (occ_task_events(g_db, tid, &evs, &nevs, NULL,
+					    0) == 0) {
+				for (k = 0; k < nevs; k++)
+					if (!strcmp(evs[k].kind,
+						    OCC_TASK_EV_RETURN))
+						found = 1;
+				occ_task_event_rows_free(evs, nevs);
+			}
+			OK(found, "h5-return-event-in-db");
+		}
+
+		/* H6 工具面互斥：一路 hang 持有 /tmp/occ_fsx_h_zz.c →
+		 * task spawn 声明同文件 → 结构化 EFILESET 拒绝 */
+		memset(&ho, 0, sizeof(ho));
+		ho.prompt = "sim:hang 30";
+		ho.parent_session = g_psid;
+		ho.occ_bin = self_bin;
+		ho.env = g_sim_env;
+		ho.fileset = fsh;
+		ho.nfileset = 1;
+		OK(occ_orch_spawn(g_o, &ho, &hc, err, sizeof(err)) ==
+		   OCC_ORCH_OK, "h6-fsx-hold");
+		snprintf(args, sizeof(args),
+			 "{\"action\":\"spawn\",\"brief\":{\"goal\":"
+			 "\"撞互斥的第二个任务\",\"fileset\":"
+			 "[\"/tmp/occ_fsx_h_zz.c\"]}}");
+		OK(occ_tool_exec(&tc, "task", "call_h6", args, &tr) != 0 &&
+		   tr.text && strstr(tr.text, "\"ok\":false") &&
+		   strstr(tr.text, "EFILESET"), "h6-tool-fsx-reject");
+		occ_tool_result_free(&tr);
+		if (hc) {
+			occ_orch_cancel(hc, &r, err, sizeof(err));
+			occ_orch_result_free(&r);
+		}
+		unsetenv("OCC_ORCH_TOOLS");
+		unsetenv("OCC_ORCH_BIN");
+		unsetenv("OCC_ORCH_SIM");
 	}
 
 	/* ===== E/F B2 压测 + WAL 读回 ===== */

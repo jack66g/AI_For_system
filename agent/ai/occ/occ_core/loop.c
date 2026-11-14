@@ -37,6 +37,9 @@
 #include "occ_sysprompt.h"
 #include "occ_tools/occ_tools.h"
 
+/* E3 主从编排：判级提示段开关 + task 工具执行面（occ_tool_ctx.orch） */
+#include "orch.h"
+
 /* T9d 外部绑定：SME 注入/写回 + ac transcript/轮询/换窗（§8/§9） */
 #include "occ_ac.h"
 #include "occ_sme.h"
@@ -60,6 +63,65 @@ const char OCC_SYSTEM_PROMPT[] =
 	"错时读取错误信息修正后重试或如实报告。bash 在 aik-sandbox 隔离区"
 	"内执行：工作目录已读写挂入，宿主其余路径不可见。\n"
 	"4. 会话历史完整保留，可引用此前内容与工具结果。";
+
+/*
+ * E3 编排段（ORCH-DESIGN §1/§3——L0/L1/L2 判级提示段 + task 工具
+ * 使用规范）。OCC_ORCH_TOOLS=1 时并入系统提示尾部；默认关=系统提示
+ * 零变化（差分/p-smoke 红线）。分级依据字段照 §3（brief 字段集）。
+ */
+static const char OCC_ORCH_PROMPT[] =
+	"5. 主从编排——先用判级规则决定亲自做还是派发，再行动：\n"
+	"   - L0（一两句直接答）：无需工具无需派发，直接回复。\n"
+	"   - L1（小事亲做）：读一两个文件或跑一两条命令即可完成——亲自用"
+	"上述工具完成，不派发。\n"
+	"   - L2（派发）：其余执行类任务——用 task 工具建任务并派发子智能"
+	"体执行，等待终局、读回结果、表态验收。\n"
+	"   判级规则：派发开销与亲自开销自估——任务书组装+验收成本大于亲做"
+	"成本则降级亲做。判级是内部约定，不要向用户复述判级过程。\n"
+	"   task 工具五动作：spawn（提交 brief 派发；字段集=goal/fileset/"
+	"forbidden/deliverables/acceptance/selfcheck/auth_note/budget/"
+	"context/rework_max，其中 goal 与非空 fileset 必填，fileset 为独占"
+	"声明——并发任务声明同一文件会被拒绝）；status 查任务状态；wait "
+	"限时等待终局（到点未终局如实返回未终局，可再等）；read_result 读"
+	"子报告与终局摘要；return 对结果表态（记入任务事件）。派发后用 "
+	"wait+read_result 催收，不要对同一目标反复 spawn。";
+
+/* E3：编排段取值（开关开=段文本；关=NULL——compose_sys_prompt 消费） */
+static const char *orch_prompt_segment(void)
+{
+	return occ_orch_tools_enabled() ? OCC_ORCH_PROMPT : NULL;
+}
+
+/*
+ * E3：系统提示合成——OCC_SYSTEM_PROMPT + 可选编排段 + 可选〈记忆〉块
+ * （两段间空行分隔）。两段皆无 → 返回 OCC_SYSTEM_PROMPT 原文（默认
+ * 路径零变化）。返回静态 heap 缓冲（单线程合同；SME cached 同款先例，
+ * 下次调用覆盖）；oom 退默认原文（不炸环）。
+ */
+static const char *compose_sys_prompt(const char *mem_blk)
+{
+	const char *seg = orch_prompt_segment();
+	static char *buf;
+
+	if (!seg && !mem_blk)
+		return OCC_SYSTEM_PROMPT;
+	free(buf);
+	buf = malloc(strlen(OCC_SYSTEM_PROMPT) +
+		     (seg ? strlen(seg) + 2 : 0) +
+		     (mem_blk ? strlen(mem_blk) + 2 : 0) + 1);
+	if (!buf)
+		return OCC_SYSTEM_PROMPT;
+	strcpy(buf, OCC_SYSTEM_PROMPT);
+	if (seg) {
+		strcat(buf, "\n\n");
+		strcat(buf, seg);
+	}
+	if (mem_blk) {
+		strcat(buf, "\n\n");
+		strcat(buf, mem_blk);
+	}
+	return buf;
+}
 
 /* ---- 步数/续跑上限（PLAN §6） ---- */
 #define OCC_LOOP_MAX_STEPS 24
@@ -607,6 +669,7 @@ static size_t exec_pending(occ_db *db, const char *sess_id,
 	tc.session_id = sess_id;
 	tc.msg_id = asst_msg_id;
 	tc.timeout_ms = 0;			/* 缺省（env 可配） */
+	tc.orch = opts ? opts->orch : NULL;	/* E3：task 工具执行面 */
 	if (opts && opts->workdir && opts->workdir[0]) {
 		tc.workdir = opts->workdir;
 	} else if (getcwd(cwd, sizeof(cwd))) {
@@ -692,10 +755,12 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 	const occ_tool_def *tdefs;
 	size_t ntools = 0;
 	/* T9d 绑定：SME 注入块 + system prompt 合成 + ac 轮询门 */
-	char sysbuf[16384];
 	const char *sys_prompt = OCC_SYSTEM_PROMPT;
 	int bind = 0;
 	char *mem_blk = NULL;			/* SME 注入块（heap） */
+	/* T9d SME 缓存提升至函数级（E3 compose_sys_prompt 统一消费） */
+	static char cached[8192];
+	static char cached_sid[OCC_ID_LEN];
 	static time_t g_ac_reported;
 
 	memset(&ctx, 0, sizeof(ctx));		/* goto out 清理路径安全 */
@@ -764,11 +829,10 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 		 * 消息 + 会话名，top_k=8，tag 过滤 occ/user），命中段落以
 		 * `〈记忆〉` 块并进 system prompt。每进程每会话至多一次
 		 * （成功才缓存；失败下轮重试——服务晚起可被接上）。
+		 * E3：合成统一走 compose_sys_prompt（原文+编排段+记忆块；
+		 * 两段皆无=原文——默认路径字节零变化）。
 		 */
 		if (bind && occ_sme_enabled()) {
-			static char cached[8192];
-			static char cached_sid[OCC_ID_LEN];
-
 			if (!cached[0] || strcmp(cached_sid, sess.id) != 0) {
 				char q[640];
 
@@ -785,17 +849,12 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 					mem_blk = NULL;
 				}
 			}
-			if (cached[0] && !strcmp(cached_sid, sess.id)) {
-				/* 定精度：避免 format-truncation 误报，且
-				 * 两段都不会被截（prompt <1k、块 <9k） */
-				snprintf(sysbuf, sizeof(sysbuf),
-					 "%.1000s\n\n%.15000s",
-					 OCC_SYSTEM_PROMPT, cached);
-				sys_prompt = sysbuf;
-			}
 			emit_state_once(opts, occ_sme_status(), g_sme_seen,
 					sizeof(g_sme_seen));
 		}
+		sys_prompt = compose_sys_prompt(
+			cached[0] && !strcmp(cached_sid, sess.id) ? cached :
+								   NULL);
 		/* 用户重发即认（OCD §7.3 提交语义）：撤销落地，此后不可
 		 * 再 redo（stage 行与 _redo 段清除，注记已折叠留档）。 */
 		occ_revert_commit(db, sess.id, NULL);

@@ -25,6 +25,12 @@
  * 自执行）。LLM 请求的 tools 定义由 occ_tool_defs() 提供（a1 构造器
  * 双协议序列化：openai function.parameters / anthropic input_schema）。
  *
+ * E3 第七工具 task（ORCH-DESIGN §3/R1——工具层，非运行时直调）：
+ *   五动作 spawn/status/wait/read_result/return；OCC_ORCH_TOOLS=1
+ *   才注册（默认关——默认路径 LLM 请求字节零变化，差分/p-smoke 红线）；
+ *   执行面=occ_core/orch.c 运行时（经 occ_tool_ctx.orch 注入）。
+ *   工具返回一律结构化 JSON 文本（模型可读）。
+ *
  * 环境覆盖（产品配置，非测试后门；与 OCC_DB 同族）：
  *   OCC_SNAPROOT       快照根（缺省 ~/.occ/snapshots）
  *   OCC_TRACE_DIR      trace 目录（缺省 ~/.occ/trace）
@@ -49,6 +55,9 @@
 #define OCC_T_GLOB  "glob"
 #define OCC_T_GREP  "grep"
 #define OCC_T_BASH  "bash"
+#define OCC_T_TASK  "task"			/* E3：第七工具
+						 * （OCC_ORCH_TOOLS=1
+						 * 才注册） */
 
 /* 结果文本化截断上限（任务书：8KB） */
 #define OCC_TOOL_OUT_MAX 8192
@@ -59,20 +68,27 @@
 /*
  * 六件套 tools 定义（name/description/parameters JSON Schema 文本）。
  * 返回静态数组；*n 恒 6。直接喂 occ_llm_req.tools。
+ * E3：OCC_ORCH_TOOLS=1 时返回 7 件（尾部追加 task——判级/派发协议
+ * 见 orch.h；默认关，差分红线路径恒 6 件）。
  */
 const occ_tool_def *occ_tool_defs(size_t *n);
 int occ_tool_is_known(const char *name);
 
 /* ---- 执行上下文 ---- */
+struct occ_orch;			/* 前向（occ_core/orch.h；避免头环） */
 typedef struct occ_tool_ctx {
 	occ_db *db;			/* 可 NULL（无 durable 落库需求时） */
-	const char *session_id;		/* ses_…（trace/快照路径） */
+	const char *session_id;		/* ses_…（trace/快照路径；task
+					 * 工具 spawn 的 parent） */
 	const char *msg_id;		/* 携带该 toolCall 的 assistant msg */
 	const char *workdir;		/* 工作目录（glob/bash rw 面）；
 					 * NULL=getcwd */
 	const char *snaproot;		/* NULL=OCC_SNAPROOT/~/.occ/snapshots */
 	const char *trace_dir;		/* NULL=OCC_TRACE_DIR/~/.occ/trace */
 	long long timeout_ms;		/* 0=缺省 OCC_TOOL_TIMEOUT_DEF_MS */
+	struct occ_orch *orch;		/* E3：编排运行时（task 工具执行
+					 * 面；NULL=编排未启用——task
+					 * 调用返回结构化人话错误） */
 } occ_tool_ctx;
 
 /* ---- 执行结果 ---- */

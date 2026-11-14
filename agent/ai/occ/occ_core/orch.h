@@ -38,8 +38,24 @@
  *     留 dispatched 可审计，§10 风险 3）
  *
  * 线程合同：非线程安全（occ 主环单线程调用；R4 进程隔离后无需加锁）。
- * 链接面：只依赖 session.o/task.o（E1 底座）；尚未链入 occ 主程序
- * （E3 Task 工具接线），headless `occ -p` 协议零变化。
+ * 链接面：只依赖 session.o/task.o（E1 底座）；E3 起经 occ_tool_ctx.orch
+ * 接入主程序（occ.c 进程级实例），headless `occ -p` 协议零变化。
+ *
+ * E3 追加（§8 棒 E3——Task 工具+派发协议）：
+ *  - occ_orch_tools_enabled：OCC_ORCH_TOOLS 总闸（默认关——第七工具
+ *    task 与判级提示段仅在开关打开时注册/注入；默认路径 LLM 请求字节
+ *    零变化，差分 62/62 与 p-smoke 红线不动）。
+ *  - 文件集互斥（§3 拍板 7 独占声明）：spawn 携带 fileset（绝对路径
+ *    数组）→ 并发闸之后、任务面建行之前查登记表，与在跑任务声明撞车
+ *    即 OCC_ORCH_EFILESET 拒绝（任务面未动，干净拒绝）；spawn 成功即
+ *    登记，任务终局（poll/wait/cancel 回收）或 occ_orch_free 自动注销。
+ *  - 结果文件 env 通道：spawn 建任务行后若未显式给 result_path，自动
+ *    /tmp mkstemp 生成并以 OCC_TASK_RESULT_FILE 注入子进程 env（子智能
+ *    体报告写它；prompt 侧由 task 工具告知）。登记进任务注册表，终局
+ *    后保留（read_result 窗口），orch 自动生成的文件 occ_orch_free 时
+ *    清理；显式给的归调用方。
+ *  - occ_orch_find_task/occ_orch_result_path：task 工具 status/wait/
+ *    read_result 动作的运行时查询面。
  */
 #ifndef _OCC_ORCH_H
 #define _OCC_ORCH_H
@@ -54,6 +70,9 @@
 #define OCC_ORCH_TERM_GRACE_MS	2000L	/* 取消两段：TERM 宽限后 KILL */
 #define OCC_ORCH_STDOUT_TAIL	8192	/* 结果回收保留的 stdout 尾窗 */
 
+/* 结果文件 env 注入键（spawn 自动通道；子进程把报告写往该文件） */
+#define OCC_ORCH_RESULT_ENV	"OCC_TASK_RESULT_FILE"
+
 /* 运行时错误码（spawn/cancel 返回；err 缓冲带人话） */
 #define OCC_ORCH_OK		0
 #define OCC_ORCH_EARGS		(-1)	/* 参数不合法 */
@@ -61,6 +80,7 @@
 #define OCC_ORCH_EBACKOFF	(-3)	/* 撞限退避窗内（err 带剩余 ms） */
 #define OCC_ORCH_ESPAWN		(-4)	/* fork/execve/occ 可执行解析失败 */
 #define OCC_ORCH_EDB		(-5)	/* 会话/任务面（E1 API）失败 */
+#define OCC_ORCH_EFILESET	(-6)	/* E3：文件集与在跑任务独占声明冲突 */
 
 /* 子进程终局分类（结果回收四分开记） */
 typedef enum {
@@ -111,8 +131,16 @@ typedef struct occ_orch_child occ_orch_child;	/* 活子（终局即失效） */
  *                 mkstemp 自动生成（终局读回后随 child 释放删除）
  *   env           附加环境 NAME=VALUE 数组（NULL 结尾）；OCC_DB 由
  *                 运行时自动注入（=本运行时库路径，子会话/任务同库；
- *                 env 中同名项后写覆盖）
+ *                 env 中同名项后写覆盖）；有任务面时 OCC_TASK_RESULT_FILE
+ *                 亦自动注入（见头注 E3 段）
  *   timeout_ms    per-任务墙钟上限；0=无限。超时→取消同路径
+ *   fileset       E3：授权文件集（独占声明；元素须绝对路径——调用方
+ *                 归一）。与在跑任务撞车 → OCC_ORCH_EFILESET 拒绝；
+ *                 NULL/0=不声明不登记（互斥面不参与）
+ *   nfileset      fileset 元素数
+ *   result_path   E3：结果文件（报告 IPC）。NULL+有任务面=自动 /tmp
+ *                 mkstemp+env 注入+登记（occ_orch_free 清理）；显式给
+ *                 =调用方持有；无任务面时不自动生成
  */
 typedef struct occ_orch_spawn_opts {
 	const char *prompt;
@@ -127,6 +155,9 @@ typedef struct occ_orch_spawn_opts {
 	const char *stderr_path;
 	const char *const *env;
 	long long timeout_ms;
+	const char *const *fileset;
+	size_t nfileset;
+	const char *result_path;
 } occ_orch_spawn_opts;
 
 /* ---- 运行时生命周期 ---- */
@@ -196,5 +227,35 @@ void occ_orch_result_free(occ_orch_result *r);	/* stdout_tail 归零 */
 pid_t occ_orch_child_pid(const occ_orch_child *c);
 const char *occ_orch_child_session(const occ_orch_child *c);	/* 空=无 */
 const char *occ_orch_child_task(const occ_orch_child *c);	/* 空=无 */
+
+/* ---- E3：Task 工具/判级提示段总闸 + 文件集互斥 + 任务查询 ---- */
+
+/*
+ * occ_orch_tools_enabled - OCC_ORCH_TOOLS 开关（env；非空且非 "0"/
+ * "false" 即开）。开=第七工具 task 注册（occ_tool_defs 返回 7 件）+
+ * 判级提示段并入系统提示；关=全部零变化（差分/p-smoke 红线路径）。
+ */
+int occ_orch_tools_enabled(void);
+
+/*
+ * occ_orch_fileset_conflict - files 是否与在跑任务的独占声明撞车。
+ * 返回 1=冲突（owner_task 回填持有任务 id；可 NULL 不取）；0=无冲突
+ * （含 o/files 参数不完整——按无冲突放行，登记面缺省不拦截）。
+ */
+int occ_orch_fileset_conflict(const occ_orch *o, const char *const *files,
+			      size_t n, char *owner_task, size_t buflen);
+
+/*
+ * occ_orch_find_task - 按任务 id 找活子（status/wait 动作运行时面）。
+ * 返回活子句柄（终局前有效）；NULL=不在活表（已终局或无此任务）。
+ */
+occ_orch_child *occ_orch_find_task(occ_orch *o, const char *task_id);
+
+/*
+ * occ_orch_result_path - 任务结果文件路径（spawn 时登记；终局后保留
+ * 至 occ_orch_free——read_result 窗口）。NULL=无该任务记录（进程
+ * 重启后内存表丢失，调用方回退任务面 result 事件）。
+ */
+const char *occ_orch_result_path(const occ_orch *o, const char *task_id);
 
 #endif /* _OCC_ORCH_H */

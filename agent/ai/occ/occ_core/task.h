@@ -58,6 +58,10 @@
 #define OCC_TASK_EV_ESCALATE	"escalate"
 #define OCC_TASK_EV_DONE	"done"
 #define OCC_TASK_EV_DISTILL	"distill"
+#define OCC_TASK_EV_RETURN	"return"	/* E3 追加：主会话 return
+						 * 动作表态（不动状态机；
+						 * E4 verdict 通道接入前的
+						 * 最小承载） */
 
 #define OCC_TASK_TITLE_MAX	128		/* title 容量（截断，同 session） */
 #define OCC_TASK_REWORK_MAX_DEF	2		/* R2：缺省回炉上限 */
@@ -158,6 +162,15 @@ int occ_task_escalate(occ_db *db, const char *id, const char *reason_json,
  */
 int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
 		     char *err, size_t errlen);
+
+/*
+ * occ_task_note - E3 追加（API 阻断缺口：task 工具 return 动作需要
+ * 落事件而不动状态机）：任意状态下追加 kind='return' 审计事件行，
+ * 状态不变。payload_json 可 NULL。任务不存在/DB 错 → -1 人话。
+ * kind 白名单不开放（固定 "return"——E4 verdict 通道接入时再扩面）。
+ */
+int occ_task_note(occ_db *db, const char *id, const char *payload_json,
+		  char *err, size_t errlen);
 
 /*
  * 事件审计列表（id 升序=时间序）。*rows heap，返回行数（0=*rows=NULL）；

@@ -70,6 +70,7 @@ LLM_CALL_OBJ := $(OBJ_DIR)/occ_llm/llm_call.o
 #     session.c 开库迁移装配其 DDL，链接面随 session.o 成对出现）
 # E2：+ orch（ORCH §8 子智能体运行时——R4 进程隔离 spawn/回收/取消
 #     两段/超时/并发闸 2+退避 30s；只读消费 E1 会话/任务面）
+#     E3 起内建文件集互斥+结果文件 env 通道+OCC_ORCH_TOOLS 总闸
 CORE_SRCS := occ_core/session.c occ_core/loop.c occ_core/tokens.c \
 	     occ_core/revert.c occ_core/occ_sme.c occ_core/occ_ac.c \
 	     occ_core/occ_telemetry.c occ_core/replay.c occ_core/task.c \
@@ -123,6 +124,8 @@ NET_BINS := tests/occ_smoke tests/test_http_headers
 # E1：test_task（任务状态机全路径+schema v3 迁移+/clear 归档库面）
 # E2：test_orch（运行时面：并发闸/退避/取消两段/超时/收尸/结果回收
 #     +B2 并发写库两腿压测→tests/orch_b2_report.txt）
+# E3：test_tools 扩 task 工具开关/参数边界；test_orch 扩 G 文件集互斥
+#     +H task 五动作全链（sim 子进程）；loop.c 判级段默认关零变化
 CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
@@ -289,12 +292,13 @@ tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
 # 分类 + B2 并发写库两腿压测（自 exec 多进程 worker；报告落
 # tests/orch_b2_report.txt）。链集合同 test_task（orch.o 只读消费
 # session/task 面）；--sim/--b2w/--b2rw/--conc-drill 为子模式入口。
+# E3：+ TOOLS_OBJS（task 第七工具五动作全链演练经 occ_tool_exec）。
 tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		 $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
-		 $(STORE_LIB) $(SQLITE_LIB)
+		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
-		$(OBJ_DIR)/occ_core/task.o \
+		$(OBJ_DIR)/occ_core/task.o $(TOOLS_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # tokens：五项账本 + len/4 估算（纯计算，无外部依赖）
@@ -311,11 +315,14 @@ tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_
 		$(LDLIBS)
 
 # tools（T9b1）：六件套边界 + 快照 + trace + bash 沙箱契约（stub）
+# E3：+ orch.o（task 第七工具开关 occ_orch_tools_enabled 消费）+ 全链
+# 演练在 test_orch（sim 子进程 harness）
 tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
-		  $(OBJ_DIR)/occ_core/task.o $(STORE_LIB) $(SQLITE_LIB)
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
-		$(OBJ_DIR)/occ_core/task.o \
+		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
@@ -354,11 +361,12 @@ tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 
 tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
-		   $(OBJ_DIR)/occ_core/task.o \
+		   $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		   $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
+		$(OBJ_DIR)/occ_core/orch.o \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # retry（T9b2）：重试分级矩阵 + 参数族（旋钮/env/缺省）+ 退避曲线

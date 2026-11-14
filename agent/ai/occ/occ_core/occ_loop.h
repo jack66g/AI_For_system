@@ -39,6 +39,8 @@
 #include "occ_session.h"
 #include "occ_tokens.h"
 
+struct occ_orch;			/* 前向（occ_core/orch.h；opts.orch） */
+
 /* 环返回码 */
 #define OCC_LOOP_OK 0
 #define OCC_LOOP_EARGS (-1)		/* 参数/会话状态不合法 */
@@ -102,6 +104,9 @@ typedef struct occ_loop_opts {
 	const char *workdir;		/* 工具工作目录（b1；NULL=getcwd）：
 					 * glob/grep/bash rw 挂载面 */
 	occ_sink sink;			/* T9c2：非空→输出走回调（见上） */
+	struct occ_orch *orch;		/* E3：编排运行时（透传 occ_tool_ctx
+					 * ——task 第七工具执行面；NULL=
+					 * 编排未启用，task 调用回人话错） */
 } occ_loop_opts;
 
 typedef struct occ_loop_result {

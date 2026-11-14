@@ -714,6 +714,100 @@ int main(void)
 		   "trunc-8k-cap");
 	}
 
+	/* ======== E3：task 第七工具（开关/边界；全链演练在 test_orch） ======== */
+	{
+		size_t n = 0;
+		const occ_tool_def *d;
+
+		/* 默认关：未知+六件（红线——差分/p-smoke 路径零变化） */
+		OK(occ_tool_defs(&n) && n == 6 && !occ_tool_is_known("task"),
+		   "task-default-off");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "未知工具"),
+		   "task-default-unknown");
+		/* 开关开：第七件注册+schema/描述非空 */
+		setenv("OCC_ORCH_TOOLS", "1", 1);
+		d = occ_tool_defs(&n);
+		OK(n == 7 && d && !strcmp(d[6].name, "task") &&
+		   d[6].description && strstr(d[6].parameters, "spawn") &&
+		   strstr(d[6].parameters, "fileset") &&
+		   strstr(d[6].parameters, "rework_max"), "task-on-seven-defs");
+		OK(occ_tool_is_known("task") && !occ_tool_is_known("rm"),
+		   "task-on-known");
+		/* 无 orch 运行时 → 结构化人话错误（JSON） */
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "\"ok\":false") &&
+		   strstr(s, "编排未启用"), "task-no-orch");
+		/* 坏 JSON 参数 → 人话拒绝（不静默按缺失） */
+		s = (char *)exec_tool("task", "{\"action\":");
+		OK(exec_rc() != 0 && s && strstr(s, "JSON") &&
+		   strstr(s, "参数"), "task-bad-json");
+		/* 缺 action / 未知 action */
+		s = (char *)exec_tool("task", "{}");
+		OK(exec_rc() != 0 && s && strstr(s, "action"), "task-no-action");
+		s = (char *)exec_tool("task", "{\"action\":\"fly\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "fly") &&
+		   strstr(s, "未知 action"), "task-unknown-action");
+		/* spawn 边界：缺 brief / brief 非 object / 缺 goal / 缺
+		 * fileset / fileset 空数组 / rework_max 越界（R2 上限 1-3） */
+		s = (char *)exec_tool("task", "{\"action\":\"spawn\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "brief"), "task-spawn-no-brief");
+		s = (char *)exec_tool("task", "{\"action\":\"spawn\","
+				      "\"brief\":\"不是对象\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "brief"), "task-spawn-brief-notobj");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":{}}");
+		OK(exec_rc() != 0 && s && strstr(s, "goal"), "task-spawn-no-goal");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":"
+				      "{\"goal\":\"做点事\"}}");
+		OK(exec_rc() != 0 && s && strstr(s, "fileset"), "task-spawn-no-fileset");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":"
+				      "{\"goal\":\"做点事\",\"fileset\":[]}}");
+		OK(exec_rc() != 0 && s && strstr(s, "空数组"),
+		   "task-spawn-empty-fileset");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":"
+				      "{\"goal\":\"做点事\",\"fileset\":[\"a.c\"],"
+				      "\"rework_max\":9}}");
+		OK(exec_rc() != 0 && s && strstr(s, "rework_max") &&
+		   strstr(s, "越界"), "task-spawn-rework-max-hi");
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":"
+				      "{\"goal\":\"做点事\",\"fileset\":[\"a.c\"],"
+				      "\"rework_max\":0}}");
+		/* rework_max=0=缺省 2——过参数校验，走到环境检查
+		 *（session 缺失——exec_tool 的 ctx 无 session_id） */
+		OK(exec_rc() != 0 && s && strstr(s, "会话上下文"),
+		   "task-spawn-rework-max-default2");
+		/* 清单字段类型错误 → 人话 */
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"spawn\",\"brief\":"
+				      "{\"goal\":\"做点事\",\"fileset\":[\"a.c\"],"
+				      "\"forbidden\":\"不是数组\"}}");
+		OK(exec_rc() != 0 && s && strstr(s, "forbidden"),
+		   "task-spawn-bad-list");
+		/* status/read_result 缺 task_id */
+		s = (char *)exec_tool("task", "{\"action\":\"status\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "task_id"),
+		   "task-status-no-tid");
+		s = (char *)exec_tool("task", "{\"action\":\"read_result\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "task_id"),
+		   "task-readres-no-tid");
+		/* return 缺 verdict */
+		s = (char *)exec_tool("task",
+				      "{\"action\":\"return\",\"task_id\":\"tsk_x\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "verdict"),
+		   "task-return-no-verdict");
+		/* 关回去：零变化 */
+		unsetenv("OCC_ORCH_TOOLS");
+		OK(occ_tool_defs(&n) && n == 6 && !occ_tool_is_known("task"),
+		   "task-off-again");
+	}
+
 	occ_tool_result_free(&g_res);
 	{
 		char cmd[300];

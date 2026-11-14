@@ -49,6 +49,7 @@
 #include "occ_core/occ_loop.h"
 #include "occ_core/occ_replay.h"
 #include "occ_core/occ_revert.h"
+#include "occ_core/orch.h"			/* E3：编排运行时挂载 */
 #include "occ_llm/occ_catalog.h"
 #include "occ_llm/occ_registry.h"
 #include "occ_tui/tui_data.h"
@@ -69,6 +70,14 @@ static const char USAGE[] =
 	"  occ sessions                         会话列表\n"
 	"环境：OCC_MODEL_TOML / OCC_PROVIDER_TOML / OCC_DB / OCC_SNAPROOT 可覆盖；"
 	" 交互模式另支持 OCC_REPLAY_LINES（历史回放行数预算，缺省 1000，0=禁）\n";
+
+/*
+ * E3：编排运行时（进程级实例；OCC_ORCH_TOOLS=1 才建——默认关零开销）。
+ * run_turn（headless 全链）与 tui_worker_main（交互 worker）经
+ * occ_loop_opts.orch 透传进 occ_tool_ctx——task 第七工具执行面。
+ * main out: 处 occ_orch_free 收尸（活子取消两段；§10 风险 3 口径）。
+ */
+static occ_orch *g_orch;
 
 /* ---- SIGINT（T9b2；OCD §7.1 headless 版） ----
  * 第一次：置 occ_interrupt_flag——loop 在安全点（每工具后/每轮 LLM 前/
@@ -202,6 +211,7 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 	memset(&opts, 0, sizeof(opts));
 	opts.prompt = prompt;			/* NULL=重放（recover/retry） */
 	opts.stream_out = stdout;
+	opts.orch = g_orch;			/* E3：task 工具执行面 */
 	{
 		/* b1：工具工作目录=occ 启动目录（glob/grep/bash rw 面） */
 		static char cwd[4096];
@@ -894,6 +904,7 @@ static void *tui_worker_main(void *arg)
 	opts.sink.fn = tui_sink_cb;
 	opts.sink.ud = a->view;
 	opts.workdir = a->cwd;
+	opts.orch = g_orch;			/* E3：task 工具执行面 */
 
 	t0 = tui_now_ms();
 	rc = occ_loop_run(a->db, &a->p, sid[0] ? sid : NULL, &opts, &res,
@@ -3598,6 +3609,13 @@ int main(int argc, char **argv)
 		fprintf(stderr, "occ: %s\n", err);
 		return 1;
 	}
+	/* E3：编排开关开才建运行时（默认关=零开销零行为变化） */
+	if (occ_orch_tools_enabled()) {
+		g_orch = occ_orch_new(db);
+		if (!g_orch)
+			fprintf(stderr, "occ: 警告：编排运行时初始化失败——"
+				"task 工具本次不可用\n");
+	}
 	if (want_tui) {
 		rc = run_interactive(db, model_toml, provider_toml);
 		goto out;
@@ -3799,6 +3817,7 @@ int main(int argc, char **argv)
 	fputs(USAGE, stderr);
 	rc = 2;
 out:
+	occ_orch_free(g_orch);			/* E3：活子收尸+登记表清理 */
 	occ_db_close(db);
 	return rc;
 }

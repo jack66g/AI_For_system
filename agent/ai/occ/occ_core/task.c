@@ -805,3 +805,35 @@ int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
 		return -1;
 	return 0;
 }
+
+/*
+ * occ_task_note - E3 追加（API 阻断缺口：task 工具 return 动作需要
+ * 落事件而不动状态机；语义详见 task.h）。任意状态可记（主会话对
+ * 结果的表态与状态机迁移正交）。
+ */
+int occ_task_note(occ_db *db, const char *id, const char *payload_json,
+		  char *err, size_t errlen)
+{
+	char cur[16];
+	int rc, rwc, rwm;
+
+	if (!db || !id || !id[0]) {
+		set_err(err, errlen, "occ_task_note: bad args");
+		return -1;
+	}
+	if (tx_begin(db, err, errlen))
+		return -1;
+	rc = task_state(db, id, cur, sizeof(cur), &rwc, &rwm);
+	if (rc != 1) {
+		tx_rollback(db);
+		return task_state_fail(rc, id, "occ_task_note", err, errlen);
+	}
+	if (ev_add(db, id, OCC_TASK_EV_RETURN, payload_json)) {
+		tx_rollback(db);
+		set_err(err, errlen, "note: 事件落库失败");
+		return -1;
+	}
+	if (tx_commit(db, err, errlen))
+		return -1;
+	return 0;
+}
