@@ -26,6 +26,7 @@
 
 #include "occ_core/occ_session.h"
 #include "occ_tools/occ_tools.h"
+#include "occ_utf8.h"		/* E10②：UTF-8 校验/净化共用件单测 */
 
 static int n_fail;
 static int n_ok;
@@ -243,6 +244,41 @@ int main(void)
 		   !strcmp(dst, "abc"), "utf8-ascii-keep");
 		OK(occ_utf8_trunc("你好世界", 12, 7, dst, sizeof(dst)) == 6,
 		   "utf8-cut-boundary");
+	}
+	{
+		/* E10② 净化单测：坏字节串 → U+FFFD（最大子部口径）；
+		 * 好 UTF-8（ASCII/中文/4 字节 emoji）逐字节零变化；
+		 * valid 预检口径一致 */
+		static const char bad[] = { 'a', (char)0xFF, 'b',
+					    (char)0xC3, (char)0x28, 'c' };
+		static const char trunc4[] = { (char)0xF0, (char)0x9F,
+					       (char)0x98 };	/* 截断 4B */
+		char out[64];
+		size_t n;
+
+		OK(occ_utf8_valid("abc你好\xF0\x9F\x98\x80", 3 + 6 + 4) == 1,
+		   "utf8san-valid-good");
+		OK(occ_utf8_valid(bad, sizeof(bad)) == 0,
+		   "utf8san-valid-bad");
+		n = occ_utf8_sanitize(bad, sizeof(bad), out, sizeof(out));
+		/* a + FFFD(0xFF) + b + FFFD(0xC3 续位中断，0x28 独立
+		 * 判读为合法 '(' 透传) + c */
+		OK(n == 1 + 3 + 1 + 3 + 1 + 1 &&
+		   !memcmp(out, "a\xEF\xBF\xBD""b\xEF\xBF\xBD(c", n),
+		   "utf8san-bad-to-fffd");
+		n = occ_utf8_sanitize("ok 你好 \xF0\x9F\x98\x80",
+				      2 + 1 + 6 + 1 + 4, out, sizeof(out));
+		OK(n == 2 + 1 + 6 + 1 + 4 &&
+		   !memcmp(out, "ok 你好 \xF0\x9F\x98\x80", n),
+		   "utf8san-good-unchanged");
+		n = occ_utf8_sanitize(trunc4, sizeof(trunc4), out,
+				      sizeof(out));
+		OK(n == 3 && !memcmp(out, "\xEF\xBF\xBD", 3),
+		   "utf8san-truncated-seq");
+		n = occ_utf8_sanitize("a\xE4\xBD""x", 4, out, sizeof(out));
+		/* 3B 序列续位中断于 'x'：最大子部 E4 BD → 一枚 FFFD，
+		 * 'x' 透传 */
+		OK(n == 1 + 3 + 1, "utf8san-partial-seq");
 	}
 	{
 		char cwd[256];
@@ -570,6 +606,15 @@ int main(void)
 		/* B7 未知工具 */
 		s = (char *)exec_tool("rm", "{\"path\":\"x\"}");
 		OK(exec_rc() != 0 && strstr(s, "未知工具"), "bash7-unknown");
+
+		/* B8 E10②a 源端净化：stub 透传 printf 坏字节（0xFF）→
+		 * 工具结果在进缓冲前已替换 U+FFFD（无裸坏字节入库） */
+		s = (char *)exec_tool("bash",
+		      "{\"command\":\"printf 'a\\\\377b'\"}");
+		OK(exec_rc() == 0 && s &&
+		   strstr(s, "a\xEF\xBF\xBD""b") &&
+		   !memchr(s, 0xFF, strlen(s)),
+		   "bash8-utf8-sanitize-source");
 	}
 
 	/* ======== trace JSONL（带 session/trace_dir 的 ctx 直执） ======== */
@@ -734,6 +779,12 @@ int main(void)
 		   strstr(d[6].parameters, "fileset") &&
 		   strstr(d[6].parameters, "rework_max"),
 		   "task-on-seven-defs");
+		/* E10④⑧：schema 同步——spawn+task_id 再派面 + wait 上限
+		 * 120000（缺省 2000 / minimum 100 不变） */
+		OK(strstr(d[6].parameters, "120000") &&
+		   strstr(d[6].parameters, "缺省 2000") &&
+		   strstr(d[6].parameters, "再派"),
+		   "task-schema-wait-respawn");
 		OK(!strcmp(d[7].name, "recall") &&
 		   strstr(d[7].parameters, "layer"), "recall-eighth-def");
 		OK(occ_tool_is_known("task") && occ_tool_is_known("recall") &&

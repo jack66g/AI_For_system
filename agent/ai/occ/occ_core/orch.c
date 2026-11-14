@@ -930,6 +930,23 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		}
 		return OCC_ORCH_ESPAWN;
 	}
+	/*
+	 * E10③：结果文件持久登记（kind='result_file' 事件，追加式
+	 * 审计）。运行时注册表进程私有——派发进程死后 task 工具
+	 * read_result/return 以此兜底恢复路径（任务不再「永久无法
+	 * 验收」）。落库失败尽力不阻断 spawn（活注册表本进程内仍
+	 * 有效；stderr 留痕可审计）。
+	 */
+	if (tid[0] && rpath[0]) {
+		char pj[320];
+		char e2[192];
+
+		snprintf(pj, sizeof(pj), "{\"path\":\"%.256s\"}", rpath);
+		if (occ_task_note_kind(o->db, tid, OCC_TASK_EV_RESULT_FILE,
+				       pj, e2, sizeof(e2)) != 0)
+			fprintf(stderr, "occ-orch: result_file 事件落库失败"
+				"（task %s）：%s\n", tid, e2);
+	}
 
 	/* ---- 可执行 + 输出文件 + env ---- */
 	if (opts->occ_bin && opts->occ_bin[0]) {

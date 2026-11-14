@@ -875,9 +875,12 @@ static int unit_main(void)
 		occ_task_row_free(&trow);
 		OK(occ_task_events(g_db, ctid, &evs, &nevs, NULL, 0) == 0 &&
 		   nevs >= 2, "a-events");
-		if (nevs >= 2) {
+		if (nevs >= 3) {
+			/* E10③：spawn 在 dispatch 后追加 kind='result_file'
+			 * 持久登记事件——序列=dispatch,result_file,result */
 			OK(!strcmp(evs[0].kind, OCC_TASK_EV_DISPATCH) &&
-			   !strcmp(evs[1].kind, OCC_TASK_EV_RESULT),
+			   !strcmp(evs[1].kind, OCC_TASK_EV_RESULT_FILE) &&
+			   !strcmp(evs[2].kind, OCC_TASK_EV_RESULT),
 			   "a-event-kinds");
 			occ_task_event_rows_free(evs, nevs);
 		}
@@ -1278,6 +1281,45 @@ static int unit_main(void)
 		       tr.text ? tr.text : "(null)");
 		occ_tool_result_free(&tr);
 
+		/* H4b E10③ 结果文件跨进程恢复：spawn 落 kind='result_file'
+		 * 持久事件；新 orch 运行时（注册表空=派发进程死语义）经
+		 * read_result 事件兜底拿回 RF 路径与报告内容 */
+		{
+			occ_task_event_row *evs = NULL;
+			size_t nevs = 0, k;
+			int nrf = 0;
+
+			if (occ_task_events(g_db, tid, &evs, &nevs, NULL,
+					    0) == 0) {
+				for (k = 0; k < nevs; k++)
+					if (!strcmp(evs[k].kind,
+						    OCC_TASK_EV_RESULT_FILE) &&
+					    evs[k].payload_json &&
+					    strstr(evs[k].payload_json,
+						   "\"path\""))
+						nrf++;
+				occ_task_event_rows_free(evs, nevs);
+			}
+			OK(nrf == 1, "h4b-result-file-event");
+		}
+		{
+			occ_orch *o2 = occ_orch_new(g_db);
+			occ_tool_ctx tc2 = tc;
+
+			OK(o2 != NULL, "h4b-new-runtime");
+			tc2.orch = o2;		/* 注册表空：仅事件流兜底 */
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"read_result\",\"task_id\":\"%s\"}",
+				 tid);
+			OK(occ_tool_exec(&tc2, "task", "call_h4b", args,
+					 &tr) == 0 &&
+			   tr.text && strstr(tr.text, "目标达成") &&
+			   strstr(tr.text, "\"result_file\":\"/tmp/"),
+			   "h4b-read-result-xprocess");
+			occ_tool_result_free(&tr);
+			occ_orch_free(o2);
+		}
+
 		/* H5 return：表态记入任务事件（最小实现；E4 接 verdict） */
 		snprintf(args, sizeof(args),
 			 "{\"action\":\"return\",\"task_id\":\"%s\","
@@ -1324,6 +1366,100 @@ static int unit_main(void)
 		if (hc) {
 			occ_orch_cancel(hc, &r, err, sizeof(err));
 			occ_orch_result_free(&r);
+		}
+
+		/* H7 E10④ spawn+task_id 工具面再派：rework 态受理 /
+		 * 其他态人话拒（H5 验收环机械判 narrative 报告 fail →
+		 * H 任务应已落 rework） */
+		{
+			occ_task_row trow;
+			char ptid[OCC_ID_LEN];
+
+			OK(occ_task_get(g_db, tid, &trow, err, sizeof(err)) ==
+			   1 && !strcmp(trow.status, OCC_TASK_ST_REWORK),
+			   "h7-task-in-rework");
+			occ_task_row_free(&trow);
+			/* 负例①：pending 态任务带 task_id spawn → 人话拒 */
+			OK(occ_task_create(g_db, g_psid, "h7 pending 待派",
+					   "{}", 0, &trow, err,
+					   sizeof(err)) == 0,
+			   "h7-pending-create");
+			snprintf(ptid, sizeof(ptid), "%s", trow.id);
+			occ_task_row_free(&trow);
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"spawn\",\"task_id\":\"%s\","
+				 "\"brief\":{\"goal\":\"不应受理\"}}", ptid);
+			OK(occ_tool_exec(&tc, "task", "call_h7a", args,
+					 &tr) != 0 &&
+			   tr.text && strstr(tr.text, "\"ok\":false") &&
+			   strstr(tr.text, "仅对 rework"),
+			   "h7a-pending-rejected");
+			occ_tool_result_free(&tr);
+			/* 正例：rework 任务再派（原任务书内嵌 sim:report →
+			 * 子进程重写结果文件后即退 → in_review） */
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"spawn\",\"task_id\":\"%s\","
+				 "\"brief\":{\"goal\":\"二报：补齐 VERDICT 表\"}}",
+				 tid);
+			OK(occ_tool_exec(&tc, "task", "call_h7b", args,
+					 &tr) == 0 &&
+			   tr.text && strstr(tr.text, "\"ok\":true") &&
+			   strstr(tr.text, "\"respawn\":true") &&
+			   strstr(tr.text, "\"task_id\":\"tsk_") &&
+			   strstr(tr.text, "\"result_file\":\"/tmp/"),
+			   "h7b-respawn-rework");
+			occ_tool_result_free(&tr);
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"wait\",\"task_id\":\"%s\","
+				 "\"timeout_ms\":15000}", tid);
+			OK(occ_tool_exec(&tc, "task", "call_h7c", args,
+					 &tr) == 0 &&
+			   tr.text && strstr(tr.text, "\"done\":true") &&
+			   strstr(tr.text, "\"end\":\"exit\"") &&
+			   strstr(tr.text, "\"exit_code\":0") &&
+			   strstr(tr.text, "\"task_state\":\"in_review\""),
+			   "h7c-respawn-wait");
+			occ_tool_result_free(&tr);
+			/* 负例②：in_review 态任务再派 → 人话拒 */
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"spawn\",\"task_id\":\"%s\"}",
+				 tid);
+			OK(occ_tool_exec(&tc, "task", "call_h7d", args,
+					 &tr) != 0 &&
+			   tr.text && strstr(tr.text, "\"ok\":false") &&
+			   strstr(tr.text, "仅对 rework"),
+			   "h7d-in-review-rejected");
+			occ_tool_result_free(&tr);
+			/* 再派腿同样落 result_file 持久事件（回炉再派新 RF） */
+			{
+				occ_task_event_row *evs = NULL;
+				size_t nevs = 0, k;
+				int nrf = 0;
+
+				if (occ_task_events(g_db, tid, &evs, &nevs,
+						    NULL, 0) == 0) {
+					for (k = 0; k < nevs; k++)
+						if (!strcmp(evs[k].kind,
+							    OCC_TASK_EV_RESULT_FILE))
+							nrf++;
+					occ_task_event_rows_free(evs, nevs);
+				}
+				OK(nrf == 2, "h7b-two-result-file-events");
+			}
+		}
+
+		/* H8 E10⑦⑥ 任务书渲染断言：brief_json（=发子进程的渲染
+		 * 全文）含 回炉上限 行（E7 渲染 budget 漏了它——已补）与
+		 * # VERDICT 报告格式要求（E10⑥） */
+		{
+			occ_task_row trow;
+
+			OK(occ_task_get(g_db, tid, &trow, err, sizeof(err)) ==
+			   1 && trow.brief_json &&
+			   strstr(trow.brief_json, "回炉上限：2 次") &&
+			   strstr(trow.brief_json, "VERDICT"),
+			   "h8-brief-render-reworkmax-verdict");
+			occ_task_row_free(&trow);
 		}
 		unsetenv("OCC_ORCH_TOOLS");
 		unsetenv("OCC_ORCH_BIN");

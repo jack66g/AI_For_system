@@ -9,6 +9,7 @@
 
 #include "occ_llm/occ_llm.h"
 #include "store/store_json.h"
+#include "occ_utf8.h"		/* E10②b：请求体出口净化断言 */
 
 static int fails;
 
@@ -317,6 +318,39 @@ int main(void)
 		CHECK(b && !strstr(b, "reasoning_content"),
 		      "R flag off -> key omitted");
 		free(b);
+	}
+
+	/* ---- U: E10②b 请求体出口 UTF-8 兜底净化（occ_build_request
+	 * 协议分派面）：坏字节工具结果 → U+FFFD；合法输入逐字节零变化 */
+	{
+		occ_llm_req r;
+		occ_msg msgs[2];
+		char *b2;
+
+		memset(&r, 0, sizeof(r));
+		memset(msgs, 0, sizeof(msgs));
+		r.proto = OCC_PROTO_OPENAI_COMPAT;
+		r.model = "deepseek-flash";
+		msgs[0].role = OCC_ROLE_USER;
+		msgs[0].text = "run";
+		msgs[1].role = OCC_ROLE_TOOL;
+		msgs[1].tool_call_id = "call_1";
+		msgs[1].text = "out:\xFF\xC3(done";	/* bash 坏字节毒化链现场 */
+		r.msgs = msgs;
+		r.nmsgs = 2;
+		b = occ_build_request(&r, NULL);
+		CHECK(b && strstr(b, "out:\xEF\xBF\xBD\xEF\xBF\xBD(done"),
+		      "U bad tool bytes -> FFFD at request exit");
+		CHECK(b && occ_utf8_valid(b, strlen(b)),
+		      "U body valid UTF-8 after sanitize");
+		free(b);
+		/* 合法输入：净化面零变化（与直构产物逐字节同） */
+		msgs[1].text = "{\"ok\":true,\"中文\":\"\xF0\x9F\x98\x80\"}";
+		b = occ_build_request(&r, NULL);
+		b2 = occ_build_request_openai(&r, NULL);
+		CHECK(b && b2 && !strcmp(b, b2), "U legal bytes unchanged");
+		free(b);
+		free(b2);
 	}
 
 	if (fails) {

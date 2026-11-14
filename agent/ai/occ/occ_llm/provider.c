@@ -20,6 +20,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "occ_utf8.h"		/* E10②b：请求体出口 UTF-8 兜底净化 */
+
 const char *occ_protocol_name(occ_protocol p)
 {
 	switch (p) {
@@ -67,15 +69,46 @@ int occ_chat_url(char *buf, size_t buflen, occ_protocol proto,
 	return 0;
 }
 
+/*
+ * occ_build_request - 协议分派 + E10②b 请求体出口 UTF-8 兜底净化。
+ *
+ * 覆盖面：system/messages（含工具结果回放——bash 坏字节的历史路径、
+ * 其他工具、旧库回放）与 tools 定义一切入流字节。每个非法 UTF-8
+ * 字节替换 U+FFFD（防服务端「invalid UTF-8」400 → 主会话 llm_fail
+ * 死链）。合法请求字节零变化：occ_utf8_valid 全串预检通过即原缓冲
+ * 直返（免拷贝——差分 62/62 红线双保险）；预检不过才净化重灌
+ * （≤3× 增长）；oom 原样发出（净化尽力，不因分配失败阻断请求）。
+ */
 char *occ_build_request(const occ_llm_req *req, size_t *outlen)
 {
+	char *body;
+	size_t blen = 0;
+
 	if (!req)
 		return NULL;
 	if (req->proto == OCC_PROTO_OPENAI_COMPAT)
-		return occ_build_request_openai(req, outlen);
-	if (req->proto == OCC_PROTO_ANTHROPIC)
-		return occ_build_request_anthropic(req, outlen);
-	return NULL;
+		body = occ_build_request_openai(req, &blen);
+	else if (req->proto == OCC_PROTO_ANTHROPIC)
+		body = occ_build_request_anthropic(req, &blen);
+	else
+		return NULL;
+	if (!body)
+		return NULL;
+	if (!occ_utf8_valid(body, blen)) {
+		char *clean = malloc(blen * 3 + 1);
+
+		if (clean) {
+			size_t n = occ_utf8_sanitize(body, blen, clean,
+						     blen * 3 + 1);
+
+			free(body);
+			body = clean;
+			blen = n;
+		}
+	}
+	if (outlen)
+		*outlen = blen;
+	return body;
 }
 
 static char *read_file(const char *path, size_t *outlen)

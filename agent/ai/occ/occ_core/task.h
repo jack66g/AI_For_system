@@ -68,6 +68,12 @@
 						 * （不动状态机；payload
 						 * 见 occ_task_budget_add/
 						 * occ_task_budget_baseline） */
+#define OCC_TASK_EV_RESULT_FILE "result_file"	/* E10③ 追加：结果文件
+						 * 持久登记（不动状态机；
+						 * spawn 落 payload=
+						 * {"path":"…"}——运行时
+						 * 注册表进程死后 read_result
+						 * /return 跨进程恢复用） */
 
 #define OCC_TASK_TITLE_MAX	128		/* title 容量（截断，同 session） */
 #define OCC_TASK_REWORK_MAX_DEF	2		/* R2：缺省回炉上限 */
@@ -188,10 +194,21 @@ int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
  * occ_task_note - E3 追加（API 阻断缺口：task 工具 return 动作需要
  * 落事件而不动状态机）：任意状态下追加 kind='return' 审计事件行，
  * 状态不变。payload_json 可 NULL。任务不存在/DB 错 → -1 人话。
- * kind 白名单不开放（固定 "return"——E4 verdict 通道接入时再扩面）。
+ * 实现为 occ_task_note_kind(…, OCC_TASK_EV_RETURN, …) 薄包装
+ * （调用面零变化）。
  */
 int occ_task_note(occ_db *db, const char *id, const char *payload_json,
 		  char *err, size_t errlen);
+
+/*
+ * occ_task_note_kind - E10③ 追加（occ_task_note 的 kind 参数化）：
+ * 追加式审计事件（不动状态机），kind 白名单=OCC_TASK_EV_RETURN 与
+ * OCC_TASK_EV_RESULT_FILE（状态机 kind 一律不经此面——防旁路伪造
+ * dispatch/verdict 审计）。任意状态可记。payload_json 可 NULL。
+ * 任务不存在/DB 错/白名单外 kind → -1 人话。
+ */
+int occ_task_note_kind(occ_db *db, const char *id, const char *kind,
+		       const char *payload_json, char *err, size_t errlen);
 
 /*
  * occ_task_budget_baseline - E7 追加（预算记账管线）：spawn 时预算

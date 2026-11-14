@@ -42,6 +42,10 @@
 
 #include "store/store_json.h"
 
+#include "occ_utf8.h"		/* E10②：UTF-8 校验/净化共用件
+				 * （bash 工具结果源端净化与 occ_llm
+				 * 请求体出口兜底同一实现） */
+
 /* ---- 结果缓冲（occ_tools_priv.h 契约实现） ---- */
 
 void occ_ob_put(occ_obuf *o, const char *s, size_t n)
@@ -155,7 +159,8 @@ static const char SCHEMA_TASK[] =
 	"{\"type\":\"object\",\"properties\":{"
 	"\"action\":{\"type\":\"string\",\"enum\":[\"spawn\",\"status\","
 	"\"wait\",\"read_result\",\"return\"],\"description\":\"spawn=建任务"
-	"并派发子智能体；status=查任务状态；wait=限时等待终局；"
+	"并派发子智能体（可选 task_id=对该回炉任务再派）；status=查任务"
+	"状态；wait=限时等待终局；"
 	"read_result=读子报告与终局摘要；return=验收表态（触发验收环："
 	"机械判→回炉整改词/超限升级/通过结项）\"},"
 	"\"brief\":{\"type\":\"object\",\"description\":\"spawn 任务书"
@@ -167,10 +172,12 @@ static const char SCHEMA_TASK[] =
 	"budget 预算配额（可含 wall_ms 墙钟上限毫秒、max_tokens 任务累计"
 	"输入+输出 token 上限——超限即熔断取消并升级）；context 必要上下文；"
 	"rework_max 回炉上限覆写（1-3，缺省 2）\"},"
-	"\"task_id\":{\"type\":\"string\",\"description\":\"status/wait/"
-	"read_result/return 的目标任务 id（tsk_…，spawn 返回）\"},"
+	"\"task_id\":{\"type\":\"string\",\"description\":\"目标任务 id"
+	"（tsk_…，spawn 返回）：status/wait/read_result/return 必填；"
+	"spawn 可选=对该任务回炉再派（仅 rework 态受理工具面再派，"
+	"其余态拒绝）\"},"
 	"\"timeout_ms\":{\"type\":\"integer\",\"description\":\"wait 限时"
-	"毫秒（缺省 2000，上限 30000；到点未终局如实返回未终局而非挂死）\","
+	"毫秒（缺省 2000，上限 120000；到点未终局如实返回未终局而非挂死）\","
 	"\"minimum\":100},"
 	"\"verdict\":{\"type\":\"string\",\"description\":\"return 动作："
 	"主会话（裁判）对结果的表态原文（差距/亲跑抽查依据，记入任务"
@@ -1205,16 +1212,45 @@ static int tool_bash(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	const char *command = args_str(a, "command");
 	const char *workdir = args_str(a, "workdir");
 	long long timeout_s = args_int(a, "timeout", 0);
+	occ_obuf raw;
+	char *clean;
+	size_t n;
+	int rc;
 
 	if (!command || !command[0]) {
 		occ_ob_puts(o, "ERROR: bash 缺少参数 command");
 		return -1;
 	}
-	return occ_sandbox_bash(ctx, command, workdir,
-				timeout_s > 0 ? timeout_s * 1000 : 0, o);
+	memset(&raw, 0, sizeof(raw));
+	rc = occ_sandbox_bash(ctx, command, workdir,
+			      timeout_s > 0 ? timeout_s * 1000 : 0, &raw);
+	/*
+	 * E10②a 源端净化：沙箱原始输出可能含非法 UTF-8 字节（实战
+	 * 毒化链：bash tail -c 咬出坏字节 → 工具结果入库回放 → 请求
+	 * 体非法 UTF-8 → 服务端 400 → 主会话死）。进结果缓冲前把每个
+	 * 非法字节替换为 U+FFFD；合法输出逐字节零变化。oom 时原样
+	 * 尽力（净化不因分配失败阻断工具结果）。
+	 */
+	clean = malloc(sizeof(raw.buf) * 3);	/* 最坏 1B→3B（FFFD） */
+	if (clean) {
+		n = occ_utf8_sanitize(raw.buf, raw.len, clean,
+				      sizeof(raw.buf) * 3);
+		occ_ob_put(o, clean, n);
+		free(clean);
+	} else {
+		occ_ob_put(o, raw.buf, raw.len);
+	}
+	if (raw.truncated)
+		o->truncated = 1;
+	o->total = raw.total;	/* 产物量按净化前原始字节记账 */
+	return rc;
 }
 
 /* ---- task（E3 第七工具；R1=工具层。ORCH-DESIGN §3 派发协议） ---- */
+
+/* E10⑧：wait 限时上限（真模型子会话常超 30s——上调 120s；缺省仍
+ * 2000ms，schema minimum 100 同步描述） */
+#define OCC_TASK_WAIT_MAX_MS	120000LL
 
 /* 动态字符串（prompt 渲染——任务书全文可超 obuf 8KB 截断域） */
 struct sbuf {
@@ -1583,6 +1619,99 @@ static void spawn_cleanup(char **forb, size_t nforb, char **deliv,
 	free(brief_txt);
 }
 
+/*
+ * task_respawn - E10④：spawn+task_id 工具面再派（回炉腿）。任务须
+ * 处 rework 态（其余态人话拒——含 in_review/done/escalated/pending/
+ * dispatched）；走既有 occ_orch_spawn(task_id) C 路（rework→
+ * dispatched 状态机 + 新子会话 + 预算熔断检查点全继承）。prompt=
+ * 「回炉再派」头 + 可选本轮补充 brief + 原任务书（brief_json——
+ * E10⑥ 起含 # VERDICT 报告格式要求）。brief 给了须为对象（内容
+ * 不再强制 goal/fileset——回炉的授权面沿原任务）。
+ */
+static int task_respawn(const occ_tool_ctx *ctx, occ_args *a,
+			const char *tid, occ_obuf *o)
+{
+	const aik_json *brief;
+	occ_task_row trow;
+	struct sbuf prompt = { NULL, 0, 0, 0 };
+	occ_orch_spawn_opts so;
+	occ_orch_child *c = NULL;
+	char err[256], dbuf[256], stbuf[24];
+	char *brief_txt = NULL;
+	size_t bl;
+	int rc;
+
+	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1)
+		return jerr(o, NULL, "再派任务 %s 不存在（任务库无此 id）",
+			    tid);
+	snprintf(stbuf, sizeof(stbuf), "%s", trow.status);
+	if (strcmp(trow.status, OCC_TASK_ST_REWORK)) {
+		occ_task_row_free(&trow);
+		return jerr(o, NULL, "spawn+task_id 仅对 rework（验收不通过"
+			    "待回炉）态任务再派——任务 %s 当前态 %s：新建任务"
+			    "请不带 task_id，终局任务用 read_result/return",
+			    tid, stbuf);
+	}
+	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
+	if (brief && aik_json_typeof(brief) != AIK_JSON_OBJ) {
+		occ_task_row_free(&trow);
+		return jerr(o, NULL, "再派参数 brief 须为对象（本轮补充"
+			    "要求；可省略=按原任务书重派）");
+	}
+	if (brief && aik_json_dump(brief, &brief_txt, &bl) != 0)
+		brief_txt = NULL;
+	sb_puts(&prompt, "【回炉再派（上一轮验收不通过——按整改要求修复）】\n");
+	if (brief_txt && brief_txt[0])
+		sb_printf(&prompt, "本轮补充要求（brief）：%s\n", brief_txt);
+	sb_printf(&prompt, "原任务书：\n%s\n",
+		  trow.brief_json ? trow.brief_json : "(无)");
+	occ_task_row_free(&trow);
+	if (prompt.oom) {
+		sb_free(&prompt);
+		free(brief_txt);
+		return jerr(o, NULL, "task spawn 再派任务书组装失败（oom）");
+	}
+	memset(&so, 0, sizeof(so));
+	so.prompt = prompt.buf;
+	so.task_id = tid;		/* rework 再派：任务面复用 */
+	so.workdir = ctx->workdir;
+	rc = occ_orch_spawn((occ_orch *)ctx->orch, &so, &c, err, sizeof(err));
+	sb_free(&prompt);
+	free(brief_txt);
+	if (rc != OCC_ORCH_OK)
+		return jerr(o, spawn_code(rc), "%s", err);
+	{
+		aik_json *robj = aik_json_new_obj();
+		int okk = robj &&
+			  aik_json_obj_put(robj, "ok",
+					   aik_json_new_bool(1)) == 0 &&
+			  aik_json_obj_put(robj, "action",
+					   aik_json_new_str("spawn")) == 0 &&
+			  aik_json_obj_put(robj, "respawn",
+					   aik_json_new_bool(1)) == 0 &&
+			  aik_json_obj_put(robj, "task_id",
+					   aik_json_new_str(tid)) == 0 &&
+			  aik_json_obj_put(robj, "session_id",
+					   aik_json_new_str(
+						occ_orch_child_session(c))) == 0 &&
+			  aik_json_obj_put(robj, "pid",
+					   aik_json_new_int(
+						occ_orch_child_pid(c))) == 0 &&
+			  aik_json_obj_put(robj, "result_file",
+					   aik_json_new_str(
+						occ_orch_result_path(
+						(occ_orch *)ctx->orch,
+						tid))) == 0;
+		int r2 = okk ? jout(o, robj) : -1;
+
+		if (!okk)
+			occ_ob_puts(o, "ERROR: task spawn 再派结果组装失败"
+				    "（oom）");
+		aik_json_free(robj);
+		return okk ? r2 : -1;
+	}
+}
+
 static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 {
 	const aik_json *brief, *fsj, *budget;
@@ -1599,7 +1728,24 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	char err[256], abs[4096];
 	long long rework_max = 2, wall_ms = 0, max_tokens = 0;
 	int rc;
+	const char *rtid = args_str(a, "task_id");
 
+	/* E10④：spawn+task_id=对回炉任务再派（独立路——原 spawn 新建
+	 * 路零变化）；未带 task_id 走下方原路 */
+	if (rtid && rtid[0]) {
+		if (!ctx->session_id || !ctx->session_id[0])
+			return jerr(o, NULL, "task spawn 需要会话上下文"
+				    "（任务要挂在主会话名下——当前工具执行"
+				    "无 session）");
+		if (!ctx->orch)
+			return jerr(o, NULL, "编排未启用（occ_tool_ctx.orch"
+				    " 为空或 OCC_ORCH_TOOLS 未开）——task "
+				    "工具不可用");
+		if (!ctx->db)
+			return jerr(o, NULL, "编排未启用（库缺失）——task "
+				    "工具不可用");
+		return task_respawn(ctx, a, rtid, o);
+	}
 	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
 	if (!brief || aik_json_typeof(brief) != AIK_JSON_OBJ)
 		return jerr(o, NULL, "spawn 缺少参数 brief（任务书对象——"
@@ -1776,9 +1922,12 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	if (context && context[0])
 		sb_printf(&prompt, "必要上下文：%s\n", context);
 	sb_printf(&prompt, "回炉上限：%lld 次\n", rework_max);
-	sb_puts(&prompt, "报告要求：完成后把最终报告（结论/关键证据/自检结果）"
-		"写入环境变量 " OCC_ORCH_RESULT_ENV " 指向的文件，"
-		"并在标准输出打印一行完成摘要。\n");
+	sb_puts(&prompt, "报告要求：完成后把最终报告写入环境变量 "
+		OCC_ORCH_RESULT_ENV " 指向的文件，并在标准输出打印一行完成"
+		"摘要。报告须含 # VERDICT 表（| criterion | result | "
+		"evidence | self | 固定表头，逐条验收标准一行，result="
+		"pass/fail，evidence 用 file:/md5:/contains:/exit: 机检令牌"
+		"——验收环逐条机检，无表或自由文本证据不采信）。\n");
 	if (prompt.oom) {
 		sb_free(&prompt);
 		goto oom_soft;
@@ -1950,8 +2099,8 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		return jerr(o, NULL, "wait 缺少参数 task_id");
 	if (tmo < 100)
 		tmo = 100;
-	if (tmo > 30000)
-		tmo = 30000;			/* 主进程不死等 */
+	if (tmo > OCC_TASK_WAIT_MAX_MS)
+		tmo = OCC_TASK_WAIT_MAX_MS;	/* 主进程不死等 */
 	if (!ctx->orch || !ctx->db)
 		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
 			    "——task 工具不可用");
@@ -2071,6 +2220,46 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	}
 }
 
+/*
+ * result_path_resolve - E10③：结果文件路径跨进程恢复。运行时注册表
+ * （进程私有，进程死即失）miss 时查任务事件流 kind='result_file' 兜底
+ * （spawn 时持久化落库的登记；回炉再派多条取最近一条；payload=
+ * {"path":"…"}）。活表命中或无事件 → 返回活表值（可 NULL/空）。
+ * 命中兜底时路径写入调用方缓冲 out 并返回 out。
+ */
+static const char *result_path_resolve(occ_orch *o, occ_db *db,
+				       const char *tid,
+				       char *out, size_t outlen)
+{
+	const char *rp = occ_orch_result_path(o, tid);
+	occ_task_event_row *evs = NULL;
+	size_t nevs = 0, i;
+	char pj[384], perr[64];
+	aik_json *v;
+
+	if ((rp && rp[0]) || !db || !tid || !tid[0] || !out || !outlen)
+		return rp;
+	pj[0] = '\0';
+	if (occ_task_events(db, tid, &evs, &nevs, NULL, 0) != 0)
+		return rp;
+	for (i = 0; i < nevs; i++)
+		if (!strcmp(evs[i].kind, OCC_TASK_EV_RESULT_FILE) &&
+		    evs[i].payload_json && evs[i].payload_json[0])
+			snprintf(pj, sizeof(pj), "%s", evs[i].payload_json);
+	occ_task_event_rows_free(evs, nevs);
+	if (!pj[0])
+		return rp;
+	v = aik_json_parse(pj, strlen(pj), perr, sizeof(perr));
+	if (v) {
+		const char *p = aik_json_str(aik_json_get(v, "path"));
+
+		if (p && p[0])
+			snprintf(out, outlen, "%s", p);
+		aik_json_free(v);
+	}
+	return out[0] ? out : rp;
+}
+
 static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 			    occ_obuf *o)
 {
@@ -2083,6 +2272,7 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 	const char *last_payload = NULL;
 	const char *last_mv = NULL;
 	char dbuf[256];
+	char rbuf[384];
 	aik_json *obj;
 
 	if (!tid || !tid[0])
@@ -2092,8 +2282,11 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 			    "——task 工具不可用");
 	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1)
 		return jerr(o, NULL, "任务 %s 不存在", tid);
-	/* 结果文件（运行时注册表——进程生命期内有效） */
-	rp = occ_orch_result_path((occ_orch *)ctx->orch, tid);
+	/* 结果文件：运行时注册表 → E10③ 事件流兜底（派发进程死后
+	 * 跨进程恢复——任务仍可 read_result/return 验收） */
+	rbuf[0] = '\0';
+	rp = result_path_resolve((occ_orch *)ctx->orch, ctx->db, tid,
+				 rbuf, sizeof(rbuf));
 	if (rp && rp[0])
 		report = read_file_head(rp, 4096);
 	/* 终局 result 事件摘要（E2 collect 落的 end/exit_code/stdout_path）
@@ -2184,6 +2377,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		occ_review_verdict rv;
 		char brief[OCC_RV_BRIEF_MAX];
 		char state[24];
+		char rbuf[384];
 		int jpass = 1;
 
 		passj = a->root ? aik_json_get(a->root, "pass") : NULL;
@@ -2200,8 +2394,12 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			jpass = 0;	/* 表态文本兜底推断（显式 pass 优先） */
 		}
 		memset(&ro, 0, sizeof(ro));
-		ro.result_path = occ_orch_result_path(
-			(occ_orch *)ctx->orch, tid);
+		/* E10③：机械判的结果文件同走注册表→事件流兜底（跨进程
+		 * 恢复后 return 验收环仍可读到报告） */
+		rbuf[0] = '\0';
+		ro.result_path = result_path_resolve(
+			(occ_orch *)ctx->orch, ctx->db, tid, rbuf,
+			sizeof(rbuf));
 		ro.base_dir = ctx->workdir;
 		ro.judge_note = verdict;
 		ro.judge_pass = jpass;

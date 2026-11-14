@@ -890,18 +890,25 @@ int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
 }
 
 /*
- * occ_task_note - E3 追加（API 阻断缺口：task 工具 return 动作需要
- * 落事件而不动状态机；语义详见 task.h）。任意状态可记（主会话对
- * 结果的表态与状态机迁移正交）。
+ * occ_task_note_kind - E10③ 追加：kind 参数化的追加式审计事件
+ * （白名单=return/result_file——状态机 kind 不经此面；语义详见
+ * task.h）。occ_task_note 为其 'return' 薄包装（调用面零变化）。
  */
-int occ_task_note(occ_db *db, const char *id, const char *payload_json,
-		  char *err, size_t errlen)
+int occ_task_note_kind(occ_db *db, const char *id, const char *kind,
+		       const char *payload_json, char *err, size_t errlen)
 {
 	char cur[16];
 	int rc, rwc, rwm;
 
-	if (!db || !id || !id[0]) {
-		set_err(err, errlen, "occ_task_note: bad args");
+	if (!db || !id || !id[0] || !kind || !kind[0]) {
+		set_err(err, errlen, "occ_task_note_kind: bad args");
+		return -1;
+	}
+	if (strcmp(kind, OCC_TASK_EV_RETURN) &&
+	    strcmp(kind, OCC_TASK_EV_RESULT_FILE)) {
+		set_err(err, errlen,
+			"occ_task_note_kind: kind 白名单外（仅 return/"
+			"result_file——状态机 kind 不经此面）");
 		return -1;
 	}
 	if (tx_begin(db, err, errlen))
@@ -909,16 +916,29 @@ int occ_task_note(occ_db *db, const char *id, const char *payload_json,
 	rc = task_state(db, id, cur, sizeof(cur), &rwc, &rwm);
 	if (rc != 1) {
 		tx_rollback(db);
-		return task_state_fail(rc, id, "occ_task_note", err, errlen);
+		return task_state_fail(rc, id, "occ_task_note_kind", err,
+				       errlen);
 	}
-	if (ev_add(db, id, OCC_TASK_EV_RETURN, payload_json)) {
+	if (ev_add(db, id, kind, payload_json)) {
 		tx_rollback(db);
-		set_err(err, errlen, "note: 事件落库失败");
+		set_err(err, errlen, "note_kind: 事件落库失败");
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))
 		return -1;
 	return 0;
+}
+
+/*
+ * occ_task_note - E3 追加（API 阻断缺口：task 工具 return 动作需要
+ * 落事件而不动状态机；语义详见 task.h）。任意状态可记（主会话对
+ * 结果的表态与状态机迁移正交）。
+ */
+int occ_task_note(occ_db *db, const char *id, const char *payload_json,
+		  char *err, size_t errlen)
+{
+	return occ_task_note_kind(db, id, OCC_TASK_EV_RETURN, payload_json,
+				  err, errlen);
 }
 
 /*

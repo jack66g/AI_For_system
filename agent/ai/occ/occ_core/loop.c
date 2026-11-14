@@ -84,7 +84,12 @@ static const char OCC_ORCH_PROMPT[] =
 	"声明——并发任务声明同一文件会被拒绝）；status 查任务状态；wait "
 	"限时等待终局（到点未终局如实返回未终局，可再等）；read_result 读"
 	"子报告与终局摘要；return 对结果表态（记入任务事件）。派发后用 "
-	"wait+read_result 催收，不要对同一目标反复 spawn。";
+	"wait+read_result 催收，不要对同一目标反复 spawn（回炉任务用 "
+	"spawn+task_id 再派）。\n"
+	"   任务书须向子智能体传达报告格式：子任务报告须含 # VERDICT 表"
+	"（criterion|result|evidence|self 四列，逐条验收标准一行，"
+	"evidence 用 file:/md5:/contains:/exit: 机检令牌）——验收环逐条"
+	"机检，无表或自由文本证据不采信。";
 
 /* E3：编排段取值（开关开=段文本；关=NULL——compose_sys_prompt 消费） */
 static const char *orch_prompt_segment(void)

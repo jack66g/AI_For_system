@@ -374,6 +374,29 @@ static void sec_parse(void)
 			 "| file:out_b.bin | pass | file:out_b.bin | ok |\n",
 			 EV_OK, tmpdir, acc + 1, 1, &v);
 	OK(v.pass, "b-basedir-relative");
+
+	/* E10① GFM 分隔行：表头下 |---|---|---|---| 不是数据行——
+	 * 完美表+分隔行应全过（实战 A1/B1：分隔行被当数据行 →
+	 * R-ROWPASS 误拒完美报告） */
+	occ_review_verdict_init(&v);
+	occ_review_parse("# VERDICT\n"
+			 "| criterion | result | evidence | self |\n"
+			 "| --- | --- | --- | --- |\n"
+			 "| exit=0 | pass | exit:0 | ok |\n",
+			 EV_OK, NULL, NULL, 0, &v);
+	OK(v.pass && v.n_hit == 0, "b-gfm-sep-row-pass");
+
+	/* E10① 分隔行冒号对齐变体（:---/:---:/---:）同样跳过；真数据
+	 * 行照判（fail 行恰一处 R-ROWPASS——分隔行不贡献误拒，也不
+	 * 影响 R-NOSELF 判定） */
+	occ_review_verdict_init(&v);
+	occ_review_parse("# VERDICT\n"
+			 "| criterion | result | evidence | self |\n"
+			 "| :--- | :---: | ---: | :--- |\n"
+			 "| exit=0 | fail | exit:0 | 差一步 |\n",
+			 EV_OK, tmpdir, acc, 1, &v);
+	OK(!v.pass && has_rule(&v, OCC_RV_R_ROWPASS) && v.n_hit == 1 &&
+	   !has_rule(&v, OCC_RV_R_NOSELF), "b-gfm-sep-mix-data-judged");
 }
 
 /* ============ C 整改词/升级词渲染 ============ */

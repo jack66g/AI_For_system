@@ -507,6 +507,40 @@ static int check_evidence(const char *ev, const char *base_dir,
 	return 1;
 }
 
+/* E10① GFM 分隔行判定（|---|:--:|--:| 等对齐变体）：所有格（trim
+ * 后）均为「可选两端冒号 + 至少一杠」即分隔行——既非表头也非数据
+ * 行，判卷跳过（实战 A1/B1：真模型 GFM 表的分隔行被当数据行，
+ * result 列 "---" 非 pass → R-ROWPASS 误拒完美报告）。 */
+static int rv_is_sep_row(const char *const *cells, const size_t *lens,
+			 size_t ncell)
+{
+	size_t i;
+
+	if (!ncell)
+		return 0;
+	for (i = 0; i < ncell; i++) {
+		const char *s = cells[i];
+		size_t n = lens[i], o = 0;
+		int ndash = 0;
+
+		if (!n)
+			return 0;
+		if (s[o] == ':')
+			o++;
+		while (o < n && s[o] == '-') {
+			ndash++;
+			o++;
+		}
+		if (!ndash)
+			return 0;
+		if (o < n && s[o] == ':')
+			o++;
+		if (o != n)
+			return 0;
+	}
+	return 1;
+}
+
 void occ_review_parse(const char *report, const char *result_event_json,
 		      const char *base_dir,
 		      const char *const *acceptance, size_t n_acc,
@@ -577,6 +611,8 @@ void occ_review_parse(const char *report, const char *result_event_json,
 					}
 					/* 表头前的 | 行忽略（前言噪音） */
 				} else if (ncell >= 3 &&
+					   !rv_is_sep_row(cells, lens,
+							  ncell) &&
 					   n_rows < RV_MAX_ROWS) {
 					snprintf(rows[n_rows].crit,
 						 sizeof(rows[0].crit),
