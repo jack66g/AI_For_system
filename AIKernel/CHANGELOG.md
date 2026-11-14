@@ -109,3 +109,9 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 - AIKernel/test/perf/k10_matrix.py 跑表器 + configs/k104_{base,off}.frag（scripts/config 纯参数行，# 注释跳过）：P0 静态四门→P1 KUnit→P2 三配置（strong/base/off 翻转后自证再编，boot 断言：strong 三件套指纹等值/base 三件套在+audit 无+指纹变/off /proc/ai 整树缺席）→P3 storm 500→P4 同源三建 sha256 比对+config 复位 factory 抽取比对；全程计时对 CI<30min 预算。
 - 矩阵实抓四跨配置缺陷（真 config 组合从未编译过=潜伏爆点，全修）：subsys/power/ai_power.h #else 桩区缺 K4/K7 四访问器桩（POWER=n 跨族隐式声明）；subsys/net/ai_net.h AI 侧五访问器声明门 RUNTIME 而实现门 NET 错位（声明内嵌 NET 门+#else 零值桩）；ai_net.h 桩体 return AI_OK 为全树不存在幽灵宏（改字面 0）；off 片须点名 --disable AIKERNEL_AGENT（agent/ai/Kconfig 遗留六家族不依赖总开关，五子随父级联）。
 - base 实测 config_hash=e95e704364d361b5 ≠ strong 6a36fe4a68743a2f（K10a 指纹首次实战区分配置）；P4 三建字节一致 FAIL=内核构建缺省非确定序（预期如实登记；可复现构建全套钉死=尾账）。
+
+## K11 用户态闭环联调（2026-11-14，K 轨 K0–K11 收齐）
+- occ /status 追加 AIKernel 内核观测行（三件套+audit 首行链统计+agents 行数/actions+models 首行；缺段省段、非 AIKernel 主机整行静默零扰动）——rig 真机 TUI 渲染实证；
+- aistreamd：启动三件套快照 env 事件行落 telemetry parquet + AS_ONCE 单轮/AS_DUMP 逐字段 dump 测试口径（常驻零开销）；
+- AIKernel/test/perf/k11_golden.py 全链 golden 两幕器（rig 注盘：aikctl+python3.10+aistreamd+新 occ+conf）——终跑 GOLDEN_SUMMARY ok=7 fail=0（storm300 全成/链 NEW/OUTCOME 按 decision_id 配对 300:300/ASDump⊆内核 ring/parquet 4 块导出/三件套一致/抽一条 OUTCOME 配对必红=断链即红自证）；
+- 真 finding：tool 动作 outcome 回填=用户态职责（生产 aikd 经 sysfs，rig 无角色=断链；golden 以生产同款面 /sys/kernel/ai/policy/outcome 回填闭环）；outcome attr 真身在 policy/ 子目录（父路径 O_CREAT=EACCES 假象）；rig 盘 occ TUI 占串口（/shell 内建落 bash）；rig 自带 aistreamd 常驻持锁；ONLCR \r 断跨行正则；audit d= 小端字节序。内核侧零改动。

@@ -2429,6 +2429,88 @@ static int cmd_zoom(struct tui_app *a, const char *arg)
 	return 0;
 }
 
+
+/* K11：AIKernel 内核侧观测行——/proc/ai/status 三件套 + audit 首行链
+ * 统计 + agents 行数/actions 累加 + models 首行。非 AIKernel 主机
+ * /proc/ai/status 不存在=整行静默省略（p-smoke/差分零扰动前提）。
+ * 读面全小步：audit 只取首行（K9 实测 decisions 类全量读代价大，
+ * 同纪律不整读）；各段缺省省段，不虚报。 */
+static void cmd_status_kernel_line(struct tui_view *view)
+{
+	char buf[640], line[288];
+	char kver[40] = "", abi[16] = "", cfg[32] = "";
+	char chain[128] = "", ag[96] = "", md[128] = "";
+	FILE *f;
+	int agents = 0;
+	unsigned long long acts = 0;
+
+	f = fopen("/proc/ai/status", "r");
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "kernel_ver: %39s", kver) == 1)
+			continue;
+		if (sscanf(line, "abi_ver: %15s", abi) == 1)
+			continue;
+		if (sscanf(line, "config_hash: %31s", cfg) == 1)
+			continue;
+	}
+	fclose(f);
+	if (!kver[0] || !abi[0] || !cfg[0])
+		return;
+
+	f = fopen("/proc/ai/audit", "r");
+	if (f) {
+		if (fgets(line, sizeof(line), f)) {
+			unsigned long long nodes = 0, ev = 0;
+
+			if (sscanf(line, "chain head=%*s nodes=%llu evicted=%llu",
+				   &nodes, &ev) == 2)
+				snprintf(chain, sizeof(chain),
+					 " · chain nodes=%llu evicted=%llu",
+					 nodes, ev);
+		}
+		fclose(f);
+	}
+
+	f = fopen("/proc/ai/agents", "r");
+	if (f) {
+		while (fgets(line, sizeof(line), f)) {
+			unsigned long long ac;
+			unsigned id;
+			char nm[64];
+
+			if (sscanf(line, "id=%u name=%63s bound=%*u actions=%llu",
+				   &id, nm, &ac) == 3) {
+				agents++;
+				acts += ac;
+			}
+		}
+		fclose(f);
+		if (agents)
+			snprintf(ag, sizeof(ag), " · agents=%d acts=%llu",
+				 agents, acts);
+	}
+
+	f = fopen("/proc/ai/models", "r");
+	if (f) {
+		if (fgets(line, sizeof(line), f)) {
+			char nm[48];
+			unsigned ver, st;
+
+			if (sscanf(line, "name=%47s version=%u state=%u",
+				   nm, &ver, &st) == 3)
+				snprintf(md, sizeof(md),
+					 " · model %s v%u st%u", nm, ver, st);
+		}
+		fclose(f);
+	}
+
+	snprintf(buf, sizeof(buf), "kernel=%s abi=%s cfg=%s%s%s%s",
+		 kver, abi, cfg, chain, ag, md);
+	tui_view_notice(view, buf);
+}
+
 static int tui_app_on_command(void *ud, const char *line)
 {
 	struct tui_app *a = ud;
@@ -2564,6 +2646,7 @@ static int tui_app_on_command(void *ud, const char *line)
 			 est ? "~" : "", t1, t2, fb ? "*" : "", pbuf, items,
 			 billed, est ? "~" : "", a->cwd);
 		tui_view_notice(a->view, buf);
+		cmd_status_kernel_line(a->view);
 		return 0;
 	}
 	if (!strcmp(line, "/models"))

@@ -53,6 +53,8 @@
 /* ---- 全局上下文（单线程，信号只置标志） ---- */
 
 static volatile sig_atomic_t g_stop;
+/* K11 golden：AS_ONCE=1 单轮模式（跑完一轮 tick+poll 即优雅退出） */
+static int g_once;
 static volatile sig_atomic_t g_dump;
 static volatile sig_atomic_t g_reload;
 
@@ -439,6 +441,45 @@ int main(int argc, char **argv)
 		sigaction(SIGHUP, &sa, NULL);
 	}
 
+	/* K11：内核三件套快照——/proc/ai/status 尾三行合成一条 event 行落
+	 * Parquet（无 AIKernel 面则降级诚实跳过）。指纹漂移对账=boot 行
+	 * 唯一性（运行中换内核理论不发生）。 */
+	{
+		FILE *kf = fopen("/proc/ai/status", "r");
+		char kline[288], kver[40] = "", abi[16] = "", cfg[32] = "";
+
+		if (kf) {
+			while (fgets(kline, sizeof(kline), kf)) {
+				if (sscanf(kline, "kernel_ver: %39s", kver) == 1)
+					continue;
+				if (sscanf(kline, "abi_ver: %15s", abi) == 1)
+					continue;
+				if (sscanf(kline, "config_hash: %31s", cfg) == 1)
+					continue;
+			}
+			fclose(kf);
+			if (kver[0] && abi[0] && cfg[0]) {
+				struct as_event kev;
+
+				as_event_mk(&kev,
+					      as_stream_idx(AS_STREAM_EVENT),
+					      "ai", NULL,
+					      "k11_boot kernel_ver=%s abi_ver=%s "
+					      "config_hash=%s", kver, abi, cfg);
+				if (G.pq.enabled)
+					as_pq_sink_feed(&G.pq, &kev);
+				as_log("k11 boot snapshot: kernel=%s abi=%s cfg=%s",
+					kver, abi, cfg);
+			} else {
+				as_log("k11 boot snapshot: status fields missing "
+					"(degrade)");
+			}
+		} else {
+			as_log("k11 boot snapshot: no /proc/ai/status "
+				"(non-AIKernel host, degrade)");
+		}
+	}
+	g_once = (getenv("AS_ONCE") && getenv("AS_ONCE")[0] == '1');
 	write_stats(&G, "startup");
 	as_log("running (streams: see %s)", G.conf.stats_file);
 
@@ -449,6 +490,11 @@ int main(int argc, char **argv)
 				  G.conf.parquet_flush_sec * 1000;
 
 	while (!g_stop) {
+		if (g_once) {
+			/* K11 golden：单轮即停——本轮各 tick+poll 照跑，下轮即退 */
+			g_stop = 1;
+			g_once = 0;
+		}
 		long long now = as_now_mono_ms();
 		long long timeout = 1000;	/* 兜底 1s 醒一次跑定时器 */
 		long long due;

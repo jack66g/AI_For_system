@@ -31,6 +31,17 @@
 #include "as_util.h"
 
 /* root 归一（init/set_root 保证无尾部 '/'，"/" 除外）；sub 以 '/' 开头 */
+/* K11 golden：AS_DUMP=1 时决策记录逐条 stderr dump（测试口径，
+ * 常驻仅一次 getenv 判定，零开销） */
+static int as_dec_dump_enabled(void)
+{
+	static int dump = -1;
+
+	if (dump < 0)
+		dump = (getenv("AS_DUMP") && getenv("AS_DUMP")[0] == '1');
+	return dump;
+}
+
 static void dec_path(char *buf, size_t cap, const char *root,
 		     const char *sub)
 {
@@ -303,6 +314,15 @@ static int dec_poll_once(struct as_decisions *d)
 		}
 		d->stats->dec.rows_seen++;
 		file_nonempty = 1;
+		if (as_dec_dump_enabled())
+			fprintf(stderr,
+				"ASDUMP id=%llu type=%u trace=%016llx:%016llx "
+				"cost_ns=%llu intent=%llu parent=%llu agent=%u "
+				"executed=%u outcome=%u outcome_ts=%llu se=%u\n",
+				r.id, r.type, r.trace_hi, r.trace_lo,
+				r.cost_ns, r.intent_id, r.parent_id,
+				r.agent_id, r.executed, r.outcome,
+				r.outcome_ts, r.side_effect_mask);
 		if (r.id > file_max)
 			file_max = r.id;
 		if (rows_n == rows_cap) {
