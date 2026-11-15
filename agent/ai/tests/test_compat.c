@@ -18,6 +18,12 @@
  *     expect.exit_code 实装（42/缺省 0/97→负向 98 避撞/300 拒绝）；
  *     六类超限诚实报错（generate 面 env/argv/map/自动 env + 加载面
  *     env/map/lib/chmod/install/argv 全集 + §4.4 缺字段拒绝）
+ *   - C3 Lane-1（层名统一+L3 双态）：四 code layer=L3 断言（ARCH_MISMATCH
+ *     双态各半+LIBC/32 位/OSABI）；emulators 探测面（env 权威覆盖在场/
+ *     缺席、PATH 发现——不依赖真装 qemu，假模拟器文件即在场态）；
+ *     L3 wrapper 规则装配（layers.L3.emulator/contract.argv 前缀 [qemu,
+ *     stage 内目标]/risk=medium/limitations 模拟执行注记/execve 断言随
+ *     argv[0]）；加载面 L3 形状安检与矛盾数据拒绝
  *
  * --live（需要 root + 真 aik-sandbox + gcc）：走 tool_executor_run 真链路
  *   构造样本 A（#!/usr/bin/python4.9 脚本）与样本 B（DT_NEEDED
@@ -1327,6 +1333,298 @@ static void test_load_manifest(void)
 	tool_registry_free(&reg);
 }
 
+/* ------------------------------------------------------------------
+ * C3 Lane-1：层名统一 + L3 双态与 wrapper 装配（全非 root 零副作用）。
+ * 双态不依赖真装 qemu：AIK_QEMU_USER_<ARCH> 是权威覆盖——env 指到存在/
+ * 不存在的文件即得在场/缺席两态（坏路径=缺席不静默回落，见
+ * cp_qemu_user_find）；PATH 发现用临时目录前置假 qemu-<arch>-static。
+ * ------------------------------------------------------------------ */
+
+/* 合成最小 ELF64（仅 Ehdr；machine/osabi 可配，无 PT_INTERP/动态段）
+ * ——触发 ARCH_MISMATCH 双态 / OSABI 类 ABI_MISMATCH，判定路径最短 */
+static int write_synth_elf_arch(const char *path, unsigned machine, int osabi)
+{
+	unsigned char buf[128];
+	Elf64_Ehdr eh;
+
+	memset(buf, 0, sizeof(buf));
+	memset(&eh, 0, sizeof(eh));
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS64;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_ident[EI_OSABI] = (unsigned char)osabi;
+	eh.e_type = ET_DYN;
+	eh.e_machine = machine;
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	memcpy(buf, &eh, sizeof(eh));
+	return write_file_bin(path, buf, sizeof(buf), 0755);
+}
+
+/* 合成最小 ELF32（EM_386）——触发 32 位 ABI_MISMATCH（人工路径文案） */
+static int write_synth_elf32_x86(const char *path)
+{
+	unsigned char buf[96];
+	Elf32_Ehdr eh;
+
+	memset(buf, 0, sizeof(buf));
+	memset(&eh, 0, sizeof(eh));
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS32;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_type = ET_DYN;
+	eh.e_machine = EM_386;
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	memcpy(buf, &eh, sizeof(eh));
+	return write_file_bin(path, buf, sizeof(buf), 0755);
+}
+
+/* 手写 L3 fixture 适配器（加载面：形状安检与矛盾数据拒绝） */
+static int write_fixture_l3(const char *root, const char *name,
+			    const char *emu, const char *argv0)
+{
+	char path[512], buf[3072];
+	int n;
+
+	n = snprintf(buf, sizeof(buf),
+		     "{\"schema\":\"aikernel.compat/v0\",\"adapter\":\"%s\","
+		     "\"risk\":\"low\",\"limitations\":[\"fixture\"],"
+		     "\"provides\":[],\"created_by\":\"c3a-fixture\","
+		     "\"trace_id\":null,"
+		     "\"target\":{\"host\":\"/bin/sh\",\"kind\":\"elf\","
+		     "\"inside\":\"/opt/aik-compat/%s/app/sh\",\"size\":1,"
+		     "\"because\":\"fixture\"},"
+		     "\"layers\":{\"L0\":{\"env\":[],\"path_map\":[],"
+		     "\"lib_redirect\":[],\"chmod\":[]},"
+		     "\"L2\":{\"workspace\":\"cmp-%s\",\"backing\":\"disk\","
+		     "\"stage\":\"/opt/aik-compat/%s\",\"install\":[],"
+		     "\"usr_overlay\":false,\"mount_view\":[]},"
+		     "\"L3\":{\"emulator\":\"%s\"}},"
+		     "\"contract\":{\"argv\":[\"%s\","
+		     "\"/opt/aik-compat/%s/app/sh\"],\"timeout_s\":10,"
+		     "\"assert\":[],\"negative\":[]},"
+		     "\"rollback\":{\"paths\":[],\"steps\":[]}}",
+		     name, name, name, name, emu, argv0, name);
+	if (n <= 0 || (size_t)n >= sizeof(buf))
+		return -1;
+	snprintf(path, sizeof(path), "%s/adapters/%s.json", root, name);
+	return write_file(path, buf, 0644);
+}
+
+static void test_c3_l3(void)
+{
+	struct tool_registry reg;
+	char *err = NULL, *out = NULL, *json = NULL;
+	const char *root = getenv("AIKERNEL_COMPAT_ROOT");
+	char dir[] = "/tmp/c3a-unit-XXXXXX";
+	char arm64[512], fake[512], pthdir[512], pthq[512], elf32[512];
+	char osabi[512], toonew[512], adir[512], args[2048], oldpath[4096];
+	const char *po;
+	int ok = 0, runnable = -1;
+
+	if (!root || !root[0]) {
+		CHECK(0, "AIKERNEL_COMPAT_ROOT 在场（C3 L3 用例）");
+		return;
+	}
+	memset(&reg, 0, sizeof(reg));
+	if (tool_registry_load(&reg, &err) != AI_OK) {
+		CHECK(0, "tools.json 加载（C3 L3 用例）");
+		return;
+	}
+	CHECK(mkdtemp(dir) != NULL, "mkdtemp（C3 L3 用例）");
+	snprintf(arm64, sizeof(arm64), "%s/c3a-arm64", dir);
+	snprintf(fake, sizeof(fake), "%s/qemu-aarch64-fake", dir);
+	snprintf(pthdir, sizeof(pthdir), "%s/pth", dir);
+	snprintf(pthq, sizeof(pthq), "%s/qemu-arm-static", pthdir);
+	snprintf(elf32, sizeof(elf32), "%s/c3a-elf32", dir);
+	snprintf(osabi, sizeof(osabi), "%s/c3a-osabi", dir);
+	snprintf(toonew, sizeof(toonew), "%s/c3a-toonew", dir);
+	CHECK(write_synth_elf_arch(arm64, EM_AARCH64, ELFOSABI_NONE) == 0,
+	      "写合成 aarch64 ELF（最小 Ehdr）");
+	CHECK(write_file(fake, "#!/bin/sh\nexit 0\n", 0755) == 0,
+	      "写假模拟器（env 在场态指向它；probe 不执行它）");
+	CHECK(mkdir(pthdir, 0755) == 0, "建 PATH 发现用临时目录");
+	CHECK(write_file(pthq, "#!/bin/sh\nexit 0\n", 0755) == 0,
+	      "写 PATH 上的假 qemu-arm-static");
+	CHECK(write_synth_elf32_x86(elf32) == 0, "写合成 32 位 x86 ELF");
+	CHECK(write_synth_elf_arch(osabi, EM_X86_64, ELFOSABI_SOLARIS) == 0,
+	      "写合成 OSABI=Solaris ELF");
+	CHECK(write_synth_elf(toonew, "GLIBC_2.9999") == 0,
+	      "写合成超新版本 ELF");
+
+	/* --- aarch64 缺席态：env 权威覆盖指到不存在路径 --- */
+	setenv("AIK_QEMU_USER_AARCH64", "/nonexistent/c3a-noqemu", 1);
+	(void)ai_compat_probe_json(arm64, NULL, &json, &runnable);
+	CHECK(json && strstr(json, "\"emulators\":{\"aarch64\":null") != NULL,
+	      "缺席态：emulators.aarch64=null（env 覆盖不静默回落）");
+	CHECK(json && strstr(json, "\"ARCH_MISMATCH\",\"layer\":\"L3\","
+	      "\"fatal\":true,\"adaptable\":false") != NULL,
+	      "缺席态：ARCH_MISMATCH layer=L3 且 fatal+不可适配");
+	CHECK(json && strstr(json, "qemu-aarch64-static 未装") != NULL,
+	      "缺席态：detail 人话点名缺件");
+	CHECK(json && strstr(json, "apt install qemu-user-static") != NULL,
+	      "缺席态：detail 给装法一句");
+	CHECK(runnable == 0, "缺席态：runnable=false（fatal 保持）");
+	free(json);
+	json = NULL;
+
+	/* --- aarch64 在场态：env 指到存在的假模拟器 --- */
+	setenv("AIK_QEMU_USER_AARCH64", fake, 1);
+	(void)ai_compat_probe_json(arm64, NULL, &json, &runnable);
+	CHECK(json && strstr(json, fake) != NULL,
+	      "在场态：emulators.aarch64=env 指定路径（权威覆盖）");
+	CHECK(json && strstr(json, "\"ARCH_MISMATCH\",\"layer\":\"L3\","
+	      "\"fatal\":true,\"adaptable\":true") != NULL,
+	      "在场态：ARCH_MISMATCH layer=L3，fatal 保持但可适配");
+	CHECK(json && strstr(json, "经 qemu-user 模拟执行") != NULL,
+	      "在场态：detail 指名经 qemu-user 模拟执行");
+	free(json);
+	json = NULL;
+
+	/* --- arm 双态：env 覆盖缺席 / PATH 发现（均不依赖真装） --- */
+	setenv("AIK_QEMU_USER_ARM", "/nonexistent/c3a-noqemu-arm", 1);
+	(void)ai_compat_probe_json("/bin/sh", NULL, &json, &runnable);
+	CHECK(json && strstr(json, "\"arm\":null") != NULL,
+	      "arm 缺席态：emulators.arm=null");
+	free(json);
+	json = NULL;
+	unsetenv("AIK_QEMU_USER_ARM");
+	po = getenv("PATH");
+	snprintf(oldpath, sizeof(oldpath), "%s", po ? po : "");
+	{
+		char newpath[4600];
+
+		snprintf(newpath, sizeof(newpath), "%s:%s", pthdir, oldpath);
+		setenv("PATH", newpath, 1);
+	}
+	(void)ai_compat_probe_json("/bin/sh", NULL, &json, &runnable);
+	CHECK(json && strstr(json, pthq) != NULL,
+	      "PATH 发现：emulators.arm 命中 PATH 上的 qemu-arm-static");
+	free(json);
+	json = NULL;
+	setenv("PATH", oldpath, 1);
+
+	/* --- 层名统一：LIBC_VERSION_TOO_NEW / 32 位 / OSABI 三 code --- */
+	(void)ai_compat_probe_json(toonew, NULL, &json, &runnable);
+	if (json && strstr(json, "LIBC_VERSION_TOO_NEW"))
+		CHECK(strstr(json, "\"LIBC_VERSION_TOO_NEW\",\"layer\":"
+		      "\"L3\"") != NULL,
+		      "LIBC_VERSION_TOO_NEW layer=L3（v0 恒不可适配）");
+	else
+		CHECK(json && strstr(json, "LIBC_VERSION_TOO_NEW") == NULL,
+		      "宿主 libc 无 verdef → 诚实降级（layer 用例跳过）");
+	free(json);
+	json = NULL;
+	(void)ai_compat_probe_json(elf32, NULL, &json, &runnable);
+	CHECK(json && strstr(json, "\"ABI_MISMATCH\",\"layer\":\"L3\"") != NULL,
+	      "32 位 x86：ABI_MISMATCH layer=L3");
+	CHECK(json && strstr(json, "libc6:i386") != NULL,
+	      "32 位 x86：detail 给 multiarch 人工路径");
+	free(json);
+	json = NULL;
+	(void)ai_compat_probe_json(osabi, NULL, &json, &runnable);
+	CHECK(json && strstr(json, "\"ABI_MISMATCH\",\"layer\":\"L3\"") != NULL,
+	      "OSABI 非 Linux：ABI_MISMATCH layer=L3");
+	CHECK(json && strstr(json, "不做 OS 翻译") != NULL,
+	      "OSABI 非 Linux：detail 指明 qemu 不做 OS 翻译");
+	free(json);
+	json = NULL;
+
+	/* --- generate 在场态：L3 wrapper 装配 --- */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c3a-l3gen\",\"target\":\"%s\",\"write\":false}",
+		 arm64);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"L3\":{\"emulator\":\"") != NULL,
+	      "generate：layers.L3.emulator 在场");
+	{
+		char pre[1024];
+
+		snprintf(pre, sizeof(pre), "\"argv\":[\"%s\","
+			 "\"/opt/aik-compat/c3a-l3gen/app/c3a-arm64\"", fake);
+		CHECK(out && strstr(out, pre) != NULL,
+		      "generate：contract.argv 前缀 [qemu, stage 内目标副本]");
+	}
+	CHECK(out && strstr(out, "\"risk\":\"medium\"") != NULL,
+	      "generate：含 L3 层 → risk=medium");
+	CHECK(out && strstr(out, "模拟执行：性能非原生，syscall 语义经 "
+	      "qemu 翻译") != NULL,
+	      "generate：limitations 自动加模拟执行注记");
+	CHECK(out && strstr(out, "\"value\":\"execve\","
+	      "\"match\":\"qemu-aarch64-fake\"") != NULL,
+	      "generate：execve 轨迹断言随 argv[0]（match=模拟器名）");
+	/* binfmt 面：unadapted 必要性负向与 binfmt 注记互斥——宿主注册了
+	 * 对应 arch handler 时未适配直跑也被内核透明翻译，负向必须让位
+	 * （C2 增强型同款裁定；不变式在有无 binfmt 的宿主上都成立） */
+	CHECK(out && ((strstr(out, "\"id\":\"unadapted\"") != NULL) ==
+		      (strstr(out, "binfmt_misc 已注册") == NULL)),
+	      "generate：unadapted 负向与 binfmt 注记互斥一致（按宿主实态）");
+	free(out);
+	out = NULL;
+
+	/* --- generate 缺席态：入口闸诚实拒绝（fatal&adaptable=0 才拒） --- */
+	setenv("AIK_QEMU_USER_AARCH64", "/nonexistent/c3a-noqemu", 1);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "ERROR") &&
+	      strstr(out, "ARCH_MISMATCH") && strstr(out, "不可适配"),
+	      "generate 缺席态：入口闸拒绝且指名 ARCH_MISMATCH");
+	free(out);
+	out = NULL;
+	setenv("AIK_QEMU_USER_AARCH64", fake, 1);
+
+	/* --- 加载面控制组：真 L3 适配器过形状安检 --- */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c3a-l3load\",\"target\":\"%s\",\"write\":true}",
+		 arm64);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"written\":true"),
+	      "加载面控制组：L3 适配器落盘");
+	free(out);
+	out = NULL;
+	run_tool(&reg, "compat_apply", "{\"name\":\"c3a-l3load\"}", &out, &ok);
+	CHECK(out && strstr(out, "适配器不可用") == NULL,
+	      "加载面控制组：L3 形状（argv=[模拟器, stage 内目标]）过安检");
+	free(out);
+	out = NULL;
+
+	/* --- 加载面负例：矛盾数据 / 坏形状拒绝 --- */
+	snprintf(adir, sizeof(adir), "%s/adapters", root);
+	(void)mkdir(adir, 0755);
+	CHECK(write_fixture_l3(root, "c3a-fx-mismatch", "/nonexistent/c3a-q",
+				"/bin/sh") == 0,
+	      "写 fixture：L3.emulator 与 argv[0] 不一致");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c3a-fx-mismatch\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "适配器不可用") &&
+	      strstr(out, "不一致"), "L3 矛盾数据（emulator≠argv[0]）→ 拒绝");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture_l3(root, "c3a-fx-noexec", "/nonexistent/c3a-q",
+				"/nonexistent/c3a-q") == 0,
+	      "写 fixture：argv[0] 一致但模拟器不存在");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c3a-fx-noexec\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "适配器不可用") &&
+	      strstr(out, "模拟器绝对路径"),
+	      "argv[0] 不可执行 → 拒绝（诚实报 L3 形状要求）");
+	free(out);
+	out = NULL;
+
+	unsetenv("AIK_QEMU_USER_AARCH64");
+	unlink(arm64);
+	unlink(fake);
+	unlink(pthq);
+	unlink(elf32);
+	unlink(osabi);
+	unlink(toonew);
+	rmdir(pthdir);
+	rmdir(dir);
+	tool_registry_free(&reg);
+}
+
 static int unit(void)
 {
 	char root[] = "/tmp/w82b-compat-root-XXXXXX";
@@ -1354,6 +1652,7 @@ static int unit(void)
 	test_generate_manifest();
 	test_generate_limits();
 	test_load_manifest();
+	test_c3_l3();
 	printf("SUMMARY(unit): %d checks, %d failed\n", checks, fails);
 	rmdir(root);
 	return fails ? 1 : 0;

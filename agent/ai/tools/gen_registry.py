@@ -4966,11 +4966,14 @@ def range_tools():
 # W82B：V6 应用兼容（compat 通道，四件）
 #
 # 判据（ROADMAP §4.6 V6）：**适配器是数据，不是代码**——AI 产出的是规则
-# + 行为契约，应用本体一个字节都不改。第一版只做两层：
+# + 行为契约，应用本体一个字节都不改。层次（C3 §0 层名统一后唯一口径）：
 #   L0 环境适配：路径重映射（shim）/ 环境变量 / 依赖库重定向
 #   L2 运行时隔离：workspace 自带 rootfs 与库 + /usr overlay 挂载视图
-# L1（ABI 翻译：binfmt_misc / seccomp 翻译）明确未实现：探测到架构不同
-# 或 32 位缺 loader 时标 layer=L1 / adaptable=false，绝不假装能修。
+#   L3 qemu-user 异构模拟/翻译（旧口径误名 L1）：aarch64/arm 双态——探到
+#     qemu-<arch>-static 时 ARCH_MISMATCH 标 layer=L3 / adaptable=true，
+#     generate 产 L3 wrapper；缺席或 32 位 x86/OSABI 非 Linux/libc 超新 →
+#     adaptable=false 诚实拒绝，绝不假装能修。L1（LD_PRELOAD/audit 符号级
+#     shim）明确未实现。
 #
 # 诚实边界：compat_probe 只做静态判定（不执行目标）；真实试跑只发生在
 # compat_apply 的 workspace 内；compat_verify 的契约必须含负向用例，
@@ -4989,8 +4992,18 @@ def tool_compat_probe():
                        "同族解释器候选（/usr/bin 等按前缀扫描）、执行位/"
                        "可读性。每条 fatal 原因给 code/layer/fatal/"
                        "adaptable/detail/evidence[]；缺解释器/缺库 → "
-                       "layer=L0 可适配；架构不同/32 位缺 loader → "
-                       "layer=L1 明确标注不可适配（v0 不做 ABI 翻译）。",
+                       "layer=L0 可适配；架构不同/32 位缺 loader/OSABI 非 "
+                       "Linux/libc 超新 → layer=L3（qemu-user 异构模拟/"
+                       "翻译）：aarch64/arm 且宿主探到模拟器时 "
+                       "ARCH_MISMATCH 标 adaptable=true（经 qemu-user 模拟"
+                       "执行），缺席则 adaptable=false 且 detail 人话点名"
+                       "缺件与装法；32 位 x86/OSABI 非 Linux/"
+                       "LIBC_VERSION_TOO_NEW v0 恒不可自动适配（detail 给"
+                       "人工路径）。顶层 emulators:{aarch64:path|null, "
+                       "arm:path|null} 为宿主 qemu-user 探测结果（查序 "
+                       "$AIK_QEMU_USER_<ARCH> > PATH 上 qemu-<arch>-"
+                       "static > /usr/bin/qemu-<arch>-static；env 显式设置"
+                       "即权威覆盖，坏路径=缺席不静默回落）。",
         "parameters": obj_schema(
             {"target": {"type": "string",
                         "description": "宿主绝对路径（可执行/脚本；目录只"
@@ -5009,12 +5022,18 @@ def tool_compat_generate():
                        "path_map（路径重映射 shim）/ env（环境变量）/ "
                        "lib_redirect（库重定向）/ chmod（workspace 副本"
                        "补位，宿主原件权限不动）；L2（workspace + stage + "
-                       "install + /usr overlay 挂载视图）；contract（退出"
-                       "码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹"
-                       "关键项 + 三类负向用例）；rollback（stage 与 upper "
-                       "shim 路径）。每条规则强制带 because，缺 because 拒绝"
-                       "应用。interpreter_map/lib_sources 可显式指定来源；"
-                       "探测到缺解释器/缺库但给不出来源时诚实失败，不猜。",
+                       "install + /usr overlay 挂载视图）；L3（aarch64/arm "
+                       "双态在场时产 qemu-user 模拟 wrapper：layers.L3."
+                       "emulator 记模拟器路径，contract.argv=[\"<emulator>"
+                       "\",\"<stage 内目标副本>\",用户 args...]，直调不注册 "
+                       "binfmt_misc；risk 含 L3 → medium；limitations 自动"
+                       "加「模拟执行：性能非原生，syscall 语义经 qemu 翻译」"
+                       "）；contract（退出码/stdout 非空/含指定输出/耗时上"
+                       "限 + syscall 轨迹关键项 + 三类负向用例）；rollback"
+                       "（stage 与 upper shim 路径）。每条规则强制带 "
+                       "because，缺 because 拒绝应用。interpreter_map/"
+                       "lib_sources 可显式指定来源；探测到缺解释器/缺库但"
+                       "给不出来源时诚实失败，不猜。",
         "parameters": obj_schema(
             {"name": {"type": "string",
                       "description": "适配器名（[A-Za-z0-9_.-]{1,32}，首字符"

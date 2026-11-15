@@ -15,8 +15,17 @@
  *   8) 通道入口
  *
  * 诚实边界（v0）：
- *   - L1（ABI 翻译：binfmt_misc / seccomp 翻译）未实现；探测到架构不同/
- *     32 位缺 loader 时标 layer=L1 且 adaptable=0，绝不假装能修。
+ *   - 层名统一（C3 §0，对齐 SYSTEM-EVOLUTION §4.3 唯一口径）：旧口径
+ *     layer="L1"（ABI 翻译）全部改名 layer="L3"（binfmt/qemu-user 异构
+ *     模拟/翻译）。持久化适配器零迁移：这四个 code（ABI_MISMATCH/
+ *     ARCH_MISMATCH/MISSING_ABI_LOADER/LIBC_VERSION_TOO_NEW）旧口径下
+ *     从不 adaptable=1，从未生成过含 layer="L1" 串的适配器，盘上无存量。
+ *   - L3（qemu-user 异构模拟）v0 半开（C3 §1）：aarch64/arm 且本机探到
+ *     qemu-<arch>-static 时 ARCH_MISMATCH 标 layer=L3 且 adaptable=1，
+ *     generate 产 L3 wrapper（contract.argv 前缀 qemu，直调不注册
+ *     binfmt_misc）；模拟器缺席/32 位 x86/OSABI 非 Linux/libc 超新 →
+ *     adaptable=0 诚实拒绝，detail 给人工路径。L1（LD_PRELOAD/audit
+ *     符号级 shim）未实现。
  *   - probe 只做静态判定（不执行目标）；真实试跑在 compat_apply 内、
  *     且只在 workspace 里发生。
  *   - syscall 轨迹依赖宿主 strace；缺 strace 时 verify 直接判"不可验证"，
@@ -1229,6 +1238,9 @@ struct cp_probe {
 	char provided_max[AI_COMPAT_VER_LEN];
 	char too_new[CP_MAX_TOO_NEW][AI_COMPAT_VER_LEN];
 	int n_too_new;
+	/* C3：ARCH_MISMATCH 双态在场时命中的 qemu-user 模拟器路径（空=缺席） */
+	char emu[PATH_MAX];
+	unsigned em;			/* ELF e_machine（binfmt 核对面） */
 	char because[1024];
 };
 
@@ -1359,6 +1371,104 @@ static int cp_lookup_path(const char *name, char *out, size_t cap)
 		}
 	}
 	return -1;
+}
+
+/*
+ * C3：qemu-user 模拟器探测（L3 层双态判定的环境面）。
+ * 查找顺序（设计册 §1.1）：$AIK_QEMU_USER_<ARCH>（arch 大写）>
+ * PATH 上 qemu-<arch>-static > /usr/bin/qemu-<arch>-static（后两级由
+ * cp_lookup_path 的 PATH 扫描+固定兜底序一次完成）。
+ * 显式 env 是权威覆盖：设了但指向不存在/不可执行/不安全路径时判缺席，
+ * 不静默回落到系统安装（台架缺席态即用 AIK_QEMU_USER_AARCH64=/
+ * nonexistent 覆盖达成——回落会假成功）。
+ * v0 双态只认 aarch64/arm 两族（§1.2 裁定范围），其余 arch 直接缺席。
+ * 返回 0=探到（out 写绝对路径）；-1=缺席。
+ */
+static int cp_qemu_user_find(const char *arch, char *out, size_t cap)
+{
+	char env_name[64], name[64], up[32];
+	const char *e;
+	size_t i;
+
+	if (!arch || !arch[0])
+		return -1;
+	if (strcmp(arch, "aarch64") && strcmp(arch, "arm"))
+		return -1;
+	for (i = 0; arch[i] && i < sizeof(up) - 1; i++)
+		up[i] = (char)toupper((unsigned char)arch[i]);
+	up[i] = '\0';
+	snprintf(env_name, sizeof(env_name), "AIK_QEMU_USER_%s", up);
+	e = getenv(env_name);
+	if (e && e[0]) {
+		if (cp_safe_path(e) && cp_file_ok(e) && !access(e, X_OK)) {
+			snprintf(out, cap, "%s", e);
+			return 0;
+		}
+		return -1;	/* 权威覆盖：坏路径=缺席，不回落 */
+	}
+	snprintf(name, sizeof(name), "qemu-%s-static", arch);
+	return cp_lookup_path(name, out, cap) == 0 ? 0 : -1;
+}
+
+/*
+ * C3：宿主 binfmt_misc 是否已注册 e_machine=<em> 的 ELF 翻译 handler
+ * （读 /proc/sys/fs/binfmt_misc/*：首行 enabled + magic 行 ELF 魔数 +
+ * 偏移 18 的 e_machine 匹配；interpreter 名不固定——Debian 是
+ * /usr/libexec/qemu-binfmt/<arch>-binfmt-P——故按 magic 判）。
+ * 在场则未适配直跑宿主原件也会被内核透明翻译成功——『未适配必败』
+ * 必要性负向对 L3 适配不适用（C2 增强型同款裁定：必要性不成立时硬设
+ * 必恒假红）。未挂载/不可读=不在场（诚实保守）。
+ */
+static int cp_binfmt_has(unsigned em)
+{
+	DIR *d;
+	struct dirent *de;
+
+	if (!em)
+		return 0;
+	d = opendir("/proc/sys/fs/binfmt_misc");
+	if (!d)
+		return 0;
+	while ((de = readdir(d))) {
+		char path[PATH_MAX], buf[512];
+		const char *hex;
+		unsigned b18, b19;
+		int fd;
+		ssize_t n;
+
+		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") ||
+		    !strcmp(de->d_name, "register") ||
+		    !strcmp(de->d_name, "status"))
+			continue;
+		snprintf(path, sizeof(path), "/proc/sys/fs/binfmt_misc/%s",
+			 de->d_name);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n <= 0)
+			continue;
+		buf[n] = '\0';
+		if (strncmp(buf, "enabled", 7) != 0)
+			continue;	/* disabled 条目不生效 */
+		hex = strstr(buf, "\nmagic ");
+		if (!hex)
+			continue;
+		hex += 7;
+		/* ELF 魔数在偏移 0；e_machine 小端在偏移 18（=魔数串第
+		 * 36..39 个十六进制字符；v0 口径：qemu 条目 offset 恒 0） */
+		if (strncmp(hex, "7f454c46", 8) != 0)
+			continue;
+		if (sscanf(hex + 36, "%2x%2x", &b18, &b19) != 2)
+			continue;
+		if ((unsigned)(b18 | (b19 << 8)) == em) {
+			closedir(d);
+			return 1;
+		}
+	}
+	closedir(d);
+	return 0;
 }
 
 /*
@@ -1550,39 +1660,74 @@ static void cp_check_interp(struct cp_probe *p, const char *interp,
 
 static void cp_probe_elf(struct cp_probe *p, const struct cp_elf *e)
 {
-	unsigned hem = cp_host_em(cp_host_machine());
+	const char *hm = cp_host_machine();
+	unsigned hem = cp_host_em(hm);
 
+	/*
+	 * §0 层名统一（C3）：以下四 code 旧口径 layer="L1"（ABI 翻译）按
+	 * 计划书 §4.3 唯一口径改名 layer="L3"（binfmt/qemu-user 异构模拟/
+	 * 翻译）。持久化适配器零迁移：这四个 code 旧口径下从不 adaptable=1
+	 * → 从未生成过含 layer="L1" 串的适配器，盘上无存量需改。
+	 */
 	snprintf(p->arch, sizeof(p->arch), "%s", cp_machine_name(e->machine));
+	p->em = e->machine;
 	if (e->osabi != ELFOSABI_NONE && e->osabi != ELFOSABI_LINUX &&
 	    e->osabi != 3) {
 		struct cp_reason *r = cp_reason(
-			p, "ABI_MISMATCH", "L1", 1, 0,
-			"ELF OSABI=%u 不是 Linux/SysV", (unsigned)e->osabi);
+			p, "ABI_MISMATCH", "L3", 1, 0,
+			"ELF OSABI=%u 不是 Linux/SysV（qemu-user 不做 OS "
+			"翻译；恒不可自动适配，需在对应 OSABI 环境运行或"
+			"重编 Linux 目标）", (unsigned)e->osabi);
 		cp_ev(r, "e_ident[EI_OSABI]=%u", (unsigned)e->osabi);
 	}
 	if (!e->is64) {
 		struct cp_reason *r = cp_reason(
-			p, "ABI_MISMATCH", "L1", 1, 0,
-			"32 位 ELF（宿主 %s）；v0 只做 L0+L2，不做 ABI 翻译",
-			cp_host_machine());
+			p, "ABI_MISMATCH", "L3", 1, 0,
+			"32 位 ELF（宿主 %s）；v0 不自动配 32 位 loader 与"
+			"兼容库（人工路径二选一：装 multiarch i386 库如 "
+			"libc6:i386 与 32 位 loader 后重探，或手工经 "
+			"qemu-i386-static 运行）", hm);
 		cp_ev(r, "ELFCLASS32；需要 i386 兼容库与 32 位 loader");
 		cp_ev(r, "/lib/ld-linux.so.2: %s",
 		      cp_file_ok("/lib/ld-linux.so.2") ? "存在" : "不存在");
 	}
 	if (hem && e->machine != hem) {
-		struct cp_reason *r = cp_reason(
-			p, "ARCH_MISMATCH", "L1", 1, 0,
-			"目标架构 %s ≠ 宿主架构 %s（需要 L1 翻译/模拟，"
-			"v0 不提供）", cp_machine_name(e->machine),
-			cp_host_machine());
-		cp_ev(r, "e_machine=%u（%s）", e->machine,
-		      cp_machine_name(e->machine));
-		cp_ev(r, "uname -m = %s", cp_host_machine());
+		const char *tarch = cp_machine_name(e->machine);
+		char emu[PATH_MAX];
+		int have_emu = cp_qemu_user_find(tarch, emu, sizeof(emu)) == 0;
+		struct cp_reason *r;
+
+		if (have_emu) {
+			/* 双态在场（C3 §1.2）：宿主原生跑不了（fatal 保持）
+			 * 但经 qemu-user 可模拟修复 → adaptable=1 */
+			snprintf(p->emu, sizeof(p->emu), "%s", emu);
+			r = cp_reason(
+				p, "ARCH_MISMATCH", "L3", 1, 1,
+				"目标架构 %s ≠ 宿主架构 %s；经 qemu-user 模拟"
+				"执行（%s）", tarch, hm, emu);
+			cp_ev(r, "emulator: %s", emu);
+		} else if (!strcmp(tarch, "aarch64") || !strcmp(tarch, "arm")) {
+			/* 双态缺席：维持 fatal+adaptable=0，人话点名缺件与装法 */
+			r = cp_reason(
+				p, "ARCH_MISMATCH", "L3", 1, 0,
+				"目标架构 %s ≠ 宿主架构 %s（qemu-%s-static "
+				"未装；装法：sudo apt install "
+				"qemu-user-static 后重探）", tarch,
+				hm, tarch);
+		} else {
+			r = cp_reason(
+				p, "ARCH_MISMATCH", "L3", 1, 0,
+				"目标架构 %s ≠ 宿主架构 %s（需异构模拟/翻译；"
+				"v0 双态只覆盖 aarch64/arm 的 qemu-user）",
+				tarch, hm);
+		}
+		cp_ev(r, "e_machine=%u（%s）", e->machine, tarch);
+		cp_ev(r, "uname -m = %s", hm);
 	}
 	if (e->interp[0]) {
 		if (!cp_file_ok(e->interp)) {
 			struct cp_reason *r = cp_reason(
-				p, "MISSING_ABI_LOADER", "L1", 1, 0,
+				p, "MISSING_ABI_LOADER", "L3", 1, 0,
 				"ELF 解释器 %s 不存在（动态链接器缺失）",
 				e->interp);
 			cp_ev(r, "PT_INTERP=%s", e->interp);
@@ -1677,8 +1822,11 @@ static void cp_probe_elf(struct cp_probe *p, const struct cp_elf *e)
 					top = i;
 			{
 				struct cp_reason *r = cp_reason(
-					p, "LIBC_VERSION_TOO_NEW", "L1", 1, 0,
-					"需要 %s %s > 宿主 %s",
+					p, "LIBC_VERSION_TOO_NEW", "L3", 1, 0,
+					"需要 %s %s > 宿主 %s（v0 恒不可自动"
+					"适配；人工路径：在新版 glibc 容器/"
+					"chroot 内运行或重编降符号版本，同源 "
+					"shim 属 L1 未实现）",
 					libc_req ? libc_req->lib : "libc.so",
 					p->too_new[top],
 					p->provided_max[0] ? p->provided_max :
@@ -1868,6 +2016,28 @@ static int cp_probe_json_inner(FILE *f, struct cp_probe *p)
 	cp_jstr(f, p->arch);
 	fputs(",\"host\":", f);
 	cp_jstr(f, p->host_arch);
+	fputc('}', f);
+	/* C3：宿主 qemu-user 探测面（双态环境证据）。两键常驻、缺席=null
+	 * ——先例=versions.host_libc 的诚实 null（已知键+未知值写 null，
+	 * 而不是整个键缺席让上层猜"探没探过"） */
+	fputs(",\"emulators\":{\"aarch64\":", f);
+	{
+		char emu[PATH_MAX];
+
+		if (cp_qemu_user_find("aarch64", emu, sizeof(emu)) == 0)
+			cp_jstr(f, emu);
+		else
+			fputs("null", f);
+	}
+	fputs(",\"arm\":", f);
+	{
+		char emu[PATH_MAX];
+
+		if (cp_qemu_user_find("arm", emu, sizeof(emu)) == 0)
+			cp_jstr(f, emu);
+		else
+			fputs("null", f);
+	}
 	fputc('}', f);
 	fputs(",\"reasons\":[", f);
 	for (i = 0; i < p->n_r; i++) {
@@ -2065,6 +2235,10 @@ struct cp_adapter {
 	int n_inst;
 	char argv[CP_MAX_ARGV][PATH_MAX];
 	int n_argv;
+	/* C3：L3 模拟执行 wrapper（contract.argv 前缀 qemu 直调，不注册
+	 * binfmt_misc，宿主零内核依赖；generate 由 probe 双态置位） */
+	int l3;
+	char l3_emu[PATH_MAX];
 	int timeout_s;
 	/* C2 manifest 线索（SYSTEM-EVOLUTION §4.4）：解释器 shim 目标来自
 	 * 本机同族候选（L1 未实现边界）、是否含调用方显式 path_map ——
@@ -2381,6 +2555,21 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			free(ts);
 		}
 	}
+	/* 5a) C3：L3 模拟执行 wrapper——probe 双态在场（探到 qemu-user 且
+	 *      目标 aarch64/arm）时置位。argv 前缀/layers.L3/risk/limitations
+	 *      的发射在 cp_generate；此处先过安检（路径必须是宿主侧安全
+	 *      绝对可执行文件，它要进 contract.argv[0] 与 sandbox 视图） */
+	if (p->emu[0]) {
+		if (!cp_safe_path(p->emu) || !cp_file_ok(p->emu) ||
+		    access(p->emu, X_OK)) {
+			snprintf(err, errcap,
+				 "qemu-user 模拟器 %.200s 不可用（绝对/安全/"
+				 "存在/可执行四查任一不过）", p->emu);
+			return -1;
+		}
+		a->l3 = 1;
+		snprintf(a->l3_emu, sizeof(a->l3_emu), "%s", p->emu);
+	}
 	/* 5) 缺库 -> LD_LIBRARY_PATH（若调用方没自己给） */
 	if (a->n_lib > 0) {
 		int have = 0;
@@ -2491,12 +2680,19 @@ static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 	{
 		char base[128];
 
-		cp_basename(a->inside, base, sizeof(base));
+		/* C3：L3 wrapper 的 execve 落在 qemu 上（目标由模拟器经
+		 * openat 加载执行，轨迹里没有目标的 execve）——断言随
+		 * contract.argv[0] 走，数据驱动不写死宿主架构假设 */
+		cp_basename(a->l3 ? a->l3_emu : a->inside, base, sizeof(base));
 		fputs("{\"type\":\"syscall_seen\",\"value\":\"execve\","
 		      "\"match\":", f);
 		cp_jstr(f, base);
-		fputs(",\"ok_only\":false,\"because\":\"轨迹里必须真的 execve "
-		      "了目标（不是被 shell 吞掉）\"},", f);
+		fputs(",\"ok_only\":false,\"because\":", f);
+		cp_jstr(f, a->l3 ?
+			"轨迹里必须真的 execve 了 qemu wrapper（目标由模拟"
+			"器加载执行，argv[0] 即模拟器）" :
+			"轨迹里必须真的 execve 了目标（不是被 shell 吞掉）");
+		fputs("},", f);
 	}
 	for (i = 0; i < a->n_lib; i++) {
 		fputs("{\"type\":\"syscall_seen\",\"value\":\"openat\","
@@ -2526,8 +2722,11 @@ static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 	      expect_exit, neg_exit);
 	/* C2 整合修：仅 blocked（probe runnable=0）目标才设『未适配必败』
 	 * 负向。增强型适配（目标本可运行：补 env/传参等）的必要性天然
-	 * 不成立，硬设必恒假红（C2 棒3 台架 F13 实锤 observed=pass）。 */
-	if (!p->runnable)
+	 * 不成立，硬设必恒假红（C2 棒3 台架 F13 实锤 observed=pass）。
+	 * C3 binfmt 面：L3 目标在 binfmt_misc 已注册对应 arch handler 的
+	 * 宿主上，未适配直跑也被内核透明翻译成功——必要性同样不成立，
+	 * 如实跳过（limitations 注记），否则 execve ENOEXEC 必败成立。 */
+	if (!p->runnable && !(a->l3 && cp_binfmt_has(p->em)))
 		fputs(",{\"id\":\"unadapted\",\"kind\":\"run_unadapted\","
 		      "\"target_assert\":\"*\",\"expect\":\"fail\","
 		      "\"because\":\"不带任何适配规则跑宿主原件必须过不了"
@@ -2539,11 +2738,14 @@ static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 
 /* risk 查表：L0 规则数（env+path_map+lib_redirect+chmod）n<=4 且未动用
  * L2 视图原语 -> low；n>4 或含 L2 层（/usr overlay、多装 stage 文件）
+ * 或含 L3 层（C3：qemu-user 模拟执行，syscall 语义经翻译，风险高一档）
  * -> medium。（不可修 fatal code 在入口闸就已拒绝生成，不会出现。） */
 static const char *cp_risk_of(const struct cp_adapter *a)
 {
 	int n_l0 = a->n_env + a->n_map + a->n_lib + a->n_chm;
 
+	if (a->l3)
+		return "medium";
 	if (n_l0 <= 4 && !a->usr_overlay && a->n_inst <= 1)
 		return "low";
 	return "medium";
@@ -2600,6 +2802,21 @@ static void cp_generate_manifest(FILE *f, const struct cp_adapter *a,
 			 "——shim 目标 %.128s 取自本机同族候选探测，语义等价"
 			 "未经 L1 验证",
 			 a->cand_target[0] ? a->cand_target : "(未知)");
+		cp_jstr(f, buf);
+	}
+	if (a->l3) {
+		/* C3 §1.3：L3 模拟执行的固有代价如实入 limitations */
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, "模拟执行：性能非原生，syscall 语义经 qemu 翻译");
+	}
+	if (a->l3 && cp_binfmt_has(p->em)) {
+		/* C3 binfmt 面：必要性负向跳过的原因如实入清单 */
+		if (n++)
+			fputc(',', f);
+		snprintf(buf, sizeof(buf), "宿主 binfmt_misc 已注册 %s 翻译"
+			 " handler：未适配直跑宿主原件也被内核透明翻译，"
+			 "『未适配必败』必要性负向不适用（如实跳过）", p->arch);
 		cp_jstr(f, buf);
 	}
 	if (a->explicit_map) {
@@ -2811,6 +3028,13 @@ static int cp_generate(const char *args, size_t alen, char **out)
 			 "stage 随 workspace 销毁即零残留");
 		a.n_inst++;
 	}
+	/* C3：L3 wrapper 的 contract.argv = [qemu, stage 内目标副本,
+	 * 用户 args...]（探勘裁定：不碰 binfmt_misc——wrapper 直调，
+	 * 宿主零注册零内核依赖） */
+	if (a.l3) {
+		snprintf(a.argv[a.n_argv], PATH_MAX, "%s", a.l3_emu);
+		a.n_argv++;
+	}
 	snprintf(a.argv[a.n_argv], PATH_MAX, "%s", a.inside);
 	a.n_argv++;
 	{
@@ -2968,7 +3192,15 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		      "自带的一层叠上去（upper 落在 workspace 镜像内，宿主 "
 		      "/usr 零写入）\"}", f);
 	}
-	fputs("]}},", f);
+	fputs("]}", f);	/* install[] 收尾 + L2 收尾 */
+	if (a.l3) {
+		fputs(",\"L3\":{\"emulator\":", f);
+		cp_jstr(f, a.l3_emu);
+		fputs(",\"because\":\"宿主无此架构；wrapper 以 qemu-user 直调"
+		      " stage 内目标副本（不注册 binfmt_misc，宿主零内核"
+		      "依赖；syscall 语义经 qemu 翻译）\"}", f);
+	}
+	fputs("},", f);	/* layers 收尾 */
 	cp_generate_contract(f, &a, &p, args, alen, expect_exit);
 	fputs(",\"rollback\":{\"paths\":[", f);
 	cp_jstr(f, a.stage);
@@ -3045,9 +3277,10 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		*out = buf;
 	}
 	cp_audit("compat_generate", "adapter=%s target=%s written=%d "
-		 "rules(L0=%d/%d/%d L2=%d) risk=%s created_by=%s because=%s",
+		 "rules(L0=%d/%d/%d L2=%d l3=%d) risk=%s created_by=%s "
+		 "because=%s",
 		 a.name, a.host, write, a.n_map, a.n_lib, a.n_env, a.n_inst,
-		 cp_risk_of(&a),
+		 a.l3, cp_risk_of(&a),
 		 (created_by && created_by[0]) ? created_by :
 		 "ai-tool:compat_generate", p.because);
 	goto done;
@@ -3691,6 +3924,20 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 	if (s)
 		snprintf(a->stage, sizeof(a->stage), "%s", s);
 	free(s);
+	/* C3：L3 模拟执行 wrapper（缺席合法——L0/L2 目标本就无此层） */
+	{
+		const char *l3;
+		size_t l3len;
+
+		if (jobj(l, llen, "L3", &l3, &l3len)) {
+			s = jstr(l3, l3len, "emulator");
+			if (s) {
+				a->l3 = 1;
+				snprintf(a->l3_emu, sizeof(a->l3_emu), "%s", s);
+			}
+			free(s);
+		}
+	}
 	a->usr_overlay = jbool(l2, l2len, "usr_overlay", 0);
 	a->timeout_s = (int)jll(c, clen, "timeout_s", 10);
 	a->n_argv = cp_parse_arr_strs(c, clen, "argv", a->argv,
@@ -4053,8 +4300,27 @@ static int cp_adapter_validate(struct cp_adapter *a, char *err, size_t errcap)
 			 a->inside);
 		return -1;
 	}
-	if (a->n_argv < 1 || !cp_safe_path(a->argv[0]) ||
-	    !cp_under(a->argv[0], a->stage)) {
+	if (a->l3) {
+		/* C3：L3 wrapper 的 argv=[模拟器, stage 内目标, ...]。模拟器
+		 * 是宿主侧绝对可执行路径（sandbox 视图内可见），不要求在
+		 * stage 内；且必须与 layers.L3.emulator 声明一致（矛盾
+		 * 数据=拒绝，先例=缺 because）。 */
+		if (a->n_argv < 2 || !cp_safe_path(a->argv[0]) ||
+		    access(a->argv[0], X_OK) || !cp_safe_path(a->argv[1]) ||
+		    !cp_under(a->argv[1], a->stage)) {
+			snprintf(err, errcap,
+				 "L3 适配器 contract.argv 必须是 "
+				 "[模拟器绝对路径, stage 内目标, ...]");
+			return -1;
+		}
+		if (!a->l3_emu[0] || strcmp(a->l3_emu, a->argv[0])) {
+			snprintf(err, errcap,
+				 "layers.L3.emulator 与 contract.argv[0] "
+				 "不一致（矛盾数据）");
+			return -1;
+		}
+	} else if (a->n_argv < 1 || !cp_safe_path(a->argv[0]) ||
+		   !cp_under(a->argv[0], a->stage)) {
 		snprintf(err, errcap, "contract.argv[0] 必须是 stage 内的路径");
 		return -1;
 	}

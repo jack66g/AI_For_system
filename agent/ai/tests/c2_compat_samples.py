@@ -365,7 +365,15 @@ def resolve_aikctl(explicit, probe):
 
 
 def run_cmd(cmd, timeout):
-    cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    # C3 整合修：钉 qemu-user 缺席态（env 权威覆盖，COMPAT-C3-DESIGN
+    # §1.1/联调点③）——C2 台架范围=L0/L2；qemu-user-static 装机（C3
+    # 前置供给）后宿主对 aarch64/arm 变为可适配态，会翻掉 R01/R02
+    # 拒绝账户的冻结语义。钉缺席让 L0/L2 判定与宿主装机状态解耦。
+    env = dict(os.environ)
+    env['AIK_QEMU_USER_AARCH64'] = '/nonexistent-aik-c2-pin'
+    env['AIK_QEMU_USER_ARM'] = '/nonexistent-aik-c2-pin'
+    cp = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                        env=env)
     return cp.returncode, cp.stdout.decode('utf-8', errors='replace')
 
 

@@ -5,20 +5,20 @@ B2 并发写库压测报告（ORCH-E2 销账件；tests/test_orch 每次运行�
 [腿1 生产路径] 4 进程 × 25 事务：occ_db_open（含并发首开建库竞态面）+
   occ_msg_add_user（INSERT occ_message+UPDATE occ_session）+ occ_task_create（INSERT）+
   occ_task_dispatch（UPDATE occ_task+INSERT occ_task_event）——全部生产 API 路径
-  w0: 事务=25 ok=25 fail=0 墙钟=39ms
-  w1: 事务=25 ok=25 fail=0 墙钟=2022ms
-  w2: 事务=25 ok=25 fail=0 墙钟=1035ms
-  w3: 事务=25 ok=25 fail=0 墙钟=3025ms
+  w0: 事务=25 ok=25 fail=0 墙钟=36ms
+  w1: 事务=25 ok=25 fail=0 墙钟=3026ms
+  w2: 事务=25 ok=25 fail=0 墙钟=2021ms
+  w3: 事务=25 ok=25 fail=0 墙钟=1029ms
   合计：事务=100 ok=100 fail=0（断言 fail==0）
 
 [腿2 可观测] 4 进程 × 25 事务：等价 PRAGMA（WAL+foreign_keys）+
   计数 busy handler（10ms 步进≤5s——与 busy_timeout=5000 同等待包络，重试可见）+
   共享热行 UPDATE（4 行轮流加压）+ 事务内 200us 计算负载
-  w0: 事务=25 ok=25 fail=0 busy重试=2 墙钟=40ms
-  w1: 事务=25 ok=25 fail=0 busy重试=0 墙钟=18ms
-  w2: 事务=25 ok=25 fail=0 busy重试=4 墙钟=62ms
-  w3: 事务=25 ok=25 fail=0 busy重试=7 墙钟=91ms
+  w0: 事务=25 ok=25 fail=0 busy重试=7 墙钟=90ms
+  w1: 事务=25 ok=25 fail=0 busy重试=0 墙钟=26ms
+  w2: 事务=25 ok=25 fail=0 busy重试=3 墙钟=47ms
+  w3: 事务=25 ok=25 fail=0 busy重试=5 墙钟=70ms
 
-[腿2 合计] 事务=100 fail=0 busy重试=13（busy 包络内吸收，零终局 SQLITE_BUSY）
-[总墙钟参考] 腿1 最长单 worker=3025ms；腿2 最长=91ms
+[腿2 合计] 事务=100 fail=0 busy重试=15（busy 包络内吸收，零终局 SQLITE_BUSY）
+[总墙钟参考] 腿1 最长单 worker=3026ms；腿2 最长=90ms
 结论：多进程并发写下写串行化成立（WAL+IMMEDIATE+busy 包络），B2 销账依据=NEXT-PLAN.md 波次 B2 行

@@ -7480,7 +7480,7 @@
       "name": "compat_probe",
       "channel": "compat",
       "risk": "R",
-      "description": "探测一个目标在本机为什么跑不起来（D0 只读，静态判定，不执行目标）：ELF 头（e_machine/位宽/OSABI/PT_INTERP）、DT_NEEDED 逐个在 LD_LIBRARY_PATH/RUNPATH/多架构目录里解析、脚本 shebang 链（含 #!/usr/bin/env 风格与解释器本身是脚本的下钻）、同族解释器候选（/usr/bin 等按前缀扫描）、执行位/可读性。每条 fatal 原因给 code/layer/fatal/adaptable/detail/evidence[]；缺解释器/缺库 → layer=L0 可适配；架构不同/32 位缺 loader → layer=L1 明确标注不可适配（v0 不做 ABI 翻译）。",
+      "description": "探测一个目标在本机为什么跑不起来（D0 只读，静态判定，不执行目标）：ELF 头（e_machine/位宽/OSABI/PT_INTERP）、DT_NEEDED 逐个在 LD_LIBRARY_PATH/RUNPATH/多架构目录里解析、脚本 shebang 链（含 #!/usr/bin/env 风格与解释器本身是脚本的下钻）、同族解释器候选（/usr/bin 等按前缀扫描）、执行位/可读性。每条 fatal 原因给 code/layer/fatal/adaptable/detail/evidence[]；缺解释器/缺库 → layer=L0 可适配；架构不同/32 位缺 loader/OSABI 非 Linux/libc 超新 → layer=L3（qemu-user 异构模拟/翻译）：aarch64/arm 且宿主探到模拟器时 ARCH_MISMATCH 标 adaptable=true（经 qemu-user 模拟执行），缺席则 adaptable=false 且 detail 人话点名缺件与装法；32 位 x86/OSABI 非 Linux/LIBC_VERSION_TOO_NEW v0 恒不可自动适配（detail 给人工路径）。顶层 emulators:{aarch64:path|null, arm:path|null} 为宿主 qemu-user 探测结果（查序 $AIK_QEMU_USER_<ARCH> > PATH 上 qemu-<arch>-static > /usr/bin/qemu-<arch>-static；env 显式设置即权威覆盖，坏路径=缺席不静默回落）。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -7502,7 +7502,7 @@
       "name": "compat_generate",
       "channel": "compat",
       "risk": "W1",
-      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。adapter 还带 SYSTEM-EVOLUTION §4.4 manifest 五字段：risk（查表 low/medium）/limitations（probe 非 fatal 原因+v0 静态边界自动汇入）/provides（lib_redirect sonames+解释器映射目标名）/created_by/trace_id。interpreter_map/lib_sources/path_map 可显式指定；探测到缺解释器/缺库但给不出来源时诚实失败，不猜；env(16)/path_map(8)/lib_redirect(24)/install(8)/argv(8 含程序本体)/chmod(4) 超上限直接报错，不静默截断。",
+      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；L3（aarch64/arm 双态在场时产 qemu-user 模拟 wrapper：layers.L3.emulator 记模拟器路径，contract.argv=[\"<emulator>\",\"<stage 内目标副本>\",用户 args...]，直调不注册 binfmt_misc；risk 含 L3 → medium；limitations 自动加「模拟执行：性能非原生，syscall 语义经 qemu 翻译」）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。adapter 还带 SYSTEM-EVOLUTION §4.4 manifest 五字段：risk（查表 low/medium）/limitations（probe 非 fatal 原因+v0 静态边界自动汇入）/provides（lib_redirect sonames+解释器映射目标名）/created_by/trace_id。interpreter_map/lib_sources/path_map 可显式指定；探测到缺解释器/缺库但给不出来源时诚实失败，不猜；env(16)/path_map(8)/lib_redirect(24)/install(8)/argv(8 含程序本体)/chmod(4) 超上限直接报错，不静默截断。",
       "parameters": {
         "type": "object",
         "properties": {

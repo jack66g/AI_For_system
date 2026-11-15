@@ -27,6 +27,25 @@
                                  pre= 快照两态入台账）
   compat monitor [--once]         轮询 promote 台账+compat state+verify
                                  复跑；default 级 launcher 失效只报告不删
+  compat hw [--fixture F] [--jsonl OUT]
+                                 L4 硬件诚实面（C3）：只读采集 PCI/USB/
+                                 IOMMU 组//dev/dri//lib/firmware → 逐设备/
+                                 每类 verdict（ok|needs_l4_unsupported_
+                                 here(原因)|unknown）+caveats 常驻；绝不
+                                 enablement（真机采集与 --fixture 双路）
+  module propose --ko P [--note T]
+                                 L5 人工硬门①（C3）：nonce+md5+vermagic+
+                                 固定三行风险话术+确认短语 CONFIRM D4
+                                 <nonce>；提议入账（文件协议=ai_lease.h
+                                 非 TTY 确认契约同款）
+  module list                     L5 ② pending 提议清单
+  module approve NONCE --phrase T
+                                 L5 ③ D4 短语逐字节精确（错=拒绝+失败计数
+                                 入账）
+  module install NONCE [--dry-run]
+                                 L5 ④ 未批准 nonce 一律拒绝；已批准恒
+                                 dry-run 只打印 insmod 不执行（真载=尾池）
+  module ledger                   L5 ⑤ 账本行链校验（xxh64）+四类事件计数
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -44,6 +63,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import struct
@@ -1062,7 +1082,12 @@ def cmd_compat_plan(args):
     """probe+generate 二段 → 完整适配 manifest（jsonl 行 + C2_PLAN 汇总）。
 
     棒1 新字段（risk/limitations/provides/created_by/trace_id）按合同读：
-    在 generate 输出的 adapter 内如实透传，缺席不补造。"""
+    在 generate 输出的 adapter 内如实透传，缺席不补造。
+    C3 新字段同款纪律（COMPAT-C3-DESIGN §1，Lane-1 合同）：probe 顶层
+    emulators 与 adapter.layers.L3 均逐字段原样内嵌（row['probe']=probe
+    JSON 整体、row['adapter']=generate 首行 JSON 整体）——Lane-1 未合入
+    时缺席=如实透传不补造；AIK_QEMU_USER_<ARCH> 等 env 经 subprocess 环境
+    原样传给 probe/generate，本面不解释。"""
     probe, err = compat_resolve_probe(args.probe)
     if err:
         print(err, file=sys.stderr)
@@ -1671,6 +1696,597 @@ def cmd_compat_monitor(args):
             return 0
 
 
+# ---------------------------------------------------------- compat C3 hw ----
+# C3（COMPAT-C3-DESIGN §2）：L4 硬件诚实面。只读采集+裁定，绝不
+# enablement（不改驱动绑定/不加载模块/不写 sysfs），绝不假成功——
+# 结构性不可达=needs_l4_unsupported_here(原因)，只读面无法判定=unknown。
+# --fixture：静态合成清单（台架判据/未知 PCI ID 输入用，非真挂设备）；
+# 在场类目覆盖真机采集，缺席类目保持真机只读值——真机与 fixture 双路。
+HW_SCHEMA = 'aikernel.compat/hw/1'
+HW_SYS_PCI = '/sys/bus/pci/devices'
+HW_SYS_USB = '/sys/bus/usb/devices'
+HW_SYS_IOMMU_GROUPS = '/sys/kernel/iommu_groups'
+HW_DRI_DIR = '/dev/dri'
+HW_FIRMWARE_DIR = '/lib/firmware'
+HW_CAVEATS_ALWAYS = [
+    '只读诚实面：不做任何 enablement（不改驱动绑定/不加载模块/不写 sysfs）',
+    '真直通（passthrough）需 IOMMU+VFIO 在场且试绑验证——本命令不试绑，'
+    'verdict 不代表直通会成功',
+]
+
+
+def _sysfs_read(path):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _sysfs_driver(dpath):
+    """driver 符号链接名（绑定态）；无绑定返回 None。"""
+    try:
+        return os.path.basename(os.readlink(os.path.join(dpath, 'driver')))
+    except OSError:
+        return None
+
+
+def hw_collect_real():
+    """真机只读采集 → dict（不可读类目如实 None/0/False）。"""
+    facts = {}
+    try:
+        facts['pci'] = [
+            {'bdf': bdf,
+             'vendor': _sysfs_read(os.path.join(HW_SYS_PCI, bdf, 'vendor')),
+             'device': _sysfs_read(os.path.join(HW_SYS_PCI, bdf, 'device')),
+             'driver': _sysfs_driver(os.path.join(HW_SYS_PCI, bdf))}
+            for bdf in sorted(os.listdir(HW_SYS_PCI))]
+    except OSError:
+        facts['pci'] = None
+    try:
+        facts['usb'] = [
+            {'name': name,
+             'vendor': _sysfs_read(os.path.join(HW_SYS_USB, name,
+                                                'idVendor')),
+             'product': _sysfs_read(os.path.join(HW_SYS_USB, name,
+                                                 'idProduct')),
+             'driver': _sysfs_driver(os.path.join(HW_SYS_USB, name))}
+            for name in sorted(os.listdir(HW_SYS_USB))]
+    except OSError:
+        facts['usb'] = None
+    try:
+        facts['iommu_groups'] = len(os.listdir(HW_SYS_IOMMU_GROUPS))
+    except OSError:
+        facts['iommu_groups'] = 0
+    facts['vfio'] = os.path.isdir('/sys/module/vfio')
+    facts['uio'] = os.path.isdir('/sys/module/uio')
+    try:
+        facts['dri'] = sorted(os.listdir(HW_DRI_DIR))
+    except OSError:
+        facts['dri'] = None
+    n_fw = 0
+    for _root, _dirs, files in os.walk(HW_FIRMWARE_DIR):
+        n_fw += len(files)
+    facts['firmware_count'] = n_fw
+    return facts
+
+
+def hw_block_reason(facts):
+    """L4 直通结构性阻断原因（无 IOMMU/VFIO=off/UIO=off）；无阻断 None。"""
+    parts = []
+    if not facts.get('iommu_groups'):
+        parts.append('无 IOMMU（IOMMU 组=0）')
+    if not facts.get('vfio'):
+        parts.append('内核 VFIO=off')
+    if not facts.get('uio'):
+        parts.append('内核 UIO=off')
+    return '；'.join(parts) or None
+
+
+def hw_pci_verdict(dev, facts):
+    if not dev.get('vendor') or not dev.get('device'):
+        return 'unknown', 'vendor/device 属性不可读（无法识别设备）'
+    if dev.get('driver'):
+        return 'ok', '宿主驱动已绑定:%s（经内核驱动面可用）' % dev['driver']
+    why = hw_block_reason(facts)
+    if why:
+        return 'needs_l4_unsupported_here', why
+    return 'unknown', 'IOMMU+VFIO 在场；只读探测不试绑（enablement 非本命令范围）'
+
+
+def hw_usb_verdict(dev):
+    if dev.get('driver'):
+        if dev.get('driver') == 'usb':
+            return 'ok', '虚拟根集线器（usbcore 绑定）'
+        return 'ok', '宿主驱动已绑定:%s' % dev['driver']
+    return 'unknown', '无驱动绑定；直通路径（usbip）状态未知（只读面不判定）'
+
+
+def cmd_compat_hw(args):
+    """L4 硬件诚实面（只读采集+裁定；输出 jsonl：meta 行(含 caveats 常驻)
+    +逐设备/每类行+末行 C3_HW 汇总，scan 风格）。"""
+    if args.fixture:
+        try:
+            with open(args.fixture, 'r', encoding='utf-8') as f:
+                fx = json.load(f)
+        except (OSError, ValueError) as e:
+            print('compat hw: --fixture 读/解析失败: %s\n'
+                  '下一步：检查 JSON（顶层 object；pci/usb/dri=列表、'
+                  'iommu_groups/firmware_count=整数、vfio/uio=布尔、'
+                  'firmware_needed=名单）。' % e, file=sys.stderr)
+            return 1
+        if not isinstance(fx, dict):
+            print('compat hw: --fixture 顶层须为 JSON object', file=sys.stderr)
+            return 1
+    else:
+        fx = {}
+    facts = hw_collect_real()
+    # fixture 在场类目覆盖真机采集（静态判据用）；缺席类目保持真机只读值
+    for k in ('pci', 'usb', 'dri'):
+        if isinstance(fx.get(k), list):
+            facts[k] = fx[k]
+    for k in ('iommu_groups', 'firmware_count'):
+        if isinstance(fx.get(k), int) and not isinstance(fx.get(k), bool):
+            facts[k] = fx[k]
+    for k in ('vfio', 'uio'):
+        if isinstance(fx.get(k), bool):
+            facts[k] = fx[k]
+    needed = [n for n in (fx.get('firmware_needed') or [])
+              if isinstance(n, str)]
+    caveats = list(HW_CAVEATS_ALWAYS)
+    if not facts.get('iommu_groups'):
+        caveats.append('本机 IOMMU 组=0：真 passthrough 在本机不可测，'
+                       '无驱动绑定设备如实判 needs_l4_unsupported_here')
+    meta = {'schema': HW_SCHEMA, 'meta': True, 'ts': int(time.time()),
+            'source': 'fixture' if fx else 'real',
+            'iommu_groups': facts.get('iommu_groups') or 0,
+            'vfio': bool(facts.get('vfio')), 'uio': bool(facts.get('uio')),
+            'caveats': caveats}
+    out, opened = sys.stdout, None
+    if args.jsonl:
+        try:
+            parent = os.path.dirname(os.path.abspath(args.jsonl))
+            os.makedirs(parent, exist_ok=True)
+            opened = open(args.jsonl, 'w', encoding='utf-8')
+            out = opened
+        except OSError as e:
+            print('compat hw: 打开 %s 失败: %s' % (args.jsonl, e),
+                  file=sys.stderr)
+            return 1
+
+    def emit(obj):
+        print(json.dumps(obj, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':')), file=out)
+
+    counts = {'ok': 0, 'needs_l4_unsupported_here': 0, 'unknown': 0}
+    try:
+        emit(meta)
+        for dev in (facts.get('pci') or []):
+            v, why = hw_pci_verdict(dev, facts)
+            counts[v] = counts.get(v, 0) + 1
+            emit({'schema': HW_SCHEMA, 'kind': 'pci', 'bdf': dev.get('bdf'),
+                  'vendor': dev.get('vendor'), 'device': dev.get('device'),
+                  'driver': dev.get('driver'), 'verdict': v, 'reason': why})
+        for dev in (facts.get('usb') or []):
+            v, why = hw_usb_verdict(dev)
+            counts[v] = counts.get(v, 0) + 1
+            emit({'schema': HW_SCHEMA, 'kind': 'usb', 'name': dev.get('name'),
+                  'vendor': dev.get('vendor'),
+                  'product': dev.get('product'), 'driver': dev.get('driver'),
+                  'verdict': v, 'reason': why})
+        dri = facts.get('dri')
+        if dri:
+            dri_reason = '显卡 ISA 用户态直驱判定不可测（只读登记，不加载不试驱）'
+        elif dri is not None:
+            dri_reason = '%s 无节点（本机无 DRM 设备面）' % HW_DRI_DIR
+        else:
+            dri_reason = '%s 不可读/不存在（DRM 用户态面缺席）' % HW_DRI_DIR
+        counts['unknown'] += 1
+        emit({'schema': HW_SCHEMA, 'kind': 'dri',
+              'nodes': dri or [], 'verdict': 'unknown', 'reason': dri_reason})
+        fw_count = facts.get('firmware_count')
+        counts['unknown'] += 1
+        emit({'schema': HW_SCHEMA, 'kind': 'firmware', 'count': fw_count,
+              'verdict': 'unknown',
+              'reason': '%s 只读计数；逐名需求见 firmware_ref 行'
+              % HW_FIRMWARE_DIR})
+        for name in needed:
+            present = os.path.isfile(os.path.join(HW_FIRMWARE_DIR, name))
+            v = 'ok' if present else 'needs_l4_unsupported_here'
+            counts[v] = counts.get(v, 0) + 1
+            emit({'schema': HW_SCHEMA, 'kind': 'firmware_ref', 'name': name,
+                  'present': present, 'verdict': v,
+                  'reason': ('固件在场:%s' % name if present else
+                             '固件缺失:%s' % name)})
+        print('C3_HW pci=%d usb=%d dri=%d iommu_groups=%d firmware=%s '
+              'ok=%d needs=%d unknown=%d'
+              % (len(facts.get('pci') or []), len(facts.get('usb') or []),
+                 len(facts.get('dri') or []),
+                 facts.get('iommu_groups') or 0, fw_count, counts['ok'],
+                 counts['needs_l4_unsupported_here'], counts['unknown']),
+              file=out)
+    except OSError as e:
+        print('compat hw: 写输出失败: %s' % e, file=sys.stderr)
+        return 1
+    finally:
+        if opened:
+            opened.close()
+    return 0
+
+
+# --------------------------------------------------------------- module ----
+# C3（COMPAT-C3-DESIGN §3）：L5 树外内核模块人工硬门（零内核改动）。
+# 文件协议=ai_lease.h:305-332 非 TTY 确认契约（policy/ai_lease.c 同款）：
+#   <confirm>/pending/<nonce>.json 0600、目录 0700、nonce=32hex、
+#   D4 短语 "CONFIRM D4 <nonce>" 逐字节精确、批准后 pending→approved、
+#   TTL=AI_LEASE_CONFIRM_TTL=300s、consumed/denied 目录同构。
+# python 按同契约读写——协议即接口不重造实现。目录可参数化：
+#   AIKERNEL_CONFIRM_DIR（沿 C 侧同款 env，ai_lease.h:31）覆盖确认目录，
+#   AIKMODULE_DIR 覆盖账本目录（台架/独立部署；真路径 /run/aikernel/
+#   confirm 与 /var/lib/aikernel/module 仅 root --live 用）。
+MODULE_DIR_DEFAULT = '/var/lib/aikernel/module'
+MODULE_CONFIRM_DEFAULT = '/run/aikernel/confirm'    # = AI_LEASE_CONFIRM_DEFAULT
+MODULE_TTL = 300                    # = AI_LEASE_CONFIRM_TTL（ai_lease.h:64）
+MODULE_NONCE_RE = re.compile(r'^[0-9a-f]{32}$')
+# 固定三行风险话术（设计册 §3 写死在代码里；探勘实证本机
+# CONFIG_MODULE_SIG=off、CONFIG_MODULE_FORCE_UNLOAD=y）
+MODULE_RISK_LINES = (
+    '风险 1/3 树外内核模块可致整机不稳：内核 panic、死机或文件系统损坏',
+    '风险 2/3 本机 CONFIG_MODULE_SIG=off：模块未签名即载入，内核不校验来源',
+    '风险 3/3 本机 CONFIG_MODULE_FORCE_UNLOAD=y：强卸在用模块可致内核崩溃',
+)
+
+
+def module_dir():
+    return os.environ.get('AIKMODULE_DIR', MODULE_DIR_DEFAULT) or \
+        MODULE_DIR_DEFAULT
+
+
+def module_confirm_dir():
+    return os.environ.get('AIKERNEL_CONFIRM_DIR',
+                          MODULE_CONFIRM_DEFAULT) or MODULE_CONFIRM_DEFAULT
+
+
+def _mkdir_0700(path):
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _write_0600_new(path, data):
+    """O_EXCL 新建 0600（nonce 随机碰撞可忽略；存在=异常路径）。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(data)
+
+
+def _write_0600(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data.encode('utf-8') if isinstance(data, str) else data)
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
+def _module_ledger_prev(path):
+    """账本末行 hash（行链 prev 咬合）；空/缺失='0'*16；损坏抛 RuntimeError
+    （审计账本损坏=停写报告，不静默重开链）。"""
+    try:
+        with open(path, 'r', errors='replace') as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    except FileNotFoundError:
+        return '0' * 16
+    except OSError as e:
+        raise RuntimeError('账本读失败: %s' % e)
+    if not lines:
+        return '0' * 16
+    try:
+        prev = json.loads(lines[-1]).get('hash')
+    except ValueError as e:
+        raise RuntimeError('账本末行非 JSON: %s' % e)
+    if not isinstance(prev, str) or not prev:
+        raise RuntimeError('账本末行缺 hash')
+    return prev
+
+
+def module_ledger_append(ev):
+    """追加一行事件（xxh64 行链：prev=前行 hash 咬合；hash=xxh64(本行
+    canonical JSON 且 hash 字段清零, seed=CHAIN_SEED)——节点 self_hash
+    同款口径+锚链 prev 咬合风格）。0600 追加式。"""
+    path = os.path.join(module_dir(), 'ledger.jsonl')
+    _mkdir_0700(module_dir())
+    obj = dict(ev)
+    obj['ts'] = int(time.time())
+    obj['prev'] = _module_ledger_prev(path)
+    obj['hash'] = ''
+    obj['hash'] = '%016x' % xxh64(_canon(obj).encode('utf-8'), CHAIN_SEED)
+    append_private(path, (_canon(obj) + '\n').encode('utf-8'))
+    return obj
+
+
+def module_ledger_verify(path):
+    """账本行链校验：逐行重算 xxh64（hash 清零口径）+prev 咬合。
+    → (code, [行])；0=OK / 1=IO / 2=行链断。"""
+    try:
+        with open(path, 'r', errors='replace') as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    except OSError as e:
+        return 1, ['账本读失败: %s' % e]
+    if not lines:
+        return 1, ['账本为空: %s' % path]
+    prev = '0' * 16
+    counts = {}
+    for i, ln in enumerate(lines):
+        try:
+            obj = json.loads(ln)
+            calc = '%016x' % xxh64(
+                _canon(dict(obj, hash='')).encode('utf-8'), CHAIN_SEED)
+        except (ValueError, TypeError):
+            return 2, ['LEDGER_BREAK line=%d（非 JSON 行）' % i]
+        if obj.get('prev') != prev or obj.get('hash') != calc:
+            return 2, ['LEDGER_BREAK line=%d（prev/hash 行链断）' % i]
+        prev = obj['hash']
+        counts[obj.get('ev')] = counts.get(obj.get('ev'), 0) + 1
+    return 0, ['LEDGER_OK lines=%d propose=%d approve=%d install=%d '
+               'refused=%d' % (len(lines), counts.get('propose', 0),
+                               counts.get('approve', 0),
+                               counts.get('install', 0),
+                               counts.get('refused', 0))]
+
+
+def _module_fail_count(path, nonce):
+    """账本中该 nonce 的短语失败累计（refused/phrase_mismatch 计数）。"""
+    n = 0
+    try:
+        with open(path, 'r', errors='replace') as f:
+            for ln in f:
+                try:
+                    obj = json.loads(ln)
+                except ValueError:
+                    continue
+                if obj.get('ev') == 'refused' and obj.get('nonce') == nonce \
+                        and obj.get('reason') == 'phrase_mismatch':
+                    n += 1
+    except OSError:
+        pass
+    return n
+
+
+def _module_uid_name():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return 'uid%d' % os.getuid()
+
+
+def cmd_module_propose(args):
+    ko = os.path.abspath(args.ko)
+    if not os.path.isfile(ko):
+        print('module propose: .ko 不存在: %s\n'
+              '下一步：确认树外模块路径（须先在本机准备好 .ko 文件）。'
+              % ko, file=sys.stderr)
+        return 1
+    md5 = _md5_file(ko)
+    vermagic = None
+    mi = shutil.which('modinfo')
+    if mi:
+        try:
+            cp = subprocess.run([mi, '-F', 'vermagic', ko],
+                                capture_output=True, timeout=15)
+            if cp.returncode == 0:
+                vermagic = cp.stdout.decode(
+                    'utf-8', errors='replace').strip() or None
+        except (OSError, subprocess.TimeoutExpired):
+            vermagic = None
+    nonce = secrets.token_hex(16)
+    now = int(time.time())
+    # pending JSON：ai_lease 确认协议契约字段（policy/ai_lease.c
+    # ai_lease_confirm_pending_write 同款）+module 扩展字段（ko/md5/
+    # vermagic/note/risk_lines；C 侧 /lease confirm 面可读基础字段）
+    pending = {
+        'nonce': nonce, 'tool': 'aikctl.module',
+        'args_json': json.dumps({'ko': ko, 'note': args.note or ''},
+                                ensure_ascii=False),
+        'danger': 'D4', 'lease_id': None,
+        'created_at': now, 'expires_at': now + MODULE_TTL,
+        'uid': os.getuid(),
+        'action': 'aikctl module propose --ko %s' % ko,
+        'impact': '装载树外内核模块 %s（md5=%s）' % (ko, md5),
+        'rollback': 'rmmod <模块名>（若未占用且允许卸载）',
+        'question': 'CONFIRM D4 %s' % nonce,
+        'ko': ko, 'md5': md5, 'vermagic': vermagic,
+        'note': args.note or '', 'risk_lines': list(MODULE_RISK_LINES),
+    }
+    base = module_confirm_dir()
+    try:
+        # os.makedirs 的 mode 只作用于叶子——base 本体须先单独收紧 0700
+        _mkdir_0700(base)
+        for sub in ('pending', 'approved', 'consumed', 'denied'):
+            _mkdir_0700(os.path.join(base, sub))
+        ppath = os.path.join(base, 'pending', '%s.json' % nonce)
+        _write_0600_new(ppath, _canon(pending) + '\n')
+    except OSError as e:
+        print('module propose: 建/写 pending 失败（真路径需 root；台架/独立'
+              '部署用 AIKERNEL_CONFIRM_DIR 覆盖）: %s' % e, file=sys.stderr)
+        return 1
+    try:
+        module_ledger_append({'ev': 'propose', 'nonce': nonce, 'ko': ko,
+                              'md5': md5, 'vermagic': vermagic,
+                              'uid': os.getuid()})
+    except (RuntimeError, OSError) as e:
+        print('module propose: 账本写入失败: %s' % e, file=sys.stderr)
+        return 1
+    print('MODULE_PROPOSE nonce=%s' % nonce)
+    print('ko=%s' % ko)
+    print('md5=%s vermagic=%s' % (
+        md5, vermagic if vermagic else '(modinfo 缺席或无 vermagic)'))
+    print('pending=%s' % ppath)
+    for ln in MODULE_RISK_LINES:
+        print(ln)
+    print('确认短语（逐字节精确）: CONFIRM D4 %s' % nonce)
+    print('下一步: aikctl module approve %s --phrase "CONFIRM D4 %s"'
+          % (nonce, nonce))
+    return 0
+
+
+def cmd_module_list(_args):
+    pdir = os.path.join(module_confirm_dir(), 'pending')
+    try:
+        names = sorted(e for e in os.listdir(pdir) if e.endswith('.json'))
+    except OSError:
+        names = []
+    for nm in names:
+        try:
+            with open(os.path.join(pdir, nm), 'r', errors='replace') as f:
+                obj = json.load(f)
+            print('pending nonce=%s ko=%s md5=%s expires_at=%s note=%s'
+                  % (obj.get('nonce'), obj.get('ko'), obj.get('md5'),
+                     obj.get('expires_at'), obj.get('note') or ''))
+        except (OSError, ValueError) as e:
+            print('pending %s（读失败: %s）' % (nm, e))
+    print('MODULE_LIST pending=%d' % len(names))
+    return 0
+
+
+def cmd_module_approve(args):
+    nonce = args.nonce
+    if not MODULE_NONCE_RE.match(nonce):
+        print('module approve: 非法 nonce（32 hex）: %r' % nonce,
+              file=sys.stderr)
+        return 1
+    base = module_confirm_dir()
+    ppath = os.path.join(base, 'pending', '%s.json' % nonce)
+    lpath = os.path.join(module_dir(), 'ledger.jsonl')
+
+    def refuse(reason):
+        fc = _module_fail_count(lpath, nonce)
+        if reason == 'phrase_mismatch':
+            fc += 1
+        try:
+            module_ledger_append({'ev': 'refused', 'nonce': nonce,
+                                  'reason': reason, 'fail_count': fc,
+                                  'uid': os.getuid()})
+        except (RuntimeError, OSError):
+            pass
+        print('module approve: 拒绝（%s；fail_count=%d）。下一步：核对短语'
+              '（逐字节精确）或重新 propose。' % (reason, fc), file=sys.stderr)
+        return 1
+
+    if not os.path.isfile(ppath):
+        return refuse('unknown_or_consumed_nonce')
+    try:
+        with open(ppath, 'r', errors='replace') as f:
+            pend = json.load(f)
+    except (OSError, ValueError) as e:
+        print('module approve: pending 读失败: %s' % e, file=sys.stderr)
+        return 1
+    if int(pend.get('expires_at') or 0) <= int(time.time()):
+        return refuse('expired')
+    # D4 短语逐字节精确比对（== 对 str 即逐字节；policy/ai_lease.c 同款）
+    if args.phrase != 'CONFIRM D4 %s' % nonce:
+        return refuse('phrase_mismatch')
+    now = int(time.time())
+    by = _module_uid_name()
+    approved = {
+        'nonce': nonce, 'tool': pend.get('tool'),
+        'args_json': pend.get('args_json'), 'danger': 'D4',
+        'lease_id': None, 'expires_at': pend.get('expires_at'),
+        'approved_at': now, 'approved_by': by, 'approved': True,
+        'ko': pend.get('ko'), 'md5': pend.get('md5'),
+        'vermagic': pend.get('vermagic'),
+    }
+    apath = os.path.join(base, 'approved', '%s.json' % nonce)
+    try:
+        _mkdir_0700(os.path.join(base, 'approved'))
+        _write_0600(apath, _canon(approved) + '\n')
+        os.unlink(ppath)
+    except OSError as e:
+        print('module approve: 写 approved/删 pending 失败: %s' % e,
+              file=sys.stderr)
+        return 1
+    try:
+        module_ledger_append({'ev': 'approve', 'nonce': nonce,
+                              'md5': pend.get('md5'), 'approved_by': by,
+                              'uid': os.getuid()})
+    except (RuntimeError, OSError) as e:
+        print('module approve: 账本写入失败: %s' % e, file=sys.stderr)
+        return 1
+    print('MODULE_APPROVED nonce=%s approved_by=%s' % (nonce, by))
+    print('下一步: aikctl module install %s（缺省 --dry-run，只打印不执行）'
+          % nonce)
+    return 0
+
+
+def cmd_module_install(args):
+    nonce = args.nonce
+    if not MODULE_NONCE_RE.match(nonce):
+        print('module install: 非法 nonce（32 hex）: %r' % nonce,
+              file=sys.stderr)
+        return 1
+    base = module_confirm_dir()
+    ppath = os.path.join(base, 'pending', '%s.json' % nonce)
+    apath = os.path.join(base, 'approved', '%s.json' % nonce)
+    lpath = os.path.join(module_dir(), 'ledger.jsonl')
+
+    def refuse(reason):
+        fc = _module_fail_count(lpath, nonce)
+        try:
+            module_ledger_append({'ev': 'refused', 'nonce': nonce,
+                                  'reason': reason, 'fail_count': fc,
+                                  'uid': os.getuid()})
+        except (RuntimeError, OSError):
+            pass
+        print('module install: 拒绝（%s；L5 人工硬门：未批准 nonce 一律'
+              '不装载）。下一步：先 approve（D4 短语逐字节精确）。'
+              % reason, file=sys.stderr)
+        return 1
+
+    if os.path.isfile(ppath) and not os.path.isfile(apath):
+        return refuse('not_approved_yet')      # 机判负例：未批准一律拒绝
+    if not os.path.isfile(apath):
+        return refuse('unknown_nonce')
+    try:
+        with open(apath, 'r', errors='replace') as f:
+            approved = json.load(f)
+    except (OSError, ValueError) as e:
+        print('module install: approved 读失败: %s' % e, file=sys.stderr)
+        return 1
+    if not approved.get('approved'):
+        return refuse('not_approved')
+    if int(approved.get('expires_at') or 0) <= int(time.time()):
+        return refuse('expired_approval')
+    ko = approved.get('ko') or '?'
+    md5 = approved.get('md5') or '?'
+    vermagic = approved.get('vermagic')
+    try:
+        module_ledger_append({'ev': 'install', 'nonce': nonce, 'ko': ko,
+                              'md5': md5, 'dry_run': True,
+                              'uid': os.getuid()})
+    except (RuntimeError, OSError) as e:
+        print('module install: 账本写入失败: %s' % e, file=sys.stderr)
+        return 1
+    # v0 恒 dry-run：真 insmod（vermagic 匹配内核）=尾池（设计册 §3/§6）
+    print('MODULE_INSTALL_DRYRUN nonce=%s（已批准；只打印不执行）' % nonce)
+    print('将执行（不执行）: insmod %s' % shlex.quote(ko))
+    print('md5=%s vermagic=%s' % (
+        md5, vermagic if vermagic else '(modinfo 缺席或无 vermagic)'))
+    print('真 insmod=尾池（本命令 v0 不执行任何内核装载；--dry-run 旗标为'
+          '接口稳定保留）')
+    return 0
+
+
+def cmd_module_ledger(_args):
+    code, out = module_ledger_verify(os.path.join(module_dir(),
+                                                  'ledger.jsonl'))
+    for ln in out:
+        print(ln)
+    return code            # 0=OK / 1=IO / 2=行链断（LEDGER_BREAK）
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -1817,6 +2433,53 @@ def main(argv=None):
     p_cm.add_argument('--probe', default=None, metavar='BIN',
                       help='aik-compat 二进制')
     p_cm.set_defaults(func=cmd_compat_monitor)
+
+    # C3（COMPAT-C3-DESIGN §2）：L4 硬件诚实面（只读）
+    p_hw = cpsub.add_parser(
+        'hw', help='L4 硬件诚实面：只读采集+裁定（C3；绝不 enablement）')
+    p_hw.add_argument('--fixture', default=None, metavar='FILE',
+                      help='合成清单 JSON（在场类目覆盖真机采集：pci/usb/'
+                           'dri=列表、iommu_groups/firmware_count=整数、'
+                           'vfio/uio=布尔、firmware_needed=名单）——静态'
+                           '判据/台架用')
+    p_hw.add_argument('--jsonl', default=None, metavar='OUT',
+                      help='输出文件（缺省 stdout；末行 C3_HW 汇总）')
+    p_hw.set_defaults(func=cmd_compat_hw)
+
+    # C3（COMPAT-C3-DESIGN §3）：L5 人工硬门
+    p_mod = sub.add_parser('module', help='L5 树外内核模块人工硬门（C3；'
+                                        'ai_lease 确认协议同款文件契约）')
+    msub = p_mod.add_subparsers(dest='module_cmd', required=True)
+
+    p_mp = msub.add_parser('propose', help='提议装载 .ko（nonce+固定三行'
+                           '风险话术+确认短语；提议入账）')
+    p_mp.add_argument('--ko', required=True, metavar='PATH',
+                      help='.ko 文件（须存在）')
+    p_mp.add_argument('--note', default=None, metavar='TXT',
+                      help='备注（写入 pending/账本）')
+    p_mp.set_defaults(func=cmd_module_propose)
+
+    p_ml = msub.add_parser('list', help='pending 提议清单')
+    p_ml.set_defaults(func=cmd_module_list)
+
+    p_ma = msub.add_parser('approve', help='人工批准（D4 短语逐字节精确；'
+                           '错短语=拒绝+失败计数入账）')
+    p_ma.add_argument('nonce', metavar='NONCE', help='32 hex nonce')
+    p_ma.add_argument('--phrase', required=True, metavar='TXT',
+                      help='必须逐字节等于 "CONFIRM D4 <nonce>"')
+    p_ma.set_defaults(func=cmd_module_approve)
+
+    p_mi = msub.add_parser('install', help='装载（v0 恒 dry-run 只打印'
+                           'insmod；未批准 nonce 一律拒绝）')
+    p_mi.add_argument('nonce', metavar='NONCE', help='32 hex nonce')
+    p_mi.add_argument('--dry-run', action='store_true',
+                      help='v0 恒 dry-run（真 insmod=尾池）；旗标为接口'
+                           '稳定保留')
+    p_mi.set_defaults(func=cmd_module_install)
+
+    p_mled = msub.add_parser('ledger', help='账本行链校验+四类事件计数'
+                             '（只读）')
+    p_mled.set_defaults(func=cmd_module_ledger)
 
     args = ap.parse_args(argv)
     return args.func(args)

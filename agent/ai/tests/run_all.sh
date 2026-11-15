@@ -176,6 +176,28 @@ else
     failed+=("c2_compat_samples")
 fi
 
+echo "== C3 L3/L4/L5 bench (COMPAT-C3-DESIGN §4) =="
+# 第 64 门：C3 台架 default 模式（非 root）：账户①层名 L3（§0 唯一口径，
+# 与 Lane-1 compat_tools.c 面合同联调——其未合入的工树本账户对真 probe
+# 如实红，期望按设计册冻结不因工树态调低/标注转绿）、②L3 缺席态机判
+# （AIK_QEMU_USER_AARCH64=/nonexistent）+plan 透传诚实、③L4 五类 probe 级
+# 判定表（aikctl compat hw --fixture/真机只读双路）、④L5 门机制全链
+# （propose→list→错短语拒→批准→install 恒 dry-run→未批准拒负例→账本
+# 四事件+行链校验+篡改检出；AIKMODULE_DIR/AIKERNEL_CONFIRM_DIR 指临时
+# 目录零全局副作用）。probe 沿第 62/63 门口径指向仓内构建件；aikctl 由
+# 台架按 probe 兄弟路径（aikctl/aikctl）自解析。--live root 三面（真
+# aarch64 全链+hw 真机+L5 真目录）由主会话 sudo -n 亲跑，不进 run_all。
+# 仓内件缺失（未 make）/缺 aikctl = 如实 FAIL 非跳过。
+if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+   timeout 420 python3 "$here/c3_compat_samples.py" > /tmp/aik-c3_compat_samples.log 2>&1; then
+    echo "PASS c3_compat_samples"
+    pass=$((pass + 1))
+else
+    echo "FAIL c3_compat_samples (see /tmp/aik-c3_compat_samples.log)"
+    fail=$((fail + 1))
+    failed+=("c3_compat_samples")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then
