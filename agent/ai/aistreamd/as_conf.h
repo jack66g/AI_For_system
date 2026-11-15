@@ -14,6 +14,18 @@
 
 #define AS_CONF_PATH_DEFAULT	"/etc/aikernel/aistreamd.conf"
 
+/* ---- L1 棒①：价值评分器默认值（VALUE_W1..W6 / VALUE_PROMOTE_MIN/MAX；
+ * 公式与归一基准见 as_value.h 文件头。W1..W5 和=1.00≤1——value 恒
+ * [0,1] 可归一（as_conf_load 校验同一约束） ---- */
+#define AS_VALUE_W1_DEF		0.45	/* novelty（digest 首见+severity） */
+#define AS_VALUE_W2_DEF		0.25	/* 反差 |outcome−expected| */
+#define AS_VALUE_W3_DEF		0.05	/* 纠正（occ 未接，v0=0） */
+#define AS_VALUE_W4_DEF		0.15	/* 代价 cost_ns */
+#define AS_VALUE_W5_DEF		0.10	/* 稀有 */
+#define AS_VALUE_W6_DEF		0.10	/* 重复罚 */
+#define AS_VALUE_PROMOTE_MIN_DEF	0.50	/* promotion 带下沿（含） */
+#define AS_VALUE_PROMOTE_MAX_DEF	0.95	/* 上沿（含） */
+
 /* 流名（固定六路；统计/日志/标签都用这些名字） */
 #define AS_STREAM_EVENT		"event"		/* NETLINK_AI REG→EVENT */
 #define AS_STREAM_PROC		"proc"		/* CN_PROC */
@@ -77,6 +89,13 @@ struct as_conf {
 						 * journal 列名，只删布局内文件） */
 	long long parquet_flush_sec;		/* 批写节流：秒（默认 30） */
 	long long parquet_flush_rows;		/* 批写节流：行（默认 128） */
+	long long parquet_retention_days;	/* L1 棒②：raw 层 TTL 天数
+						 * （默认 7；0=关；先于预算
+						 * 执行——time 先 size 后） */
+	long long curated_retention_days;	/* curated 层 TTL（默认 90；
+						 * 与 raw 独立） */
+	long long curated_max_gb;		/* curated 层独立预算（默认 2GB；
+						 * 与 raw 预算不混算） */
 
 	/* ---- I-10：决策闭环第 4 步 outcome 回填器（as_outcome.c；C3 纯注记
 	 * 面，出厂默认关——设计 I10-METRIC-DESIGN §4.5/§6.4） ---- */
@@ -121,9 +140,32 @@ struct as_conf {
 	/* ---- SENSE 遥测脱敏（产生侧；设计 SENSE-REDACT-DESIGN §2.2/§5；
 	 * 多用户前提，出厂默认 off=单用户现状零字节变化 ---- */
 	int sense_redact_level;			/* 0=off 1=soft 2=strict
-						 * （默认 0） */
+							 * （默认 0） */
 	char sense_redact_salt[65];		/* hash 盐（默认空=确定性格式；
-						 * ≤64B 非空白，不落遥测） */
+							 * ≤64B 非空白，不落遥测） */
+
+	/* ---- L1 棒①：价值评分器 + curated promotion（as_value.c；设计
+	 * DATA-L1-DESIGN §1；坏值拒绝启动=严格口径同其余键） ---- */
+	double value_w[6];			/* VALUE_W1..W6（默认见
+						 * AS_VALUE_*_DEF；各 ∈[0,1]
+						 * 且 W1..W5 和 ≤1——value
+						 * ∈[0,1] 归一前提） */
+	double value_promote_min;		/* promotion 带下沿（含；默认
+						 * 0.50） */
+	double value_promote_max;		/* 上沿（含；默认 0.95；MIN≤MAX
+						 * 由 as_conf_load 校验） */
+	int curated_enabled;			/* curated 双写+SME 补发门
+						 * （默认 1） */
+#define AS_CAT_RET_MAX 8
+	/* ---- L1 棒②：per-cat TTL 覆盖（RETENTION_DAYS_<CAT>=N 前缀键）。
+	 * 目录级粒度：telemetry 天目录内含被覆盖 cat 的文件则该目录 TTL
+	 * 取 base 与覆盖值中的较长者（decisions 子目录无 cat，随同日目录
+	 * 整体保留——原子性优先；设计 DATA-L1-DESIGN §2）。 ---- */
+	struct {
+		char cat[32];
+		long long days;
+	} cat_retention[AS_CAT_RET_MAX];
+	int n_cat_retention;
 
 	/* 可观测 */
 	long long stats_interval_sec;	/* stats 文件周期写（默认 10） */

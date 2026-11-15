@@ -39,12 +39,26 @@ struct as_event {
 	int has_decision_id;		/* event/policy 专属 */
 	unsigned long long decision_id;
 	uint64_t trace_hi;		/* K1 统一 trace_id 高 64 位（0:0=无/未
-					 * 携带；policy/decision 事件填充，环境事件
-					 * 0——透传 telemetry parquet trace_hi/lo 列
-					 * 与 SME 行文本） */
+						 * 携带；policy/decision 事件填充，环境事件
+						 * 0——透传 telemetry parquet trace_hi/lo 列
+						 * 与 SME 行文本） */
 	uint64_t trace_lo;
 	int merged_count;		/* 聚合记录专用：合并总条数（含首条）；
 					 * 普通事件为 0 */
+	/* L1 棒① v3 append-only 尾（DATA-L1-DESIGN §1）：价值评分器
+	 * （as_value）decisions 路原料 + 评分结果。dec_* 仅 decisions 路
+	 * 合成事件由 as_decisions.c 填（dec_material=1）；其余构造器
+	 * 经 as_event_mk memset 恒 0（=原料缺失——评分如实 0 贡献 +
+	 * flags 缺失位）。value/vflags 由挂点（aistreamd.c）评分回填，
+	 * as_pq_sink 透传落 telemetry v3 尾 2 列；未评=0。 */
+	double value;			/* 评分 [0,1]；未评=0 */
+	int64_t vflags;			/* AS_VF_* 位域（as_value.h） */
+	int dec_material;		/* decisions 路原料有效位 */
+	long long dec_outcome;		/* 决策 outcome（内核枚举原样） */
+	long long dec_expected;		/* K1 v2 尾巴 expected */
+	unsigned long long dec_cost_ns;	/* K1 v2 尾巴 cost_ns */
+	int dec_confidence;		/* 内核 confidence 0..100 */
+	int dec_agent_id;		/* K1 v2 尾巴 agent_id */
 };
 
 /* 流名 → 下标（未知返回 -1） */

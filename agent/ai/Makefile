@@ -509,3 +509,41 @@ aik-compat-clean:
 	rm -rf $(CP_BUILD) $(CP_BIN)
 
 -include $(CP_OBJS:.o=.d)
+
+# ============================================================================
+# L1 棒③ aik-gcm（corpus 包加密面，DATA-L1-DESIGN §3）：
+# 追加段，既有规则不修改（沿 C1 aik-compat 先例）。
+#  - 独立小二进制：tools/gcm_main.c 单源，stdin→stdout 纯字节面，
+#    -ffunction-sections -fdata-sections + -Wl,--gc-sections
+#  - 只链 libmbedcrypto.a（GCM/CTR_DRBG/ENTROPY；裁剪配置
+#    include/mbedtls/mbedtls-trim.h B7 批保留——GCM 内部依赖 CTR），
+#    TLS/X509 面不进产物；前置依赖既有 mbedtls 目标（其配方自带
+#    库文件存在性短路，与 all 的先例一致）
+#  - 包格式 versioned：magic AIKCORP1|ver u16|key_ref 32B 定长|nonce 12B|
+#    tag 16B|ciphertext；AAD=tag 前包头（详见 gcm_main.c 头注）
+#  - 挂 all 不挂 install（安装归 build-rootfs.sh [5] 步——构建≠安装，
+#    同 aik-compat 裁定）
+# ============================================================================
+GCM_BIN   := aik-gcm
+GCM_BUILD := build-gcm
+GCM_OBJS  := $(GCM_BUILD)/tools/gcm_main.o
+
+all: $(GCM_BIN)
+
+$(GCM_BIN): $(GCM_OBJS) mbedtls
+	@echo "$(GREEN)[LINK]$(NC) $@"
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--gc-sections -o $@ $(GCM_OBJS) \
+		$(MBEDTLS_DIR)/library/libmbedcrypto.a
+
+$(GCM_BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)[CC]$(NC) $< (aik-gcm)"
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(DEPFLAGS) \
+		$(INCLUDES) -c -o $@ $<
+
+.PHONY: aik-gcm-clean
+clean: aik-gcm-clean
+aik-gcm-clean:
+	rm -rf $(GCM_BUILD) $(GCM_BIN)
+
+-include $(GCM_OBJS:.o=.d)

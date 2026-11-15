@@ -198,6 +198,31 @@ else
     failed+=("c3_compat_samples")
 fi
 
+echo "== L1 data three-layer bench (DATA-L1-DESIGN §4) =="
+# 第 65 门：L1 数据三层台架 default 模式（非 root）三账户：①评分/
+# promotion（aistreamd 短跑+ai_inject 混合 fixture 流→telemetry v3 13 列
+# +promotion 率 5-15% 带内+flags 缺失位+curated 落盘+SME 死端口计数
+# 诚实）；②三层保留（预植目录树+AS_ONCE 单事件短跑→TTL 边界/cat 覆盖/
+# 当天永不删/curated 独立/异物保护+journal 台账）；③corpus（aikctl
+# dataset list/export soft 脱敏门+corpus .aikcorp+manifest+aik-gcm dec
+# 逐字节往返+delete 双发确认门+mock SME 批量 DELETE）。门内环境自足：
+# AIKCTL/AIK_GCM/AISTREAMD/AI_INJECT 指仓内构建件（门测当前构建，非
+# 可能陈旧的装机副本）。C13=真产物集成探针（aistreamd 实产 ai_*.parquet
+# 命名 vs aikctl dataset 读契约）——未修读契约的树上如实红（期望冻结
+# 不调低，c3 台「如实红」同款纪律）。仓内件缺失（未 make）/缺
+# pyarrow = 如实 FAIL 非跳过。
+if AIKCTL="$agent/aikctl/aikctl" AIK_GCM="$agent/aik-gcm" \
+   AISTREAMD="$agent/aistreamd/aistreamd" \
+   AI_INJECT="$agent/aistreamd/tests/ai_inject" \
+   timeout 600 python3 "$here/l1_data_bench.py" > /tmp/aik-l1_data_bench.log 2>&1; then
+    echo "PASS l1_data_bench"
+    pass=$((pass + 1))
+else
+    echo "FAIL l1_data_bench (see /tmp/aik-l1_data_bench.log)"
+    fail=$((fail + 1))
+    failed+=("l1_data_bench")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then

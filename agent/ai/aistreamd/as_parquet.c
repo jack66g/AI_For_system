@@ -35,6 +35,8 @@
 
 #include "aistreamd/as_parquet.h"
 #include "aistreamd/as_snappy.h"
+#include "as_value.h"		/* L1 棒①：curated 门/promotion/dec 行评分
+				 * （纯叶子，无日志 IO——writer 可链） */
 
 #define PQ_PAR1		"PAR1"
 #define PQ_CREATED_BY	"aistreamd as_parquet 1.0 (T8 writer-only)"
@@ -275,6 +277,7 @@ enum pq_ph {
 	PQ_INT32,
 	PQ_INT64,
 	PQ_BYTE_ARRAY,
+	PQ_DOUBLE,	/* L1 v3：value 列（IEEE754 位型经 ints 数组传） */
 };
 
 enum pq_lg {
@@ -290,6 +293,9 @@ struct pq_coldef {
 	const char *name;
 	enum pq_ph ph;
 	enum pq_lg lg;
+	/* PQ_DOUBLE 约定：调用方把 double 位型（memcpy 8B）放进 ints
+	 * 数组传入——build_page/统计按位型搬运，min/max 比较按 double
+	 * （见 col_minmax）。pq_write_table 签名因此不变。 */
 };
 
 struct pq_ba {
@@ -310,19 +316,20 @@ static int conv_type(enum pq_lg lg)
 	}
 }
 
-/* Parquet 物理类型：INT32=1 INT64=2 BYTE_ARRAY=6 */
+/* Parquet 物理类型：INT32=1 INT64=2 BYTE_ARRAY=6 DOUBLE=5 */
 static int phys_type(enum pq_ph ph)
 {
 	switch (ph) {
 	case PQ_INT32:	return 1;
 	case PQ_INT64:	return 2;
+	case PQ_DOUBLE:	return 5;
 	default:	return 6;
 	}
 }
 
 /* ---- schema 三套（列名/物理类型/逻辑宽度/顺序逐字段对齐 REF） ---- */
 
-static const struct pq_coldef tel_cols[11] = {
+static const struct pq_coldef tel_cols[TEL_NCOL] = {
 	{ "timestamp_ns",	PQ_INT64,	PQ_LG_I64 },
 	{ "pid",		PQ_INT32,	PQ_LG_I32 },
 	{ "tgid",		PQ_INT32,	PQ_LG_I32 },
@@ -334,9 +341,15 @@ static const struct pq_coldef tel_cols[11] = {
 	{ "data",		PQ_BYTE_ARRAY,	PQ_LG_NONE },
 	{ "trace_hi",		PQ_INT64,	PQ_LG_I64 },	/* K1 v2 */
 	{ "trace_lo",		PQ_INT64,	PQ_LG_I64 },
+	/* L1 棒① append-only v3 尾 2 列（老行/未评=0；位域 as_value.h） */
+	{ "value",		PQ_DOUBLE,	PQ_LG_NONE },
+	{ "flags",		PQ_INT64,	PQ_LG_I64 },
 };
 
-static const struct pq_coldef dec_cols[31] = {
+/* L1 v3：DEC_NCOL=32 恰达 PQ_MAXCOL 上限——decisions 再加列须先扩
+ * PQ_MAXCOL（并复核 pq_write_table 的 chunk[31] 定长数组），升级
+ * 须整表换 schema（append-only 边界，设计 §1.2 明示此约）。 */
+static const struct pq_coldef dec_cols[DEC_NCOL] = {
 	{ "decision_id",	PQ_INT64,	PQ_LG_I64 },
 	{ "trigger_ts",		PQ_INT64,	PQ_LG_I64 },
 	{ "trigger_event_id",	PQ_INT64,	PQ_LG_I64 },
@@ -369,9 +382,11 @@ static const struct pq_coldef dec_cols[31] = {
 	{ "expected",		PQ_INT64,	PQ_LG_I64 },
 	{ "cost_ns",		PQ_INT64,	PQ_LG_I64 },
 	{ "side_effect_mask",	PQ_INT32,	PQ_LG_I32 },
+	/* L1 棒① append-only v3 尾 1 列（=PQ_MAXCOL 恰满；老行=0） */
+	{ "value",		PQ_DOUBLE,	PQ_LG_NONE },
 };
 
-static const struct pq_coldef idx_cols[6] = {
+static const struct pq_coldef idx_cols[IDX_NCOL] = {
 	{ "file",		PQ_BYTE_ARRAY,	PQ_LG_STR },
 	{ "date",		PQ_BYTE_ARRAY,	PQ_LG_STR },
 	{ "category",		PQ_INT32,	PQ_LG_I8 },
@@ -379,11 +394,6 @@ static const struct pq_coldef idx_cols[6] = {
 	{ "start_ts",		PQ_INT64,	PQ_LG_I64 },
 	{ "end_ts",		PQ_INT64,	PQ_LG_I64 },
 };
-
-#define TEL_NCOL	11		/* K1 D10 v2：9->11 */
-#define DEC_NCOL	31		/* K1 D10 v2：23->31 */
-#define IDX_NCOL	6
-#define PQ_MAXCOL	32
 
 /* 数值窄化到逻辑宽度（符号语义保持；编码按物理宽度） */
 static int64_t narrow(enum pq_lg lg, int64_t v)
@@ -433,6 +443,8 @@ static int build_page(const struct pq_coldef *c, int64_t nrows,
 				return -1;
 		}
 	} else {
+		/* INT64 与 DOUBLE（位型透传——见 pq_coldef 约定注）同径：
+		 * lg=NONE 时 narrow 恒等，wle64 落 8 字节位型 */
 		for (int64_t i = 0; i < nrows; i++) {
 			if (wle64(raw, (uint64_t)narrow(c->lg, ints[i])) != 0)
 				return -1;
@@ -441,13 +453,30 @@ static int build_page(const struct pq_coldef *c, int64_t nrows,
 	return 0;
 }
 
-/* 统计原始值（min/max 按窄化后的序比较） */
+/* 统计原始值（min/max 按窄化后的序比较；DOUBLE 列按 double 序——
+ * 位型经 memcpy 往返，min/max 存回位型供 footer 统计字节直用） */
 static void col_minmax(const struct pq_coldef *c, int64_t nrows,
 		       const int64_t *ints, int64_t *pmin, int64_t *pmax)
 {
 	int64_t mn = 0, mx = 0;
 
-	if (c->ph != PQ_BYTE_ARRAY && nrows > 0) {
+	if (c->ph == PQ_DOUBLE && nrows > 0) {
+		double dmn, dmx;
+
+		memcpy(&dmn, &ints[0], sizeof(dmn));
+		dmx = dmn;
+		for (int64_t i = 1; i < nrows; i++) {
+			double dv;
+
+			memcpy(&dv, &ints[i], sizeof(dv));
+			if (dv < dmn)
+				dmn = dv;
+			if (dv > dmx)
+				dmx = dv;
+		}
+		memcpy(&mn, &dmn, sizeof(mn));
+		memcpy(&mx, &dmx, sizeof(mx));
+	} else if (c->ph != PQ_BYTE_ARRAY && nrows > 0) {
 		mn = mx = narrow(c->lg, ints[0]);
 		for (int64_t i = 1; i < nrows; i++) {
 			int64_t v = narrow(c->lg, ints[i]);
@@ -562,7 +591,9 @@ static int pq_write_table(const char *path, const struct pq_coldef *cols,
 					narrow(c->lg, vmin));
 				le_into(chunk[ci].stat_max, 4,
 					narrow(c->lg, vmax));
-			} else if (c->ph == PQ_INT64) {
+			} else if (c->ph == PQ_INT64 || c->ph == PQ_DOUBLE) {
+				/* DOUBLE 统计=8 字节 IEEE754 位型（vmin/
+				 * vmax 已按 double 序取好，字节面同型） */
 				chunk[ci].stat_len = 8;
 				le_into(chunk[ci].stat_min, 8, vmin);
 				le_into(chunk[ci].stat_max, 8, vmax);
@@ -942,6 +973,9 @@ static long next_seq(const char *dir, const char *prefix)
 
 /* ================= 5. REF 对齐高层写 ================= */
 
+/* 前置：index 重建核心（第 6 节定义；mid 语义同 write_tel_mid） */
+static int update_index_mid(const char *root, const char *mid, long *skipped);
+
 static void add_stat(struct pq_write_stat *st, const char *path)
 {
 	struct stat sb;
@@ -959,9 +993,16 @@ static int cmp_i64(const void *a, const void *b)
 	return x < y ? -1 : x > y ? 1 : 0;
 }
 
-int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
-			  size_t n, int64_t btime_sec, size_t chunk_max,
-			  struct pq_write_stat *wstat)
+/*
+ * write_tel_mid - telemetry 落盘核心（mid="telemetry"=raw 布局
+ * <root>/telemetry/<日>/；mid=""=curated 布局 <root>/<日>/ 直接天目录
+ * ——设计 §1.3 字面布局，L1 棒①）。行装配含 v3 尾 2 列（value 位型
+ * +flags）。
+ */
+static int write_tel_mid(const char *root, const char *mid,
+			 const struct pq_tel_row *rows, size_t n,
+			 int64_t btime_sec, size_t chunk_max,
+			 struct pq_write_stat *wstat)
 {
 	int cats[256];
 	size_t catn = 0;
@@ -1021,7 +1062,10 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 		}
 
 		as_pq_day_from_ts(grp[idx[0]].ts_ns, btime_sec, day);
-		snprintf(dir, sizeof(dir), "%s/telemetry/%s", root, day);
+		if (mid[0])
+			snprintf(dir, sizeof(dir), "%s/%s/%s", root, mid, day);
+		else
+			snprintf(dir, sizeof(dir), "%s/%s", root, day);
 		if (mkdirs(dir) != 0) {
 			free(grp);
 			free(idx);
@@ -1032,8 +1076,9 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 			size_t clen = cnt - i < chunk_max ? cnt - i : chunk_max;
 			long seq = next_seq(dir, prefix);
 			char path[600];
-			int64_t *cols[10];
-			int64_t *blob = malloc(clen * 10 * sizeof(int64_t));
+			int64_t *cols[TEL_NCOL - 1];	/* 数值列（含 v3 尾 2） */
+			int64_t *blob = malloc(clen * (TEL_NCOL - 1) *
+					       sizeof(int64_t));
 			struct pq_ba *ba = malloc(clen * sizeof(*ba));
 			struct pq_ba *bp[1];
 			int bad = 0;
@@ -1045,7 +1090,7 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 				free(idx);
 				goto out;
 			}
-			for (int c = 0; c < 10; c++)
+			for (int c = 0; c < TEL_NCOL - 1; c++)
 				cols[c] = blob + clen * (size_t)c;
 			for (size_t r = 0; r < clen; r++) {
 				const struct pq_tel_row *tr = &grp[idx[i + r]];
@@ -1060,6 +1105,10 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 				cols[7][r] = tr->data_len;
 				cols[8][r] = tr->trace_hi;
 				cols[9][r] = tr->trace_lo;
+				/* L1 v3：value 位型（DOUBLE 列约定）+flags */
+				memcpy(&cols[10][r], &tr->value,
+				       sizeof(tr->value));
+				cols[11][r] = tr->flags;
 				ba[r].p = tr->data;
 				ba[r].n = (size_t)(tr->data_len < 0 ?
 						   0 : tr->data_len);
@@ -1088,7 +1137,7 @@ int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
 	if (total > 0) {
 		long sk = 0;
 
-		if (as_pq_update_index(root, &sk) != 0)
+		if (update_index_mid(root, mid, &sk) != 0)
 			goto out;
 	}
 	if (wstat)
@@ -1098,7 +1147,56 @@ out:
 	return rc_ret;
 }
 
-static int write_dec_table(const char *root, const struct pq_dec_row *rows,
+int as_pq_write_telemetry(const char *root, const struct pq_tel_row *rows,
+			  size_t n, int64_t btime_sec, size_t chunk_max,
+			  struct pq_write_stat *wstat)
+{
+	int total = write_tel_mid(root, "telemetry", rows, n, btime_sec,
+				  chunk_max, wstat);
+
+	if (total < 0)
+		return total;
+	/* L1 棒① curated 双写：promotion 行子集镜像独立根（门=
+	 * as_value 快照；失败不坏 raw 路——计数上报）。 */
+	if (!as_value_curated_enabled() || n == 0 || !rows)
+		return total;
+	{
+		struct pq_tel_row *sub = malloc(n * sizeof(*sub));
+		size_t k = 0;
+
+		if (!sub) {
+			as_value_note_curated(0, 0);
+			return total;
+		}
+		for (size_t i = 0; i < n; i++)
+			if (rows[i].flags & AS_VF_PROMOTED)
+				sub[k++] = rows[i];
+		if (k > 0) {
+			char croot[512];
+
+			if (snprintf(croot, sizeof(croot), "%s/curated",
+				     root) >= (int)sizeof(croot)) {
+				as_value_note_curated(0, (long long)k);
+			} else if (write_tel_mid(croot, "", sub, k, btime_sec,
+						 chunk_max, NULL) < 0) {
+				as_value_note_curated(0, (long long)k);
+			} else {
+				as_value_note_curated(1, (long long)k);
+			}
+		}
+		free(sub);
+	}
+	return total;
+}
+
+/*
+ * write_dec_table - decisions/chains 落盘核心（mid="decisions"=raw 布局
+ * <root>/decisions/<日>/；mid=""=curated 布局 <root>/<日>/，且不再
+ * 二次镜像——防镜像递归）。L1 v3：尾列 value=as_value_dec_row_score
+ * 行内原料现算（行稳定，口径见 as_value.h 头注）。
+ */
+static int write_dec_table(const char *root, const char *mid,
+			   const struct pq_dec_row *rows,
 			   size_t n, int64_t btime_sec, int chains,
 			   struct pq_write_stat *wstat)
 {
@@ -1111,7 +1209,10 @@ static int write_dec_table(const char *root, const struct pq_dec_row *rows,
 	if (n == 0)
 		return 0;
 	as_pq_day_from_ts(ts0, btime_sec, day);
-	snprintf(dir, sizeof(dir), "%s/decisions/%s", root, day);
+	if (mid[0])
+		snprintf(dir, sizeof(dir), "%s/%s/%s", root, mid, day);
+	else
+		snprintf(dir, sizeof(dir), "%s/%s", root, day);
 	if (mkdirs(dir) != 0)
 		return -1;
 	blob = malloc(n * DEC_NCOL * sizeof(int64_t));
@@ -1121,6 +1222,8 @@ static int write_dec_table(const char *root, const struct pq_dec_row *rows,
 		cols[c] = blob + n * (size_t)c;
 	for (size_t r = 0; r < n; r++) {
 		const struct pq_dec_row *d = &rows[r];
+		double dv = as_value_dec_row_score(d);
+		int64_t dvbits;
 		const int64_t v[DEC_NCOL] = {
 			d->decision_id, d->trigger_ts, d->trigger_event_id,
 			d->decision_ts, d->decision_type,
@@ -1133,8 +1236,10 @@ static int write_dec_table(const char *root, const struct pq_dec_row *rows,
 			d->agent_id, d->expected, d->cost_ns, d->side_effect_mask,
 		};
 
-		for (int c = 0; c < DEC_NCOL; c++)
+		memcpy(&dvbits, &dv, sizeof(dvbits));	/* DOUBLE 位型 */
+		for (int c = 0; c < DEC_NCOL - 1; c++)
 			cols[c][r] = v[c];
+		cols[DEC_NCOL - 1][r] = dvbits;
 	}
 	if (chains)
 		snprintf(path, sizeof(path), "%s/chains_%s.parquet", dir, day);
@@ -1154,14 +1259,51 @@ int as_pq_write_decisions(const char *root, const struct pq_dec_row *rows,
 			  size_t n, int64_t btime_sec,
 			  struct pq_write_stat *wstat)
 {
-	return write_dec_table(root, rows, n, btime_sec, 0, wstat);
+	int rc = write_dec_table(root, "decisions", rows, n, btime_sec, 0,
+				 wstat);
+
+	if (rc < 0)
+		return rc;
+	/* L1 棒① curated 镜像：进 promotion 带的行（value 由 writer 同
+	 * 口径现算）→ <root>/curated/<日>/decisions.parquet；chains 不
+	 * 镜像（分析视图，主行已镜像）。失败不坏 raw 路。 */
+	if (!as_value_curated_enabled() || n == 0 || !rows)
+		return rc;
+	{
+		struct pq_dec_row *sub = malloc(n * sizeof(*sub));
+		size_t k = 0;
+
+		if (!sub) {
+			as_value_note_curated(0, 0);
+			return rc;
+		}
+		for (size_t i = 0; i < n; i++)
+			if (as_value_promoted(as_value_dec_row_score(&rows[i])))
+				sub[k++] = rows[i];
+		if (k > 0) {
+			char croot[512];
+
+			if (snprintf(croot, sizeof(croot), "%s/curated",
+				     root) >= (int)sizeof(croot)) {
+				as_value_note_curated(0, (long long)k);
+			} else if (write_dec_table(croot, "", sub, k,
+						   btime_sec, 0, NULL) < 0) {
+				as_value_note_curated(0, (long long)k);
+			} else {
+				as_value_note_curated(1, (long long)k);
+			}
+		}
+		free(sub);
+	}
+	return rc;
 }
 
 int as_pq_write_chains(const char *root, const struct pq_dec_row *rows,
 		       size_t n, int64_t btime_sec,
 		       struct pq_write_stat *wstat)
 {
-	return write_dec_table(root, rows, n, btime_sec, 1, wstat);
+	return write_dec_table(root, "decisions", rows, n, btime_sec, 1,
+			       wstat);
 }
 
 /* ================= 6. index 重建 ================= */
@@ -1196,7 +1338,12 @@ struct pq_idx_row {
 	int64_t end_ts;
 };
 
-int as_pq_update_index(const char *root, long *skipped)
+/*
+ * update_index_mid - index 重建核心（mid="telemetry"=raw；mid=""=curated
+ * 根直接天目录——index.parquet 落 <root>/index.parquet，file 列记
+ * <日>/<文件> 相对路径）。
+ */
+static int update_index_mid(const char *root, const char *mid, long *skipped)
 {
 	char teldir[512];
 	DIR *dir = NULL;
@@ -1205,7 +1352,10 @@ int as_pq_update_index(const char *root, long *skipped)
 	size_t np = 0, pcap = 0;
 	int rc = -1;
 
-	snprintf(teldir, sizeof(teldir), "%s/telemetry", root);
+	if (mid[0])
+		snprintf(teldir, sizeof(teldir), "%s/%s", root, mid);
+	else
+		snprintf(teldir, sizeof(teldir), "%s", root);
 	dir = opendir(teldir);
 	if (!dir)
 		return -1;
@@ -1227,8 +1377,12 @@ int as_pq_update_index(const char *root, long *skipped)
 				continue;
 			if (!is_tel_data_file(se->d_name))
 				continue;
-			snprintf(rel, sizeof(rel), "telemetry/%s/%s",
-				 e->d_name, se->d_name);
+			if (mid[0])
+				snprintf(rel, sizeof(rel), "%s/%s/%s", mid,
+					 e->d_name, se->d_name);
+			else
+				snprintf(rel, sizeof(rel), "%s/%s",
+					 e->d_name, se->d_name);
 			if (np == pcap) {
 				char **nb = realloc(paths,
 						    (pcap ? pcap * 2 : 16) *
@@ -1272,14 +1426,25 @@ int as_pq_update_index(const char *root, long *skipped)
 			const char *rel = paths[i];
 			const char *slash1 = strchr(rel, '/');
 			const char *slash2;
+			const char *date;
+			size_t date_len;
 			char full[1024];
 			struct pq_file_stats fs;
 
 			if (!slash1)
 				continue;
-			slash2 = strchr(slash1 + 1, '/');
-			if (!slash2)
-				continue;
+			if (mid[0]) {
+				/* rel=<mid>/<日>/<文件>：日期=两斜杠间 */
+				slash2 = strchr(slash1 + 1, '/');
+				if (!slash2)
+					continue;
+				date = slash1 + 1;
+				date_len = (size_t)(slash2 - slash1 - 1);
+			} else {
+				/* rel=<日>/<文件>（curated 根）：日期=首斜杠前 */
+				date = rel;
+				date_len = (size_t)(slash1 - rel);
+			}
 			snprintf(full, sizeof(full), "%s/%s", root, rel);
 			if (as_pq_file_stats(full, &fs) != 0) {
 				if (skipped)
@@ -1287,8 +1452,8 @@ int as_pq_update_index(const char *root, long *skipped)
 				continue;	/* REF：异常静默跳过；此处计数 */
 			}
 			irows[nr].file = rel;	/* 暂指向 paths[i]（strdup 稳定） */
-			irows[nr].date = slash1 + 1;
-			irows[nr].date_len = (size_t)(slash2 - slash1 - 1);
+			irows[nr].date = date;
+			irows[nr].date_len = date_len;
 			irows[nr].category =
 				fs.has_cat ? (int8_t)fs.cat_max : 0;
 			irows[nr].records = fs.num_rows;
@@ -1329,8 +1494,11 @@ int as_pq_update_index(const char *root, long *skipped)
 			bas[nr + i].p = (const uint8_t *)dslot;
 			bas[nr + i].n = dlens[i];
 		}
-		snprintf(ipath, sizeof(ipath), "%s/telemetry/index.parquet",
-			 root);
+		if (mid[0])
+			snprintf(ipath, sizeof(ipath), "%s/%s/index.parquet",
+				 root, mid);
+		else
+			snprintf(ipath, sizeof(ipath), "%s/index.parquet", root);
 		ok = pq_write_table(ipath, idx_cols, IDX_NCOL, (int64_t)nr,
 				    (int64_t *const *)cols,
 				    (const struct pq_ba *const *)bp);
@@ -1352,6 +1520,18 @@ out:
 		free(paths[i]);
 	free(paths);
 	return rc;
+}
+
+int as_pq_update_index(const char *root, long *skipped)
+{
+	return update_index_mid(root, "telemetry", skipped);
+}
+
+/* L1 棒②：curated 层 index 重建（保留策略删日目录后调用；root=
+ * <PARQUET_DIR>/curated，mid="" 即 curated 布局——棒① 镜像同款）。 */
+int as_pq_update_index_curated(const char *root, long *skipped)
+{
+	return update_index_mid(root, "", skipped);
 }
 
 /* ================= 7. footer 统计读取（thrift compact reader） ====== */
@@ -1784,11 +1964,26 @@ int as_pq_file_stats(const char *path, struct pq_file_stats *out)
 	ropen(&r);					/* FileMetaData */
 	{
 		int id, type, rf;
+		int ncols = -1;
 
 		while ((rf = rfield(&r, &id, &type)) == 1) {
 			if (id == 3 && type == TT_I64) {
 				if (rzig(&r, &num_rows) != 0)
 					goto out;
+			} else if (id == 2 && type == TT_LIST) {
+				/* schema 元素表：root + 叶 → ncols = n−1
+				 * （L1 v3 列数断言面；逐元素照旧跳过） */
+				int et;
+				size_t nsc;
+
+				if (rlist_hdr(&r, &et, &nsc) != 0 ||
+				    et != TT_STRUCT)
+					goto out;
+				ncols = nsc > 0 ? (int)nsc - 1 : 0;
+				for (size_t g = 0; g < nsc; g++) {
+					if (rskip(&r, TT_STRUCT) != 0)
+						goto out;
+				}
 			} else if (id == 4 && type == TT_LIST) {
 				int et;
 				size_t nrg;
@@ -1807,6 +2002,10 @@ int as_pq_file_stats(const char *path, struct pq_file_stats *out)
 		if (rf < 0)
 			goto out;
 		rclose(&r);
+		if (ncols >= 0) {
+			out->has_ncols = 1;
+			out->ncols = ncols;
+		}
 	}
 	if (num_rows < 0)
 		goto out;

@@ -111,8 +111,9 @@ void as_sme_build(const struct as_event *ev, const struct as_conf *c,
 	(void)c;
 }
 
-int as_sme_post(struct as_sme *s, const char *text, const char *meta,
-		const char *tags)
+/* 单次 POST 核心（importance 可指定——常路=conf，curated 补发=value） */
+static int sme_post_imp(struct as_sme *s, const char *text, const char *meta,
+			const char *tags, double importance)
 {
 	struct sme_add_opts o;
 	char out[SME_OUT_BUF_MIN];
@@ -123,13 +124,58 @@ int as_sme_post(struct as_sme *s, const char *text, const char *meta,
 	o.metadata_json = meta;
 	o.tags_json = tags;
 	o.has_importance = 1;
-	o.importance = s->conf->importance;
+	o.importance = importance;
 	o.source = "kernel_evt";
 	rc = sme_add_ex(&o, out, sizeof(out));
 	s->stats->sme_ok = (rc == AI_OK) ? 1 : 0;
 	if (rc != AI_OK)
 		as_log_debug("sme POST failed rc=%d out=%.120s", rc, out);
 	return rc == AI_OK ? 0 : -1;
+}
+
+int as_sme_post(struct as_sme *s, const char *text, const char *meta,
+		const char *tags)
+{
+	return sme_post_imp(s, text, meta, tags, s->conf->importance);
+}
+
+void as_sme_deliver_curated(struct as_sme *s, const struct as_event *ev,
+			    double value)
+{
+	char text[AS_TEXT_MAX], meta[AS_META_MAX];
+	char tags0[AS_TAGS_MAX], tags[AS_TAGS_MAX + 24];
+	double imp = value;
+
+	/* SME importance 契约 0<x<=1（IMPORTANCE 同校验）；value=0 不会
+	 * promotion（带下沿>0），钳制仅防极值配置 */
+	if (imp <= 0.0)
+		imp = 0.01;
+	if (imp > 1.0)
+		imp = 1.0;
+	as_sme_build(ev, s->conf, text, sizeof(text), meta, sizeof(meta),
+		     tags0, sizeof(tags0));
+	/* tags 尾插 AS_SME_CURATED_TAG：[..."] → [...,"curated:v1"] */
+	{
+		size_t l = strlen(tags0);
+
+		if (l > 0 && tags0[l - 1] == ']') {
+			memcpy(tags, tags0, l - 1);
+			snprintf(tags + l - 1, sizeof(tags) - (l - 1),
+				 ",\"%s\"]", AS_SME_CURATED_TAG);
+		} else {
+			snprintf(tags, sizeof(tags), "%s", tags0);
+		}
+	}
+	if (sme_post_imp(s, text, meta, tags, imp) == 0) {
+		s->curated_ok++;
+		return;
+	}
+	/* 失败=计数+限频告警后丢弃（不占环：同文本常路 POST/环形兜底
+	 * 已在，补发仅 tags/importance 差异——双份占环的取舍，设计 §1.3） */
+	s->curated_fail++;
+	as_warn_ratelimit("sme-curated", 60000,
+			  "curated nudge POST failed (total_fail=%lld)",
+			  s->curated_fail);
 }
 
 void as_sme_deliver(struct as_sme *s, const struct as_event *ev)

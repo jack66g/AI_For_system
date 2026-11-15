@@ -67,6 +67,21 @@ void as_conf_defaults(struct as_conf *c)
 	 * 设计 SENSE-REDACT-DESIGN §5 出厂默认建议） */
 	c->sense_redact_level = 0;	/* 0=off 1=soft 2=strict */
 	c->sense_redact_salt[0] = '\0';
+	/* L1 棒①：价值评分器 + curated promotion（默认见 as_conf.h 宏） */
+	c->value_w[0] = AS_VALUE_W1_DEF;
+	c->value_w[1] = AS_VALUE_W2_DEF;
+	c->value_w[2] = AS_VALUE_W3_DEF;
+	c->value_w[3] = AS_VALUE_W4_DEF;
+	c->value_w[4] = AS_VALUE_W5_DEF;
+	c->value_w[5] = AS_VALUE_W6_DEF;
+	c->value_promote_min = AS_VALUE_PROMOTE_MIN_DEF;
+	c->value_promote_max = AS_VALUE_PROMOTE_MAX_DEF;
+	c->curated_enabled = 1;
+	/* L1 棒②：三层保留（DATA-L1-DESIGN §2；raw TTL 先于体量预算） */
+	c->parquet_retention_days = 7;
+	c->curated_retention_days = 90;
+	c->curated_max_gb = 2;
+	c->n_cat_retention = 0;
 	c->stats_interval_sec = 10;
 	c->log_debug = 0;
 	snprintf(c->stats_file, sizeof(c->stats_file), "/run/aistreamd.stats");
@@ -145,6 +160,11 @@ enum key_id {
 	K_DECISIONS_SCAN_MAX, K_DECISIONS_BATCH_MAX,
 	K_DECISIONS_WRITE_SME, K_DECISIONS_MOCK_ROOT,
 	K_SENSE_REDACT, K_SENSE_REDACT_SALT,
+	K_VALUE_W1, K_VALUE_W2, K_VALUE_W3, K_VALUE_W4, K_VALUE_W5,
+	K_VALUE_W6, K_VALUE_PROMOTE_MIN, K_VALUE_PROMOTE_MAX,
+	K_CURATED_ENABLED,
+	K_PARQUET_RETENTION_DAYS, K_CURATED_RETENTION_DAYS,
+	K_CURATED_MAX_GB,
 	K_MAX
 };
 
@@ -170,6 +190,11 @@ static const char *const key_names[K_MAX] = {
 	"DECISIONS_SCAN_MAX", "DECISIONS_BATCH_MAX",
 	"DECISIONS_WRITE_SME", "DECISIONS_MOCK_ROOT",
 	"SENSE_REDACT", "SENSE_REDACT_SALT",
+	"VALUE_W1", "VALUE_W2", "VALUE_W3", "VALUE_W4", "VALUE_W5",
+	"VALUE_W6", "VALUE_PROMOTE_MIN", "VALUE_PROMOTE_MAX",
+	"CURATED_ENABLED",
+	"PARQUET_RETENTION_DAYS", "CURATED_RETENTION_DAYS",
+	"CURATED_MAX_GB",
 };
 
 static int key_lookup(const char *k)
@@ -188,6 +213,8 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 	int seen[K_MAX];
 	char strbuf[3][300];
 	int stridx = 0;
+	int valw_line = 0;		/* L1：VALUE_W* 跨键校验锚行 */
+	int promote_line = 0;		/* L1：MIN<=MAX 校验锚行 */
 
 	memset(seen, 0, sizeof(seen));
 	f = fopen(path, "r");
@@ -231,6 +258,61 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 				*ke-- = '\0';
 		}
 		v = eq + 1;
+		/* L1 棒②：per-cat TTL 覆盖前缀键（RETENTION_DAYS_<CAT>=N，
+		 * DATA-L1-DESIGN §2）。任意 cat 名（1..31 字符，
+		 * [A-Za-z0-9_-]）；坏值/坏名/重复 cat=拒；上限
+		 * AS_CAT_RET_MAX 条。不进 seen[] 去重机制（自带重复检查）。 */
+		if (strncmp(k, "RETENTION_DAYS_", 15) == 0) {
+			const char *cat = k + 15;
+			size_t cl = strlen(cat);
+			long long n = 0;
+			int dup = 0;
+
+			if (cl == 0 || cl >= 32) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad cat name for "
+					   "RETENTION_DAYS_<CAT>: ", k, NULL);
+			}
+			for (const char *q = cat; *q; q++)
+				if (!(*q >= 'a' && *q <= 'z') &&
+				    !(*q >= 'A' && *q <= 'Z') &&
+				    !(*q >= '0' && *q <= '9') &&
+				    *q != '_' && *q != '-') {
+					fclose(f);
+					return bad(err, errcap, lineno,
+						   "bad cat name for "
+						   "RETENTION_DAYS_<CAT>: ",
+						   k, NULL);
+				}
+			if (parse_ll(v, &n) != 0 || n < 0 || n > 36500) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad value for "
+					   "RETENTION_DAYS_<CAT> "
+					   "(need int 0..36500): ", v, NULL);
+			}
+			for (int i = 0; i < c->n_cat_retention; i++)
+				if (strcmp(c->cat_retention[i].cat, cat) == 0)
+					dup = 1;
+			if (dup) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "duplicate cat override: ", k,
+					   NULL);
+			}
+			if (c->n_cat_retention >= AS_CAT_RET_MAX) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "too many RETENTION_DAYS_<CAT> "
+					   "entries (max 8): ", k, NULL);
+			}
+			snprintf(c->cat_retention[c->n_cat_retention].cat,
+				 sizeof(c->cat_retention[0].cat), "%s", cat);
+			c->cat_retention[c->n_cat_retention].days = n;
+			c->n_cat_retention++;
+			continue;
+		}
 		id = key_lookup(k);
 		if (id < 0) {
 			fclose(f);
@@ -464,6 +546,17 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			NEED_LL("PARQUET_FLUSH_ROWS", 1, 65536,
 				c->parquet_flush_rows);
 			break;
+		case K_PARQUET_RETENTION_DAYS:
+			NEED_LL("PARQUET_RETENTION_DAYS", 0, 36500,
+				c->parquet_retention_days);
+			break;
+		case K_CURATED_RETENTION_DAYS:
+			NEED_LL("CURATED_RETENTION_DAYS", 0, 36500,
+				c->curated_retention_days);
+			break;
+		case K_CURATED_MAX_GB:
+			NEED_LL("CURATED_MAX_GB", 1, 1024, c->curated_max_gb);
+			break;
 		case K_OUTCOME_ENABLED:
 			NEED_LL("OUTCOME_ENABLED", 0, 1, c->outcome_enabled);
 			break;
@@ -540,6 +633,44 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 			snprintf(c->sense_redact_salt,
 				 sizeof(c->sense_redact_salt), "%s", v);
 			break;
+		case K_VALUE_W1:
+		case K_VALUE_W2:
+		case K_VALUE_W3:
+		case K_VALUE_W4:
+		case K_VALUE_W5:
+		case K_VALUE_W6: {
+			/* 双精度权重（各 [0,1]；W1..W5 和 ≤1 的跨键约束在
+			 * 全文件解析后校验——保证 value∈[0,1] 可归一） */
+			double *dst = &c->value_w[id - K_VALUE_W1];
+
+			if (parse_double(v, &d) != 0 || d < 0.0 || d > 1.0) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad value for VALUE_W* (need double "
+					   "0..1): ", v, NULL);
+			}
+			*dst = d;
+			valw_line = lineno;
+			break;
+		}
+		case K_VALUE_PROMOTE_MIN:
+		case K_VALUE_PROMOTE_MAX: {
+			double *dst = id == K_VALUE_PROMOTE_MIN ?
+				&c->value_promote_min : &c->value_promote_max;
+
+			if (parse_double(v, &d) != 0 || d < 0.0 || d > 1.0) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "bad value for VALUE_PROMOTE_* "
+					   "(need double 0..1): ", v, NULL);
+			}
+			*dst = d;
+			promote_line = lineno;
+			break;
+		}
+		case K_CURATED_ENABLED:
+			NEED_LL("CURATED_ENABLED", 0, 1, c->curated_enabled);
+			break;
 		default:
 			fclose(f);
 			return bad(err, errcap, lineno,
@@ -548,5 +679,16 @@ int as_conf_load(struct as_conf *c, const char *path, char *err, size_t errcap)
 #undef NEED_LL
 	}
 	fclose(f);
+	/* L1 棒①跨键校验（单键范围已在 case 内拒；此处管联合约束，
+	 * 错误锚行=该组键最后一次出现的行号） */
+	if (c->value_w[0] + c->value_w[1] + c->value_w[2] + c->value_w[3] +
+	    c->value_w[4] > 1.0 + 1e-9)
+		return bad(err, errcap, valw_line ? valw_line : 1,
+			   "VALUE_W1..W5 sum > 1 (value not "
+			   "[0,1]-normalizable)", NULL, NULL);
+	if (c->value_promote_min > c->value_promote_max)
+		return bad(err, errcap, promote_line ? promote_line : 1,
+			   "VALUE_PROMOTE_MIN > VALUE_PROMOTE_MAX",
+			   NULL, NULL);
 	return 0;
 }

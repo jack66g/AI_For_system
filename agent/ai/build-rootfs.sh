@@ -137,11 +137,13 @@ echo "=== [5] 拷入 AI 二进制 (strip 后进镜像) ==="
 # T9e: aikernel-shell/ai 已出厂移除，控制台入口换 occ。
 # C2: aik-compat 进镜像即 strip（W4A 裁定统一适用——未 strip 布局在
 # AIKernel 内核上启动即 SIGSEGV 的风险对静态小二进制同样成立）。
-strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl" "$SRC/agent/ai/aik-compat"
+strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl" "$SRC/agent/ai/aik-compat" "$SRC/agent/ai/aik-gcm"
 install -D -m755 "$SRC/agent/ai/occ/occ"  "$MNT/usr/local/bin/occ"
 install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
 # C1: aik-compat（compat probe 生产 CLI 面；COMPAT-C1-DESIGN §2.2）
 install -D -m755 "$SRC/agent/ai/aik-compat" "$MNT/usr/local/bin/aik-compat"
+# L1 棒③: aik-gcm（corpus 包加密面；DATA-L1-DESIGN §3——同 [5] strip 统一）
+install -D -m755 "$SRC/agent/ai/aik-gcm"    "$MNT/usr/local/bin/aik-gcm"
 # q17: 控制台接管层 aik-console（v3：tty1=fbterm--occ 循环兜底，70=zoom
 # 重启环；factory 树权威文件）
 install -D -m755 "$FACTORY/usr/local/bin/aik-console"     "$MNT/usr/local/bin/aik-console"

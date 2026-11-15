@@ -46,9 +46,10 @@
 #include "as_stats.h"
 #include "as_streams.h"
 #include "as_util.h"
+#include "as_value.h"
 
 #define AISTREAMD_VERSION \
-	"aistreamd 1.5 (K3c + K3d-2 I-9 hotplug advisory + T8 parquet + I-10 outcome backfill + SENSE redact + T8 decisions ingest)"
+	"aistreamd 1.6 (K3c + K3d-2 I-9 hotplug advisory + T8 parquet + I-10 outcome backfill + SENSE redact + T8 decisions ingest + L1 value/promotion)"
 
 /* ---- 全局上下文（单线程，信号只置标志） ---- */
 
@@ -69,6 +70,7 @@ struct g_ctx {
 	struct as_outcome outcome;	/* I-10：决策 outcome 回填（C3 默认关） */
 	struct as_pq_sink pq;		/* T8：事件→Parquet 落盘（默认关） */
 	struct as_decisions dec;	/* T8 遗留：decisions 消费（C1 默认关） */
+	struct as_value_ctx vctx;	/* L1 棒①：价值评分状态 */
 	int lock_fd;
 };
 
@@ -94,6 +96,25 @@ static void on_signal(int sig)
 
 /* ---- 管道（解析回调 → 去重 → 配额 → SME） ---- */
 
+/*
+ * score_and_feed - L1 棒①统一评分挂点：两路（事件/decisions 原料在
+ * ev v3 尾巴）→ as_value 评分回填 ev->value/vflags → promotion 行
+ * curated 补一发（CURATED_ENABLED 门；且 PARQUET_ENABLED=0 时不补——
+ * curated 属数据分层，parquet 关=无 promotion 持久化，仅记忆补发会
+ * 与落盘面失约）→ Parquet 缓冲（v3 尾 2 列透传，promoted 行由
+ * writer 镜像 curated 根）。设计 §1.1/§1.3。
+ */
+static void score_and_feed(struct g_ctx *g, struct as_event *ev)
+{
+	int promoted = ev->dec_material ?
+		as_value_hook_decision(&g->vctx, ev) :
+		as_value_hook_event(&g->vctx, ev);
+
+	if (promoted && g->conf.curated_enabled && g->conf.parquet_enabled)
+		as_sme_deliver_curated(&g->sme, ev, ev->value);
+	as_pq_sink_feed(&g->pq, ev);
+}
+
 static void quota_then_deliver(struct g_ctx *g, const struct as_event *ev)
 {
 	enum as_quota_verdict v =
@@ -116,7 +137,8 @@ static void agg_emit(struct as_event *agg, void *u)
 {
 	struct g_ctx *g = u;
 
-	as_pq_sink_feed(&g->pq, agg);	/* T8：聚合记录同落 Parquet */
+	score_and_feed(g, agg);		/* L1：聚合行评分（repeats 罚）+
+					 * T8 落 Parquet */
 	quota_then_deliver(g, agg);
 }
 
@@ -136,8 +158,10 @@ static void on_event(struct as_event *ev, void *u)
 		return;
 	}
 	/* T8：Parquet 落盘采样在去重窗口之后（首条+聚合都落；与 SME 配额
-	 * 独立——磁盘增长由 PARQUET_MAX_GB 保留策略约束）。默认关=零操作。 */
-	as_pq_sink_feed(&g->pq, ev);
+	 * 独立——磁盘增长由 PARQUET_MAX_GB 保留策略约束）。默认关=零操作。
+	 * L1 棒①：去重后评分挂点（设计 §1.1——digest/repeats/severity/
+	 * cat 计数原料在 ev）→ feed 透传 v3 尾 2 列。 */
+	score_and_feed(g, ev);
 	quota_then_deliver(g, ev);
 }
 
@@ -148,18 +172,20 @@ static void outcome_emit(struct as_event *ev, void *u)
 {
 	struct g_ctx *g = u;
 
-	as_pq_sink_feed(&g->pq, ev);
+	score_and_feed(g, ev);		/* L1：事件路评分 */
 	quota_then_deliver(g, ev);
 }
 
 /* T8 遗留接线：decisions 消费合成事件出口——与 outcome_emit 同手法
  * （游标已去重、每条含唯一 decision_id，无重复语义；直接 parquet 采样
- * + 配额 → SME） */
+ * + 配额 → SME）。L1 棒①：decisions 路评分挂点（31 列原料经 ev v3
+ * 尾巴，as_decisions.c 填——|outcome−expected|/cost_ns/confidence/
+ * agent_id → 反差/代价，设计 §1.1）。 */
 static void decisions_emit(struct as_event *ev, void *u)
 {
 	struct g_ctx *g = u;
 
-	as_pq_sink_feed(&g->pq, ev);
+	score_and_feed(g, ev);
 	quota_then_deliver(g, ev);
 }
 
@@ -370,6 +396,14 @@ int main(int argc, char **argv)
 		       G.conf.sense_redact_level ? "" :
 		       " (factory default; see SENSE-REDACT-DESIGN)",
 		       G.conf.sense_redact_salt[0] ? "set" : "-");
+		printf("value W1..W6=%.2f/%.2f/%.2f/%.2f/%.2f/%.2f "
+		       "promote=[%.2f,%.2f] curated=%d (schema v3: telemetry "
+		       "13 cols + decisions 32 cols; DATA-L1-DESIGN S1)\n",
+		       G.conf.value_w[0], G.conf.value_w[1],
+		       G.conf.value_w[2], G.conf.value_w[3],
+		       G.conf.value_w[4], G.conf.value_w[5],
+		       G.conf.value_promote_min, G.conf.value_promote_max,
+		       G.conf.curated_enabled);
 		return 0;
 	}
 
@@ -377,6 +411,16 @@ int main(int argc, char **argv)
 	/* SENSE 脱敏引擎初始化（产生侧；off=零开销恒等；journal 一行——
 	 * off 也打（审计初值，AS_OUTCOME 同款口径）） */
 	as_redact_set(G.conf.sense_redact_level, G.conf.sense_redact_salt);
+	/* L1 棒①：价值评分器（策略快照注入 writer 层 + 挂点状态）；
+	 * 权重不热更（同 parquet 键口径——改配置走 restart） */
+	as_value_conf_init(&G.conf);
+	as_value_ctx_init(&G.vctx);
+	as_log("value scorer on: W1..W6=%.2f/%.2f/%.2f/%.2f/%.2f/%.2f "
+	       "promote=[%.2f,%.2f] curated=%d (formula bases: as_value.h)",
+	       G.conf.value_w[0], G.conf.value_w[1], G.conf.value_w[2],
+	       G.conf.value_w[3], G.conf.value_w[4], G.conf.value_w[5],
+	       G.conf.value_promote_min, G.conf.value_promote_max,
+	       G.conf.curated_enabled);
 	if (acquire_lock(&G) != 0)
 		return 1;
 	as_log("%s starting (conf=%s)", AISTREAMD_VERSION, conf_path);
@@ -466,8 +510,8 @@ int main(int argc, char **argv)
 					      "ai", NULL,
 					      "k11_boot kernel_ver=%s abi_ver=%s "
 					      "config_hash=%s", kver, abi, cfg);
-				if (G.pq.enabled)
-					as_pq_sink_feed(&G.pq, &kev);
+				score_and_feed(&G, &kev);	/* L1：评分+落盘
+									 * （pq 关=feed 零操作） */
 				as_log("k11 boot snapshot: kernel=%s abi=%s cfg=%s",
 					kver, abi, cfg);
 			} else {
@@ -594,6 +638,17 @@ int main(int argc, char **argv)
 					 * 后释放（游标为运行态——重启后
 					 * 首轮重摄取可见 ring=自然回填） */
 	as_pq_sink_close(&G.pq);	/* T8：缓冲行 flush 后释放 */
+	{
+		/* L1 棒①终笔台账：评分/promotion/curated 镜像/补发计数 */
+		long long crows = 0, cfails = 0;
+
+		as_value_curated_counts(&crows, &cfails);
+		as_log("value final: scored=%lld promoted=%lld "
+		       "curated_mirror_rows=%lld curated_mirror_fail_batches=%lld "
+		       "sme_nudge_ok=%lld sme_nudge_fail=%lld",
+		       G.vctx.scored, G.vctx.promoted, crows, cfails,
+		       G.sme.curated_ok, G.sme.curated_fail);
+	}
 	write_stats(&G, "final");
 	as_sme_free(&G.sme);
 	as_quota_free(&G.quota);

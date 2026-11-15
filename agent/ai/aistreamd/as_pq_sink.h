@@ -46,6 +46,18 @@ struct as_pq_sink {
 	long long flush_sec;
 	long long flush_rows;
 	long long max_gb;
+	long long retention_days;	/* L1 棒②：raw TTL（conf PARQUET_
+					 * RETENTION_DAYS；0=关） */
+	long long cur_retention_days;	/* curated TTL（conf CURATED_
+					 * RETENTION_DAYS） */
+	long long cur_max_gb;		/* curated 独立预算（conf CURATED_
+					 * MAX_GB） */
+	struct {
+		char cat[32];
+		long long days;
+	} cat_ret[AS_CAT_RET_MAX];	/* per-cat TTL 覆盖（conf
+					 * RETENTION_DAYS_<CAT>） */
+	int n_cat_ret;
 	struct as_stats *stats;		/* 计数直写（单线程） */
 
 	/* 行缓冲（data 内联，无独立堆块） */
@@ -58,6 +70,8 @@ struct as_pq_sink {
 		char data[AS_PQ_LINE_MAX];
 		int64_t trace_hi;	/* K1 D10：ev->trace_hi/lo 透传（0:0=无） */
 		int64_t trace_lo;
+		double value;		/* L1 v3：ev->value 透传（未评=0） */
+		int64_t vflags;		/* L1 v3：ev->vflags 位域透传 */
 	} *buf;
 	size_t n, cap;
 };
@@ -88,6 +102,30 @@ void as_pq_retain(struct as_pq_sink *s);
  */
 void as_pq_retain_root(const char *root, long long max_gb, int64_t btime,
 		       struct as_stats *st);
+
+/*
+ * as_pq_retain_cfg / as_pq_retain_root_cfg - L1 棒② 三层保留配置与核心
+ * （DATA-L1-DESIGN §2）。raw 层：TTL 先（per-cat 目录级覆盖取更长）
+ * 体量预算后（历史语义原样）；curated 层：独立 TTL+独立预算。
+ * ttl_days/cur_ttl_days=0 → 该层 TTL 关；cur_max_gb<0 → curated 层
+ * 整体跳过（as_pq_retain_root 旧签名包裹路径用——只做 raw 预算，
+ * 行为与历史逐字节一致，as_decisions 遗留接线不受影响）。
+ */
+struct as_pq_retain_cfg {
+	long long ttl_days;
+	long long max_gb;
+	long long cur_ttl_days;
+	long long cur_max_gb;
+	struct {
+		char cat[32];
+		long long days;
+	} cat_ret[AS_CAT_RET_MAX];
+	int n_cat_ret;
+};
+
+void as_pq_retain_root_cfg(const char *root,
+			   const struct as_pq_retain_cfg *cfg,
+			   int64_t btime, struct as_stats *st);
 
 /* 退出路径：flush + 释放 */
 void as_pq_sink_close(struct as_pq_sink *s);

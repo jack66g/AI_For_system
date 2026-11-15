@@ -46,6 +46,26 @@
                                  L5 ④ 未批准 nonce 一律拒绝；已批准恒
                                  dry-run 只打印 insmod 不执行（真载=尾池）
   module ledger                   L5 ⑤ 账本行链校验（xxh64）+四类事件计数
+  dataset list --layer raw|curated [--root R]
+                                 读 index.parquet 汇总行数/日期域/体量
+                                 （L1 棒③；pyarrow 可选依赖，缺席=人话
+                                 +指路 pip install pyarrow，rc=1）
+  dataset export --layer curated|corpus --since --until --out P
+                                 [--format parquet|jsonl] [--redact soft|
+                                 strict|off] curated 拼包导出，导出门内建
+                                 脱敏（soft/strict 移植自 aistreamd
+                                 as_redact/as_event 策略表；缺省 soft；
+                                 off 须显式且打印风险行）；corpus=同内容
+                                 jsonl 过 aik-gcm 成 <out>.aikcorp +
+                                 同目录 manifest（sha256/rows/key_ref/
+                                 since/until/redaction 档/created）
+  dataset delete --layer curated --since --until [--yes]
+                                 双发确认门（occ /delete 精神：首发布防
+                                 打印范围+行数+文件清单，10s 内重发 --yes
+                                 才真删）；文件删除+SME 侧 tags=curated:v1
+                                 时间窗匹配批量 DELETE（SME 不可达=拒绝
+                                 删除并指路，诚实优先）；raw 层拒绝（TTL
+                                 自治，人话解释）
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -71,7 +91,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 
 PROC_AUDIT = '/proc/ai/audit'
 SYSFS_CHAIN = '/sys/kernel/ai/chain'
@@ -2287,6 +2310,602 @@ def cmd_module_ledger(_args):
     return code            # 0=OK / 1=IO / 2=行链断（LEDGER_BREAK）
 
 
+# ============================================================== dataset ----
+# L1 棒③（DATA-L1-DESIGN §3）：数据三层用户面（list/export/delete）。
+# pyarrow 为可选依赖——缺席=人话+指路 pip install pyarrow、rc=1；
+# aikctl 其余子族纯 stdlib 保持（_require_pyarrow 只在 dataset 路径调用）。
+#
+# 布局契约（对齐 aistreamd 既有事实，只读不重造）：
+#   raw     <root>/telemetry/YYYY-MM-DD/cat_*.parquet +
+#           <root>/telemetry/index.parquet（列 file/date/category/
+#           records/start_ts/end_ts——aistreamd/as_parquet.c:374 idx_cols）
+#   curated <root>/curated/YYYY-MM-DD/cat_*.parquet +
+#           <root>/curated/index.parquet（棒① 同构双写目标；本侧按契约
+#           读取，棒① 未合树时=list 如实报"暂无数据"）
+#   telemetry 行 11 列（aistreamd/as_parquet.c:325 tel_cols）；
+#   data 列=行文本（aistreamd/as_pq_sink.c:112-115 memcpy ev->line）。
+DEFAULT_DATA_ROOT = '/var/lib/aikernel'
+DEFAULT_CORPUS_KEY = '/var/lib/aikernel/corpus.key'
+CORPUS_KEY_REF = 'keyfile:corpus.key'     # 设计 §0：key_ref 入包格式
+DATASET_TEL_COLS = ('timestamp_ns', 'pid', 'tgid', 'cpu', 'category',
+                    'event_type', 'severity', 'data_len', 'data',
+                    'trace_hi', 'trace_lo')
+
+
+def _require_pyarrow():
+    """dataset 子族的 pyarrow 门：缺席=人话+指路，rc=1（不静默降级）。"""
+    try:
+        import pyarrow
+        import pyarrow.parquet
+        return pyarrow, pyarrow.parquet
+    except ImportError as e:
+        print('aikctl: dataset 子族需要可选依赖 pyarrow（import 失败：%s）'
+              % e, file=sys.stderr)
+        print('指路：pip install pyarrow 后重试；aikctl 其余子族纯 '
+              'stdlib 不受影响', file=sys.stderr)
+        sys.exit(1)
+
+
+def _parse_date(s, what):
+    try:
+        return datetime.strptime(s, '%Y-%m-%d').date()
+    except ValueError:
+        print('aikctl: %s=%s 非法（需 YYYY-MM-DD）' % (what, s),
+              file=sys.stderr)
+        sys.exit(1)
+
+
+def _day_bounds_ns(since_d, until_d):
+    """[since 00:00:00, until+1d 00:00) 的 epoch-ns 闭开界（UTC——
+    timestamp_ns 为 UTC epoch ns）。"""
+    lo = int(datetime(since_d.year, since_d.month, since_d.day,
+                      tzinfo=timezone.utc).timestamp()) * 1000000000
+    hi_day = until_d + timedelta(days=1)
+    hi = int(datetime(hi_day.year, hi_day.month, hi_day.day,
+                      tzinfo=timezone.utc).timestamp()) * 1000000000
+    return lo, hi - 1                    # 闭区间：hi-1ns
+
+
+def _layer_dir(root, layer):
+    return os.path.join(root, 'telemetry' if layer == 'raw' else 'curated')
+
+
+def _day_dirs(root, layer, since_d, until_d):
+    """窗口内（含端点）的天目录 (day, path) 列表，日期名升序。"""
+    base = _layer_dir(root, layer)
+    lo, hi = since_d.isoformat(), until_d.isoformat()
+    out = []
+    if not os.path.isdir(base):
+        return out
+    for name in sorted(os.listdir(base)):
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', name) \
+                and lo <= name <= hi \
+                and os.path.isdir(os.path.join(base, name)):
+            out.append((name, os.path.join(base, name)))
+    return out
+
+
+def _cat_files(day_dir):
+    """天目录内布局数据文件（<cat>_<seq>.parquet 白名单——沿
+    as_parquet.c:1160 is_tel_data_file / as_pq_sink.c is_rotated 的
+    *_*.parquet 非 index 语义。棒④ 台架 C13 实锤：原 cat_ 字面量前缀
+    漏掉 aistreamd 实产 <cat名>_NNNN.parquet（如 ai_0000.parquet）→
+    真数据根 rows=0；按自注语义放宽）。"""
+    out = []
+    for name in sorted(os.listdir(day_dir)):
+        if (name == 'index.parquet' or not name.endswith('.parquet')
+                or '_' not in name[:-len('.parquet')]):
+            continue
+        out.append(os.path.join(day_dir, name))
+    return out
+
+
+# ---- SENSE 脱敏 python 移植（导出门内建；只读参考 aistreamd，不 import
+# C 代码——复制规则要点并注明来源行号）：
+#   - 值级变换 FNV-1a64(salt||0x01||value)/hash "h:<16hex>"/mask 首字符
+#     +***/drop "-"：aistreamd/as_redact.c:76-89（as_redact_fnv64）与
+#     as_redact.c:92-117（redact_one）
+#   - 字段类 soft/strict 策略表：aistreamd/as_event.c:16-54（rs_pid 恒
+#     hash；rs_idval=rs_comm soft hash/strict drop；rs_addr=rs_path=
+#     rs_model soft mask/strict drop；rs_dev soft 透传/strict mask）
+#   - decision_id 恒原样例外：aistreamd/as_event.h:36（K3-DESIGN §K3c
+#     审计链冻结契约）
+#   - credential 类为本导出门扩展：内核遥测字段表无凭据字段，但导出
+#     面向全文行文本（设计 §3 探勘风险提示：SENSE off 数据源=原文），
+#     故 soft mask / strict drop（键序不变，仅值变换——同 as_event.h:60
+#     "行格式不变仅字段值变换"语义）。
+_FNV_OFFSET = 0xcbf29ce484222325
+_FNV_PRIME = 0x100000001b3
+REDACT_SALT = ''        # MVP 无盐（as_redact.h:19-21 诚实声明同样适用：
+                        # 无盐低熵值可枚举——定位是去标识化非匿名）
+
+# 类 → (soft, strict)；None=透传。'p'=hash 'm'=mask 'd'=drop
+_REDACT_CLASSES = {
+    'pid':   ('p', 'p'),     # as_event.c:19 rs_pid——保聚合 join
+    'idval': ('p', 'd'),     # as_event.c:24 rs_idval（uid/gid/comm）
+    'addr':  ('m', 'd'),     # as_event.c:31 rs_addr（IP/路由）
+    'path':  ('m', 'd'),     # as_event.c:37 rs_path
+    'model': ('m', 'd'),     # as_event.c:43 rs_model
+    'dev':   (None, 'm'),    # as_event.c:49 rs_dev
+    'cred':  ('m', 'd'),     # aikctl 导出门扩展类
+}
+_KEY_CLASS = {
+    'parent': 'pid', 'child': 'pid', 'pid': 'pid', 'ppid': 'pid',
+    'tgid': 'pid',
+    'comm': 'idval', 'uid': 'idval', 'gid': 'idval',
+    'addr': 'addr', 'dst': 'addr', 'gw': 'addr', 'local': 'addr',
+    'peer': 'addr',
+    'prefix': 'path', 'path': 'path', 'exe': 'path',
+    'model': 'model',
+    'dev': 'dev', 'device': 'dev',
+    'password': 'cred', 'passwd': 'cred', 'secret': 'cred',
+    'token': 'cred', 'api_key': 'cred', 'apikey': 'cred',
+    'authorization': 'cred', 'auth': 'cred', 'cookie': 'cred',
+    'credential': 'cred', 'private_key': 'cred',
+}
+_KV_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)')
+
+
+def _fnv64(salt, value):
+    """FNV-1a64(salt || 0x01 || value)——as_redact.c:76-89 移植。"""
+    h = _FNV_OFFSET
+    for ch in (salt or ''):
+        h = ((h ^ ord(ch)) * _FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    h ^= 0x01
+    for ch in (value or ''):
+        h = ((h ^ ord(ch)) * _FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _redact_value(v, strat):
+    if strat == 'p':
+        return 'h:%016x' % _fnv64(REDACT_SALT, v)
+    if strat == 'm':
+        return (v[:1] + '***') if v else '***'
+    if strat == 'd':
+        return '-'
+    return v
+
+
+def redact_line(line, level):
+    """行文本 k=v 值变换（off=恒等，字节零变化——同 as_event.c 冻结
+    fixture 前提）；键名/键序不变，decision_id 例外恒原样。"""
+    if level == 'off':
+        return line
+
+    def repl(m):
+        k = m.group(1)
+        if k == 'decision_id':
+            return m.group(0)
+        cls = _KEY_CLASS.get(k)
+        if cls is None:
+            return m.group(0)
+        strat = _REDACT_CLASSES[cls][0 if level == 'soft' else 1]
+        return '%s=%s' % (k, _redact_value(m.group(2), strat))
+
+    return _KV_RE.sub(repl, line)
+
+
+def redact_pid_col(pid, level):
+    """pid 列整型脱敏——as_redact.c:109-122 as_redact_pid_col 移植：
+    hash → (fnv64 & 0x7fffffff)；pid<=0 原样（无主体=0 语义）。"""
+    if level == 'off' or pid is None or pid <= 0:
+        return pid
+    return _fnv64(REDACT_SALT, str(pid)) & 0x7FFFFFFF
+
+
+def _ts_wall_ns(ts, _btime_cache=[None]):
+    """行时基归一：aistreamd 实产行存开机单调 ns（as_pq_sink.c feed 注
+    释 REF 语义；棒④ 台架 C13 二段实锤：墙钟窗罩不住单调时基→rows=0），
+    fixture/外部行常为墙钟 ns。判定：ts < 1e17（≈1973 年前，不可能为
+    墙钟）视为单调，按 /proc/stat btime 平移成墙钟；否则原样。"""
+    if ts is None:
+        return None
+    ts = int(ts)
+    if ts >= 10 ** 17:
+        return ts
+    if _btime_cache[0] is None:
+        bt = 0
+        try:
+            with open('/proc/stat', 'r') as fh:
+                for ln in fh:
+                    if ln.startswith('btime '):
+                        bt = int(ln.split()[1])
+                        break
+        except OSError:
+            pass
+        _btime_cache[0] = bt
+    return ts + _btime_cache[0] * 10 ** 9 if _btime_cache[0] else ts
+
+
+def _collect_rows(pq, root, since_d, until_d, layer='curated'):
+    """窗口内 curated 天目录 cat 文件逐行读出（pyarrow），行级
+    timestamp_ns 过滤（天目录为主筛、行级为诚实复核；时基归一见
+    _ts_wall_ns）。"""
+    lo, hi = _day_bounds_ns(since_d, until_d)
+    rows = []
+    for _day, ddir in _day_dirs(root, layer, since_d, until_d):
+        for path in _cat_files(ddir):
+            cols = pq.read_table(path).to_pydict()
+            n = len(cols.get('timestamp_ns', []))
+            for i in range(n):
+                ts = _ts_wall_ns(cols['timestamp_ns'][i])
+                if ts is not None and lo <= ts <= hi:
+                    row = {}
+                    for c in DATASET_TEL_COLS:
+                        row[c] = cols[c][i] if c in cols else None
+                    # 真产物 data 列=二进制（C writer PQ byte array），
+                    # fixture=字符串——归一成 str（棒④ C13 三段实锤：
+                    # bytes 直接进 redact 正则会 TypeError）。
+                    if isinstance(row.get('data'), bytes):
+                        row['data'] = row['data'].decode(
+                            'utf-8', 'replace')
+                    rows.append(row)
+    rows.sort(key=lambda r: r['timestamp_ns'])
+    return rows
+
+
+def _rows_jsonl_bytes(rows):
+    out = []
+    for r in rows:
+        out.append(json.dumps(
+            {c: r[c] for c in DATASET_TEL_COLS}, ensure_ascii=False))
+    return ('\n'.join(out) + ('\n' if out else '')).encode('utf-8')
+
+
+def _write_parquet(pa, pq, rows, out):
+    schema = pa.schema([
+        ('timestamp_ns', pa.int64()), ('pid', pa.int32()),
+        ('tgid', pa.int32()), ('cpu', pa.int16()),
+        ('category', pa.int8()), ('event_type', pa.int8()),
+        ('severity', pa.int8()), ('data_len', pa.int16()),
+        ('data', pa.string()), ('trace_hi', pa.int64()),
+        ('trace_lo', pa.int64()),
+    ])
+    cols = {c: [r[c] for r in rows] for c in DATASET_TEL_COLS}
+    pq.write_table(pa.Table.from_pydict(cols, schema=schema), out)
+
+
+def _find_gcm_bin():
+    """aik-gcm 解析：env AIK_GCM > PATH > 工树构建产物（aikctl 同仓
+    agent/ai/aik-gcm）。找不到=人话指路 make aik-gcm。"""
+    env = os.environ.get('AIK_GCM')
+    if env:
+        return env
+    w = shutil.which('aik-gcm')
+    if w:
+        return w
+    cand = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'aik-gcm')
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    return None
+
+
+def cmd_dataset_list(args):
+    pa, pq = _require_pyarrow()
+    base = _layer_dir(args.root, args.layer)
+    ipath = os.path.join(base, 'index.parquet')
+    if not os.path.isfile(ipath):
+        print('aikctl: %s 层无 index.parquet（%s 暂无数据或未初始化；'
+              'raw 由 aistreamd 产生，curated 由棒① promotion 双写产生）'
+              % (args.layer, base))
+        return 0
+    idx = pq.read_table(ipath).to_pydict()
+    n = len(idx.get('file', []))
+    if n == 0:
+        print('aikctl: %s 层 index.parquet 为空（0 文件）' % args.layer)
+        return 0
+    total_rows = 0
+    total_bytes = 0
+    dates = []
+    for i in range(n):
+        f, d = idx['file'][i], idx['date'][i]
+        total_rows += int(idx['records'][i])
+        dates.append(d)
+        # index 的 file 列两种口径：文件名（fixture）或 aistreamd 实产
+        # 的 "<日>/<文件>" 相对路径——后者 join(base, d, f) 会双拼日期
+        # （棒④ 台架 C13 次级发现）。归一：f 已含日期前缀则不再拼 d。
+        if str(f).startswith(str(d) + '/'):
+            p = os.path.join(base, str(f))
+        else:
+            p = os.path.join(base, str(d), str(f))
+        if os.path.isfile(p):
+            total_bytes += os.path.getsize(p)
+        else:
+            print('aikctl: 注意：索引行 file=%s date=%s 在磁盘上不存在'
+                  '（索引陈旧？）' % (f, d), file=sys.stderr)
+    print('layer=%s root=%s' % (args.layer, args.root))
+    print('files=%d rows=%d bytes=%d (%.2f MiB)'
+          % (n, total_rows, total_bytes, total_bytes / 1048576.0))
+    print('dates=%s..%s' % (min(dates), max(dates)))
+    print('DATASET_LIST layer=%s files=%d rows=%d dates=%s..%s bytes=%d'
+          % (args.layer, n, total_rows, min(dates), max(dates),
+             total_bytes))
+    return 0
+
+
+def cmd_dataset_export(args):
+    pa, pq = _require_pyarrow()
+    if args.redact == 'off':
+        print('aikctl: 风险提示：--redact off 已显式关闭脱敏——导出物将'
+              '包含行文本原文（SENSE off 数据源=原文，设计 §3 探勘风险'
+              '提示）；请确保导出目的地受控。', file=sys.stderr)
+    since_d = _parse_date(args.since, '--since')
+    until_d = _parse_date(args.until, '--until')
+    if since_d > until_d:
+        print('aikctl: --since %s 晚于 --until %s' % (args.since,
+                                                      args.until),
+              file=sys.stderr)
+        return 1
+    rows = _collect_rows(pq, args.root, since_d, until_d)
+    for r in rows:
+        r['data'] = redact_line(r['data'] or '', args.redact)
+        for c in ('pid', 'tgid'):
+            r[c] = redact_pid_col(r[c], args.redact)
+        dl = len((r['data'] or '').encode('utf-8'))
+        r['data_len'] = dl if dl <= 32767 else 32767
+    if args.layer == 'curated':
+        if args.format == 'jsonl':
+            data = _rows_jsonl_bytes(rows)
+            with open(args.out, 'wb') as f:
+                f.write(data)
+        else:
+            _write_parquet(pa, pq, rows, args.out)
+        print('DATASET_EXPORT layer=curated format=%s redact=%s rows=%d '
+              'out=%s' % (args.format, args.redact, len(rows), args.out))
+        return 0
+    # ---- corpus：同内容 jsonl → aik-gcm enc → .aikcorp + manifest ----
+    gcm = _find_gcm_bin()
+    if gcm is None:
+        print('aikctl: 找不到 aik-gcm（AIK_GCM 未设、PATH 无、工树也无'
+              '构建产物）——先在 agent/ai 下 make aik-gcm',
+              file=sys.stderr)
+        return 1
+    key = args.key or os.environ.get('AIK_CORPUS_KEY') or DEFAULT_CORPUS_KEY
+    if not os.path.isfile(key):
+        print('aikctl: corpus 密钥 %s 不存在——先生成：aik-gcm keygen '
+              '--key %s（或用 --key / env AIK_CORPUS_KEY 指路）'
+              % (key, key), file=sys.stderr)
+        return 1
+    outpkg = args.out if args.out.endswith('.aikcorp') \
+        else args.out + '.aikcorp'
+    payload = _rows_jsonl_bytes(rows)
+    try:
+        proc = subprocess.run([gcm, 'enc', '--key', key],
+                              input=payload, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+    except OSError as e:
+        print('aikctl: 调 aik-gcm 失败：%s' % e, file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        print('aikctl: aik-gcm enc 失败（rc=%d）：%s'
+              % (proc.returncode,
+                 proc.stderr.decode('utf-8', 'replace').strip()),
+              file=sys.stderr)
+        return 1
+    with open(outpkg, 'wb') as f:
+        f.write(proc.stdout)
+    manifest = {
+        'version': 1,
+        'format': 'jsonl+aik-gcm(AES-256-GCM)',
+        'key_ref': CORPUS_KEY_REF,
+        'rows': len(rows),
+        'since': args.since,
+        'until': args.until,
+        'redaction': args.redact,
+        'created': datetime.now(timezone.utc).isoformat(
+            timespec='seconds'),
+        'bytes': os.path.getsize(outpkg),
+        'sha256': hashlib.sha256(proc.stdout).hexdigest(),
+    }
+    mpath = outpkg + '.manifest.json'
+    with open(mpath, 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write('\n')
+    print('DATASET_EXPORT layer=corpus redact=%s rows=%d out=%s '
+          'manifest=%s sha256=%s'
+          % (args.redact, len(rows), outpkg, mpath, manifest['sha256']))
+    return 0
+
+
+def _sme_export_memories(sme_url, timeout=5):
+    req = urllib.request.Request(sme_url.rstrip('/') + '/export')
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8')).get('memories', [])
+
+
+def _sme_curated_ids(sme_url, since_d, until_d, timeout=5):
+    """tags=curated:v1 且 metadata.ts（epoch ms，as_sme.h 契约）落窗的
+    记忆 id 列表。SME 不可达/非 2xx → 抛异常由调用方拒绝删除。"""
+    lo, hi = _day_bounds_ns(since_d, until_d)
+    lo_ms, hi_ms = lo // 1000000, hi // 1000000
+    ids = []
+    for m in _sme_export_memories(sme_url, timeout):
+        tags = m.get('tags') or []
+        if 'curated:v1' not in tags:
+            continue
+        ts = (m.get('metadata') or {}).get('ts')
+        if isinstance(ts, (int, float)) and lo_ms <= ts <= hi_ms:
+            mid = m.get('id')
+            if mid:
+                ids.append(str(mid))
+    return ids
+
+
+def _sme_delete(sme_url, mid, timeout=5):
+    url = sme_url.rstrip('/') + '/memories/' \
+        + urllib.parse.quote(mid, safe='')
+    req = urllib.request.Request(url, method='DELETE')
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        r.read()
+    return True
+
+
+def _rebuild_curated_index(pa, pq, root):
+    """删除后从剩余 cat 文件重建 curated/index.parquet（行来源逐文件
+    重读——索引陈旧即失效，重建为准；同 as_pq_sink index 重建精神）。"""
+    base = _layer_dir(root, 'curated')
+    rows = {'file': [], 'date': [], 'category': [], 'records': [],
+            'start_ts': [], 'end_ts': []}
+    for day in sorted(os.listdir(base)):
+        ddir = os.path.join(base, day)
+        if not (re.fullmatch(r'\d{4}-\d{2}-\d{2}', day)
+                and os.path.isdir(ddir)):
+            continue
+        for path in _cat_files(ddir):
+            cols = pq.read_table(path).to_pydict()
+            ts = cols.get('timestamp_ns') or []
+            if not ts:
+                continue
+            rows['file'].append(os.path.basename(path))
+            rows['date'].append(day)
+            rows['category'].append(cols['category'][0])
+            rows['records'].append(len(ts))
+            rows['start_ts'].append(min(ts))
+            rows['end_ts'].append(max(ts))
+    schema = pa.schema([
+        ('file', pa.string()), ('date', pa.string()),
+        ('category', pa.int8()), ('records', pa.int64()),
+        ('start_ts', pa.int64()), ('end_ts', pa.int64()),
+    ])
+    pq.write_table(pa.Table.from_pydict(rows, schema=schema),
+                   os.path.join(base, 'index.parquet'))
+
+
+def cmd_dataset_delete(args):
+    if args.layer == 'raw':
+        print('aikctl: dataset delete 拒绝 raw 层——raw 由 aistreamd '
+              'TTL/预算自治管理（7d TTL + 2GB 环形保留，设计 §2），手动'
+              '删除会破坏保留环语义；要收缩 raw 请调 aistreamd.conf 的 '
+              'PARQUET_MAX_GB / RETENTION_DAYS 配置。', file=sys.stderr)
+        return 1
+    pa, pq = _require_pyarrow()
+    since_d = _parse_date(args.since, '--since')
+    until_d = _parse_date(args.until, '--until')
+    if since_d > until_d:
+        print('aikctl: --since %s 晚于 --until %s'
+              % (args.since, args.until), file=sys.stderr)
+        return 1
+    days = _day_dirs(args.root, 'curated', since_d, until_d)
+    targets = []
+    rows_n = 0
+    for day, ddir in days:
+        for path in _cat_files(ddir):
+            rows_n += pq.read_table(path).num_rows
+            targets.append(path)
+    sme_url = args.sme_url
+    try:
+        sme_ids = _sme_curated_ids(sme_url, since_d, until_d)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError) as e:
+        print('aikctl: SME 不可达（%s）——按裁定拒绝删除（诚实优先：'
+              'SME 侧 curated:v1 记忆无法对应清理就删文件=双侧漂移）。'
+              '先恢复 SME（检查 SME_URL=%s / 服务状态）再删。'
+              % (e, sme_url), file=sys.stderr)
+        return 1
+    arm_key = hashlib.sha256(
+        ('%s|curated|%s|%s' % (os.path.abspath(args.root), args.since,
+                               args.until)).encode()).hexdigest()[:16]
+    arm_dir = os.environ.get('AIKCTL_ARM_DIR', '/tmp')
+    arm_path = os.path.join(
+        arm_dir, 'aikctl-ds-delete-%s.json' % arm_key)
+    if not args.yes:
+        # 第一发：只布防不删（occ.c:2929-2991 /delete 双发确认门精神）
+        nonce = secrets.token_hex(8)
+        try:
+            with open(arm_path, 'w', encoding='utf-8') as f:
+                json.dump({'nonce': nonce, 'ts': time.time(),
+                           'layer': 'curated',
+                           'root': os.path.abspath(args.root),
+                           'since': args.since, 'until': args.until,
+                           'files': targets, 'rows': rows_n,
+                           'sme_ids': sme_ids}, f)
+        except OSError as e:
+            print('aikctl: 布防文件写入失败（%s）：%s'
+                  % (arm_path, e), file=sys.stderr)
+            return 1
+        print('确认删除范围：layer=curated root=%s' % args.root)
+        print('  日期窗：%s..%s（含端点）' % (args.since, args.until))
+        print('  天目录 %d 个 / 数据文件 %d 个 / 行数 %d'
+              % (len(days), len(targets), rows_n))
+        for p in targets:
+            print('    %s' % p)
+        print('  SME 侧 curated:v1 匹配记忆 %d 条（将批量 DELETE）'
+              % len(sme_ids))
+        print('确认：10 秒内重发同一命令并加 --yes 将永久删除上述数据'
+              '（不可恢复；nonce %s）' % nonce)
+        return 1
+    # 第二发（--yes）：核对布防
+    if not os.path.isfile(arm_path):
+        print('aikctl: 未布防——先发一次不带 --yes 的同一命令（双发确认'
+              '门，occ /delete 精神）', file=sys.stderr)
+        return 1
+    try:
+        with open(arm_path, 'r', encoding='utf-8') as f:
+            arm = json.load(f)
+    except (OSError, ValueError) as e:
+        print('aikctl: 布防文件读失败（%s）：%s——重新布防'
+              % (arm_path, e), file=sys.stderr)
+        return 1
+    if (arm.get('root') != os.path.abspath(args.root)
+            or arm.get('since') != args.since
+            or arm.get('until') != args.until
+            or arm.get('layer') != 'curated'):
+        print('aikctl: 布防参数与本次命令不符（root/since/until 任一变'
+              '化即失效）——重发第一发布防', file=sys.stderr)
+        return 1
+    if time.time() - float(arm.get('ts', 0)) > 10.0:
+        try:
+            os.unlink(arm_path)
+        except OSError:
+            pass
+        print('aikctl: 布防已过期（超过 10 秒）——重发第一发布防再确认',
+              file=sys.stderr)
+        return 1
+    # SME 批量 DELETE（布防时枚举的 id——窗口内一致）
+    sme_deleted = 0
+    for mid in arm.get('sme_ids', []):
+        try:
+            _sme_delete(sme_url, str(mid))
+            sme_deleted += 1
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) \
+                as e:
+            print('aikctl: SME DELETE %s 失败（%s）——已删 %d/%d，本条跳'
+                  '过；重跑本命令可补删（文件侧见下）'
+                  % (mid, e, sme_deleted, len(arm.get('sme_ids', []))),
+                  file=sys.stderr)
+    # 文件删除：布局白名单（只删 cat_*.parquet；index 走重建）
+    freed = 0
+    removed = 0
+    for path in arm.get('files', []):
+        try:
+            freed += os.path.getsize(path)
+            os.remove(path)
+            removed += 1
+        except OSError as e:
+            print('aikctl: 删除 %s 失败：%s' % (path, e), file=sys.stderr)
+    for _day, ddir in days:
+        try:
+            os.rmdir(ddir)          # 仅当空时成功（同 purge 语义）
+        except OSError:
+            pass
+    try:
+        _rebuild_curated_index(pa, pq, args.root)
+    except Exception as e:            # noqa: BLE001 —— 汇总报告不中断
+        print('aikctl: curated index 重建失败（%s）——list 可能陈旧，'
+              '重跑一次删除或手工触发重建' % e, file=sys.stderr)
+    try:
+        os.unlink(arm_path)
+    except OSError:
+        pass
+    print('DATASET_DELETE layer=curated %s..%s files=%d rows=%d '
+          'bytes_freed=%d sme_deleted=%d/%d'
+          % (args.since, args.until, removed, arm.get('rows', rows_n),
+             freed, sme_deleted, len(arm.get('sme_ids', []))))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -2480,6 +3099,50 @@ def main(argv=None):
     p_mled = msub.add_parser('ledger', help='账本行链校验+四类事件计数'
                              '（只读）')
     p_mled.set_defaults(func=cmd_module_ledger)
+
+    # L1 棒③（DATA-L1-DESIGN §3）：dataset 子族
+    p_ds = sub.add_parser('dataset', help='数据三层用户面（L1 棒③：'
+                          'list/export/delete；pyarrow 可选依赖）')
+    dsub = p_ds.add_subparsers(dest='dataset_cmd', required=True)
+
+    d_ls = dsub.add_parser('list', help='读 index.parquet 汇总'
+                           '行数/日期域/体量')
+    d_ls.add_argument('--layer', choices=['raw', 'curated'], required=True)
+    d_ls.add_argument('--root', default=DEFAULT_DATA_ROOT,
+                      help='数据根（缺省 %s）' % DEFAULT_DATA_ROOT)
+    d_ls.set_defaults(func=cmd_dataset_list)
+
+    d_ex = dsub.add_parser('export', help='curated 拼包导出（内建脱敏'
+                           '缺省 soft）/corpus 加密包（aik-gcm）')
+    d_ex.add_argument('--layer', choices=['curated', 'corpus'],
+                      required=True)
+    d_ex.add_argument('--since', required=True, metavar='YYYY-MM-DD',
+                      help='起始日（含）')
+    d_ex.add_argument('--until', required=True, metavar='YYYY-MM-DD',
+                      help='截止日（含）')
+    d_ex.add_argument('--out', required=True,
+                      help='输出路径（corpus 层追加 .aikcorp 后缀）')
+    d_ex.add_argument('--format', choices=['parquet', 'jsonl'],
+                      default='jsonl', help='curated 层格式（缺省 jsonl）')
+    d_ex.add_argument('--redact', choices=['soft', 'strict', 'off'],
+                      default='soft', help='脱敏档（缺省 soft；off 须'
+                      '显式且打印风险行）')
+    d_ex.add_argument('--root', default=DEFAULT_DATA_ROOT)
+    d_ex.add_argument('--key', help='corpus 密钥（缺省 env '
+                      'AIK_CORPUS_KEY 或 %s）' % DEFAULT_CORPUS_KEY)
+    d_ex.set_defaults(func=cmd_dataset_export)
+
+    d_de = dsub.add_parser('delete', help='双发确认门删除（首发布防，'
+                           '10s 内重发 --yes 才真删；raw 层拒绝）')
+    d_de.add_argument('--layer', choices=['raw', 'curated'], required=True)
+    d_de.add_argument('--since', required=True, metavar='YYYY-MM-DD')
+    d_de.add_argument('--until', required=True, metavar='YYYY-MM-DD')
+    d_de.add_argument('--yes', action='store_true',
+                      help='第二发确认（须先布防且 10s 内）')
+    d_de.add_argument('--root', default=DEFAULT_DATA_ROOT)
+    d_de.add_argument('--sme-url', default=os.environ.get(
+        'SME_URL', 'http://127.0.0.1:8000'), help='SME 基址')
+    d_de.set_defaults(func=cmd_dataset_delete)
 
     args = ap.parse_args(argv)
     return args.func(args)

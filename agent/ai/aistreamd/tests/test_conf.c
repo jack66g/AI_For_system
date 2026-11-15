@@ -105,6 +105,39 @@ int main(void)
 	CHECK(load_str("RATE_PER_MIN 60\n", &c, err, sizeof(err)) != 0,
 	      "missing = rejected");
 
+	/* ---- L1 棒②：三层保留 conf 面 ---- */
+	{
+		struct as_conf d;
+
+		CHECK(load_str("# c\n", &d, err, sizeof(err)) == 0,
+		      "stick2 defaults reload");
+		CHECK(d.parquet_retention_days == 7 &&
+		      d.curated_retention_days == 90 &&
+		      d.curated_max_gb == 2 && d.n_cat_retention == 0,
+		      "L1 stick2 defaults (7d/90d/2GB)");
+	}
+	CHECK(load_str("RETENTION_DAYS_FOO=30\n", &c, err, sizeof(err)) == 0,
+	      "cat override accepted");
+	CHECK(c.n_cat_retention == 1 &&
+	      strcmp(c.cat_retention[0].cat, "FOO") == 0 &&
+	      c.cat_retention[0].days == 30, "cat override parsed");
+	CHECK(load_str("RETENTION_DAYS_FOO=abc\n", &c, err, sizeof(err)) != 0,
+	      "cat override bad value rejected");
+	CHECK(load_str("RETENTION_DAYS_=30\n", &c, err, sizeof(err)) != 0,
+	      "cat override empty cat rejected");
+	CHECK(load_str("RETENTION_DAYS_B@D=30\n", &c, err, sizeof(err)) != 0,
+	      "cat override bad cat char rejected");
+	CHECK(load_str("RETENTION_DAYS_FOO=1\nRETENTION_DAYS_FOO=2\n", &c,
+		       err, sizeof(err)) != 0, "cat override dup rejected");
+	CHECK(load_str("PARQUET_RETENTION_DAYS=14\nCURATED_RETENTION_DAYS"
+		       "=120\nCURATED_MAX_GB=3\n", &c, err, sizeof(err)) == 0,
+	      "three new keys accepted");
+	CHECK(c.parquet_retention_days == 14 &&
+	      c.curated_retention_days == 120 && c.curated_max_gb == 3,
+	      "three new keys parsed");
+	CHECK(load_str("PARQUET_RETENTION_DAYS=-1\n", &c, err,
+		       sizeof(err)) != 0, "negative ttl rejected");
+
 	/* ---- 5) 缺文件拒绝 ---- */
 	as_conf_defaults(&c);
 	CHECK(as_conf_load(&c, "/nonexistent/as.conf", err, sizeof(err)) !=

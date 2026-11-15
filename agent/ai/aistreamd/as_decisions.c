@@ -266,6 +266,14 @@ static void dec_emit_event(struct as_decisions *d,
 	as_event_decision(&ev, r->id, r->type, r->domain, r->executed,
 			  r->safety_clamped, r->outcome, r->delta,
 			  r->trace_hi, r->trace_lo);
+	/* L1 棒①：31 列原料透传评分器（decisions_emit 挂点，as_value；
+	 * 老 K1 v2 行无尾=0——如实评分（|outcome−0|=0 反差） */
+	ev.dec_material = 1;
+	ev.dec_outcome = (long long)r->outcome;
+	ev.dec_expected = r->expected;
+	ev.dec_cost_ns = r->cost_ns;
+	ev.dec_confidence = (int)r->conf;
+	ev.dec_agent_id = (int)r->agent_id;
 	d->emit(&ev, d->emit_ud);
 	d->stats->dec.events++;
 }

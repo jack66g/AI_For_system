@@ -86,8 +86,12 @@ SME_REUSE_OBJS := $(REUSE_DIR)/sme_client.o $(REUSE_DIR)/local_http.o \
 		  $(REUSE_DIR)/ai_json_util.o $(REUSE_DIR)/ai_types.o
 
 # T8 parquet writer（aistreamd 只读复用：as_parquet + as_snappy，零第三方库）
-PQ_REUSE_SRCS := ../aistreamd/as_parquet.c ../aistreamd/as_snappy.c
-PQ_REUSE_OBJS := $(REUSE_DIR)/as_parquet.o $(REUSE_DIR)/as_snappy.o
+# L1 棒①：as_parquet.c 内嵌 curated 镜像调用 as_value_* → 复用面随之
+# 增链 as_value.c（纯函数+进程级策略快照，依赖仅 libc/as_conf.h）。
+PQ_REUSE_SRCS := ../aistreamd/as_parquet.c ../aistreamd/as_snappy.c \
+		 ../aistreamd/as_value.c
+PQ_REUSE_OBJS := $(REUSE_DIR)/as_parquet.o $(REUSE_DIR)/as_snappy.o \
+		 $(REUSE_DIR)/as_value.o
 
 # occ_tools（T9b1）：六件套 + aik-sandbox 对接 + trace 审计
 TOOLS_SRCS := occ_tools/tools.c occ_tools/sandbox.c occ_tools/trace.c
@@ -230,6 +234,10 @@ $(REUSE_DIR)/as_parquet.o: ../aistreamd/as_parquet.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(REUSE_DIR)/as_snappy.o: ../aistreamd/as_snappy.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(REUSE_DIR)/as_value.o: ../aistreamd/as_value.c
 	@mkdir -p $(REUSE_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 

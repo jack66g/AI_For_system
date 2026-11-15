@@ -729,6 +729,232 @@ static void test_conf(void)
 	unlink(path);
 }
 
+/* ================= L1 棒②：三层保留（TTL/预算/curated 独立） ======= */
+
+/* today ± delta 天 → "YYYY-MM-DD"（civil_from_days，Hinnant 逆变换） */
+static void day_shift(char *out, size_t cap, const char *today,
+		      long long delta)
+{
+	int y, m, d;
+	long long z, era, doe, yoe;
+	unsigned doy, mp, dy;
+
+	(void)cap;
+	sscanf(today, "%d-%d-%d", &y, &m, &d);
+	z = (long long)d;
+	{
+		/* days_from_civil（与 as_pq_sink.c day_epoch 同式） */
+		long long yy = y - (m <= 2);
+
+		era = (yy >= 0 ? yy : yy - 399) / 400;
+		yoe = yy - era * 400;
+		doy = (153u * (m + (m > 2 ? -3 : 9)) + 2u) / 5u
+		      + (unsigned)d - 1u;
+		z = era * 146097LL + yoe * 365 + yoe / 4 - yoe / 100
+		    + (long long)doy - 719468LL + delta;
+	}
+	z += 719468;
+	era = (z >= 0 ? z : z - 146096) / 146097;
+	doe = z - era * 146097;
+	yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	{
+		long long yy = era * 400 + yoe;
+
+		doy = (unsigned)(doe - (365 * yoe + yoe / 4 - yoe / 100));
+		mp = (5 * doy + 2) / 153;
+		dy = doy - (153 * mp + 2) / 5 + 1;
+		m = (int)(mp + (mp < 10 ? 3 : -9));
+		y = (int)(yy + (m <= 2));
+		d = (int)dy;
+	}
+	snprintf(out, cap, "%04d-%02d-%02d", y, m, d);
+}
+
+/* 造 raw 天目录：telemetry/<day>/<cat>_0000.parquet + decisions/<day>/
+ * decisions.parquet（全布局=可整删） */
+static void mk_raw_day(const char *root, const char *day, const char *cat)
+{
+	char p[2048], dir[1024];
+
+	snprintf(dir, sizeof(dir), "%s/telemetry/%s", root, day);
+	mkdir(dir, 0755);
+	snprintf(p, sizeof(p), "%s/%s_0000.parquet", dir, cat);
+	write_file(p, "x");
+	snprintf(dir, sizeof(dir), "%s/decisions/%s", root, day);
+	mkdir(dir, 0755);
+	snprintf(p, sizeof(p), "%s/decisions.parquet", dir);
+	write_file(p, "x");
+}
+
+/* 造 curated 天目录：<root>/curated/<day>/ai_0000.parquet（ensure_root
+ * 不建 curated/——镜像路径由 aistreamd 运行时自建，测试补父层） */
+static void mk_cur_day(const char *root, const char *day)
+{
+	char p[2048], dir[1024];
+
+	snprintf(dir, sizeof(dir), "%s/curated", root);
+	mkdir(dir, 0755);
+	snprintf(dir, sizeof(dir), "%s/curated/%s", root, day);
+	mkdir(dir, 0755);
+	snprintf(p, sizeof(p), "%s/ai_0000.parquet", dir);
+	write_file(p, "x");
+}
+
+static int day_file_exists(const char *root, const char *layer,
+			   const char *day, const char *name)
+{
+	char p[2048];
+
+	snprintf(p, sizeof(p), "%s/%s/%s/%s", root, layer, day, name);
+	return file_exists(p);
+}
+
+static void test_retain_layers(void)
+{
+	const char *root = "/tmp/l1-unit-retain3";
+	char today[11], d8[16], d6[16], d30[16], d100[16];
+	char p[2048];
+	struct as_pq_retain_cfg cfg;
+	struct as_stats st;
+
+	rmrf(root);
+	as_pq_ensure_root(root);
+	as_pq_day_from_ts(0, as_pq_btime(), today);
+	day_shift(d8, sizeof(d8), today, -8);
+	day_shift(d6, sizeof(d6), today, -6);
+	day_shift(d30, sizeof(d30), today, -30);
+	day_shift(d100, sizeof(d100), today, -100);
+
+	/* ---- T1/T5：raw TTL + curated 不受 raw 触碰 ---- */
+	mk_raw_day(root, d8, "sched");
+	mk_raw_day(root, d6, "sched");
+	mk_raw_day(root, today, "sched");
+	mk_cur_day(root, d8);		/* 8d < 90d curated TTL → 必须幸存 */
+	memset(&cfg, 0, sizeof(cfg));
+	memset(&st, 0, sizeof(st));
+	cfg.ttl_days = 7;
+	cfg.max_gb = 100;
+	cfg.cur_ttl_days = 90;
+	cfg.cur_max_gb = 2;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	CHECK(!day_file_exists(root, "telemetry", d8, "sched_0000.parquet"),
+	      "L1 ttl: 8d raw day purged");
+	CHECK(day_file_exists(root, "telemetry", d6, "sched_0000.parquet"),
+	      "L1 ttl: 6d raw day kept");
+	CHECK(day_file_exists(root, "telemetry", today, "sched_0000.parquet"),
+	      "L1 ttl: today kept");
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d8);
+	CHECK(file_exists(p), "L1 ttl: raw pass leaves curated day");
+
+	/* ---- T2：TTL=0 关 ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_raw_day(root, d30, "sched");
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.ttl_days = 0;
+	cfg.max_gb = 100;
+	cfg.cur_max_gb = -1;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	CHECK(day_file_exists(root, "telemetry", d30, "sched_0000.parquet"),
+	      "L1 ttl off: 30d day kept");
+
+	/* ---- T3：per-cat 覆盖（目录级取更长） ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_raw_day(root, d8, "foo");	/* 覆盖 cat → 保留 */
+	mk_raw_day(root, d30, "sched");	/* 无覆盖 → 删 */
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.ttl_days = 7;
+	cfg.max_gb = 100;
+	cfg.cur_max_gb = -1;
+	cfg.cat_ret[0].days = 30;
+	snprintf(cfg.cat_ret[0].cat, sizeof(cfg.cat_ret[0].cat), "foo");
+	cfg.n_cat_ret = 1;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	CHECK(day_file_exists(root, "telemetry", d8, "foo_0000.parquet"),
+	      "L1 cat override: foo day kept beyond ttl");
+	CHECK(!day_file_exists(root, "telemetry", d30,
+			       "sched_0000.parquet"),
+	      "L1 cat override: uncovered day still purged");
+
+	/* ---- T4：TTL 先预算后（体量仍超 → 继续删最老） ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_raw_day(root, d6, "sched");
+	mk_raw_day(root, today, "sched");
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.ttl_days = 7;
+	cfg.max_gb = 0;		/* 零预算：除当天全删（历史语义） */
+	cfg.cur_max_gb = -1;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	CHECK(!day_file_exists(root, "telemetry", d6, "sched_0000.parquet"),
+	      "L1 budget after ttl: oversize day purged");
+	CHECK(day_file_exists(root, "telemetry", today, "sched_0000.parquet"),
+	      "L1 budget: today protected");
+
+	/* ---- T6：curated 自身 TTL + 当天保护 ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_cur_day(root, d100);
+	mk_cur_day(root, today);
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.max_gb = 100;
+	cfg.cur_ttl_days = 90;
+	cfg.cur_max_gb = 2;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d100);
+	CHECK(!file_exists(p), "L1 curated ttl: 100d day purged");
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, today);
+	CHECK(file_exists(p), "L1 curated ttl: today kept");
+
+	/* ---- T7：curated 独立预算（TTL 关） ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_cur_day(root, d100);
+	mk_cur_day(root, d30);
+	mk_cur_day(root, today);
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.max_gb = 100;
+	cfg.cur_ttl_days = 0;
+	cfg.cur_max_gb = 0;	/* 零预算：除当天全删 */
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d100);
+	CHECK(!file_exists(p), "L1 curated budget: oldest purged");
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d30);
+	CHECK(!file_exists(p), "L1 curated budget: next purged");
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, today);
+	CHECK(file_exists(p), "L1 curated budget: today kept");
+
+	/* ---- T8：curated 异物目录整跳 ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_cur_day(root, d100);
+	snprintf(p, sizeof(p), "%s/curated/%s/keepme.txt", root, d100);
+	write_file(p, "DO NOT DELETE");
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.max_gb = 100;
+	cfg.cur_ttl_days = 90;
+	cfg.cur_max_gb = 2;
+	as_pq_retain_root_cfg(root, &cfg, as_pq_btime(), &st);
+	snprintf(p, sizeof(p), "%s/curated/%s/keepme.txt", root, d100);
+	CHECK(file_exists(p), "L1 curated foreign: file kept");
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d100);
+	CHECK(file_exists(p), "L1 curated foreign: whole dir skipped");
+
+	/* ---- 旧签名包裹：curated 层零触碰（as_decisions 遗留路径） ---- */
+	rmrf(root);
+	as_pq_ensure_root(root);
+	mk_cur_day(root, d100);
+	mk_raw_day(root, d100, "sched");
+	as_pq_retain_root(root, 0, as_pq_btime(), &st);	/* 零预算 raw 全删 */
+	snprintf(p, sizeof(p), "%s/curated/%s/ai_0000.parquet", root, d100);
+	CHECK(file_exists(p), "L1 legacy wrapper: curated untouched");
+	CHECK(!day_file_exists(root, "telemetry", d100, "sched_0000.parquet"),
+	      "L1 legacy wrapper: raw budget-only behavior intact");
+
+	rmrf(root);
+}
+
 int main(void)
 {
 	test_snappy();
@@ -736,6 +962,7 @@ int main(void)
 	test_write();
 	test_sink();
 	test_retain();
+	test_retain_layers();
 	test_conf();
 	if (fails == 0) {
 		printf("test_parquet: all OK\n");

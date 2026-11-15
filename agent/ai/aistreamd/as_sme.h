@@ -26,10 +26,15 @@
 #define AS_META_MAX 640
 #define AS_TAGS_MAX 128
 
+/* L1 棒①：curated 补发附加 tag（DATA-L1-DESIGN §1.3） */
+#define AS_SME_CURATED_TAG "curated:v1"
+
 struct as_sme {
 	struct as_conf *conf;
 	struct as_stats *stats;
 	struct as_ring ring;
+	long long curated_ok;		/* L1：curated 补发成功计数 */
+	long long curated_fail;		/* 失败计数（丢弃不占环，见 .c 注） */
 };
 
 int as_sme_init(struct as_sme *s, struct as_conf *c, struct as_stats *st);
@@ -52,6 +57,15 @@ int as_sme_post(struct as_sme *s, const char *text, const char *meta,
  * as_sme_deliver - 直写；失败入环形缓冲（满则丢旧+计数+限频告警）。
  */
 void as_sme_deliver(struct as_sme *s, const struct as_event *ev);
+
+/*
+ * as_sme_deliver_curated - L1 棒①：promotion 行补一发（同 as_sme_build
+ * 三元组，tags 尾插 AS_SME_CURATED_TAG，importance=value 归一（钳
+ * (0,1]——SME 契约同 IMPORTANCE 校验）。失败=计数+限频告警后丢弃
+ * （同文本常路 POST/环形兜底已在，补发不双份占环——取舍在案）。
+ */
+void as_sme_deliver_curated(struct as_sme *s, const struct as_event *ev,
+			    double value);
 
 /*
  * as_sme_flush - 按序补写环形缓冲；首个失败即停（重试定时器再进）。

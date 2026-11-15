@@ -6,10 +6,11 @@
 # 见 K3C-REPORT.md「构建集成」）：在 agent/ai 下 `make aistreamd`。
 #
 #   make              # 构建 aistreamd + 注入器（tests/ai_inject）
-#   make test         # 构建并运行单测（11 项：K3c 6 + K3d-2 test_hotplug
+#   make test         # 构建并运行单测（14 项：K3c 6 + K3d-2 test_hotplug
 #                      #          + I-10 test_outcome + T8 test_parquet
 #                      #          + SENSE 脱敏 test_sense_redact
-#                      #          + T8 遗留 test_decisions）
+#                      #          + T8 遗留 test_decisions + LT-BUG 双证
+#                      #          + L1 棒① test_value）
 #   make asan-leak    # LT-BUG-008 update_index 泄漏钻证（ASan/LSan）
 #   make clean
 #
@@ -33,7 +34,7 @@ REUSE_DIR := $(OBJ_DIR)/reuse
 OWN_SRCS := as_util.c as_conf.c as_quota.c as_ring.c as_event.c \
 	    as_stats.c as_sme.c as_streams.c as_hotplug.c as_outcome.c \
 	    as_redact.c as_snappy.c as_parquet.c as_pq_sink.c \
-	    as_decisions.c aistreamd.c
+	    as_decisions.c as_value.c aistreamd.c
 OWN_OBJS := $(OWN_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # 复用对象（显式规则，避免与本目录模式规则歧义）
@@ -79,15 +80,17 @@ $(REUSE_DIR)/ai_netlink_client.o: ../runtime/netlink/ai_netlink_client.c
 tests/$(INJECT): tests/ai_inject.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-# T8 差分向量驱动：只链 writer 库（as_snappy + as_parquet，零 aistreamd 依赖）
-tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o $(OBJ_DIR)/as_parquet.o
+# T8 差分向量驱动：只链 writer 库（as_snappy + as_parquet + as_value
+# ——L1 棒① v3 尾列/curated 镜像在 writer 内，仍零 aistreamd 依赖）
+tests/$(PQ_DUMP): tests/pq_dump.c $(OBJ_DIR)/as_snappy.o \
+		  $(OBJ_DIR)/as_parquet.o $(OBJ_DIR)/as_value.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 
 # ---- 单测（对象除 aistreamd.o：tests 自带 main） ----
 
 TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
 	 test_hotplug test_outcome test_parquet test_sense_redact \
-	 test_decisions test_update_index_leak test_pq_atomic
+	 test_decisions test_update_index_leak test_pq_atomic test_value
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
 test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
@@ -111,10 +114,11 @@ ASAN_CFLAGS := -Wall -Wextra -Werror -std=c11 -O1 -g -fsanitize=address \
 asan-leak: tests/test_update_index_leak_asan
 	ASAN_OPTIONS=detect_leaks=1 ./tests/test_update_index_leak_asan
 
+# L1 棒①：as_parquet.c 引 as_value（v3 尾列/curated 镜像）——同编入
 tests/test_update_index_leak_asan: tests/test_update_index_leak.c \
-				   as_parquet.c as_snappy.c
+				   as_parquet.c as_snappy.c as_value.c
 	$(CC) $(ASAN_CFLAGS) $(INCLUDES) -o $@ tests/test_update_index_leak.c \
-		as_parquet.c as_snappy.c
+		as_parquet.c as_snappy.c as_value.c
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) \
