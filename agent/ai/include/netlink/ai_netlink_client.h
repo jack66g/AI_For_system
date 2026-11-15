@@ -149,7 +149,9 @@ enum {
     AI_DEC_ATTR_MAX = __AI_DEC_ATTR_MAX - 1,
 };
 
-/* 决策发起方（K1 D6，uapi 小枚举——防自由数） */
+/* 决策发起方（K1 D6，uapi 小枚举——防自由数）。
+ * M2（AIPD-M2-DESIGN §1）：uapi 在 TOOL=5 后插 AI_AGENT_AIPD = 6
+ * （OTHER=255 不动；值追加合法）——本镜像同位追加。 */
 enum ai_agent_id {
     AI_AGENT_KERNEL     = 0,
     AI_AGENT_OCC_CLI    = 1,
@@ -157,6 +159,7 @@ enum ai_agent_id {
     AI_AGENT_AISTREAMD  = 3,
     AI_AGENT_APIC       = 4,
     AI_AGENT_TOOL       = 5,
+    AI_AGENT_AIPD       = 6,
     AI_AGENT_OTHER      = 255,
 };
 
@@ -212,6 +215,15 @@ struct ai_nl_reg {
 };
 
 #endif /* !AI_NL_UAPI_FROM_HOST */
+
+/* M2（AIPD-M2-DESIGN §1）AI_AGENT_AIPD 镜像兜底（文件既有 #ifndef
+ * 防御风格，同 AI_DEC_ATTR_VALUE/PID 先例）：主机已装 uapi 头
+ * （AI_NL_UAPI_FROM_HOST）但版本旧、无 AIPD=6 项时，按 §1 冻结值 6
+ * 直取——内核补丁轮 #44 落地后由 uapi 枚举接管（枚举常量非宏，本
+ * define 恒定义、与枚举同值共存无害）。 */
+#ifndef AI_AGENT_AIPD
+#define AI_AGENT_AIPD  6
+#endif
 
 /* ACT 决策域上限 —— uapi 头注释写 0~11 已过时；以内核端实际校验为准：
  * AIKernel/net/ai_netlink.c:235 按 AI_POLICY_DOMAIN_PROC（=

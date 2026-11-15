@@ -51,6 +51,23 @@ struct aip_conf {
 	char stats_file[256];
 	char pid_file[256];
 	char lock_file[256];
+
+	/* 金丝雀（M2 设计册 §6；CANARY_ENABLED=0=禁用——守护行为与 M1
+	 * 等价：无 REG/无下发/无 canary 计数） */
+	int canary_enabled;			/* 0|1（默认 0） */
+	char canary_table[256];		/* B 表 AIPTBL 文件绝对路径
+						 * （""=无 B 表=B 即 A；aikctl
+						 * release --stage shadow 先落
+						 * 此键再拍板 ENABLED——staged
+						 * 未 armed 合法态） */
+	long long canary_rollback_ms;		/* armed 批自动回退窗 ms
+						 * （100..600000，默认 30000；
+						 * 亦=confirm 期限） */
+	long long canary_confirm_sec;		/* condition-abated 检查节拍
+						 * 上限秒（1..3600，默认 10；
+						 * 非 confirm 期限） */
+	long long canary_min_interval_sec;	/* 两次下发最小间隔秒
+						 * （1..3600，默认 30） */
 };
 
 /* 填默认值（解析前调用） */

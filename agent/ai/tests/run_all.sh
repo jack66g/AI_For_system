@@ -147,7 +147,7 @@ echo "== C1 compat classification bench (COMPAT-C1-DESIGN §3.3) =="
 # 构建件 ../aik-compat（门测当前构建，非可能陈旧的装机副本；与 test_*
 # 门从构建目录跑二进制同口径）。仓内件缺失（未 make）/缺 gcc
 # = 如实 FAIL 非跳过（能力真实，不静默降级）。
-if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+if AIK_COMPAT_PROBE="$agent/aik-compat" \
    timeout 300 python3 "$here/c1_compat_samples.py" > /tmp/aik-c1_compat_samples.log 2>&1; then
     echo "PASS c1_compat_samples"
     pass=$((pass + 1))
@@ -166,7 +166,7 @@ echo "== C2 compat dual-account bench (COMPAT-C2-DESIGN §1 棒3) =="
 # （aikctl/aikctl）自解析。--live root 全链（apply/verify/rollback+回滚
 # 六条+promote 三轮）由主会话 sudo -n 亲跑，不进 run_all。仓内件缺失
 # （未 make）/缺 gcc/缺 aikctl = 如实 FAIL 非跳过。
-if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+if AIK_COMPAT_PROBE="$agent/aik-compat" \
    timeout 420 python3 "$here/c2_compat_samples.py" > /tmp/aik-c2_compat_samples.log 2>&1; then
     echo "PASS c2_compat_samples"
     pass=$((pass + 1))
@@ -188,7 +188,7 @@ echo "== C3 L3/L4/L5 bench (COMPAT-C3-DESIGN §4) =="
 # 台架按 probe 兄弟路径（aikctl/aikctl）自解析。--live root 三面（真
 # aarch64 全链+hw 真机+L5 真目录）由主会话 sudo -n 亲跑，不进 run_all。
 # 仓内件缺失（未 make）/缺 aikctl = 如实 FAIL 非跳过。
-if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+if AIK_COMPAT_PROBE="$agent/aik-compat" \
    timeout 420 python3 "$here/c3_compat_samples.py" > /tmp/aik-c3_compat_samples.log 2>&1; then
     echo "PASS c3_compat_samples"
     pass=$((pass + 1))
@@ -243,6 +243,30 @@ else
     echo "FAIL m1_bench (see /tmp/aik-m1_bench.log)"
     fail=$((fail + 1))
     failed+=("m1_bench")
+fi
+
+echo "== M2 canary/A-B/signed-table release pipeline bench (AIPD-M2-DESIGN §7) =="
+# 第 67 门：M2 发布管线台架（非 root）六件分账：B1 误决策——≥120 标注
+# 向量（table_spec.json 语义：命中/边界/信任门跳过/stale；oracle=台架
+# 侧独立实现）灌 FEAT_SOURCE=mock 跑 aipd → 影子 parquet decision_type
+# 对标签 err=0；B4 合同——未知 canary 键 exit 1（M1 契约一切未知键均
+# 拒）+ENABLED 缺省=0 时 M1 等价（canary_dispatched=0/executed 全 0，
+# M1 aipd 现在跑绿，Lane-A 合入后同断言兼容）；B5 table-verify python
+# 侧（aikctl aipd table-verify 合法+三种非法同裁定）；B6 aikctl aipd
+# release/rollback 台账回合（沙箱 AIKERNEL_AIPD_ROOT+--conf 临时文件，
+# 不碰真 /etc/真 root）。B2 A/B/B3 签名门/B5 C 侧依赖 Lane-A
+# CANARY_TABLE 面（M1 aipd 无该键）——断言写全、--integration 由主
+# 会话集成期亲跑，默认模式 M2_DEFERRED 行如实列清单（不冒充跳过绿）。
+# 前置自检缺件（aipd/aikctl 未 make、缺 pyarrow、table_spec 不可解析）
+# =如实 FAIL 非跳过。AIK_AIPD_BIN/AIKCTL 沿第 65/66 门指仓内构建件。
+if AIK_AIPD_BIN="$agent/aipd/aipd" AIKCTL="$agent/aikctl/aikctl" \
+   timeout 600 python3 "$here/m2_bench.py" > /tmp/aik-m2_bench.log 2>&1; then
+    echo "PASS m2_bench"
+    pass=$((pass + 1))
+else
+    echo "FAIL m2_bench (see /tmp/aik-m2_bench.log)"
+    fail=$((fail + 1))
+    failed+=("m2_bench")
 fi
 
 echo

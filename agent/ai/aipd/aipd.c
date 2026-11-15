@@ -6,9 +6,11 @@
  *   决策（aip_decide：按序首命中，p99<1ms 纯函数）→ 影子记录
  *   （aip_shadow：33 列 parquet + 对照 mismatch 滚动窗）。
  *
- * ██████ M1 影子红线（设计 §0）：SHADOW 恒 1——**本守护无任何 ACT
- * 下发代码路径**（不调 NETLINK_AI ACT/ACT2；影子行 executed 恒 0）。
- * 全部输出=本地影子记录+stats。金丝雀/下发=M2 拍板。██████████
+ * ██████ M1 影子红线（设计 §0）：SHADOW 恒 1——影子记录永不下线。
+ * M1 语义在 M2 由 CANARY_ENABLED=0 精确保持（无 REG/无下发/无 canary
+ * 计数=行为逐字节等价）。CANARY_ENABLED=1 时追加金丝雀面（M2 §2）：
+ * REG 绑定（失败诚实降级存活）→ 决策点 ACT_BATCH 单元组下发（§3 三
+ * 旋钮白名单）→ ARMED 观察（confirm/到期回退检测）→ outcome 回填。████
  *
  * lease：flock /run/aipd.lock + pid 文件，第二实例启动即退（非 0）。
  * 审计：stdout/stderr → journald 前缀 "aipd: "；stats 落
@@ -36,11 +38,13 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+#include "aip_canary.h"
 #include "aip_conf.h"
 #include "aip_feat.h"
 #include "aip_model.h"
 #include "aip_shadow.h"
 #include "aip_table.h"
+#include "aip_table_file.h"
 #include "aip_util.h"
 
 #define AIPD_VERSION \
@@ -60,6 +64,12 @@ struct g_ctx {
 	struct aip_cmp cmp;
 	int cmp_on;			/* conf compare_enabled */
 	int lock_fd;
+	/* M2 金丝雀（§2）+ 表 B（§4：无 B 表=B 即 A=builtin） */
+	struct aip_canary canary;
+	struct aip_table_file b_table;
+	const struct ai_rule *b_rules;	/* 决策面表指针（builtin 或 B） */
+	size_t b_nrules;
+	int b_is_file;
 	/* 决策计数（stats 面） */
 	long long decisions, decision_hits, decisions_stale;
 };
@@ -106,6 +116,17 @@ static void sync_stats(struct g_ctx *g)
 	st->shadow_files = g->shadow.files;
 	st->shadow_errors = g->shadow.errors;
 	st->shadow_flushes = g->shadow.flushes;
+	/* M2 金丝雀面（ENABLED=0 恒 0——M1 等价） */
+	st->canary_reg_ok = g->canary.reg_ok;
+	st->canary_dispatched = g->canary.dispatched;
+	st->canary_confirmed = g->canary.confirmed;
+	st->canary_rolled_back = g->canary.rolled_back;
+	st->canary_errors = g->canary.errors;
+	st->canary_skip_stale = g->canary.skip_stale;
+	st->canary_skip_busy = g->canary.skip_busy;
+	st->canary_skip_interval = g->canary.skip_interval;
+	st->canary_ab_total = g->canary.ab_total;
+	st->canary_ab_mismatch = g->canary.ab_mismatch;
 }
 
 static void write_stats(struct g_ctx *g, const char *why)
@@ -293,6 +314,16 @@ int main(int argc, char **argv)
 		       G.conf.compare_interval_sec, G.conf.cmp_window);
 		printf("stats_interval=%llds stats=%s\n",
 		       G.conf.stats_interval_sec, G.conf.stats_file);
+		if (G.conf.canary_enabled)	/* ENABLED=0 不新增输出行=M1
+						 * 等价；表文件加载校验=
+						 * 启动期 fail-fast 面 */
+			printf("canary=1 table=%s rollback=%lldms "
+			       "confirm=%llds interval=%llds\n",
+			       G.conf.canary_table[0] ? G.conf.canary_table :
+			       "(builtin B=A)",
+			       G.conf.canary_rollback_ms,
+			       G.conf.canary_confirm_sec,
+			       G.conf.canary_min_interval_sec);
 		return 0;
 	}
 
@@ -302,11 +333,30 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* M2 §4：表文件 B 加载（CANARY_TABLE 配置即载——shadow 阶段
+	 * （ENABLED=0）也要观察 B 的 A/B 对照（§5 release --stage
+	 * shadow 语义）；全校验失配=exit 1 fail-fast 与 conf 同级
+	 * （release 时已 verify，运行期腐化=诚实死，防静默错配） */
+	G.b_rules = aip_rules;
+	G.b_nrules = aip_nrules;
+	G.b_is_file = 0;
+	if (G.conf.canary_table[0]) {
+		if (aip_table_file_load(G.conf.canary_table, &G.b_table, err,
+					sizeof(err)) != 0) {
+			aip_log("FATAL: canary table %s: %s",
+				G.conf.canary_table, err);
+			return 1;
+		}
+		G.b_rules = G.b_table.rules;
+		G.b_nrules = G.b_table.nrules;
+		G.b_is_file = 1;
+	}
+
 	aip_set_debug(G.conf.log_debug);
 	if (aip_acquire_lease(&G.conf, &G.lock_fd) != 0)
 		return 1;
 	aip_log("%s starting (conf=%s)", AIPD_VERSION, conf_path);
-	aip_log("pid=%d lock=%s stats=%s — SHADOW ONLY (M1: no ACT path)",
+	aip_log("pid=%d lock=%s stats=%s — shadow always (M1) + canary per conf (M2)",
 		(int)getpid(), G.conf.lock_file, G.conf.stats_file);
 
 	aip_stats_init(&G.stats, &G.conf, conf_path);
@@ -343,6 +393,18 @@ int main(int argc, char **argv)
 	}
 	aip_log("table: ver=%u rules=%zu sha256=%s (self-check OK)",
 		aip_table_ver, aip_nrules, aip_table_sha256);
+
+	/* M2 §2.1 金丝雀启动：REG（ENABLED=0=零动作零输出=M1 等价；
+	 * REG 失败=journal ERROR+reg_ok=0 诚实降级存活——R7/L1 验证面） */
+	aip_canary_open(&G.canary, &G.conf);
+	if (G.b_is_file)
+		snprintf(G.stats.canary_table,
+			 sizeof(G.stats.canary_table), "file:%.8s",
+			 G.b_table.sha256_hex);
+	if (G.canary.enabled)
+		aip_log("canary on: table=%s rules=%zu A/B per-poll, "
+			"dispatch follows B (agent=%d)",
+			G.stats.canary_table, G.b_nrules, AI_AGENT_AIPD);
 
 	/* 信号：不带 SA_RESTART（aistreamd 先例） */
 	signal(SIGPIPE, SIG_IGN);
@@ -393,8 +455,10 @@ int main(int argc, char **argv)
 				uint64_t decision_ts = (uint64_t)
 					aip_now_mono_ns();
 
-				if (aip_decide(&v, aip_rules, aip_nrules,
+				if (aip_decide(&v, G.b_rules, G.b_nrules,
 					       NULL, &d) == 0) {
+					int exec = 0;
+
 					if (stale)
 						d.flags |= AIP_DF_STALE;
 					G.decisions++;
@@ -402,10 +466,36 @@ int main(int argc, char **argv)
 						G.decision_hits++;
 					if (stale)
 						G.decisions_stale++;
+					/* M2 §2.2/§4：A/B 双跑对照（表 B 在场即计
+					 * =shadow 观察面）+ 金丝雀决策点（ENABLED=0
+					 * 时 dispatch 零计数 exec 恒 0=M1 等价）；
+					 * 下发只跟 B（无 B 表=B 即 A） */
+					if (G.b_is_file) {
+						struct aip_decision da;
+
+						if (aip_decide(&v, aip_rules,
+							       aip_nrules,
+							       NULL,
+							       &da) == 0) {
+							G.canary.ab_total++;
+							if (da.action !=
+							    d.action)
+								G.canary.ab_mismatch++;
+						}
+					}
+					if (G.canary.enabled) {
+						aip_canary_decide_point(
+							&G.canary, &v, &d,
+							(d.flags & AIP_DF_HIT) ?
+							G.b_rules[d.rule_idx].feat :
+							0,
+							now, &exec);
+					}
 					aip_shadow_feed(&G.shadow, &v, stale,
 							&d,
 							(long long)
-							decision_ts);
+							decision_ts, exec,
+							G.b_is_file ? 2 : 1);
 					aip_cmp_shadow(&G.cmp, d.action);
 				}
 			} else {
@@ -461,6 +551,9 @@ int main(int argc, char **argv)
 	aip_shadow_close(&G.shadow);
 	sync_stats(&G);
 	write_stats(&G, "final");
+	/* M2：canary close 在终笔之后——close 清 reg_ok，终笔须反映
+	 * 运行期真值（rig v3 反常实锤）；armed 批无善后=K2 定时器兜（§0） */
+	aip_canary_close(&G.canary);
 	if (G.cmp_on)
 		aip_cmp_free(&G.cmp);
 	aip_feat_close(&G.feat);

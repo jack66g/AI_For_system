@@ -143,6 +143,7 @@ enum ai_agent_id {
 	AI_AGENT_AISTREAMD	= 3,	/* aistreamd 采集/回填 */
 	AI_AGENT_APIC		= 4,	/* aikernel-api HTTP 网关 */
 	AI_AGENT_TOOL		= 5,	/* 其它工具进程 */
+	AI_AGENT_AIPD		= 6,	/* M2：aipd 快路径守护（金丝雀） */
 	AI_AGENT_OTHER		= 255,	/* 未登记发起方 */
 };
 

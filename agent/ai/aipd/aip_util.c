@@ -228,6 +228,7 @@ void aip_stats_init(struct aip_stats *st, const struct aip_conf *c,
 	snprintf(st->feat_source, sizeof(st->feat_source), "%s",
 		 c->feat_source == 1 ? "mock" : "map35");
 	st->table_sha_ok = 1;
+	snprintf(st->canary_table, sizeof(st->canary_table), "builtin");
 }
 
 void aip_stats_render(const struct aip_stats *st, FILE *out)
@@ -257,6 +258,18 @@ void aip_stats_render(const struct aip_stats *st, FILE *out)
 	fprintf(out, "table_sha_ok=%d\n", st->table_sha_ok);
 	fprintf(out, "table_ver=%lld\n", st->table_ver);
 	fprintf(out, "table_rules=%lld\n", st->table_rules);
+	/* M2 §6 固定行序尾部（canary_* 11 字段） */
+	fprintf(out, "canary_reg_ok=%lld\n", st->canary_reg_ok);
+	fprintf(out, "canary_dispatched=%lld\n", st->canary_dispatched);
+	fprintf(out, "canary_confirmed=%lld\n", st->canary_confirmed);
+	fprintf(out, "canary_rolled_back=%lld\n", st->canary_rolled_back);
+	fprintf(out, "canary_errors=%lld\n", st->canary_errors);
+	fprintf(out, "canary_skip_stale=%lld\n", st->canary_skip_stale);
+	fprintf(out, "canary_skip_busy=%lld\n", st->canary_skip_busy);
+	fprintf(out, "canary_skip_interval=%lld\n", st->canary_skip_interval);
+	fprintf(out, "canary_ab_total=%lld\n", st->canary_ab_total);
+	fprintf(out, "canary_ab_mismatch=%lld\n", st->canary_ab_mismatch);
+	fprintf(out, "canary_table=%s\n", st->canary_table);
 }
 
 int aip_stats_write_file(const struct aip_stats *st, const char *path)

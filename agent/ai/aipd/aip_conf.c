@@ -34,6 +34,12 @@ void aip_conf_defaults(struct aip_conf *c)
 	snprintf(c->stats_file, sizeof(c->stats_file), "/run/aipd.stats");
 	snprintf(c->pid_file, sizeof(c->pid_file), "/run/aipd.pid");
 	snprintf(c->lock_file, sizeof(c->lock_file), "/run/aipd.lock");
+	/* M2 金丝雀（§6）——默认全关=M1 等价 */
+	c->canary_enabled = 0;
+	c->canary_table[0] = '\0';
+	c->canary_rollback_ms = 30000;
+	c->canary_confirm_sec = 10;
+	c->canary_min_interval_sec = 30;
 }
 
 static int bad(char *err, size_t cap, int lineno, const char *msg)
@@ -71,6 +77,10 @@ enum key_id {
 	K_COMPARE_INTERVAL_SEC, K_CMP_WINDOW,
 	K_STATS_INTERVAL_SEC, K_LOG_DEBUG,
 	K_STATS_FILE, K_PID_FILE, K_LOCK_FILE,
+	/* M2 金丝雀键（§6）——枚举只许尾部追加，key_names[] 必须同位
+	 * 追加（历史事故坑：错位=静默炸全 conf 解析） */
+	K_CANARY_ENABLED, K_CANARY_TABLE, K_CANARY_ROLLBACK_MS,
+	K_CANARY_CONFIRM_SEC, K_CANARY_MIN_INTERVAL_SEC,
 	K_MAX
 };
 
@@ -82,6 +92,8 @@ static const char *const key_names[K_MAX] = {
 	"COMPARE_INTERVAL_SEC", "CMP_WINDOW",
 	"STATS_INTERVAL_SEC", "LOG_DEBUG",
 	"STATS_FILE", "PID_FILE", "LOCK_FILE",
+	"CANARY_ENABLED", "CANARY_TABLE", "CANARY_ROLLBACK_MS",
+	"CANARY_CONFIRM_SEC", "CANARY_MIN_INTERVAL_SEC",
 };
 
 static int key_lookup(const char *k)
@@ -329,6 +341,49 @@ int aip_conf_load(struct aip_conf *c, const char *path, char *err,
 			else
 				snprintf(c->lock_file,
 					 sizeof(c->lock_file), "%s", v);
+			break;
+		case K_CANARY_ENABLED:
+			if (parse_ll(v, &n) != 0 || n < 0 || n > 1) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "CANARY_ENABLED must be 0|1");
+			}
+			c->canary_enabled = (int)n;
+			break;
+		case K_CANARY_TABLE:
+			if (!sane_path(v)) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "CANARY_TABLE must be absolute path");
+			}
+			snprintf(c->canary_table,
+				 sizeof(c->canary_table), "%s", v);
+			break;
+		case K_CANARY_ROLLBACK_MS:
+			if (parse_ll(v, &n) != 0 || n < 100 || n > 600000) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "CANARY_ROLLBACK_MS must be "
+					   "100..600000");
+			}
+			c->canary_rollback_ms = n;
+			break;
+		case K_CANARY_CONFIRM_SEC:
+			if (parse_ll(v, &n) != 0 || n < 1 || n > 3600) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "CANARY_CONFIRM_SEC must be 1..3600");
+			}
+			c->canary_confirm_sec = n;
+			break;
+		case K_CANARY_MIN_INTERVAL_SEC:
+			if (parse_ll(v, &n) != 0 || n < 1 || n > 3600) {
+				fclose(f);
+				return bad(err, errcap, lineno,
+					   "CANARY_MIN_INTERVAL_SEC must be "
+					   "1..3600");
+			}
+			c->canary_min_interval_sec = n;
 			break;
 		default:
 			fclose(f);

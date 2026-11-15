@@ -1,5 +1,5 @@
 [Unit]
-Description=AIKernel AI Decision Shadow Daemon (M1 aipd, shadow-only)
+Description=AIKernel AI Decision Shadow Daemon (M1 aipd, shadow-only; M2 gated canary: optional ACT_BATCH dispatch with K2 auto-rollback via CANARY_ENABLED, off by default)
 Documentation=file:/etc/aikernel/aipd.conf
 After=aikernel-streams.service
 Wants=aikernel-streams.service

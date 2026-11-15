@@ -66,6 +66,24 @@
                                  时间窗匹配批量 DELETE（SME 不可达=拒绝
                                  删除并指路，诚实优先）；raw 层拒绝（TTL
                                  自治，人话解释）
+  aipd status [--conf F]         AIPD-M2 金丝雀发布管线状态（§5）：stats
+                                 文件+conf canary 相关键+A/B 摘要+release
+                                 台账+三旋钮 current（/proc/ai/control）；
+                                 promote→default=拍板项只提示手册步骤
+  aipd table-verify FILE         表文件 AIPTBL 校验（python 镜像 C 加载器
+                                 aip_table.c：magic/ver/nrules/rule 域/
+                                 sha256 重算==头 hex；失配 exit 1）
+  aipd release FILE --stage shadow|canary [--yes]
+                                 verify→拷 <root>/tables/<name>-<sha8>.bin
+                                 （0600）→写 release.json 台账（schema
+                                 aikernel.aipd/release/1）→改 conf
+                                 （CANARY_TABLE=/ENABLED=；--yes W2 硬门，
+                                 改前 pre 行注释保留）。root=$AIKERNEL_
+                                 AIPD_ROOT（默认 /var/lib/aikernel/aipd），
+                                 conf=--conf > $AIKERNEL_AIPD_CONF >
+                                 /etc/aikernel/aipd.conf
+  aipd rollback [--yes]          台账 history 回退+conf 复原 builtin（双发
+                                 确认门+--yes；tables/ 文件留档不删）
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -2906,6 +2924,509 @@ def cmd_dataset_delete(args):
     return 0
 
 
+# ------------------------------------------------- aipd（AIPD-M2 §5） ----
+# 金丝雀/A-B/签名表/自动回退 发布管线用户面（设计 ~/AIPD-M2-DESIGN.md §5；
+# 风格对齐 compat/dataset 子族：argparse/人话错误面/诚实退出码/W2 --yes）。
+AIPD_RELEASE_SCHEMA = 'aikernel.aipd/release/1'
+AIPD_ROOT_DEFAULT = '/var/lib/aikernel/aipd'
+AIPD_CONF_DEFAULT = '/etc/aikernel/aipd.conf'
+AIPD_STATS_DEFAULT = '/run/aipd.stats'
+AIPD_PROC_CONTROL = '/proc/ai/control'
+# AIPTBL 布局（设计 §4，镜像 aip_table.c/aip_table.h 生成器合同）：
+#   off 0 char[8] magic "AIPTBL\0\0" / off 8 u16 ver / off 10 u16 flags /
+#   off 12 u32 nrules(1..64) / off 16 char[65] sha256_hex NUL 结尾 /
+#   off 81 u8[47] 零填充 / off 128 起 nrules×128B 规则体（aip_table_
+#   serialize 同字节序：feat u32/op u32/lo i64/hi i64/action u32/param
+#   i32/reason[96] NUL 填充，全小端）。
+AIPD_TABLE_MAGIC = b'AIPTBL\0\0'
+AIPD_TABLE_VER = 1
+AIPD_TABLE_RULES_MAX = 64
+AIPD_TABLE_HDR_SZ = 128
+AIPD_TABLE_RULE_SZ = 128
+AIPD_REASON_MAX = 96
+AIPD_FEAT_MAX = 7                       # enum aip_feat（AIP_F_VALID_BITS 后）
+AIPD_ACT_MAX = 3                        # AIP_ACT_READAHEAD_BOOST（M2 冻结）
+AIPD_TABLE_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
+# §3 动作白名单三旋钮（M2 冻结面；status 只读 current）
+AIPD_KNOBS = ('mm.swappiness', 'sched.timeslice', 'mm.readahead')
+AIPD_FEAT_NAMES = {0: 'SEQ', 1: 'TS', 2: 'LAT_EWMA_NS', 3: 'IOWAIT_PCT',
+                   4: 'PSI_MEM_SOME', 5: 'CACHE_MISSES', 6: 'VALID_BITS'}
+AIPD_OP_NAMES = {0: 'IN_RANGE', 1: 'GT'}
+AIPD_ACT_NAMES = {0: 'NONE', 1: 'RECLAIM_AGGRESSIVE', 2: 'SCHED_COMPENSATE',
+                  3: 'READAHEAD_BOOST'}
+# conf 相关键（§6 Lane-A 追加面；本侧只读写不解释语义）
+AIPD_CONF_CANARY_KEYS = ('CANARY_ENABLED', 'CANARY_TABLE',
+                         'CANARY_ROLLBACK_MS', 'CANARY_CONFIRM_SEC',
+                         'CANARY_MIN_INTERVAL_SEC')
+# stats 里的 canary 观测键（§6 追加；status 摘要面）
+AIPD_STATS_CANARY_KEYS = ('canary_reg_ok', 'canary_dispatched',
+                          'canary_confirmed', 'canary_rolled_back',
+                          'canary_errors', 'canary_skip_stale',
+                          'canary_skip_busy', 'canary_skip_interval',
+                          'canary_ab_total', 'canary_ab_mismatch',
+                          'canary_table')
+
+
+def aipd_root():
+    return os.environ.get('AIKERNEL_AIPD_ROOT', AIPD_ROOT_DEFAULT) or \
+        AIPD_ROOT_DEFAULT
+
+
+def aipd_conf_path(args):
+    conf = getattr(args, 'conf', None) or \
+        os.environ.get('AIKERNEL_AIPD_CONF') or AIPD_CONF_DEFAULT
+    return conf
+
+
+def aipd_read_kv(path):
+    """KEY=VALUE 扁平 conf → dict（'#' 注释/空行忽略；不可读返回 None）。"""
+    out = {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for ln in fh:
+                s = ln.strip()
+                if not s or s.startswith('#') or '=' not in s:
+                    continue
+                k, v = s.split('=', 1)
+                out[k.strip()] = v.strip()
+    except OSError:
+        return None
+    return out
+
+
+def aipd_stats_path(conf_kv):
+    if conf_kv and conf_kv.get('STATS_FILE'):
+        return conf_kv['STATS_FILE']
+    return AIPD_STATS_DEFAULT
+
+
+def aipd_table_parse(data):
+    """AIPTBL 表解析+校验（python 镜像 C 加载器 aip_table.c：magic/ver/
+    nrules/逐条 rule_valid/sha256 重算==头 hex；任一失配即拒——fail-fast
+    与 conf 同级，防 A/B 静默错配）。
+    → (rules, sha_hex, err)：rules=[(feat,op,lo,hi,action,param,reason_str)]
+    合法时 err=None；非法时 err=人读原因。"""
+    def bad(msg):
+        return None, None, msg
+    if len(data) < AIPD_TABLE_HDR_SZ:
+        return bad('文件过短：%dB < 头 %dB' % (len(data), AIPD_TABLE_HDR_SZ))
+    if data[:8] != AIPD_TABLE_MAGIC:
+        return bad('magic 失配: %r（期望 %r）'
+                   % (data[:8], AIPD_TABLE_MAGIC))
+    ver, flags, nrules = struct.unpack_from('<HHI', data, 8)
+    if ver != AIPD_TABLE_VER:
+        return bad('ver=%d != %d' % (ver, AIPD_TABLE_VER))
+    if flags != 0:
+        return bad('flags=%d != 0（未定义标志位）' % flags)
+    if not 1 <= nrules <= AIPD_TABLE_RULES_MAX:
+        return bad('nrules=%d 越界（1..%d）'
+                   % (nrules, AIPD_TABLE_RULES_MAX))
+    if len(data) != AIPD_TABLE_HDR_SZ + nrules * AIPD_TABLE_RULE_SZ:
+        return bad('长度失配：%dB != 头 %dB + %d×%dB（截断/尾随垃圾）'
+                   % (len(data), AIPD_TABLE_HDR_SZ, nrules,
+                      AIPD_TABLE_RULE_SZ))
+    hexfield = data[16:81]
+    if hexfield[64] != 0:
+        return bad('sha256_hex 域未 NUL 结尾')
+    try:
+        sha_hex = hexfield[:64].decode('ascii')
+    except UnicodeDecodeError:
+        return bad('sha256_hex 域非 ASCII')
+    if not re.fullmatch(r'[0-9a-f]{64}', sha_hex):
+        return bad('sha256_hex 域非 64 位小写 hex: %r' % sha_hex)
+    if any(data[81:AIPD_TABLE_HDR_SZ]):
+        return bad('头保留域非零填充（off 81..128）')
+    rules = []
+    for i in range(nrules):
+        off = AIPD_TABLE_HDR_SZ + i * AIPD_TABLE_RULE_SZ
+        feat, op, lo, hi, action, param = struct.unpack_from(
+            '<IIqqII', data, off)
+        reason = data[off + 32:off + 32 + AIPD_REASON_MAX].split(
+            b'\0', 1)[0].decode('utf-8', 'replace')
+        # rule_valid 同款域校验（aip_table.c：feat/op 枚举内、action 上界、
+        # IN_RANGE 要求 lo<=hi；reason 定长域不做内容校验=C 同口径）
+        if feat >= AIPD_FEAT_MAX:
+            return bad('rule[%d] feat=%d 越界（<%d）' % (i, feat,
+                                                         AIPD_FEAT_MAX))
+        if op not in (0, 1):
+            return bad('rule[%d] op=%d 非法（0=IN_RANGE 1=GT）' % (i, op))
+        if action > AIPD_ACT_MAX:
+            return bad('rule[%d] action=%d 越界（<=%d）'
+                       % (i, action, AIPD_ACT_MAX))
+        if op == 0 and lo > hi:
+            return bad('rule[%d] IN_RANGE lo=%d > hi=%d' % (i, lo, hi))
+        rules.append((feat, op, lo, hi, action, param, reason))
+    body = data[AIPD_TABLE_HDR_SZ:]
+    got = hashlib.sha256(body).hexdigest()
+    if got != sha_hex:
+        return bad('sha256 失配: 重算=%s != 头=%s' % (got, sha_hex))
+    return rules, sha_hex, None
+
+
+def cmd_aipd_table_verify(args):
+    """python 镜像 C 加载器校验（B5 对拍面；C 侧=aipd 加载器行为）。"""
+    try:
+        with open(args.file, 'rb') as fh:
+            data = fh.read()
+    except OSError as e:
+        print('aikctl: aipd table-verify 读 %s 失败: %s'
+              % (args.file, e), file=sys.stderr)
+        return 1
+    rules, sha_hex, err = aipd_table_parse(data)
+    if err:
+        print('aikctl: aipd table-verify %s 拒载: %s' % (args.file, err),
+              file=sys.stderr)
+        print('AIPD_TABLE_VERIFY file=%s ok=0' % args.file)
+        return 1
+    print('AIPD_TABLE_VERIFY file=%s ok=1 nrules=%d ver=%d sha256=%s'
+          % (args.file, len(rules), AIPD_TABLE_VER, sha_hex))
+    for i, (feat, op, lo, hi, action, param, reason) in enumerate(rules):
+        print('rule[%d] feat=%d(%s) op=%d(%s) lo=%d hi=%d action=%d(%s) '
+              'param=%d reason=%s'
+              % (i, feat, AIPD_FEAT_NAMES.get(feat, '?'), op,
+                 AIPD_OP_NAMES.get(op, '?'), lo, hi, action,
+                 AIPD_ACT_NAMES.get(action, '?'), param, reason))
+    return 0
+
+
+def aipd_ledger_path():
+    return os.path.join(aipd_root(), 'release.json')
+
+
+def aipd_ledger_load():
+    try:
+        with open(aipd_ledger_path(), 'r', errors='replace') as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def aipd_ledger_save(ledger):
+    """台账原子写（tmp + os.replace；0600）——抄 compat promote_save 原子
+    写法（基线 aikctl:1310-1320 同款）。"""
+    path = aipd_ledger_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = '%s.tmp.%d' % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (_canon(ledger) + '\n').encode('utf-8'))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def aipd_ledger_history_add(ledger, action, detail):
+    ledger.setdefault('history', []).append(
+        {'ts': int(time.time()), 'action': action,
+         'detail': str(detail)[:400]})
+
+
+def aipd_conf_edit(conf_path, updates):
+    """conf 扁平 KEY=VALUE 原位改键（aipd 契约：重复键=拒——绝不产出
+    重复键）；改前原行保留为 '# pre <UTC> <原行>' 注释（审计面）；键不
+    在场=末尾追加（前置 '# pre <UTC> (absent)' 注释）。其余行/注释逐字
+    保留。tmp+os.replace 原子写，保持原文件 mode（新建 0644）。
+    → (exit_code, 消息)：0 成功；1 IO 失败。"""
+    pre = '# pre %s' % datetime.now(timezone.utc).isoformat(timespec='seconds')
+    try:
+        with open(conf_path, encoding='utf-8', errors='surrogateescape') as fh:
+            lines = fh.read().splitlines()
+        had_mode = True
+    except FileNotFoundError:
+        lines = ['# aikctl aipd 生成（原 conf 不在场；%s）'
+                 % datetime.now(timezone.utc).isoformat(
+                     timespec='seconds')]
+        had_mode = False
+    except OSError as e:
+        return 1, 'conf 读 %s 失败: %s' % (conf_path, e)
+    todo = dict(updates)
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        hit = None
+        if s and not s.startswith('#') and '=' in s:
+            k = s.split('=', 1)[0].strip()
+            if k in todo:
+                hit = k
+        if hit is not None:
+            out.append('%s %s' % (pre, ln))
+            out.append('%s=%s' % (hit, todo.pop(hit)))
+        else:
+            out.append(ln)
+    for k in todo:                        # 不在场：追加（pre 注释如实标）
+        out.append('%s (absent)' % pre)
+        out.append('%s=%s' % (k, todo[k]))
+    try:
+        mode = 0o644
+        if had_mode:
+            mode = os.stat(conf_path).st_mode & 0o777
+        d = os.path.dirname(conf_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = '%s.tmp.%d' % (conf_path, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            os.write(fd, ('\n'.join(out) + '\n').encode(
+                'utf-8', 'surrogateescape'))
+        finally:
+            os.close(fd)
+        os.replace(tmp, conf_path)
+    except OSError as e:
+        return 1, 'conf 原子写 %s 失败: %s' % (conf_path, e)
+    return 0, None
+
+
+def cmd_aipd_release(args):
+    """verify→拷 tables/（0600）→写台账→改 conf（--yes W2 硬门；pre 行
+    注释保留）。stage=shadow 只上 A/B 观察面（ENABLED=0）；canary 追加
+    下发（ENABLED=1）；promote→default=拍板项不自动化（见 status）。"""
+    try:
+        with open(args.file, 'rb') as fh:
+            data = fh.read()
+    except OSError as e:
+        print('aikctl: aipd release 读 %s 失败: %s' % (args.file, e),
+              file=sys.stderr)
+        return 1
+    rules, sha_hex, err = aipd_table_parse(data)
+    if err:
+        print('aikctl: aipd release %s 表校验拒载（未发生任何写）: %s'
+              % (args.file, err), file=sys.stderr)
+        return 1
+    name = os.path.basename(args.file)
+    if name.endswith('.bin'):
+        name = name[:-len('.bin')]
+    if not AIPD_TABLE_NAME_RE.match(name):
+        print('aikctl: aipd release 非法表名（[A-Za-z0-9][A-Za-z0-9_.-]'
+              '{0,63}）：%s' % name, file=sys.stderr)
+        return 1
+    sha8 = sha_hex[:8]
+    dest = os.path.join(aipd_root(), 'tables', '%s-%s.bin' % (name, sha8))
+    conf = aipd_conf_path(args)
+    enabled = '1' if args.stage == 'canary' else '0'
+    if not args.yes:
+        print('拒绝：aipd release --stage %s 是 W2 写操作（拷 %s + 写台账 '
+              '%s + 改 conf %s 的 CANARY_TABLE/CANARY_ENABLED=%s），必须 '
+              '--yes 显式确认。\n'
+              '注意：本面不经 executor 的 uid 档位闸，动作等同当前用户'
+              '直接执行。\n'
+              '下一步：aikctl aipd release %s --stage %s --conf %s --yes'
+              % (args.stage, dest, aipd_ledger_path(), conf, enabled,
+                 args.file, args.stage, conf), file=sys.stderr)
+        return 2
+    # ① 拷入 tables/（0600；tmp+os.replace 原子）
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = '%s.tmp.%d' % (dest, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, dest)
+    except OSError as e:
+        print('aikctl: aipd release 拷 %s 失败: %s' % (dest, e),
+              file=sys.stderr)
+        return 1
+    # ② 台账（promote 台账同型）
+    ledger = aipd_ledger_load()
+    if ledger is None:
+        ledger = {'schema': AIPD_RELEASE_SCHEMA, 'name': name,
+                  'stage': None, 'table_sha256': None, 'history': []}
+    ledger.update({'schema': AIPD_RELEASE_SCHEMA, 'name': name,
+                   'stage': args.stage, 'table_sha256': sha_hex,
+                   'updated_ts': int(time.time())})
+    aipd_ledger_history_add(
+        ledger, 'release.%s' % args.stage,
+        'table=%s-%s.bin sha256=%s conf=%s CANARY_ENABLED=%s'
+        % (name, sha8, sha_hex, conf, enabled))
+    try:
+        aipd_ledger_save(ledger)
+    except OSError as e:
+        print('aikctl: aipd release 台账写失败（表已拷、conf 未改——重跑'
+              '幂等）: %s' % e, file=sys.stderr)
+        return 1
+    # ③ conf（pre 行注释保留）
+    rc, msg = aipd_conf_edit(
+        conf, {'CANARY_TABLE': dest, 'CANARY_ENABLED': enabled})
+    if rc:
+        print('aikctl: aipd release conf 改写失败（表+台账已落——人工核对 '
+              '%s 后重跑幂等）: %s' % (conf, msg), file=sys.stderr)
+        return 1
+    print('AIPD_RELEASE file=%s name=%s stage=%s sha8=%s dest=%s '
+          'ledger=%s conf=%s CANARY_ENABLED=%s'
+          % (args.file, name, args.stage, sha8, dest,
+             aipd_ledger_path(), conf, enabled))
+    print('提示：shadow=A/B 观察面（CANARY_ENABLED=0）；改后 '
+          'systemctl restart aikernel-aipd 生效。promote→default=拍板项'
+          '（aikctl aipd status 看手册步骤）。')
+    return 0
+
+
+def cmd_aipd_rollback(args):
+    """台账 history 回退+conf 复原 builtin（双发确认门：首发布防，60s 内
+    重发 --yes 才执行；tables/ 文件留档不删——审计面）。"""
+    conf = aipd_conf_path(args)
+    arm_path = os.path.join(aipd_root(), 'rollback.arm.json')
+    ledger = aipd_ledger_load()
+    stage = ledger.get('stage') if ledger else None
+    if not args.yes:
+        # 第一发：只布防不改（dataset delete 双发确认门同款）
+        try:
+            os.makedirs(aipd_root(), exist_ok=True)
+            with open(arm_path, 'w', encoding='utf-8') as f:
+                json.dump({'ts': time.time(), 'conf': conf,
+                           'from_stage': stage}, f)
+        except OSError as e:
+            print('aikctl: aipd rollback 布防写失败（%s）: %s'
+                  % (arm_path, e), file=sys.stderr)
+            return 1
+        print('确认回退范围：root=%s conf=%s' % (aipd_root(), conf))
+        print('  台账现行 stage=%s → builtin（history 追加 rollback 行）'
+              % (stage if stage else '（无台账）'))
+        print('  conf CANARY_TABLE=/CANARY_ENABLED 复原 builtin（pre 行'
+              '注释保留；tables/ 文件留档不删）')
+        print('确认：60 秒内重发同一命令并加 --yes 执行回退')
+        return 1
+    # 第二发（--yes）：核对布防
+    try:
+        with open(arm_path, 'r', encoding='utf-8') as f:
+            arm = json.load(f)
+    except (OSError, ValueError) as e:
+        print('aikctl: 未布防或布防读失败（%s）——先发一次不带 --yes 的'
+              '同一命令（双发确认门）: %s' % (arm_path, e), file=sys.stderr)
+        return 1
+    if arm.get('conf') != conf:
+        print('aikctl: 布防参数与本次命令不符（conf 变化即失效）——重新'
+              '布防', file=sys.stderr)
+        return 1
+    if time.time() - float(arm.get('ts', 0)) > 60.0:
+        try:
+            os.unlink(arm_path)
+        except OSError:
+            pass
+        print('aikctl: 布防已过期（超过 60 秒）——重发第一发布防再确认',
+              file=sys.stderr)
+        return 1
+    try:
+        os.unlink(arm_path)
+    except OSError:
+        pass
+    # ① conf 复原 builtin
+    rc, msg = aipd_conf_edit(
+        conf, {'CANARY_TABLE': '', 'CANARY_ENABLED': '0'})
+    if rc:
+        print('aikctl: aipd rollback conf 复原失败: %s' % msg,
+              file=sys.stderr)
+        return 1
+    # ② 台账 history 回退（builtin 行入账；文件留档）
+    ledger = ledger if ledger else {'schema': AIPD_RELEASE_SCHEMA,
+                                    'name': None, 'stage': None,
+                                    'table_sha256': None, 'history': []}
+    ledger.update({'stage': 'builtin', 'table_sha256': None,
+                   'updated_ts': int(time.time())})
+    aipd_ledger_history_add(
+        ledger, 'rollback',
+        'restored builtin（from_stage=%s conf=%s；tables/ 留档）'
+        % (arm.get('from_stage'), conf))
+    try:
+        aipd_ledger_save(ledger)
+    except OSError as e:
+        print('aikctl: aipd rollback 台账写失败（conf 已复原——重跑幂等）:'
+              ' %s' % e, file=sys.stderr)
+        return 1
+    print('AIPD_ROLLBACK root=%s conf=%s stage=builtin（from=%s）'
+          'ledger=%s tables=留档'
+          % (aipd_root(), conf, arm.get('from_stage'),
+             aipd_ledger_path()))
+    print('提示：改后 systemctl restart aikernel-aipd 生效（回 builtin '
+          '静态表）。')
+    return 0
+
+
+def _to_int(v):
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def cmd_aipd_status(args):
+    """stats+conf canary 键+A/B 摘要+台账+三旋钮 current（只读诚实面；
+    缺件逐项如实标注；promote→default=拍板项手册步骤提示）。"""
+    conf = aipd_conf_path(args)
+    conf_kv = aipd_read_kv(conf)
+    stats = aipd_stats_path(conf_kv)
+    print('AIPD_STATUS root=%s conf=%s stats=%s'
+          % (aipd_root(), conf, stats))
+    if conf_kv is None:
+        print('conf: <不可读/不在场 %s>' % conf)
+    else:
+        keys = ('FEAT_SOURCE', 'SHADOW', 'MODEL_TABLE') + \
+            AIPD_CONF_CANARY_KEYS
+        print('conf: ' + ' '.join(
+            '%s=%s' % (k, conf_kv.get(k, '<缺省>'))
+            for k in keys if k in conf_kv or k in AIPD_CONF_CANARY_KEYS))
+    st = aipd_read_kv(stats)
+    if st is None:
+        print('stats: <不可读/不在场 %s——aipd 未跑？>' % stats)
+    else:
+        pick = ('pid', 'feat_source', 'uptime_ms', 'polls', 'decisions',
+                'decision_hits', 'decisions_stale', 'mismatch_pct',
+                'shadow_rows', 'shadow_files', 'shadow_errors',
+                'table_sha_ok', 'table_ver', 'table_rules')
+        print('stats: ' + ' '.join(
+            '%s=%s' % (k, st[k]) for k in pick if k in st))
+        can = {k: st[k] for k in AIPD_STATS_CANARY_KEYS if k in st}
+        if can:
+            print('canary: ' + ' '.join('%s=%s' % kv for kv in
+                                        can.items()))
+            if 'canary_ab_total' in can:
+                tot = _to_int(can.get('canary_ab_total'))
+                mis = _to_int(can.get('canary_ab_mismatch'))
+                pct = ('%.2f' % (100.0 * mis / tot)) if (tot and mis is
+                                                         not None) else '?'
+                print('A/B: ab_total=%s ab_mismatch=%s mismatch=%s%% '
+                      'table=%s' % (tot, mis, pct,
+                                    can.get('canary_table', '?')))
+        else:
+            print('canary: <无 canary 统计键——M1 aipd 或 CANARY_TABLE 空>')
+            print('A/B: <无 canary 统计面>')
+    ledger = aipd_ledger_load()
+    if ledger:
+        sha = ledger.get('table_sha256')
+        print('ledger: schema=%s stage=%s name=%s sha8=%s history=%d'
+              % (ledger.get('schema'), ledger.get('stage'),
+                 ledger.get('name'), (sha[:8] if sha else '-'),
+                 len(ledger.get('history', []))))
+    else:
+        print('ledger: <无台账 %s——未 release 过>' % aipd_ledger_path())
+    try:
+        with open(AIPD_PROC_CONTROL) as fh:
+            for ln in fh:
+                name = ln.split()[0] if ln.split() else ''
+                if name in AIPD_KNOBS:
+                    m = re.search(r'current=(-?\d+)', ln)
+                    print('knob: %s %s' % (name, m.group(0) if m
+                                           else ln.strip()))
+    except OSError as e:
+        print('knob: <不可读 %s: %s——非 AI 内核宿主？>' % (AIPD_PROC_CONTROL,
+                                                       e))
+    print('promote→default=拍板项（不自动化）：手册步骤=①金丝雀观察窗'
+          '（stats canary_confirmed/rolled_back 健康）②确认表内容 '
+          'aikctl aipd table-verify <tables/现役 .bin> ③人工拍板后 '
+          'systemctl enable --now aikernel-aipd（常驻；出厂 unit 注释 '
+          '17-20 行呼应）④台账记拍板人/时间。')
+    return 0 if st is not None else 1
+
+
+def _to_int(v):
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -3143,6 +3664,46 @@ def main(argv=None):
     d_de.add_argument('--sme-url', default=os.environ.get(
         'SME_URL', 'http://127.0.0.1:8000'), help='SME 基址')
     d_de.set_defaults(func=cmd_dataset_delete)
+
+    # AIPD-M2（AIPD-M2-DESIGN §5）：金丝雀发布管线子族
+    p_ap = sub.add_parser('aipd', help='AIPD-M2 金丝雀/A-B/签名表发布'
+                          '管线（status/table-verify/release/rollback）')
+    apsub = p_ap.add_subparsers(dest='aipd_cmd', required=True)
+
+    p_as = apsub.add_parser('status', help='stats+conf canary 键+A/B 摘要'
+                            '+release 台账+三旋钮 current（只读诚实面）')
+    p_as.add_argument('--conf', default=None, metavar='F',
+                      help='aipd.conf 路径（缺省 $AIKERNEL_AIPD_CONF 或 '
+                      '%s）' % AIPD_CONF_DEFAULT)
+    p_as.set_defaults(func=cmd_aipd_status)
+
+    p_atv = apsub.add_parser('table-verify', help='AIPTBL 表校验（python '
+                             '镜像 C 加载器 aip_table.c；失配 exit 1）')
+    p_atv.add_argument('file', metavar='FILE', help='表文件（.bin）')
+    p_atv.set_defaults(func=cmd_aipd_table_verify)
+
+    p_arl = apsub.add_parser('release', help='verify→拷 tables/（0600）→'
+                             '写台账→改 conf（W2：--yes 硬门）')
+    p_arl.add_argument('file', metavar='FILE', help='表文件（.bin）')
+    p_arl.add_argument('--stage', required=True,
+                       choices=['shadow', 'canary'],
+                       help='shadow=A/B 观察（ENABLED=0）；canary=追加下发'
+                       '（ENABLED=1）；default=拍板项不自动化')
+    p_arl.add_argument('--yes', action='store_true',
+                       help='W2 硬门（缺省拒绝并给下一步）')
+    p_arl.add_argument('--conf', default=None, metavar='F',
+                       help='aipd.conf 路径（缺省 $AIKERNEL_AIPD_CONF 或 '
+                       '%s）' % AIPD_CONF_DEFAULT)
+    p_arl.set_defaults(func=cmd_aipd_release)
+
+    p_arb = apsub.add_parser('rollback', help='台账 history 回退+conf 复原 '
+                             'builtin（双发确认门+--yes）')
+    p_arb.add_argument('--yes', action='store_true',
+                       help='第二发确认（须先布防且 60s 内）')
+    p_arb.add_argument('--conf', default=None, metavar='F',
+                       help='aipd.conf 路径（缺省 $AIKERNEL_AIPD_CONF 或 '
+                       '%s）' % AIPD_CONF_DEFAULT)
+    p_arb.set_defaults(func=cmd_aipd_rollback)
 
     args = ap.parse_args(argv)
     return args.func(args)

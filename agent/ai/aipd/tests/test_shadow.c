@@ -123,8 +123,9 @@ int main(void)
 		memset(&d, 0, sizeof(d));
 		d.rule_idx = 0;
 		d.action = AIP_ACT_SCHED_COMPENSATE;
-		for (int i = 0; i < 3; i++)
-			aip_shadow_feed(&s, &v, 0, &d, now_mono_ns());
+			for (int i = 0; i < 3; i++)
+				aip_shadow_feed(&s, &v, 0, &d, now_mono_ns(),
+						0, AIP_TABLE_VER);
 		CHECK(s.n == 3, "3 rows buffered");
 		aip_shadow_flush(&s);
 		CHECK(s.n == 0 && s.rows_written == 3 && s.files == 1,
@@ -188,7 +189,7 @@ int main(void)
 		memset(&d, 0, sizeof(d));
 		d.rule_idx = -1;
 		d.action = AIP_ACT_NONE;
-		aip_shadow_feed(&s, &v, 1, &d, now_mono_ns());
+		aip_shadow_feed(&s, &v, 1, &d, now_mono_ns(), 0, AIP_TABLE_VER);
 		aip_shadow_flush(&s);
 		CHECK(s.files == 2 && s.rows_written == 4,
 		      "rotation second file");

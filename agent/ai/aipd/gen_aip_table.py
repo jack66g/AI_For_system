@@ -14,16 +14,28 @@ aip_model.h（struct ai_rule/枚举）与 aip_table.h/aip_table.c
 
 用法：
   gen_aip_table.py [--spec table_spec.json] [--out aip_table.c]
-  --check           重生成与现有产物比对（漂移 rc=1）
+  --check           重生成与现有产物比对（漂移 rc=1；builtin 冻结合同
+                    不动——与 --emit-file/--shift 正交）
   --print-contract  打印冻结合同摘要（符号/序列化/摘要算法）
+  --emit-file PATH  出 M2 表文件 B（AIPTBL：128B 头+N×128B 体，设计册
+                    §4；头 sha=体摘要，与 C 加载器 aip_table_file.c 同
+                    布局=python/C 对拍锚）
+  --shift ±INT      阈值平移变体表（lo/hi 整体 +shift；仅供 --emit-file
+                    造非零 A/B mismatch 的 B 表；不影响 builtin 产物与
+                    --check 冻结面）
 
 改 schema=改契约（须过主会话拍板升 AIP_TABLE_VER）。
 """
 import argparse
+import copy
 import hashlib
 import json
 import struct
 import sys
+
+AIPTBL_MAGIC = b'AIPTBL\x00\x00'
+AIPTBL_HDR = struct.Struct('<8sHHI65s47s')   # 128B 头（§4 精确布局）
+RULES_MAX = 64
 
 I64_MIN, I64_MAX = -(2 ** 63), 2 ** 63 - 1
 I32_MIN, I32_MAX = -(2 ** 31), 2 ** 31 - 1
@@ -180,6 +192,36 @@ def _c_str(text):
     return '"%s"' % ''.join(out)
 
 
+def apply_shift(spec, shift):
+    """阈值平移变体（M2 §4 --shift）：全部规则 lo/hi 整体 +shift
+    （IN_RANGE 宽度不变；GT 的 hi 恒 0 同移）。平移后重校验值域。"""
+    out = copy.deepcopy(spec)
+    for i, r in enumerate(out['rules']):
+        r['lo'] += shift
+        if r['op'] == 'AIP_OP_IN_RANGE':
+            r['hi'] += shift
+    validate(out)
+    return out
+
+
+def emit_table_file(path, spec):
+    """出 AIPTBL 表文件 B（§4 布局；C 加载器 aip_table_file.c 同构）。"""
+    rules = spec['rules']
+    if len(rules) > RULES_MAX:
+        raise SpecError('rules 超 AIP_RULES_MAX=%d' % RULES_MAX)
+    body = canonical_bytes(spec)
+    sha = hashlib.sha256(body).hexdigest()
+    blob = AIPTBL_HDR.pack(AIPTBL_MAGIC,
+                           int(spec['version']) & 0xFFFF,
+                           0,
+                           len(rules),
+                           sha.encode('ascii'),
+                           b'\x00' * 47) + body
+    with open(path, 'wb') as fh:
+        fh.write(blob)
+    return sha, len(blob)
+
+
 def main(argv=None):
     import os
     ap = argparse.ArgumentParser(prog='gen_aip_table.py')
@@ -190,7 +232,16 @@ def main(argv=None):
     ap.add_argument('--check', action='store_true',
                     help='重生成与现有产物比对（漂移 rc=1）')
     ap.add_argument('--print-contract', action='store_true')
+    ap.add_argument('--emit-file', metavar='PATH', default=None,
+                    help='出 M2 AIPTBL 表文件 B（设计册 §4）')
+    ap.add_argument('--shift', metavar='N', type=int, default=None,
+                    help='阈值平移 ±N（变体 B 表；须配 --emit-file）')
     args = ap.parse_args(argv)
+
+    if args.shift is not None and not args.emit_file:
+        print('gen: --shift 仅配合 --emit-file（变体表），builtin 冻结'
+              '面不可平移', file=sys.stderr)
+        return 2
 
     spec = load_spec(args.spec)
     if args.print_contract:
@@ -223,6 +274,14 @@ def main(argv=None):
         fh.write(text)
     print('gen: %s 写出（rules=%d sha256=%s）'
           % (args.out, len(spec['rules']), digest_hex(spec)))
+    if args.emit_file:
+        emit_spec = (apply_shift(spec, args.shift)
+                     if args.shift is not None else spec)
+        sha, nbytes = emit_table_file(args.emit_file, emit_spec)
+        print('gen: %s 写出（AIPTBL rules=%d bytes=%d sha256=%s'
+              ' shift=%s）'
+              % (args.emit_file, len(emit_spec['rules']), nbytes, sha,
+                 args.shift if args.shift is not None else 'no'))
     return 0
 
 

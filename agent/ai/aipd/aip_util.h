@@ -63,6 +63,14 @@ struct aip_stats {
 	/* 心跳（墙钟 ms——失联判据：stats N 秒不更新=不发 ACT；M1 无
 	 * ACT 路径，本字段为 M2 心跳语义的预置面+soak 观测口径） */
 	long long heartbeat_ts_ms;
+	/* 金丝雀面（M2 §6——固定行序尾部追加；CANARY_ENABLED=0 时计数
+	 * 恒 0、canary_table=builtin=M1 等价） */
+	long long canary_reg_ok;
+	long long canary_dispatched, canary_confirmed, canary_rolled_back;
+	long long canary_errors;
+	long long canary_skip_stale, canary_skip_busy, canary_skip_interval;
+	long long canary_ab_total, canary_ab_mismatch;
+	char canary_table[32];		/* builtin | file:<sha8> */
 };
 
 void aip_stats_init(struct aip_stats *st, const struct aip_conf *c,

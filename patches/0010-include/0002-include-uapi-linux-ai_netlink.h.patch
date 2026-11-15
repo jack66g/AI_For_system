@@ -18,7 +18,7 @@
  
  /* ---- 常量 ---- */
  
-@@ -92,6 +94,64 @@
+@@ -92,6 +94,65 @@
  	__u32 reserved;
  };
  
@@ -71,6 +71,7 @@
 +	AI_AGENT_AISTREAMD	= 3,	/* aistreamd 采集/回填 */
 +	AI_AGENT_APIC		= 4,	/* aikernel-api HTTP 网关 */
 +	AI_AGENT_TOOL		= 5,	/* 其它工具进程 */
++	AI_AGENT_AIPD		= 6,	/* M2：aipd 快路径守护（金丝雀） */
 +	AI_AGENT_OTHER		= 255,	/* 未登记发起方 */
 +};
 +
@@ -83,7 +84,7 @@
  /* ---- REG 请求载荷 ---- */
  
  #define AI_NL_REG_F_UNREG	(1U << 0)	/* 置位=注销（默认 0=注册） */
-@@ -101,12 +161,69 @@
+@@ -101,12 +162,69 @@
  	__u32 reserved;		/* 必须为 0（前向兼容） */
  };
  
@@ -154,7 +155,7 @@
  
  /* 严重级 */
  #define AI_NL_EV_SEV_INFO	0
-@@ -123,4 +240,69 @@
+@@ -123,4 +241,69 @@
  	char  param[AI_NL_ACT_PARAM_LEN];	/* 关联参数名/模型名（NUL 结尾） */
  };
  

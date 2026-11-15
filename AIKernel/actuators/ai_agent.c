@@ -45,10 +45,10 @@
 #include "../senses/ai_netlink.h"
 #include "../boundary/ai_chain.h"
 
-/* ---- 槽表（D1 结构原样：静态 8 槽） ---- */
+/* ---- 槽表（D1 结构：静态 9 槽）（M2 +AIPD） ---- */
 
-#define AI_AGENT_NR		8	/* 静态槽总数（含 1 保留槽） */
-#define AI_AGENT_ROLES		7	/* 有效角色：0-5=枚举直映，6=OTHER */
+#define AI_AGENT_NR		9	/* 静态槽总数（含 1 保留槽）（M2 +AIPD） */
+#define AI_AGENT_ROLES		8	/* 有效角色：0-6=枚举直映，7=OTHER */
 #define AI_AGENT_WIN_MS_DEF	60000	/* 滚动窗默认（sysfs 可调） */
 
 struct ai_agent_slot {
@@ -71,22 +71,22 @@ struct ai_agent_slot {
 static struct ai_agent_slot ai_agent_slots[AI_AGENT_NR];
 static atomic_t ai_agent_bound_nr;	/* 绑定 socket 数（0=快路径） */
 
-/* 槽 → enum ai_agent_id（内置；槽 7 保留不枚举） */
+/* 槽 → enum ai_agent_id（内置；槽 8 保留不枚举）（M2 +AIPD） */
 static const u32 ai_agent_slot_ids[AI_AGENT_NR] = {
 	AI_AGENT_KERNEL, AI_AGENT_OCC_CLI, AI_AGENT_OCC_AI,
 	AI_AGENT_AISTREAMD, AI_AGENT_APIC, AI_AGENT_TOOL,
-	AI_AGENT_OTHER, AI_AGENT_KERNEL,
+	AI_AGENT_AIPD, AI_AGENT_OTHER, AI_AGENT_KERNEL,
 };
 
 static const char * const ai_agent_slot_names[AI_AGENT_NR] = {
 	"kernel", "occ_cli", "occ_ai", "aistreamd", "apic", "tool",
-	"other", "",
+	"aipd", "other", "",
 };
 
-/* enum id → 槽序（-1=白名单外；有效值={0..5,255}） */
+/* enum id → 槽序（-1=白名单外；有效值={0..6,255}）（M2 +AIPD） */
 static int ai_agent_slot_of(u32 agent_id)
 {
-	if (agent_id <= AI_AGENT_TOOL)
+	if (agent_id <= AI_AGENT_AIPD)
 		return (int)agent_id;
 	if (agent_id == AI_AGENT_OTHER)
 		return AI_AGENT_ROLES - 1;

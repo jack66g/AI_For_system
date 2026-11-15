@@ -92,7 +92,7 @@ static void agent_bind_rebind_test(struct kunit *test)
 			0);
 
 	/* 拒绑：白名单外 / KERNEL=0（内核自身，防 0 逃逸）/ portid 0 */
-	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, 6, NULL), -EINVAL);
+	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, 7, NULL), -EINVAL);
 	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, 254, NULL), -EINVAL);
 	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, 256, NULL), -EINVAL);
 	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, AI_AGENT_KERNEL, NULL),
@@ -102,6 +102,7 @@ static void agent_bind_rebind_test(struct kunit *test)
 	/* OTHER=255 合法（逃生舱，如实记账） */
 	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5003, AI_AGENT_OTHER, NULL), 0);
 	KUNIT_EXPECT_EQ(test, (u32)view_of(test, AI_AGENT_OTHER).bound, 1u);
+
 }
 
 /* ---- 解绑（UNREG/URELEASE 同路径）+ 记账保留 ---- */
@@ -157,8 +158,8 @@ static void agent_admit_whitelist_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, view_of(test, AI_AGENT_APIC).actions, 1ULL);
 	KUNIT_EXPECT_EQ(test, view_of(test, AI_AGENT_OTHER).actions, 1ULL);
 
-	/* 未绑定自报越界：-EINVAL（值域 {0..5,255} 外全拒） */
-	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5201, 6, &role), -EINVAL);
+	/* 未绑定自报越界：-EINVAL（值域 {0..6,255} 外全拒）（M2 +AIPD） */
+	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5201, 7, &role), -EINVAL);
 	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5201, 254, &role), -EINVAL);
 	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5201, 256, &role), -EINVAL);
 	KUNIT_EXPECT_EQ(test,
@@ -298,7 +299,7 @@ static void agent_note_cost_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, view_of(test, AI_AGENT_KERNEL).cost_ns, 7ULL);
 
 	/* 白名单外静默忽略；零成本不记（不产生假条目） */
-	ai_agent_note_cost(6, 100);
+	ai_agent_note_cost(7, 100);
 	ai_agent_note_cost(AI_AGENT_OTHER, 0);
 	KUNIT_EXPECT_EQ(test, view_of(test, AI_AGENT_OTHER).cost_ns, 0ULL);
 }
@@ -310,16 +311,16 @@ static void agent_view_and_quota_test(struct kunit *test)
 	struct ai_agent_view a;
 	u32 id = 0, apw = 7, win = 8;
 	const char *name = NULL;
-	static const u32 ids[] = { 0, 1, 2, 3, 4, 5, 255 };
+	static const u32 ids[] = { 0, 1, 2, 3, 4, 5, 6, 255 };
 	static const char * const names[] = {
 		"kernel", "occ_cli", "occ_ai", "aistreamd", "apic",
-		"tool", "other",
+		"tool", "aipd", "other",
 	};
 	unsigned int i;
 
 	ai_agent_test_reset();
 
-	/* 枚举顺序与内置名表（7 角色；槽 7 保留不枚举） */
+	/* 枚举顺序与内置名表（8 角色；槽 8 保留不枚举） */
 	for (i = 0; i < ARRAY_SIZE(ids); i++) {
 		KUNIT_EXPECT_EQ(test, ai_agent_enumerate(i, &id, &name), 0);
 		KUNIT_EXPECT_EQ(test, id, ids[i]);
@@ -347,8 +348,35 @@ static void agent_view_and_quota_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, a.win_ms, 8000u);
 
 	/* 越界 id：get -ENOENT / set -EINVAL */
-	KUNIT_EXPECT_EQ(test, ai_agent_quota_get(6, &apw, &win), -ENOENT);
+	KUNIT_EXPECT_EQ(test, ai_agent_quota_get(7, &apw, &win), -ENOENT);
 	KUNIT_EXPECT_EQ(test, ai_agent_set_win_ms(254, 100), -EINVAL);
+}
+
+/* ---- M2：AIPD=6 角色面（独立函数控帧：view 按值返回较大） ---- */
+static void agent_aipd_role_test(struct kunit *test)
+{
+	u32 role = 0;
+
+	ai_agent_test_reset();
+
+	/* bind 合法 + 视图名 */
+	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5801, AI_AGENT_AIPD, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test, (u32)view_of(test, AI_AGENT_AIPD).bound, 1u);
+	KUNIT_EXPECT_STREQ(test, view_of(test, AI_AGENT_AIPD).name, "aipd");
+
+	/* 绑定 socket 角色覆盖：自报 KERNEL 仍按 AIPD 记 */
+	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5801, AI_AGENT_KERNEL, &role),
+			0);
+	KUNIT_EXPECT_EQ(test, role, (u32)AI_AGENT_AIPD);
+	KUNIT_EXPECT_EQ(test, view_of(test, AI_AGENT_AIPD).actions, 1ULL);
+
+	/* 白名单外新负例：7（6 已被 AIPD 占用；未绑定自报同拒） */
+	KUNIT_EXPECT_EQ(test, ai_agent_bind(0x5802, 7, NULL), -EINVAL);
+	KUNIT_EXPECT_EQ(test, admit_as(test, 0x5802, 7, &role), -EINVAL);
+
+	/* 收尾复位：本套是末位 case，无人再 reset——不留生产面残留 */
+	ai_agent_test_reset();
 }
 
 static struct kunit_case agent_test_cases[] = {
@@ -361,6 +389,7 @@ static struct kunit_case agent_test_cases[] = {
 	KUNIT_CASE(agent_degraded_test),
 	KUNIT_CASE(agent_note_cost_test),
 	KUNIT_CASE(agent_view_and_quota_test),
+	KUNIT_CASE(agent_aipd_role_test),
 	{}
 };
 

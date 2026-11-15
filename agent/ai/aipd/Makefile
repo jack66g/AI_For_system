@@ -13,6 +13,10 @@
 #   ../aistreamd/as_parquet.c   单测 footer 统计读回（as_pq_file_stats
 #                               ——影子行计数断言的独立读路径）
 #   ../aistreamd/as_value.c     as_parquet 的链接依赖（curated 面，纯叶子）
+#   ../runtime/netlink/ai_netlink_client.c  NETLINK_AI 客户端（M2 金丝雀
+#                               REG/ACT_BATCH；aistreamd Makefile 同先例）
+#
+# 零外部库铁律：LDLIBS 恒空（netlink=裸 syscall，snappy=同仓源码）。
 
 .NOTPARALLEL:
 
@@ -25,26 +29,29 @@ OBJ_DIR := obj
 REUSE_DIR := $(OBJ_DIR)/reuse
 
 OWN_SRCS := aip_util.c aip_conf.c aip_feat.c aip_model.c aip_table.c \
-	    aip_table_data.c aip_shadow.c aipd.c
+	    aip_table_data.c aip_table_file.c aip_canary.c aip_shadow.c \
+	    aipd.c
 OWN_OBJS := $(OWN_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 REUSE_OBJS := $(REUSE_DIR)/as_snappy.o $(REUSE_DIR)/as_parquet.o \
-	      $(REUSE_DIR)/as_value.o
+	      $(REUSE_DIR)/as_value.o $(REUSE_DIR)/ai_netlink_client.o
 
 BIN := aipd
 
 # ---- 单测（对象除 aipd.o：tests 自带 main） ----
 TESTS := test_conf test_util test_feat test_model test_table \
-	 test_shadow test_cmp test_bench test_daemon
+	 test_tablefile test_canary test_shadow test_cmp test_bench \
+	 test_daemon
 
 .PHONY: all test clean
 
 all: $(BIN)
 
 $(BIN): $(filter-out $(OBJ_DIR)/aipd.o,$(OWN_OBJS)) $(OBJ_DIR)/aipd.o \
-	$(REUSE_DIR)/as_snappy.o
+	$(REUSE_DIR)/as_snappy.o $(REUSE_DIR)/ai_netlink_client.o
 	$(CC) $(CFLAGS) -o $@ $(filter-out $(OBJ_DIR)/aipd.o,$(OWN_OBJS)) \
-	      $(OBJ_DIR)/aipd.o $(REUSE_DIR)/as_snappy.o
+	      $(OBJ_DIR)/aipd.o $(REUSE_DIR)/as_snappy.o \
+	      $(REUSE_DIR)/ai_netlink_client.o
 
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -59,6 +66,10 @@ $(REUSE_DIR)/as_parquet.o: ../aistreamd/as_parquet.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(REUSE_DIR)/as_value.o: ../aistreamd/as_value.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(REUSE_DIR)/ai_netlink_client.o: ../runtime/netlink/ai_netlink_client.c
 	@mkdir -p $(REUSE_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -104,6 +115,19 @@ tests/test_cmp: tests/test_cmp.c $(OBJ_DIR)/aip_shadow.o \
 # bench 子命令烟测（解析 AIPD_BENCH 行；p99 合理性）
 tests/test_bench: tests/test_bench.c $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_bench.c
+
+# M2 表文件 B：AIPTBL 加载器（合法/篡改/截断/坏 magic 拒）
+tests/test_tablefile: tests/test_tablefile.c $(OBJ_DIR)/aip_table_file.o \
+		      $(OBJ_DIR)/aip_table.o $(OBJ_DIR)/aip_table_data.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
+
+# M2 金丝雀：状态机+§3 映射纯函数（io 桩注入；netlink 客户端对象
+# =生产 vtable 符号解析——桩不触达）
+tests/test_canary: tests/test_canary.c $(OBJ_DIR)/aip_canary.o \
+		   $(OBJ_DIR)/aip_model.o $(OBJ_DIR)/aip_table_data.o \
+		   $(OBJ_DIR)/aip_util.o $(OBJ_DIR)/aip_conf.o \
+		   $(REUSE_DIR)/ai_netlink_client.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 
 # daemon 冒烟（AIPD_ONCE=1 单轮：锁/stats 终笔/影子 parquet 落盘；
 # 链 aip_util/aip_conf=守护级锁互斥用本测先持 lease）

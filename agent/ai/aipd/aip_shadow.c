@@ -819,6 +819,9 @@ int aip_shadow_init(struct aip_shadow *s, const struct aip_conf *c)
 	snprintf(s->root, sizeof(s->root), "%s", c->parquet_dir);
 	s->flush_sec = c->shadow_flush_sec;
 	s->flush_rows = c->shadow_flush_rows;
+	/* M2 §1：AI_AGENT_AIPD=6（uapi 镜像值；CANARY_ENABLED=0 → 0
+	 * 保持 M1 逐字节等价） */
+	s->agent_id = c->canary_enabled ? 6 : 0;
 	s->btime = read_btime();
 	s->cap = 64;
 	s->buf = malloc(s->cap * sizeof(*s->buf));
@@ -831,7 +834,8 @@ int aip_shadow_init(struct aip_shadow *s, const struct aip_conf *c)
 
 void aip_shadow_feed(struct aip_shadow *s, const struct aip_fvec *v,
 		     int stale, const struct aip_decision *d,
-		     long long decision_ts_ns)
+		     long long decision_ts_ns, int executed,
+		     int model_version)
 {
 	struct aip_shadow_row *r;
 
@@ -867,13 +871,15 @@ void aip_shadow_feed(struct aip_shadow *s, const struct aip_fvec *v,
 	r->outcome_ts = 0;
 	r->outcome = 0;
 	r->metric_delta = 0;
-	r->model_version = (int32_t)AIP_TABLE_VER;
+	r->model_version = (int32_t)model_version;	/* M2 §4：1=builtin
+							 * A / 2=file B */
 	r->confidence = 100;			/* 静态表确定性 */
 	r->domain = 0;
 	r->source = 0;
-	r->executed = 0;			/* M1 影子：恒 0，无 ACT 路径 */
+	r->executed = executed ? 1 : 0;		/* M2 §2.2：canary 实发才 1
+						 * （M1 恒 0 等价） */
 	r->safety_clamped = 0;
-	r->agent_id = 0;			/* M1 无 AIPD 槽（设计 §0） */
+	r->agent_id = s->agent_id;		/* M2：0（M1 等价）|6（§1）*/
 	r->value = 0.0;
 }
 

@@ -18,8 +18,9 @@
  * as_pq_write_decisions 不适配：固定 decisions.parquet 名+32 列冻结
  * PQ_MAXCOL 上限，见 AIPD-M1-DESIGN §1.4 逃生条款）。
  *
- * 行映射（aip_decision+特征快照 → 32 列；executed 恒 0——M1 无 ACT
- * 下发代码路径）：
+ * 行映射（aip_decision+特征快照 → 32 列；executed=金丝雀实发才 1
+ * ——M2 §2.2：canary ack.executed>0 经 feed 参数传入；CANARY_ENABLED=0
+ * 恒 0=M1 等价）：
  *   decision_id      ← 本地单调计数器（1 起；M1 本地记录绕开内核
  *                       ai_agent_id 无 AIPD 槽问题，agent_id=0，设计 §0）
  *   trigger_ts       ← 特征向量 ts（ktime 单调 ns）
@@ -31,10 +32,12 @@
  *                       （无命中 -1）/ 0（预留）
  *   exec_ts/outcome_ts/outcome/metric_delta/expected/cost_ns/
  *   side_effect_mask/trace_hi/trace_lo/intent_id/parent_id ← 0（影子未执行）
- *   model_version    ← AIP_TABLE_VER
+ *   model_version    ← feed 参数（M2 §4 冻结映射：1=builtin A，
+ *                       2=file B——schema 32 列不动）
  *   confidence       ← 100（静态阈值表：确定性的诚实满值）
  *   domain/source(i8)/safety_clamped ← 0
- *   agent_id         ← 0（无 AIPD 槽；M2 追加 AI_AGENT_AIPD=6 后改）
+ *   agent_id         ← init 按 conf：CANARY_ENABLED=0 → 0（M1 等价）；
+ *                       =1 → AI_AGENT_AIPD=6（M2 §1 uapi 追加后）
  *   value            ← 0.0（L1 评分不适用于影子行）
  *   source(尾列)     ← "aipd_shadow"
  * ==========================================================================
@@ -91,6 +94,9 @@ struct aip_shadow {
 	int enabled;				/* 恒 1（M1 SHADOW 冻结） */
 	char root[256];				/* conf parquet_dir */
 	long long flush_sec, flush_rows;
+	int32_t agent_id;			/* 行 agent_id 列值（M2：init
+						 * 按 conf.canary_enabled
+						 * 0|6——§1 AI_AGENT_AIPD） */
 	int64_t btime;				/* /proc/stat（<=0=未知） */
 	struct aip_shadow_row *buf;
 	size_t n, cap;
@@ -106,10 +112,14 @@ int aip_shadow_init(struct aip_shadow *s, const struct aip_conf *c);
 /*
  * aip_shadow_feed - 影子决策入缓冲（满/到时由主循环调 flush）。
  * 填 row 全列并计数。无返回错误面（内存失败=flush 期丢批计数，诚实）。
+ * executed：金丝雀实发置 1（M2 §2.2——canary ack.executed>0 的唯一
+ * 传播面；M1 调用方恒传 0）。model_version：1=builtin A / 2=file B
+ * （§4 冻结映射）。
  */
 void aip_shadow_feed(struct aip_shadow *s, const struct aip_fvec *v,
 		     int stale, const struct aip_decision *d,
-		     long long decision_ts_ns);
+		     long long decision_ts_ns, int executed,
+		     int model_version);
 
 /* flush：缓冲 → <root>/aipd/<日>/shadow_NNNN.parquet（失败计数丢批） */
 void aip_shadow_flush(struct aip_shadow *s);
