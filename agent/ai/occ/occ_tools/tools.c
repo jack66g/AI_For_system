@@ -1944,6 +1944,9 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	so.nfileset = nfs;
 	so.timeout_ms = wall_ms;
 	so.workdir = ctx->workdir;
+	so.rework_max = (int)rework_max;	/* R1：brief 覆写透传（缺省
+						 * 2 亦显式传——occ_task
+						 * 行与 brief_json 恒一致） */
 	so.max_tokens = max_tokens;	/* E7：预算熔断（0=不设限） */
 	rc = occ_orch_spawn((occ_orch *)ctx->orch, &so, &c, err, sizeof(err));
 	sb_free(&prompt);

@@ -725,7 +725,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	char bin[512], dbkv[600];
 	char sid[OCC_ID_LEN] = "", tid[OCC_ID_LEN] = "";
 	char sop[96], sep[96], rpath[192];
-	char *argv[6], **envp = NULL;
+	char *argv[6], **envp = NULL, *pfull = NULL;
 	occ_orch_child *c;
 	long long now;
 	long long bin0 = 0, bout0 = 0;	/* E7：spawn 时 usage 快照 */
@@ -813,8 +813,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		else
 			utf8_trunc(opts->prompt, 64, title, sizeof(title));
 		if (occ_task_create(o->db, opts->parent_session, title,
-				    opts->prompt, 0, &trow, e2,
-				    sizeof(e2)) != 0) {
+				    opts->prompt, opts->rework_max, &trow,
+				    e2, sizeof(e2)) != 0) {
 			set_err(err, errlen, "occ_orch_spawn: 建任务失败"
 				"：%s", e2);
 			return OCC_ORCH_EDB;
@@ -1020,24 +1020,6 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 			return OCC_ORCH_ESPAWN;
 		}
 	}
-	/* E6：任务 id 通道（子会话 t: 层记忆注入用） */
-	{
-		char tkv[160];
-
-		snprintf(tkv, sizeof(tkv), "OCC_TASK_ID=%s",
-			 tid[0] ? tid : "");
-		if (env_set(&envp, tkv)) {
-			env_free(envp);
-			unlink(sop);
-			unlink(sep);
-			set_err(err, errlen, "occ_orch_spawn: OCC_TASK_ID env"
-				" 注入失败（oom）");
-			if (dispatched)
-				spawn_fail_cleanup(o, tid, rpath, own_result,
-						   "taskid env");
-			return OCC_ORCH_ESPAWN;
-		}
-	}
 	if (rpath[0]) {
 		char rkv[512];
 
@@ -1084,9 +1066,30 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	c->sum_in0 = bin0;
 	c->sum_out0 = bout0;
 
+	/*
+	 * R2（E10 复跑虫②）：结果文件 prompt 通道。aik-sandbox 剥 env
+	 * ——子进程内 $OCC_TASK_RESULT_FILE 为空，报告落点找不到（复跑
+	 * 8 次预算被此烧掉）。有结果文件（rpath）时把路径直书 prompt
+	 * 尾行（env 通道保留双保险）；malloc 尽力（失败回退原 prompt，
+	 * stderr 留痕——spawn 已过任务面建行，为此 escalate 代价比
+	 * 报告通道降级大）。无任务面（无 rpath）不追加。
+	 */
+	if (rpath[0]) {
+		pfull = malloc(strlen(opts->prompt) + sizeof(rpath) + 128);
+		if (pfull) {
+			snprintf(pfull,
+				 strlen(opts->prompt) + sizeof(rpath) + 128,
+				 "%s\n结果报告写此文件：%.192s"
+				 "（报告=任务书要求+# VERDICT 表）\n",
+				 opts->prompt, rpath);
+		} else {
+			fprintf(stderr, "occ-orch: 结果文件 prompt 通道"
+				" 追加失败（oom）——env 通道兜底\n");
+		}
+	}
 	argv[0] = bin;
 	argv[1] = (char *)"-p";
-	argv[2] = (char *)opts->prompt;
+	argv[2] = pfull ? pfull : (char *)opts->prompt;
 	argv[3] = (char *)"--session";
 	argv[4] = sid;
 	argv[5] = NULL;
@@ -1096,6 +1099,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		int e = errno;
 
 		env_free(envp);
+		free(pfull);
 		free(c->stdout_path);
 		free(c->stderr_path);
 		free(c);
@@ -1136,6 +1140,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		_exit(127);		/* execve 失败：如实回收 127 */
 	}
 	env_free(envp);
+	free(pfull);		/* fork 后父侧独释（子侧 execve 用副本） */
 	setpgid(c->pid, c->pid);	/* 与子侧互兜（竞态无害） */
 	c->pgid = c->pid;
 	o->live[o->n_live++] = c;
@@ -1542,6 +1547,11 @@ char *occ_orch_distill(occ_db *db, const char *task_id)
 			gl = strcspn(g, "\"");
 			if (gl > 200)
 				gl = 200;
+			/* R6：200 字节上限若落在多字节序列中间，回退到
+			 * 字符边界（原按字节腰斩——distill payload 落库
+			 * 即非法 UTF-8，严格解码方首读即炸） */
+			while (gl > 0 && ((unsigned char)g[gl] & 0xC0) == 0x80)
+				gl--;
 			memcpy(gbuf, g, gl);
 			gbuf[gl] = '\0';
 		}
@@ -1562,9 +1572,17 @@ char *occ_orch_distill(occ_db *db, const char *task_id)
 				p = q;
 				continue;
 			}
-			if (q && q - p > 2)
+			if (q && q - p > 2) {
+				char ent[224];
+
+				/* R6：原 %.160s 按字节截断腰斩多字节字符
+				 * （复跑 B 任务 distill 事件 7 处非法
+				 * UTF-8）——同文件 utf8_trunc 字符边界
+				 * 裁剪后输出（≤160 字节，实体行恒合法） */
+				utf8_trunc(p + 1, 160, ent, sizeof(ent));
 				o += (size_t)snprintf(out + o, 2048 - o,
-						      "- %.160s\n", p + 1);
+						      "- %s\n", ent);
+			}
 			p = q;
 		}
 	}

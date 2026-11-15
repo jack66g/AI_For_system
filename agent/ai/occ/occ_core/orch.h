@@ -128,8 +128,13 @@ typedef struct occ_orch_child occ_orch_child;	/* 活子（终局即失效） */
  *   parent_session 自动建任务（task_id NULL）时的主会话 id（FK 必须
  *                 存在）；NULL=不建任务行（纯 runtime 面，测试用）
  *   task_id       已建任务 id（须 pending/rework）；NULL+parent_session
- *                 非 NULL=自动建任务（title/brief_json/缺省 rework_max）
+ *                 非 NULL=自动建任务（title/brief_json/rework_max——
+ *                 见下方 rework_max 字段）
  *   title         自动建任务标题；NULL=prompt 截断（UTF-8 边界）
+ *   rework_max    R1（E10 复跑虫①）：brief.rework_max 覆写透传——
+ *                 自动建任务时传 occ_task_create（0=缺省 2；>3 拒绝
+ *                 由 occ_task_create 定）；已建任务路（task_id）无效
+ *                 （任务行已带 rework_max，回炉再派不改限）
  *   occ_bin       occ 可执行路径；NULL=缺省解析（/proc/self/exe 同目录
  *                 occ，找不到退 PATH 搜索「occ」）
  *   workdir       子进程 cwd；NULL=继承当前
@@ -146,7 +151,10 @@ typedef struct occ_orch_child occ_orch_child;	/* 活子（终局即失效） */
  *   nfileset      fileset 元素数
  *   result_path   E3：结果文件（报告 IPC）。NULL+有任务面=自动 /tmp
  *                 mkstemp+env 注入+登记（occ_orch_free 清理）；显式给
- *                 =调用方持有；无任务面时不自动生成
+ *                 =调用方持有；无任务面时不自动生成。R2（E10 复跑虫
+ *                 ②）：有结果文件时 spawn 在子进程 prompt 尾追加
+ *                 「结果报告写此文件：<rpath>」行——aik-sandbox 剥 env
+ *                 的兜底（env 通道保留双保险）
  *   max_tokens    E7：任务 token 预算上限（brief.budget.max_tokens——
  *                 任务累计 budget_in+budget_out 超限即熔断；0=不设限。
  *                 三检查点见下方 E7 段）
@@ -158,6 +166,7 @@ typedef struct occ_orch_spawn_opts {
 	const char *parent_session;
 	const char *task_id;
 	const char *title;
+	int rework_max;		/* R1：brief 覆写透传（0=缺省；建任务面） */
 	const char *occ_bin;
 	const char *workdir;
 	const char *stdout_path;

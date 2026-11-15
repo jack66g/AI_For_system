@@ -73,6 +73,7 @@
 
 #include "occ_core/orch.h"
 #include "occ_tools/occ_tools.h"	/* E3：task 工具全链演练 */
+#include "occ_utf8.h"		/* E10 复跑 R6：distill payload 合法性断言 */
 
 static int n_fail;
 static int n_ok;
@@ -223,11 +224,13 @@ static int sim_main(int argc, char **argv)
 		sleep(s > 0 ? s : 30);
 		return 0;
 	}
-	if (!strcmp(prompt, "sim:exit7")) {
+	/* 前缀匹配：R2 起 spawn 在 prompt 尾追加结果文件行（运行时
+	 * 通道）——sim 合同=sim: 指令前缀，尾行不属于任务书正文 */
+	if (!strncmp(prompt, "sim:exit7", 9)) {
 		printf("SIM-EXIT7 sid=%s\n", sid);
 		return 7;
 	}
-	if (!strcmp(prompt, "sim:segv")) {
+	if (!strncmp(prompt, "sim:segv", 8)) {
 		printf("SIM-SEGV sid=%s\n", sid);
 		fflush(stdout);
 		raise(SIGSEGV);
@@ -237,6 +240,30 @@ static int sim_main(int argc, char **argv)
 		const char *v = getenv(prompt + 8);
 
 		printf("SIM-ENV %s=%s\n", prompt + 8, v ? v : "(null)");
+		return 0;
+	}
+	/*
+	 * E10 复跑 R2 断言臂：prompt 形如 "sim:probe <needle>"（needle
+	 * 止于行尾）——跳过 probe 声明自身后搜 needle 第二次出现（orch
+	 * spawn 的 prompt 尾追加行携带）：命中打印 "SIM-PROBE 1 <命中处
+	 * 起全文>"（含结果文件路径，stdout 尾窗可断言），否则 SIM-PROBE 0。
+	 */
+	if (!strncmp(prompt, "sim:probe ", 10)) {
+		char needle[128];
+		const char *nlp = strchr(prompt + 10, '\n');
+		size_t nl = nlp ? (size_t)(nlp - (prompt + 10)) :
+				  strlen(prompt + 10);
+		const char *hit;
+
+		if (nl >= sizeof(needle))
+			nl = sizeof(needle) - 1;
+		memcpy(needle, prompt + 10, nl);
+		needle[nl] = '\0';
+		hit = strstr(prompt + 10 + nl, needle);
+		if (hit)
+			printf("SIM-PROBE 1 %s", hit);
+		else
+			printf("SIM-PROBE 0\n");
 		return 0;
 	}
 	/*
@@ -872,6 +899,9 @@ static int unit_main(void)
 		OK(occ_task_get(g_db, ctid, &trow, NULL, 0) == 1 &&
 		   !strcmp(trow.status, OCC_TASK_ST_IN_REVIEW),
 		   "a-status-in-review");
+		/* E10 复跑 R1 缺省面：spawn_opts 未给 rework_max（0）→
+		 * occ_task_create 落缺省 2 */
+		OK(trow.rework_max == 2, "a-reworkmax-default-2");
 		occ_task_row_free(&trow);
 		OK(occ_task_events(g_db, ctid, &evs, &nevs, NULL, 0) == 0 &&
 		   nevs >= 2, "a-events");
@@ -1001,6 +1031,132 @@ static int unit_main(void)
 			   "a7-escalated");
 		}
 		occ_task_rows_free(rows, n);
+	}
+	/* ===== A8/A9/A10 E10 复跑修复波（R1/R2/R6） ===== */
+	/* R1（复跑虫①）：spawn_opts.rework_max 覆写透传——brief 要 1 被
+	 * 丢、occ_task 恒缺省 2 → 该 escalate 未 escalate */
+	{
+		occ_orch_spawn_opts opts;
+
+		memset(&opts, 0, sizeof(opts));
+		opts.prompt = "sim:ok";
+		opts.parent_session = g_psid;
+		opts.occ_bin = self_bin;
+		opts.env = g_sim_env;
+		opts.rework_max = 1;
+		c = NULL;
+		OK(occ_orch_spawn(g_o, &opts, &c, err, sizeof(err)) == 0,
+		   "a8-spawn");
+		if (c) {
+			snprintf(ctid, sizeof(ctid), "%s",
+				 occ_orch_child_task(c));
+			occ_orch_wait(c, &r, err, sizeof(err));
+			occ_orch_result_free(&r);
+			OK(occ_task_get(g_db, ctid, &trow, NULL, 0) == 1 &&
+			   trow.rework_max == 1,
+			   "a8-reworkmax-override-1");
+			occ_task_row_free(&trow);
+		}
+	}
+	/* R2（复跑虫②）：结果文件路径直书子 prompt 尾行——aik-sandbox 剥
+	 * env，子进程 $OCC_TASK_RESULT_FILE 为空找不到报告落点 */
+	{
+		occ_orch_spawn_opts opts;
+
+		memset(&opts, 0, sizeof(opts));
+		opts.prompt = "sim:probe 结果报告写此文件：";
+		opts.parent_session = g_psid;
+		opts.occ_bin = self_bin;
+		opts.env = g_sim_env;
+		c = NULL;
+		OK(occ_orch_spawn(g_o, &opts, &c, err, sizeof(err)) == 0,
+		   "a9-spawn");
+		if (c) {
+			const char *rpath;
+
+			snprintf(ctid, sizeof(ctid), "%s",
+				 occ_orch_child_task(c));
+			rpath = occ_orch_result_path(g_o, ctid);
+			OK(rpath && rpath[0], "a9-rpath-registered");
+			occ_orch_wait(c, &r, err, sizeof(err));
+			OK(r.stdout_tail &&
+			   strstr(r.stdout_tail, "SIM-PROBE 1") != NULL,
+			   "a9-prompt-rpath-line");
+			OK(r.stdout_tail && rpath &&
+			   strstr(r.stdout_tail, rpath) != NULL,
+			   "a9-prompt-rpath-value");
+			occ_orch_result_free(&r);
+		}
+	}
+	/* R6（复跑虫⑥）：distill 目标行/实体清单 UTF-8 字符边界裁剪——
+	 * 原 %.160s 按字节腰斩多字节字符，落库 payload 即非法 UTF-8 */
+	{
+		occ_task_row t2;
+		occ_session_row s2;
+		char brief[1280], goal[512], ent[512];
+
+		/* goal：198 ASCII+「汉」（3B）=201B，200 上限原实现恰截在
+		 * 「汉」第 2/3 字节；实体：158 ASCII+「汉」=161B，160 上限
+		 * 原实现恰截在「汉」第 2/3 字节——两处都构造在腰斩界上 */
+		memset(goal, 'G', 198);
+		goal[198] = '\0';
+		memset(ent, 'E', 158);
+		ent[158] = '\0';
+		snprintf(brief, sizeof(brief),
+			 "{\"goal\":\"%s汉\",\"acceptance\":[\"%s汉\"]}",
+			 goal, ent);
+		OK(occ_session_create(g_db, "r6-model", &s2, err,
+				      sizeof(err)) == 0, "a10-session");
+		if (occ_task_create(g_db, s2.id, "r6-distill-utf8", brief, 0,
+				    &t2, err, sizeof(err)) == 0) {
+			OK(occ_task_dispatch(g_db, t2.id, s2.id, err,
+					     sizeof(err)) == 0 &&
+			   occ_task_review(g_db, t2.id, "{}", err,
+					   sizeof(err)) == 0 &&
+			   occ_task_verdict(g_db, t2.id, 1,
+					    "{\"pass\":true}", err,
+					    sizeof(err)) == 0,
+			   "a10-state-machine");
+			{
+				char *dtxt = occ_orch_distill(g_db, t2.id);
+
+				OK(dtxt != NULL, "a10-distill-text");
+				if (dtxt) {
+					OK(occ_utf8_valid(dtxt,
+							  strlen(dtxt)) == 1,
+					   "a10-distill-utf8-valid");
+					free(dtxt);
+				}
+				/* 落库 payload 同源合法（严格解码方首读不炸） */
+				OK(occ_task_events(g_db, t2.id, &evs, &nevs,
+						   NULL, 0) == 0,
+				   "a10-events");
+				{
+					size_t k;
+					int found = 0, allvalid = 1;
+
+					for (k = 0; k < nevs; k++) {
+						const char *pj;
+
+						if (strcmp(evs[k].kind,
+							   OCC_TASK_EV_DISTILL))
+							continue;
+						found = 1;
+						pj = evs[k].payload_json ?
+						     evs[k].payload_json : "";
+						if (!occ_utf8_valid(pj,
+								    strlen(pj)))
+							allvalid = 0;
+					}
+					OK(found, "a10-distill-event");
+					OK(allvalid, "a10-distill-payload-utf8");
+				}
+				occ_task_event_rows_free(evs, nevs);
+			}
+			occ_task_row_free(&t2);
+		} else {
+			OK(0, "a10-task-create");
+		}
 	}
 
 	/* ===== B 取消精准 ===== */
@@ -1245,6 +1401,47 @@ static int unit_main(void)
 		}
 		OK(tid[0] == 't', "h1-tid-extracted");
 		occ_tool_result_free(&tr);
+
+		/* H1b E10 复跑 R1 工具面全链：brief.rework_max=1 → occ_task
+		 * 行=1（虫①发源地=task_spawn 解析了 brief 却没传 spawn_opts，
+		 * 任务行恒缺省 2——A 任务该 escalate 未 escalate 的根因） */
+		{
+			char tid1b[OCC_ID_LEN] = "";
+			occ_task_row t1b;
+
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"spawn\",\"brief\":{\"goal\":"
+				 "\"sim:ok\",\"fileset\":[\"h_t1b.c\"],"
+				 "\"acceptance\":[\"exit=0\"],"
+				 "\"rework_max\":1}}");
+			memset(&tr, 0, sizeof(tr));
+			OK(occ_tool_exec(&tc, "task", "call_h1b", args, &tr) == 0 &&
+			   tr.text && strstr(tr.text, "\"rework_max\":1"),
+			   "h1b-tool-spawn");
+			if (tr.text) {
+				q = strstr(tr.text, "\"task_id\":\"");
+				if (q) {
+					q += strlen("\"task_id\":\"");
+					e = strchr(q, '"');
+					if (e && (size_t)(e - q) < sizeof(tid1b)) {
+						memcpy(tid1b, q, (size_t)(e - q));
+						tid1b[e - q] = '\0';
+					}
+				}
+			}
+			occ_tool_result_free(&tr);
+			OK(tid1b[0] == 't', "h1b-tid-extracted");
+			OK(occ_task_get(g_db, tid1b, &t1b, err, sizeof(err)) == 1 &&
+			   t1b.rework_max == 1, "h1b-task-row-reworkmax-1");
+			occ_task_row_free(&t1b);
+			/* 收尸（wait 动作至终局，不留活子占并发闸） */
+			snprintf(args, sizeof(args),
+				 "{\"action\":\"wait\",\"task_id\":\"%s\","
+				 "\"timeout_ms\":15000}", tid1b);
+			memset(&tr, 0, sizeof(tr));
+			occ_tool_exec(&tc, "task", "call_h1b_wait", args, &tr);
+			occ_tool_result_free(&tr);
+		}
 
 		/* H2 wait：限时等终局（sim:report 写结果文件后即退） */
 		snprintf(args, sizeof(args),
