@@ -62,6 +62,7 @@
 #define CP_MAX_MAP     8
 #define CP_MAX_INST    8
 #define CP_MAX_ARGV    8
+#define CP_MAX_CHMOD   4	/* C2：chmod 规则上限（原魔数 4 具名） */
 #define CP_READ_MAX    (1u << 20)	/* 适配器/轨迹读取上限 1MB */
 #define CP_OUT_MAX     (1u << 18)	/* 单次采集每流上限 256KB */
 #define CP_UPPER       "/.aik-compat/usr-upper"
@@ -1523,7 +1524,14 @@ static void cp_check_interp(struct cp_probe *p, const char *interp,
 			return;
 		}
 		if (!(st.st_mode & 0111)) {
-			struct cp_reason *r = cp_reason(
+			struct cp_reason *r;
+
+			/* C2 整合修：补设 p->interp（该分支此前不设→generate
+			 * 的 interpreter_map 按路径/basename 匹配不上→零 L0
+			 * 规则→惰性适配器 apply 必败；C2 棒3 台架 F07 实锤）。
+			 * 与 MISSING_INTERPRETER 分支同款先设后报。 */
+			snprintf(p->interp, sizeof(p->interp), "%s", cur);
+			r = cp_reason(
 				p, "INTERPRETER_NOT_EXECUTABLE", "L0", 1, 1,
 				"解释器 %s 存在但不可执行（mode=%04o）", cur,
 				(unsigned)(st.st_mode & 07777));
@@ -2047,7 +2055,7 @@ struct cp_adapter {
 	int n_map;
 	struct cp_rule_lib lib[CP_MAX_LIBS];
 	int n_lib;
-	struct cp_rule_chmod chm[4];
+	struct cp_rule_chmod chm[CP_MAX_CHMOD];
 	int n_chm;
 	struct {
 		char src[PATH_MAX];
@@ -2058,6 +2066,12 @@ struct cp_adapter {
 	char argv[CP_MAX_ARGV][PATH_MAX];
 	int n_argv;
 	int timeout_s;
+	/* C2 manifest 线索（SYSTEM-EVOLUTION §4.4）：解释器 shim 目标来自
+	 * 本机同族候选（L1 未实现边界）、是否含调用方显式 path_map ——
+	 * 都如实写 limitations，不粉饰 */
+	int interp_from_cand;
+	char cand_target[PATH_MAX];
+	int explicit_map;
 	char *raw;
 	size_t rawlen;
 	/* verify 时载入的 syscall 轨迹（属本次调用，非适配器数据） */
@@ -2127,8 +2141,13 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			if (!to)
 				to = jstr(imap, ilen, base);
 		}
-		if (!to && p->n_cand)
+		if (!to && p->n_cand) {
 			to = strdup(p->cand[0]);
+			/* 如实记边界：候选来自本机前缀扫描，不是 L1 语义验证 */
+			a->interp_from_cand = 1;
+			snprintf(a->cand_target, sizeof(a->cand_target), "%s",
+				 to ? to : "");
+		}
 		if (!to) {
 			snprintf(err, errcap,
 				 "缺解释器 %s 且未提供 interpreter_map，"
@@ -2144,7 +2163,14 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			free(to);
 			return -1;
 		}
-		if (a->n_map < CP_MAX_MAP) {
+		if (a->n_map >= CP_MAX_MAP) {
+			snprintf(err, errcap, "path_map 第 %d 条（%.200s）超出"
+				 "上限 %d（拒绝生成：静默截断=假成功）",
+				 a->n_map + 1, p->interp, CP_MAX_MAP);
+			free(to);
+			return -1;
+		}
+		{
 			snprintf(a->map[a->n_map].from, PATH_MAX, "%s",
 				 p->interp);
 			snprintf(a->map[a->n_map].to, PATH_MAX, "%s", to);
@@ -2179,7 +2205,13 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 		}
 		snprintf(src, sizeof(src), "%s", v);
 		free(v);
-		if (a->n_lib < CP_MAX_LIBS) {
+		if (a->n_lib >= CP_MAX_LIBS) {
+			snprintf(err, errcap, "lib_redirect 第 %d 条（%s）"
+				 "超出上限 %d（拒绝生成：静默截断=假成功）",
+				 a->n_lib + 1, p->missing[i], CP_MAX_LIBS);
+			return -1;
+		}
+		{
 			snprintf(a->lib[a->n_lib].soname, 128, "%s",
 				 p->missing[i]);
 			snprintf(a->lib[a->n_lib].src, PATH_MAX, "%s", src);
@@ -2198,7 +2230,13 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 	for (i = 0; i < p->n_r; i++) {
 		if (strcmp(p->r[i].code, "NOT_EXECUTABLE") != 0)
 			continue;
-		if (a->n_chm < 4) {
+		if (a->n_chm >= CP_MAX_CHMOD) {
+			snprintf(err, errcap, "chmod 第 %d 条超出上限 %d"
+				 "（拒绝生成：静默截断=假成功）",
+				 a->n_chm + 1, CP_MAX_CHMOD);
+			return -1;
+		}
+		{
 			snprintf(a->chm[a->n_chm].path, PATH_MAX, "%s",
 				 a->inside);
 			snprintf(a->chm[a->n_chm].mode, 16, "0755");
@@ -2209,11 +2247,12 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			a->n_chm++;
 		}
 	}
-	/* 4) 用户显式 env */
+	/* 4) 用户显式 env（迭代不设上限：第 CP_MAX_ENV+1 条必须报错，
+	 *    不能停在循环头上假装没看见） */
 	if (jobj(in_obj, in_len, "env", &obj, &olen)) {
 		int idx;
 
-		for (idx = 0; idx < CP_MAX_ENV; idx++) {
+		for (idx = 0;; idx++) {
 			const char *k, *v;
 			size_t kl, vl;
 			int vty;
@@ -2222,8 +2261,14 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			if (ai_json_obj_member(obj, olen, idx, &k, &kl, &v,
 					       &vl, &vty) != 1)
 				break;
-			if (vty != AI_JSON_STR)
-				continue;
+			if (vty != AI_JSON_STR) {
+				ks = ai_json_strdup_str(k, kl);
+				snprintf(err, errcap, "env[%s] 值不是字符串"
+					 "（拒绝：静默丢值=黑箱）",
+					 ks ? ks : "?");
+				free(ks);
+				return -1;
+			}
 			ks = ai_json_strdup_str(k, kl);
 			vs = ai_json_strdup_str(v, vl);
 			if (!ks || !vs) {
@@ -2231,7 +2276,15 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 				free(vs);
 				continue;
 			}
-			if (a->n_env < CP_MAX_ENV) {
+			if (a->n_env >= CP_MAX_ENV) {
+				snprintf(err, errcap, "env 第 %d 条（%s=%s）"
+					 "超出上限 %d（拒绝：静默截断=假成功）",
+					 a->n_env + 1, ks, vs, CP_MAX_ENV);
+				free(ks);
+				free(vs);
+				return -1;
+			}
+			{
 				snprintf(a->env[a->n_env].key, 128, "%s", ks);
 				snprintf(a->env[a->n_env].val, PATH_MAX, "%s",
 					 vs);
@@ -2244,6 +2297,90 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 			free(vs);
 		}
 	}
+	/* 4b) 用户显式 path_map（C2『路径假设』类：目标写死系统视图路径，
+	 *     调用方给替代实现。probe 不读目标正文，假设无法静态验证，
+	 *     如实写 limitations，绝不冒充已验证） */
+	if (jobj(in_obj, in_len, "path_map", &obj, &olen)) {
+		int idx;
+
+		for (idx = 0;; idx++) {
+			const char *k, *v;
+			size_t kl, vl;
+			int vty;
+			char *fs, *ts;
+			int dup, di;
+
+			if (ai_json_obj_member(obj, olen, idx, &k, &kl, &v,
+					       &vl, &vty) != 1)
+				break;
+			fs = ai_json_strdup_str(k, kl);
+			if (vty != AI_JSON_STR) {
+				snprintf(err, errcap, "path_map[%s] 目标不是"
+					 "字符串（拒绝：静默丢规则=黑箱）",
+					 fs ? fs : "?");
+				free(fs);
+				return -1;
+			}
+			ts = ai_json_strdup_str(v, vl);
+			if (!fs || !ts) {
+				free(fs);
+				free(ts);
+				continue;
+			}
+			if (fs[0] != '/' || !cp_safe_path(fs) ||
+			    (!cp_under(fs, "/usr") && !cp_under(fs, "/bin") &&
+			     !cp_under(fs, "/sbin") && !cp_under(fs, "/lib") &&
+			     !cp_under(fs, "/lib64"))) {
+				snprintf(err, errcap, "path_map 源 %s 不是"
+					 "系统视图内的安全绝对路径"
+					 "（只允许 /usr /bin /sbin /lib /lib64）",
+					 fs);
+				free(fs);
+				free(ts);
+				return -1;
+			}
+			if (ts[0] != '/' || !cp_file_ok(ts) || access(ts, X_OK) ||
+			    !cp_safe_path(ts)) {
+				snprintf(err, errcap, "path_map 目标 %s 不存在"
+					"/不可执行/含危险字符（shim 要 exec 它）",
+					ts);
+				free(fs);
+				free(ts);
+				return -1;
+			}
+			dup = 0;
+			for (di = 0; di < a->n_map; di++)
+				if (!strcmp(a->map[di].from, fs))
+					dup = 1;
+			if (dup) {
+				snprintf(err, errcap, "path_map 源 %s 重复声明"
+					 "（拒绝：矛盾数据）", fs);
+				free(fs);
+				free(ts);
+				return -1;
+			}
+			if (a->n_map >= CP_MAX_MAP) {
+				snprintf(err, errcap, "path_map 第 %d 条"
+					 "（%s→%s）超出上限 %d"
+					 "（拒绝：静默截断=假成功）",
+					 a->n_map + 1, fs, ts, CP_MAX_MAP);
+				free(fs);
+				free(ts);
+				return -1;
+			}
+			snprintf(a->map[a->n_map].from, PATH_MAX, "%s", fs);
+			snprintf(a->map[a->n_map].to, PATH_MAX, "%s", ts);
+			snprintf(a->map[a->n_map].because,
+				 sizeof(a->map[0].because),
+				 "调用方显式声明的路径假设重映射（probe 不读"
+				 "目标正文，无法静态验证该假设；shim 指向"
+				 "替代实现，原路径宿主原件不动）");
+			a->n_map++;
+			a->explicit_map = 1;
+			free(fs);
+			free(ts);
+		}
+	}
 	/* 5) 缺库 -> LD_LIBRARY_PATH（若调用方没自己给） */
 	if (a->n_lib > 0) {
 		int have = 0;
@@ -2251,7 +2388,14 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 		for (i = 0; i < a->n_env; i++)
 			if (!strcmp(a->env[i].key, "LD_LIBRARY_PATH"))
 				have = 1;
-		if (!have && a->n_env < CP_MAX_ENV) {
+		if (!have) {
+			if (a->n_env >= CP_MAX_ENV) {
+				snprintf(err, errcap, "env 自动追加 "
+					 "LD_LIBRARY_PATH（lib_redirect 必需）"
+					 "会超出上限 %d（用户 env 已占满；"
+					 "拒绝：静默截断=假成功）", CP_MAX_ENV);
+				return -1;
+			}
 			snprintf(a->env[a->n_env].key, 128,
 				 "LD_LIBRARY_PATH");
 			snprintf(a->env[a->n_env].val, PATH_MAX,
@@ -2270,11 +2414,14 @@ static int cp_build_rules(struct cp_adapter *a, const struct cp_probe *p,
 
 static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 				 const struct cp_probe *p,
-				 const char *in_obj, size_t in_len)
+				 const char *in_obj, size_t in_len,
+				 int expect_exit)
 {
 	const char *exp = NULL, *earr = NULL;
 	size_t elen = 0, alen = 0;
 	long long max_ms = jll(in_obj, in_len, "max_ms", 0);
+	/* 负向变异用的退出码避开期望值（期望 97 时撞车会自相矛盾） */
+	int neg_exit = (expect_exit == 97) ? 98 : 97;
 	int i;
 
 	if (jobj(in_obj, in_len, "expect", &exp, &elen)) {
@@ -2292,9 +2439,16 @@ static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 	}
 	fprintf(f, "],\"timeout_s\":%d,", a->timeout_s);
 	fputs("\"assert\":[", f);
-	fputs("{\"type\":\"exit_code\",\"op\":\"eq\",\"value\":0,"
-	      "\"because\":\"应用正常做完就该返回 0；非 0 一律不合格\"},",
-	      f);
+	if (expect_exit) {
+		fprintf(f, "{\"type\":\"exit_code\",\"op\":\"eq\",\"value\":%d,"
+			"\"because\":\"调用方显式声明期望退出码 %d（非常规"
+			"目标）；非 %d 一律不合格\"},", expect_exit,
+			expect_exit, expect_exit);
+	} else {
+		fputs("{\"type\":\"exit_code\",\"op\":\"eq\",\"value\":0,"
+		      "\"because\":\"应用正常做完就该返回 0；非 0 一律不合格\"},",
+		      f);
+	}
 	fputs("{\"type\":\"stdout_nonempty\","
 	      "\"because\":\"返回 0 但输出为空 = 典型『把 ENOSYS 包装成功』，"
 	      "必须判不合格\"},", f);
@@ -2365,15 +2519,149 @@ static void cp_generate_contract(FILE *f, struct cp_adapter *a,
 	fputs("{\"id\":\"empty_stdout\",\"kind\":\"mutate_stdout_null\","
 	      "\"target_assert\":\"stdout_nonempty\",\"expect\":\"fail\","
 	      "\"because\":\"防『返回 0 但输出为空』被包装成成功\"},", f);
-	fputs("{\"id\":\"forced_exit\",\"kind\":\"mutate_exit\","
-	      "\"target_assert\":\"exit_code\",\"exit\":97,"
+	fprintf(f, "{\"id\":\"forced_exit\",\"kind\":\"mutate_exit\","
+	      "\"target_assert\":\"exit_code\",\"exit\":%d,"
 	      "\"expect\":\"fail\",\"because\":\"退出码断言必须真的能"
-	      "拒绝非 0\"},", f);
-	fputs("{\"id\":\"unadapted\",\"kind\":\"run_unadapted\","
-	      "\"target_assert\":\"*\",\"expect\":\"fail\","
-	      "\"because\":\"不带任何适配规则跑同一目标必须过不了契约"
-	      "——否则适配器是摆设，『适配成功』就是假话\"}", f);
+	      "拒绝非期望值（期望 %d 时改用 %d 避开撞车）\"}", neg_exit,
+	      expect_exit, neg_exit);
+	/* C2 整合修：仅 blocked（probe runnable=0）目标才设『未适配必败』
+	 * 负向。增强型适配（目标本可运行：补 env/传参等）的必要性天然
+	 * 不成立，硬设必恒假红（C2 棒3 台架 F13 实锤 observed=pass）。 */
+	if (!p->runnable)
+		fputs(",{\"id\":\"unadapted\",\"kind\":\"run_unadapted\","
+		      "\"target_assert\":\"*\",\"expect\":\"fail\","
+		      "\"because\":\"不带任何适配规则跑宿主原件必须过不了"
+		      "契约——否则适配器是摆设，『适配成功』就是假话\"}", f);
 	fputs("]}", f);
+}
+
+/* ---- C2：SYSTEM-EVOLUTION §4.4 manifest 五字段 ---------------------- */
+
+/* risk 查表：L0 规则数（env+path_map+lib_redirect+chmod）n<=4 且未动用
+ * L2 视图原语 -> low；n>4 或含 L2 层（/usr overlay、多装 stage 文件）
+ * -> medium。（不可修 fatal code 在入口闸就已拒绝生成，不会出现。） */
+static const char *cp_risk_of(const struct cp_adapter *a)
+{
+	int n_l0 = a->n_env + a->n_map + a->n_lib + a->n_chm;
+
+	if (n_l0 <= 4 && !a->usr_overlay && a->n_inst <= 1)
+		return "low";
+	return "medium";
+}
+
+/*
+ * manifest 字段发射：risk / limitations / provides / created_by /
+ * trace_id。limitations 自动汇入三路：probe 非 fatal 原因（生成器不为其
+ * 造规则，如实入清单）+ 静态 caveats 三条（与 probe 实现口径一一对应）
+ * + v0 L1 边界（若有）。provides = lib_redirect 的 sonames + 解释器
+ * 映射目标名（path_map 的 to 取 basename，去重）。
+ */
+static void cp_generate_manifest(FILE *f, const struct cp_adapter *a,
+				 const struct cp_probe *p,
+				 const char *created_by,
+				 const char *trace_id)
+{
+	char buf[640];
+	int i, j, n = 0;
+
+	fputs(",\"risk\":", f);
+	cp_jstr(f, cp_risk_of(a));
+	fputs(",\"limitations\":[", f);
+	for (i = 0; i < p->n_r; i++) {
+		if (p->r[i].fatal)
+			continue;
+		snprintf(buf, sizeof(buf), "%s：%s（layer=%s，非阻塞，"
+			 "不生成规则，如实记录）", p->r[i].code,
+			 p->r[i].detail, p->r[i].layer);
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, buf);
+	}
+	{
+		static const char *caveats[] = {
+			"v0 边界：库搜索不解析 /etc/ld.so.cache（只按默认"
+			"目录/RUNPATH/显式 lib_sources；probe 证据已注明）",
+			"v0 边界：非 libc 库的符号版本要求只记录不判 fatal"
+			"（libc 家族才判 LIBC_VERSION_TOO_NEW）",
+			"v0 边界：32 位 ELF 的 DT_NEEDED 不解析（32 位目标"
+			"一律判 ABI 不匹配，不生成适配器）",
+		};
+
+		for (i = 0; i < 3; i++) {
+			if (n++)
+				fputc(',', f);
+			cp_jstr(f, caveats[i]);
+		}
+	}
+	if (a->interp_from_cand) {
+		if (n++)
+			fputc(',', f);
+		snprintf(buf, sizeof(buf), "v0 边界：L1 解释器族分析未实现"
+			 "——shim 目标 %.128s 取自本机同族候选探测，语义等价"
+			 "未经 L1 验证",
+			 a->cand_target[0] ? a->cand_target : "(未知)");
+		cp_jstr(f, buf);
+	}
+	if (a->explicit_map) {
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, "path_map 含调用方显式路径假设（probe 不读目标"
+			"正文，无法静态验证该假设成立）");
+	}
+	if (p->runnable) {
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, "增强型适配：目标本可运行，未设『未适配必败』"
+			"必要性负向（防静默语义对增强型不适用）");
+	}
+	fputs("],\"provides\":[", f);
+	n = 0;
+	for (i = 0; i < a->n_lib; i++) {
+		int dup = 0;
+
+		for (j = 0; j < i; j++)
+			if (!strcmp(a->lib[j].soname, a->lib[i].soname))
+				dup = 1;
+		if (dup)
+			continue;
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, a->lib[i].soname);
+	}
+	for (i = 0; i < a->n_map; i++) {
+		char base[128];
+
+		cp_basename(a->map[i].to, base, sizeof(base));
+		if (!base[0])
+			continue;
+		{
+			int dup = 0;
+
+			for (j = 0; j < a->n_lib; j++)
+				if (!strcmp(a->lib[j].soname, base))
+					dup = 1;
+			for (j = 0; j < i; j++) {
+				char b2[128];
+
+				cp_basename(a->map[j].to, b2, sizeof(b2));
+				if (!strcmp(b2, base))
+					dup = 1;
+			}
+			if (dup)
+				continue;
+		}
+		if (n++)
+			fputc(',', f);
+		cp_jstr(f, base);
+	}
+	fputs("],\"created_by\":", f);
+	cp_jstr(f, (created_by && created_by[0]) ? created_by :
+		"ai-tool:compat_generate");
+	fputs(",\"trace_id\":", f);
+	if (trace_id && trace_id[0])
+		cp_jstr(f, trace_id);
+	else
+		fputs("null", f);
 }
 
 static int cp_generate(const char *args, size_t alen, char **out)
@@ -2381,8 +2669,11 @@ static int cp_generate(const char *args, size_t alen, char **out)
 	char *name = jstr(args, alen, "name");
 	char *target = jstr(args, alen, "target");
 	char *ws = jstr(args, alen, "workspace");
+	char *created_by = jstr(args, alen, "created_by");
+	char *trace_id = jstr(args, alen, "trace_id");
 	long long timeout_s = jll(args, alen, "timeout_s", 10);
 	int write = jbool(args, alen, "write", 1);
+	int expect_exit = 0;
 	struct cp_probe p;
 	struct cp_adapter a;
 	char err[512] = "";
@@ -2395,6 +2686,58 @@ static int cp_generate(const char *args, size_t alen, char **out)
 
 	memset(&a, 0, sizeof(a));
 	*out = NULL;
+	/* C2：created_by/trace_id 透传（缺省如实：工具面标识 / null）；
+	 * 超长拒绝而不是截断（静默截断=黑箱） */
+	if (created_by && strlen(created_by) > 128) {
+		if (asprintf(out, "ERROR: created_by 超长（上限 128，"
+			     "实测 %zu）", strlen(created_by)) < 0)
+			*out = NULL;
+		rc = AI_ERR_INVALID_ARG;
+		goto done;
+	}
+	if (trace_id && strlen(trace_id) > 128) {
+		if (asprintf(out, "ERROR: trace_id 超长（上限 128，"
+			     "实测 %zu）", strlen(trace_id)) < 0)
+			*out = NULL;
+		rc = AI_ERR_INVALID_ARG;
+		goto done;
+	}
+	/* C2：expect.exit_code 实装（schema 已声明）；0-255 外拒绝，
+	 * 非 JSON 数字拒绝——都不静默回落到缺省 0 */
+	{
+		const char *exp;
+		size_t elen;
+
+		if (jobj(args, alen, "expect", &exp, &elen)) {
+			const char *v;
+			size_t vl;
+			int ty;
+
+			if (ai_json_obj_get(exp, elen, "exit_code", &v, &vl,
+					    &ty) == 1) {
+				long long ec;
+
+				if (ty != AI_JSON_NUM) {
+					if (asprintf(out, "ERROR: "
+						     "expect.exit_code 不是"
+						     "数字") < 0)
+						*out = NULL;
+					rc = AI_ERR_INVALID_ARG;
+					goto done;
+				}
+				ec = ai_json_ll(v, vl);
+				if (ec < 0 || ec > 255) {
+					if (asprintf(out, "ERROR: "
+						     "expect.exit_code 超出"
+						     " 0-255：%lld", ec) < 0)
+						*out = NULL;
+					rc = AI_ERR_INVALID_ARG;
+					goto done;
+				}
+				expect_exit = (int)ec;
+			}
+		}
+	}
 	if (!ai_compat_valid_name(name)) {
 		if (asprintf(out, "ERROR: 非法 name（[A-Za-z0-9_.-]{1,32}，"
 			     "首字符非 . / -）：%s", name ? name : "(无)") < 0)
@@ -2453,7 +2796,13 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		goto done;
 	}
 	/* install 规则：把目标拷进 workspace（L2 自带 rootfs） */
-	if (a.n_inst < CP_MAX_INST) {
+	if (a.n_inst >= CP_MAX_INST) {
+		snprintf(err, sizeof(err), "install 第 %d 条超出上限 %d"
+			 "（拒绝生成：静默截断=假成功）", a.n_inst + 1,
+			 CP_MAX_INST);
+		goto fail;
+	}
+	{
 		snprintf(a.inst[a.n_inst].src, PATH_MAX, "%s", a.host);
 		snprintf(a.inst[a.n_inst].dst, PATH_MAX, "%s", a.inside);
 		snprintf(a.inst[a.n_inst].because,
@@ -2471,7 +2820,7 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		if (jarr(args, alen, "argv", &earr, &elen)) {
 			int j;
 
-			for (j = 0; j < CP_MAX_ARGV - 1; j++) {
+			for (j = 0;; j++) {
 				const char *e;
 				size_t ll;
 				int ty;
@@ -2480,11 +2829,24 @@ static int cp_generate(const char *args, size_t alen, char **out)
 				if (ai_json_arr_get(earr, elen, j, &e, &ll,
 						    &ty) != 1)
 					break;
-				if (ty != AI_JSON_STR)
-					continue;
+				if (ty != AI_JSON_STR) {
+					snprintf(err, sizeof(err),
+						 "argv 第 %d 项不是字符串"
+						 "（拒绝：静默丢参=黑箱）", j);
+					goto fail;
+				}
 				s = ai_json_strdup_str(e, ll);
 				if (!s)
 					continue;
+				if (a.n_argv >= CP_MAX_ARGV) {
+					snprintf(err, sizeof(err),
+						 "argv 第 %d 项（%s）超出上限"
+						 " %d（含程序本体；拒绝：静默"
+						 "截断=假成功）", j, s,
+						 CP_MAX_ARGV);
+					free(s);
+					goto fail;
+				}
 				snprintf(a.argv[a.n_argv], PATH_MAX, "%s", s);
 				a.n_argv++;
 				free(s);
@@ -2516,6 +2878,7 @@ static int cp_generate(const char *args, size_t alen, char **out)
 			 p.because, a.host, p.kind);
 		cp_jstr(f, why);
 	}
+	cp_generate_manifest(f, &a, &p, created_by, trace_id);
 	fputs(",\"target\":{\"host\":", f);
 	cp_jstr(f, a.host);
 	fputs(",\"kind\":", f);
@@ -2606,7 +2969,7 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		      "/usr 零写入）\"}", f);
 	}
 	fputs("]}},", f);
-	cp_generate_contract(f, &a, &p, args, alen);
+	cp_generate_contract(f, &a, &p, args, alen, expect_exit);
 	fputs(",\"rollback\":{\"paths\":[", f);
 	cp_jstr(f, a.stage);
 	for (i = 0; i < a.n_map; i++) {
@@ -2682,8 +3045,11 @@ static int cp_generate(const char *args, size_t alen, char **out)
 		*out = buf;
 	}
 	cp_audit("compat_generate", "adapter=%s target=%s written=%d "
-		 "rules(L0=%d/%d/%d L2=%d) because=%s", a.name, a.host,
-		 write, a.n_map, a.n_lib, a.n_env, a.n_inst, p.because);
+		 "rules(L0=%d/%d/%d L2=%d) risk=%s created_by=%s because=%s",
+		 a.name, a.host, write, a.n_map, a.n_lib, a.n_env, a.n_inst,
+		 cp_risk_of(&a),
+		 (created_by && created_by[0]) ? created_by :
+		 "ai-tool:compat_generate", p.because);
 	goto done;
 fail:
 	if (asprintf(out, "ERROR: %s", err) < 0)
@@ -2694,6 +3060,8 @@ done:
 	free(name);
 	free(target);
 	free(ws);
+	free(created_by);
+	free(trace_id);
 	return rc;
 }
 
@@ -3327,6 +3695,25 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 	a->timeout_s = (int)jll(c, clen, "timeout_s", 10);
 	a->n_argv = cp_parse_arr_strs(c, clen, "argv", a->argv,
 				      CP_MAX_ARGV);
+	/* C2：contract.argv 超上限拒绝（静默截断=黑箱；先例=缺 because） */
+	{
+		const char *arr;
+		size_t alen;
+
+		if (jarr(c, clen, "argv", &arr, &alen)) {
+			const char *e;
+			size_t el;
+			int ty;
+
+			if (ai_json_arr_get(arr, alen, CP_MAX_ARGV, &e, &el,
+					    &ty) == 1) {
+				snprintf(err, errcap, "contract.argv[%d] 超出"
+					 "上限 %d（拒绝加载：静默截断=黑箱）",
+					 CP_MAX_ARGV, CP_MAX_ARGV);
+				return -1;
+			}
+		}
+	}
 
 	/* L0.env[] */
 	{
@@ -3335,7 +3722,7 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 		int idx;
 
 		if (jarr(l0, l0len, "env", &arr, &alen)) {
-			for (idx = 0; idx < CP_MAX_ENV; idx++) {
+			for (idx = 0;; idx++) {
 				const char *e;
 				size_t el;
 				int ty;
@@ -3352,6 +3739,15 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 					free(k);
 					free(v);
 					continue;
+				}
+				if (a->n_env >= CP_MAX_ENV) {
+					snprintf(err, errcap, "env[%d]（%s）"
+						 "超出上限 %d（拒绝加载："
+						 "静默截断=黑箱）", idx, k,
+						 CP_MAX_ENV);
+					free(k);
+					free(v);
+					return -1;
 				}
 				snprintf(a->env[a->n_env].key, 128, "%s", k);
 				snprintf(a->env[a->n_env].val, PATH_MAX, "%s",
@@ -3375,7 +3771,7 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 		int idx;
 
 		if (jarr(l0, l0len, "path_map", &arr, &alen)) {
-			for (idx = 0; idx < CP_MAX_MAP; idx++) {
+			for (idx = 0;; idx++) {
 				const char *e;
 				size_t el;
 				int ty;
@@ -3393,6 +3789,15 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 					free(to);
 					continue;
 				}
+				if (a->n_map >= CP_MAX_MAP) {
+					snprintf(err, errcap, "path_map[%d]"
+						 "（%s）超出上限 %d（拒绝"
+						 "加载：静默截断=黑箱）",
+						 idx, fr, CP_MAX_MAP);
+					free(fr);
+					free(to);
+					return -1;
+				}
 				snprintf(a->map[a->n_map].from, PATH_MAX,
 					 "%s", fr);
 				snprintf(a->map[a->n_map].to, PATH_MAX, "%s",
@@ -3409,7 +3814,7 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 			}
 		}
 		if (jarr(l0, l0len, "lib_redirect", &arr, &alen)) {
-			for (idx = 0; idx < CP_MAX_LIBS; idx++) {
+			for (idx = 0;; idx++) {
 				const char *e;
 				size_t el;
 				int ty;
@@ -3428,6 +3833,16 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 					free(fr);
 					free(to);
 					continue;
+				}
+				if (a->n_lib >= CP_MAX_LIBS) {
+					snprintf(err, errcap, "lib_redirect"
+						 "[%d]（%s）超出上限 %d"
+						 "（拒绝加载：静默截断=黑箱）",
+						 idx, sn, CP_MAX_LIBS);
+					free(sn);
+					free(fr);
+					free(to);
+					return -1;
 				}
 				snprintf(a->lib[a->n_lib].soname, 128, "%s",
 					 sn);
@@ -3448,7 +3863,7 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 			}
 		}
 		if (jarr(l0, l0len, "chmod", &arr, &alen)) {
-			for (idx = 0; idx < 4; idx++) {
+			for (idx = 0;; idx++) {
 				const char *e;
 				size_t el;
 				int ty;
@@ -3465,6 +3880,15 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 					free(pa);
 					free(mo);
 					continue;
+				}
+				if (a->n_chm >= CP_MAX_CHMOD) {
+					snprintf(err, errcap, "chmod[%d]"
+						 "（%s）超出上限 %d（拒绝"
+						 "加载：静默截断=黑箱）",
+						 idx, pa, CP_MAX_CHMOD);
+					free(pa);
+					free(mo);
+					return -1;
 				}
 				snprintf(a->chm[a->n_chm].path, PATH_MAX, "%s",
 					 pa);
@@ -3488,7 +3912,7 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 		int idx;
 
 		if (jarr(l2, l2len, "install", &arr, &alen)) {
-			for (idx = 0; idx < CP_MAX_INST; idx++) {
+			for (idx = 0;; idx++) {
 				const char *e;
 				size_t el;
 				int ty;
@@ -3505,6 +3929,15 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 					free(fr);
 					free(to);
 					continue;
+				}
+				if (a->n_inst >= CP_MAX_INST) {
+					snprintf(err, errcap, "install[%d]"
+						 "（%s）超出上限 %d（拒绝"
+						 "加载：静默截断=黑箱）",
+						 idx, fr, CP_MAX_INST);
+					free(fr);
+					free(to);
+					return -1;
 				}
 				snprintf(a->inst[a->n_inst].src, PATH_MAX,
 					 "%s", fr);
@@ -3538,6 +3971,58 @@ static int cp_adapter_load(const char *name, struct cp_adapter *a, char *err,
 			snprintf(err, errcap, "env[%d] 缺 because", i);
 			return -1;
 		}
+	/* C2：SYSTEM-EVOLUTION §4.4 manifest 字段必须在场且类型正确
+	 * （先例=缺 because 拒绝；manifest 完整率是七步流水线验收判据，
+	 * 旧版无字段的适配器请重新 generate，不做静默兼容） */
+	{
+		const char *fld;
+		size_t flen;
+		char *risk = jstr(o, olen, "risk");
+
+		if (!risk) {
+			snprintf(err, errcap, "manifest 缺 risk（§4.4；"
+				 "请用新版 compat_generate 重新生成）");
+			return -1;
+		}
+		if (strcmp(risk, "low") && strcmp(risk, "medium")) {
+			snprintf(err, errcap, "risk 非法（%s，只允许 "
+				 "low/medium）", risk);
+			free(risk);
+			return -1;
+		}
+		free(risk);
+		if (!jarr(o, olen, "limitations", &fld, &flen)) {
+			snprintf(err, errcap, "manifest 缺 limitations 或"
+				 "非数组（§4.4）");
+			return -1;
+		}
+		if (!jarr(o, olen, "provides", &fld, &flen)) {
+			snprintf(err, errcap, "manifest 缺 provides 或非数组"
+				 "（§4.4）");
+			return -1;
+		}
+		s = jstr(o, olen, "created_by");
+		if (!s || !s[0]) {
+			snprintf(err, errcap, "manifest 缺 created_by（§4.4）");
+			free(s);
+			return -1;
+		}
+		free(s);
+		{
+			const char *v;
+			size_t vl;
+			int ty;
+
+			if (ai_json_obj_get(o, olen, "trace_id", &v, &vl,
+					    &ty) != 1 ||
+			    (ty != AI_JSON_NULL && ty != AI_JSON_STR)) {
+				snprintf(err, errcap, "manifest 缺 trace_id 或"
+					 "非 null/字符串（§4.4；无链路时"
+					 "应为 null 而不是省略）");
+				return -1;
+			}
+		}
+	}
 	return 0;
 }
 
@@ -4151,6 +4636,19 @@ static int cp_apply(const char *args, size_t alen, char **out)
 			goto done;
 		}
 	}
+	/* C2 整合修（累计所有权）：promote canary→default 二次 apply 时
+	 * workspace 早已存在，cp_ws_ensure 回 created=0 会把首份 state 的
+	 * created_workspace=true 覆写丢——rollback 误判「非本次所建」不
+	 * 销毁 workspace（镜像残留+loop 泄漏；C2 棒3 台架回滚六条④⑤
+	 * 实锤）。前一份 state 已记 created=1 则带下去。 */
+	if (!created) {
+		char pws[128], perr[256];
+		int pcreated = 0;
+
+		if (cp_state_read(a.name, pws, sizeof(pws), &pcreated,
+				  perr, sizeof(perr)) == 0 && pcreated)
+			created = 1;
+	}
 	cp_apply_state_write(&a, ws, created, &trial, state_path,
 			     sizeof(state_path));
 	f = open_memstream(&buf, &blen);
@@ -4227,6 +4725,8 @@ static int cp_verify(const char *args, size_t alen, char **out)
 	int neg_fail = 0, neg_total = 0;
 	char neg_detail[3][200];
 	int neg_ok[3];
+	int neg_present[3] = { 1, 1, 0 };  /* 3=unadapted：契约里有没有 */
+	int neg_ran[3] = { 0, 0, 0 };      /* 跑成了没有（没跑成≠缺席）*/
 	char *buf = NULL;
 	size_t blen = 0;
 	FILE *f;
@@ -4337,6 +4837,7 @@ static int cp_verify(const char *args, size_t alen, char **out)
 					}
 				st = NULL;
 				neg_total++;
+				neg_ran[0] = 1;
 				neg_ok[0] = seen > 0 && f2 > 0;
 				snprintf(neg_detail[0],
 					 sizeof(neg_detail[0]),
@@ -4347,15 +4848,53 @@ static int cp_verify(const char *args, size_t alen, char **out)
 			}
 		}
 	}
-	/* 负向 2：强制退出码 97 -> exit_code 断言必须失败 */
+	/* 负向 2：强制非期望退出码 -> exit_code 断言必须失败。
+	 * 退出码取自 contract.negative 的 forced_exit.exit（C2 起
+	 * expect.exit_code 可为任意 0-255：generate 保证变异值 != 期望值，
+	 * 期望 97 时用 98 避开撞车；旧数据缺 exit 字段时缺省 97） */
 	{
 		char script[PATH_MAX + 64];
 		char *t2[CP_MAX_ARGV + 4];
 		struct cp_sb sb2;
 		struct cp_ares r2[64];
 		int f2 = 0, u2 = 0, t2n = 0, j;
+		int neg_exit = 97;
 
-		snprintf(script, sizeof(script), "\"$0\" \"$@\"; exit 97");
+		{
+			const char *cj, *na;
+			size_t cjlen, nalen;
+
+			if (jobj(a.raw, a.rawlen, "contract", &cj, &cjlen) &&
+			    jarr(cj, cjlen, "negative", &na, &nalen)) {
+				int k;
+
+				for (k = 0; k < 8; k++) {
+					const char *e;
+					size_t el;
+					int ty;
+					char *id;
+
+					if (ai_json_arr_get(na, nalen, k, &e,
+							    &el, &ty) != 1)
+						break;
+					if (ty != AI_JSON_OBJ)
+						continue;
+					id = jstr(e, el, "id");
+					if (id && !strcmp(id, "forced_exit")) {
+						long long v = jll(e, el, "exit",
+								  97);
+
+						if (v >= 0 && v <= 255)
+							neg_exit = (int)v;
+						free(id);
+						break;
+					}
+					free(id);
+				}
+			}
+		}
+		snprintf(script, sizeof(script), "\"$0\" \"$@\"; exit %d",
+			 neg_exit);
 		t2[t2n++] = (char *)"/bin/sh";
 		t2[t2n++] = (char *)"-c";
 		t2[t2n++] = script;
@@ -4377,6 +4916,7 @@ static int cp_verify(const char *args, size_t alen, char **out)
 						pass_exit = r2[k].pass;
 					}
 				neg_total++;
+				neg_ran[1] = 1;
 				neg_ok[1] = seen > 0 && !pass_exit;
 				snprintf(neg_detail[1],
 					 sizeof(neg_detail[1]),
@@ -4387,31 +4927,99 @@ static int cp_verify(const char *args, size_t alen, char **out)
 			}
 		}
 	}
-	/* 负向 3：不带任何适配（无 overlay/env）跑同一目标 -> 契约必须失败 */
+	/* 负向 3：不带任何适配跑「宿主原件」-> 契约必须失败（C2 整合修）。
+	 * 数据驱动：契约 negative 无 unadapted 条目（增强型适配，generate
+	 * 仅对 blocked 目标产）→ 合法跳过。原实现跑 staged 副本去掉
+	 * overlay/env——但 chmod/install 类修复在 prepare 已物化进副本
+	 * （mode 0755 落盘），「无适配」跑它照样过（C2 棒3 台架 F08 实锤
+	 * observed=pass）。正语义=跑 a.host 宿主原件（ro-bind 其目录只读，
+	 * 真实权限/缺失进视图）：被适配救活的目标必在此失败，必要性才
+	 * 可证。轨迹断言按未适配跑跳过（cp_eval ran_unadapted=1）。 */
 	{
 		struct cp_sb sb2;
 		struct cp_run rr;
 		struct cp_ares r2[64];
 		int f2 = 0, u2 = 0, tot2;
+		char *uargv[2];
+		char *uro[1];
+		char udir[PATH_MAX];
+		char *slash;
 
-		if (!cp_sb_build(&sb2, ws, &info, 0, NULL, 0, targv,
-				 a.n_argv)) {
-			if (!cp_spawn(sb2.argv, NULL, 0, a.timeout_s, &rr)) {
-				tot2 = cp_eval(&a, &rr, 1, 1, r2, 64, &f2, &u2);
-				neg_total++;
-				neg_ok[2] = tot2 > 0 && f2 > 0;
-				snprintf(neg_detail[2],
-					 sizeof(neg_detail[2]),
-					 "unadapted exit=%d failed=%d/%d "
-					 "stderr=%.120s", rr.exit_code, f2,
-					 tot2, rr.err ? rr.err : "");
-				cp_run_free(&rr);
+		{
+			const char *cj, *na;
+			size_t cjlen, nalen;
+
+			if (jobj(a.raw, a.rawlen, "contract", &cj, &cjlen) &&
+			    jarr(cj, cjlen, "negative", &na, &nalen)) {
+				int k;
+
+				for (k = 0; k < 8; k++) {
+					const char *e;
+					size_t el;
+					int ty;
+					char *id;
+
+					if (ai_json_arr_get(na, nalen, k, &e,
+							    &el, &ty) != 1)
+						break;
+					if (ty != AI_JSON_OBJ)
+						continue;
+					id = jstr(e, el, "id");
+					if (id && !strcmp(id, "unadapted")) {
+						neg_present[2] = 1;
+						free(id);
+						break;
+					}
+					free(id);
+				}
+			}
+		}
+		if (neg_present[2]) {
+			snprintf(udir, sizeof(udir), "%s", a.host);
+			slash = strrchr(udir, '/');
+			if (slash && slash != udir)
+				*slash = '\0';
+			else
+				snprintf(udir, sizeof(udir), "/");
+			uro[0] = udir;
+			uargv[0] = a.host;
+			uargv[1] = NULL;
+			if (!cp_sb_build(&sb2, ws, &info, 0, uro, 1,
+					 uargv, 1)) {
+				if (!cp_spawn(sb2.argv, NULL, 0,
+					      a.timeout_s, &rr)) {
+					tot2 = cp_eval(&a, &rr, 1, 1, r2, 64,
+						       &f2, &u2);
+					neg_total++;
+					neg_ran[2] = 1;
+					neg_ok[2] = tot2 > 0 && f2 > 0;
+					snprintf(neg_detail[2],
+						 sizeof(neg_detail[2]),
+						 "unadapted(host) exit=%d "
+						 "failed=%d/%d "
+						 "stderr=%.120s",
+						 rr.exit_code, f2, tot2,
+						 rr.err ? rr.err : "");
+					cp_run_free(&rr);
+				}
 			}
 		}
 	}
-	for (i = 0; i < 3; i++)
+	for (i = 0; i < 3; i++) {
+		if (!neg_present[i])
+			continue;   /* 契约缺席（增强型适配）：合法无此负向 */
+		if (!neg_ran[i]) {
+			/* 在场却没跑成（sandbox/spawn 失败）：不可验证≠通过，
+			 * 按失败计——原实现读未初始化 neg_ok 的存量诚实洞一并
+			 * 收口（C2 整合修）。 */
+			snprintf(neg_detail[i], sizeof(neg_detail[i]),
+				 "负向用例未能运行（sandbox/spawn 失败）"
+				 "——按不可验证计失败");
+			neg_ok[i] = 0;
+		}
 		if (!neg_ok[i])
 			neg_fail++;
+	}
 
 	f = open_memstream(&buf, &blen);
 	if (!f) {
@@ -4443,12 +5051,16 @@ static int cp_verify(const char *args, size_t alen, char **out)
 		"\"observed\":\"%s\",\"pass\":%s,\"detail\":",
 		neg_ok[1] ? "fail" : "pass", neg_ok[1] ? "true" : "false");
 	cp_jstr(f, neg_detail[1]);
-	fputs("},", f);
-	fprintf(f, "{\"id\":\"unadapted\",\"expect\":\"fail\","
-		"\"observed\":\"%s\",\"pass\":%s,\"detail\":",
-		neg_ok[2] ? "fail" : "pass", neg_ok[2] ? "true" : "false");
-	cp_jstr(f, neg_detail[2]);
-	fputs("}]", f);
+	fputc('}', f);
+	if (neg_present[2]) {
+		fprintf(f, ",{\"id\":\"unadapted\",\"expect\":\"fail\","
+			"\"observed\":\"%s\",\"pass\":%s,\"detail\":",
+			neg_ok[2] ? "fail" : "pass",
+			neg_ok[2] ? "true" : "false");
+		cp_jstr(f, neg_detail[2]);
+		fputc('}', f);
+	}
+	fputs("]", f);
 	fputs(",\"syscall_trace\":{\"available\":", f);
 	fputs(trace_used && a.trace ? "true" : "false", f);
 	fprintf(f, ",\"bytes\":%zu,\"asserts_unverifiable\":%d}",

@@ -475,11 +475,20 @@ install-autocondense: autocondense
 #  - 挂 all 不挂 install（主会话整合改判：run_all 第 62 门 c1_compat_samples
 #    依赖本产物存在，全量 make 后不产即红灯；install 仍归 build-rootfs.sh
 #    第 [5] 步——构建≠安装）
+# C2 棒2（COMPAT-C2-DESIGN §1）：compat_main.c 扩 generate/apply/verify/
+#  rollback 四子命令——经 exec_compat_channel 直调，apply/verify/rollback
+#  的落地/契约/回滚链在 compat_tools.c 内引用 workspace 面
+#  （ai_ws_ensure_backing/ai_ws_info_get/ai_ws_valid_name/ai_ws_destroy），
+#  实现在 tools/workspace_tools.c——其非 libc 未定义符号仅 ai_json_*
+#  四个（runtime/ai_json_util.c，已在本链）。故 CP_OBJS 增链
+#  workspace_tools.o 一个（lease/policy 面零拖入；gc-sections 按调用图
+#  裁剪，probe-only 调用图不受影响）。
 # ============================================================================
 CP_BIN   := aik-compat
 CP_BUILD := build-compat
 CP_OBJS  := $(CP_BUILD)/tools/compat_main.o \
 	    $(CP_BUILD)/tools/compat_tools.o \
+	    $(CP_BUILD)/tools/workspace_tools.o \
 	    $(CP_BUILD)/runtime/ai_json_util.o
 
 all: $(CP_BIN)

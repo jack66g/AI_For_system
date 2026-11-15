@@ -13,6 +13,20 @@
   audit status                    /proc/ai/audit 首行 + chain sysfs 状态
   compat scan PATH [PATH...]      逐目标 aik-compat probe → 分类 manifest
                                  jsonl（C1；--probe/--jsonl；末行 C1_SCAN 汇总）
+  compat plan TARGET [--name N]   probe+generate 二段 → 完整适配 manifest
+                                 （C2；末行 C2_PLAN；adapter 字段如实透传）
+  compat run NAME [--yes]         =aik-compat apply（W2：无 --yes 拒绝；
+                                 --yes 时先打印将执行动作摘要）
+  compat verify NAME              =aik-compat verify（契约+三类负向自检）
+  compat rollback NAME            =aik-compat rollback（幂等）+ promote
+                                 launcher 恢复/删除（按台账 pre 快照）
+  compat promote NAME --stage S   shadow=只跑 verify；canary=apply 落
+                                 workspace overlay（宿主零写）；default=
+                                 apply+verify 全绿后写宿主
+                                 /usr/local/bin/<launcher>（唯一宿主写点，
+                                 pre= 快照两态入台账）
+  compat monitor [--once]         轮询 promote 台账+compat state+verify
+                                 复跑；default 级 launcher 失效只报告不删
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -30,6 +44,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -958,6 +973,704 @@ def cmd_compat_scan(args):
     return 0
 
 
+# ---------------------------------------------------------- compat C2 ----
+# C2（COMPAT-C2-DESIGN §1 棒2）：plan/run/verify/rollback/promote/monitor
+# 聚合子命令。执行面全部 fork aik-compat（generate/apply/verify/rollback
+# 与 tool-call 面同一判定器与落地链，aik-compat 内经 exec_compat_channel
+# 直调）；本面只做编排、W2 --yes 确认门与 promote 台账（aikctl 自有
+# <compat_root>/promote/<name>.json，原子写，不动 compat state 文件）。
+#
+# 旁路风险（各子命令帮助文本同步注明）：run/promote 直调 aik-compat，
+# 不经 executor 的 uid→档位闸门（executor.c:88）——动作等同当前 shell
+# 用户直接执行；promote default 写宿主 /usr/local/bin 需 root。
+COMPAT_PLAN_SCHEMA = 'aikernel.compat/plan/1'
+PROMOTE_SCHEMA = 'aikernel.compat/promote/1'
+COMPAT_ROOT_DEFAULT = '/var/lib/aikernel/compat'
+COMPAT_LAUNCHER_DIR = '/usr/local/bin'
+COMPAT_GEN_TIMEOUT = 120      # plan 的 generate 段（静态生成，无试跑）
+COMPAT_APPLY_TIMEOUT = 600    # apply/rollback（workspace 创建+试跑）
+COMPAT_VERIFY_TIMEOUT = 300   # verify（契约+三类负向自检）
+AIK_COMPAT_SUB_RE = re.compile(r'^AIK_COMPAT sub=(\S+) rc=(-?\d+)\s*$')
+LAUNCHER_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
+
+
+def compat_root():
+    return os.environ.get('AIKERNEL_COMPAT_ROOT', COMPAT_ROOT_DEFAULT) or \
+        COMPAT_ROOT_DEFAULT
+
+
+def promote_ledger_path(name):
+    return os.path.join(compat_root(), 'promote', '%s.json' % name)
+
+
+def compat_state_path(name):
+    return os.path.join(compat_root(), 'state', '%s.applied.json' % name)
+
+
+def compat_adapter_path(name):
+    return os.path.join(compat_root(), 'adapters', '%s.json' % name)
+
+
+def compat_run_sub(probe, sub_args, timeout):
+    """跑 aik-compat <sub_args…> → (rc, stdout 原文)；rc=None 表示无法
+    执行/输出违约（第二项为人话）。rc = aik-compat 退出码（0/1/2）。"""
+    try:
+        cp = subprocess.run([probe] + sub_args, capture_output=True,
+                            timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, 'aik-compat 超时（>%ss 被杀）：%s' % (
+            timeout, ' '.join(sub_args[:2]))
+    except OSError as e:
+        return None, 'aik-compat 启动失败: %s' % e
+    text = cp.stdout.decode('utf-8', errors='replace')
+    for ln in reversed(text.splitlines()):
+        m = AIK_COMPAT_SUB_RE.match(ln.strip())
+        if m:
+            return int(m.group(2)), text
+    return None, ('aik-compat 输出违约（缺 AIK_COMPAT sub= 末行）: %r'
+                  % text[-160:])
+
+
+def compat_first_json(text):
+    """工具输出首行 → (dict, None) 或 (None, 人话)；ERROR: 行如实回传。"""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None, '（无输出）'
+    first = lines[0].strip()
+    if first.startswith('{'):
+        try:
+            obj = json.loads(first)
+        except ValueError as e:
+            return None, '结果 JSON 解析失败: %s' % e
+        if isinstance(obj, dict):
+            return obj, None
+        return None, '结果不是 JSON object'
+    return None, first[:300]
+
+
+def compat_map_cli_exit(rc):
+    return rc if rc is not None else 1
+
+
+def compat_forward(text):
+    """aik-compat stdout 原样转发（含末行 AIK_COMPAT 汇总）。"""
+    if text:
+        print(text, end='' if text.endswith('\n') else '\n')
+
+
+def cmd_compat_plan(args):
+    """probe+generate 二段 → 完整适配 manifest（jsonl 行 + C2_PLAN 汇总）。
+
+    棒1 新字段（risk/limitations/provides/created_by/trace_id）按合同读：
+    在 generate 输出的 adapter 内如实透传，缺席不补造。"""
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    target = os.path.abspath(args.target)
+    name = args.name
+    if not name:
+        base = os.path.basename(target)
+        name = re.sub(r'[^A-Za-z0-9_.-]+', '-', base)[:32].strip('.-')
+        name = name or 'compat-target'
+    # —— probe 段（与 scan 同一条判定路径）——
+    pj, probe_error = None, None
+    try:
+        cp = subprocess.run([probe, 'probe', target], capture_output=True,
+                            timeout=COMPAT_PROBE_TIMEOUT)
+        pj = compat_parse_probe(cp.stdout)
+    except subprocess.TimeoutExpired:
+        probe_error = 'probe 超时（>%ds 被杀）' % COMPAT_PROBE_TIMEOUT
+    except RuntimeError as e:
+        probe_error = 'probe 输出违约: %s' % e
+    except OSError as e:
+        probe_error = 'probe 启动失败: %s' % e
+    # —— generate 段（manifest 主体；不可修类由工具面诚实拒绝）——
+    gen = ['generate', name, target]
+    if args.workspace:
+        gen += ['--workspace', args.workspace]
+    for kv in args.interpreter_map:
+        gen += ['--interpreter-map', kv]
+    for kv in args.lib_source:
+        gen += ['--lib-source', kv]
+    for kv in args.env:
+        gen += ['--env', kv]
+    for s in args.expect_stdout:
+        gen += ['--expect-stdout', s]
+    for s in args.expect_stderr_not:
+        gen += ['--expect-stderr-not', s]
+    if args.expect_exit is not None:
+        gen += ['--expect-exit', str(args.expect_exit)]
+    if args.expect_max_ms is not None:
+        gen += ['--expect-max-ms', str(args.expect_max_ms)]
+    for a in args.arg:
+        gen += ['--arg', a]
+    if args.timeout_s is not None:
+        gen += ['--timeout-s', str(args.timeout_s)]
+    if args.dry_run:
+        gen.append('--dry-run')
+    adapter, adapter_error = None, None
+    grc, gtext = compat_run_sub(probe, gen, COMPAT_GEN_TIMEOUT)
+    if grc is None:
+        adapter_error = gtext
+    else:
+        obj, perr = compat_first_json(gtext)
+        if grc == 0 and obj is not None and obj.get('ok'):
+            adapter = obj
+        else:
+            adapter_error = 'generate 失败（rc=%d）：%s' % (
+                grc, perr or '结果未带 ok=true')
+    if adapter is not None:
+        verdict = 'planned'
+    elif pj is not None:
+        fatal = [r for r in (pj.get('reasons') or [])
+                 if isinstance(r, dict) and r.get('fatal')]
+        adaptable = [r for r in fatal if r.get('adaptable')]
+        verdict = 'not_adaptable' if fatal and not adaptable else 'error'
+    else:
+        verdict = 'error'
+    row = {
+        'schema': COMPAT_PLAN_SCHEMA,
+        'target': target,
+        'name': name,
+        'probe': pj if pj is not None else {'error': probe_error},
+        'runnable': bool(pj.get('runnable')) if pj is not None else None,
+        'adapter': adapter,
+        'adapter_error': adapter_error,
+        'verdict': verdict,
+        'created_by': 'aikctl',
+        'trace_id': None,
+    }
+    out, opened = sys.stdout, None
+    if args.jsonl:
+        try:
+            parent = os.path.dirname(os.path.abspath(args.jsonl))
+            os.makedirs(parent, exist_ok=True)
+            opened = open(args.jsonl, 'w', encoding='utf-8')
+            out = opened
+        except OSError as e:
+            print('compat plan: 打开 %s 失败: %s' % (args.jsonl, e),
+                  file=sys.stderr)
+            return 1
+    try:
+        print(json.dumps(row, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':')), file=out)
+        print('C2_PLAN target=%s name=%s runnable=%s adapter=%s verdict=%s'
+              % (target, name,
+                 '?' if pj is None else int(bool(pj.get('runnable'))),
+                 'ok' if adapter is not None else 'error', verdict),
+              file=out)
+    except OSError as e:
+        print('compat plan: 写 manifest 失败: %s' % e, file=sys.stderr)
+        return 1
+    finally:
+        if opened:
+            opened.close()
+    if adapter is None:
+        why = adapter_error or probe_error
+        if why:
+            print('compat plan: %s' % why, file=sys.stderr)
+        return 1
+    return 0
+
+
+def compat_adapter_summary(name):
+    """读适配器 → 摘要行（run/promote 的 --yes 动作摘要）。棒1 新字段
+    按合同读：在场即展示，缺席如实标注不补造。→ (摘要行, None)/(None, 人话)。"""
+    try:
+        with open(compat_adapter_path(name), 'r', errors='replace') as f:
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            raise ValueError('不是 JSON object')
+    except (OSError, ValueError) as e:
+        return None, ('适配器 %s 不可读（%s: %s）。\n'
+                      '下一步：先 aikctl compat plan <target> --name %s'
+                      ' 生成适配器。' % (name, compat_adapter_path(name), e,
+                                        name))
+    layers = obj.get('layers') if isinstance(obj.get('layers'), dict) else {}
+    l0 = layers.get('L0') if isinstance(layers.get('L0'), dict) else {}
+    l2 = layers.get('L2') if isinstance(layers.get('L2'), dict) else {}
+    tgt = obj.get('target') if isinstance(obj.get('target'), dict) else {}
+    counts = ' '.join('%s=%d' % (k, len(l0.get(k) or []))
+                      for k in ('env', 'path_map', 'lib_redirect', 'chmod')
+                      if isinstance(l0.get(k), list))
+    risk = obj.get('risk')
+    parts = ['适配器 %s:' % name,
+             'target=%s' % tgt.get('host', '?'),
+             'workspace=%s' % l2.get('workspace', '?'),
+             'rules(%s)' % counts if counts else 'rules(L0=0)',
+             'usr_overlay=%s' % l2.get('usr_overlay')]
+    parts.append('risk=%s' % risk if risk is not None
+                 else 'risk=(棒1字段缺席)')
+    return ' '.join(parts), None
+
+
+def cmd_compat_run(args):
+    """=aik-compat apply（W2 硬门：无 --yes 拒绝并给下一步；
+    --yes 时先打印将执行动作摘要）。"""
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    if not args.yes:
+        print('拒绝：compat run 是 W2 写操作（在 workspace 内落地适配器并'
+              '试跑；试跑失败自动回滚），必须 --yes 显式确认。\n'
+              '注意：本面不经 executor 的 uid 档位闸，动作等同当前用户'
+              '直接执行。\n'
+              '下一步：复核适配器（aikctl compat plan 可重新查看）后执行 '
+              'aikctl compat run %s --yes' % args.name, file=sys.stderr)
+        return 2
+    summary, serr = compat_adapter_summary(args.name)
+    print('将执行: aik-compat apply %s（W2；workspace 内落地+试跑，'
+          '试跑失败自动回滚）' % args.name)
+    print(serr or summary)
+    sub = ['apply', args.name]
+    if args.workspace:
+        sub += ['--workspace', args.workspace]
+    rc, text = compat_run_sub(probe, sub, COMPAT_APPLY_TIMEOUT)
+    if rc is None:
+        print('compat run: %s' % text, file=sys.stderr)
+        return 1
+    compat_forward(text)
+    return compat_map_cli_exit(rc)
+
+
+def cmd_compat_verify(args):
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    sub = ['verify', args.name] + (['--no-trace'] if args.no_trace else [])
+    rc, text = compat_run_sub(probe, sub, COMPAT_VERIFY_TIMEOUT)
+    if rc is None:
+        print('compat verify: %s' % text, file=sys.stderr)
+        return 1
+    compat_forward(text)
+    return compat_map_cli_exit(rc)
+
+
+# ----------------------------------------------------- promote 台账/launcher ----
+def promote_load(name):
+    try:
+        with open(promote_ledger_path(name), 'r', errors='replace') as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def promote_save(name, ledger):
+    """台账原子写（tmp + os.replace；0600）。"""
+    path = promote_ledger_path(name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = '%s.tmp.%d' % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (_canon(ledger) + '\n').encode('utf-8'))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def promote_history_add(ledger, action, detail):
+    ledger.setdefault('history', []).append(
+        {'ts': int(time.time()), 'action': action, 'detail': str(detail)[:400]})
+
+
+def _md5_file(path):
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ws_meta_read_dict(ws):
+    """workspace meta（<ws root>/<name>.meta，key=value 行）→ dict；
+    不存在返回 None。"""
+    root = os.environ.get('AIKERNEL_WORKSPACE_ROOT', '/var/lib/aikernel/ws')
+    try:
+        with open(os.path.join(root, '%s.meta' % ws), 'r',
+                  errors='replace') as f:
+            meta = {}
+            for ln in f:
+                if '=' in ln:
+                    k, v = ln.rstrip('\r\n').split('=', 1)
+                    meta[k] = v
+            return meta
+    except OSError:
+        return None
+
+
+def promote_build_wrapper(name):
+    """适配器 + workspace meta → default 级 launcher wrapper 脚本内容。
+
+    复刻 compat_tools.c cp_sb_build 的 aik-sandbox argv（与 apply 试跑/
+    verify 同款视图：--usr-overlay + 限额 + net；L0 env 注入；契约固定
+    argv[1:] 前置，用户参数经 "$@" 追加）。
+    → (脚本文本, None) 或 (None, 人话)。"""
+    try:
+        with open(compat_adapter_path(name), 'r', errors='replace') as f:
+            ad = json.load(f)
+        if not isinstance(ad, dict):
+            raise ValueError('不是 JSON object')
+    except (OSError, ValueError) as e:
+        return None, '适配器 %s 不可读: %s' % (name, e)
+    layers = ad.get('layers') if isinstance(ad.get('layers'), dict) else {}
+    l0 = layers.get('L0') if isinstance(layers.get('L0'), dict) else {}
+    l2 = layers.get('L2') if isinstance(layers.get('L2'), dict) else {}
+    tgt = ad.get('target') if isinstance(ad.get('target'), dict) else {}
+    inside = tgt.get('inside')
+    ws = l2.get('workspace')
+    if not inside or not ws:
+        return None, '适配器缺 target.inside / layers.L2.workspace'
+    contract = ad.get('contract') if isinstance(ad.get('contract'), dict) \
+        else {}
+    argv = [a for a in (contract.get('argv') or []) if isinstance(a, str)]
+    fixed = argv[1:] if argv else []     # argv[0] = inside（入口本体）
+    meta = ws_meta_read_dict(ws)
+    if meta is None:
+        return None, ("workspace '%s' meta 不存在"
+                      "（先 compat run --yes 完成 apply）" % ws)
+    sb = shutil.which('aik-sandbox') or '/usr/local/bin/aik-sandbox'
+    parts = [sb, 'run', ws]
+    if meta.get('backing') == 'disk' and meta.get('image'):
+        parts.append('--backing=disk:%s' % meta['image'])
+    else:
+        parts.append('--backing=tmpfs')
+    parts.append('--cpus=%s' % meta.get('cpus', '1.00'))
+    parts.append('--mem-mb=%s' % meta.get('mem_mb', '1024'))
+    parts.append('--pids=%s' % meta.get('pids_max', '256'))
+    net = meta.get('net', 'none')
+    if net == 'host':
+        parts.append('--net=host')
+    elif net == 'veth' and meta.get('net_ns'):
+        parts.append('--net=join:%s' % meta['net_ns'])
+    else:
+        parts.append('--net=none')
+    if l2.get('usr_overlay'):
+        parts.append('--usr-overlay')
+    parts.append('--')
+    parts.append(inside)
+    parts.extend(fixed)
+    lines = ['#!/bin/sh',
+             '# aikctl compat promote default 级 launcher（适配器 %s）' % name,
+             '# 由 aikctl 生成：workspace overlay 入口薄 wrapper；'
+             'promote 台账记录 pre 快照，回滚经 compat restore 恢复/删除']
+    for e in (l0.get('env') or []):
+        if isinstance(e, dict) and e.get('key') is not None:
+            p = '%s=%s' % (e['key'], e.get('value', ''))
+            lines.append("export '%s'" % p.replace("'", "'\\''"))
+    lines.append('exec %s "$@"' % ' '.join(shlex.quote(p) for p in parts))
+    return '\n'.join(lines) + '\n', None
+
+
+def cmd_compat_promote(args):
+    """shadow=只跑 verify；canary=apply 落 workspace overlay（宿主零写）；
+    default=apply+verify 全绿后写宿主 /usr/local/bin/<launcher>（唯一
+    宿主写点：写前记 pre= 快照两态入台账）。"""
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    if args.stage in ('canary', 'default') and not args.yes:
+        extra = ('（default 级将写宿主 %s/<launcher>——唯一宿主写点）'
+                 % COMPAT_LAUNCHER_DIR) if args.stage == 'default' \
+            else '（workspace 内落地，宿主零写）'
+        print('拒绝：promote --stage %s 是 W2 写操作%s，必须 --yes 显式'
+              '确认。\n'
+              '注意：本面不经 executor 的 uid 档位闸，动作等同当前用户'
+              '直接执行。\n'
+              '下一步：aikctl compat promote %s --stage %s --yes'
+              % (args.stage, extra, args.name, args.stage), file=sys.stderr)
+        return 2
+    ledger = promote_load(args.name)
+    if ledger is None:
+        ledger = {'schema': PROMOTE_SCHEMA, 'name': args.name,
+                  'stages': {}, 'launcher': None, 'history': []}
+    if args.stage == 'shadow':
+        sub = ['verify', args.name] + (['--no-trace'] if args.no_trace else [])
+        rc, text = compat_run_sub(probe, sub, COMPAT_VERIFY_TIMEOUT)
+        if rc is None:
+            print('promote shadow: %s' % text, file=sys.stderr)
+            return 1
+        compat_forward(text)
+        ok = rc == 0
+        ledger['stages']['shadow'] = {'ts': int(time.time()), 'ok': ok,
+                                      'rc': rc}
+        promote_history_add(ledger, 'promote.shadow', 'verify rc=%d' % rc)
+        promote_save(args.name, ledger)
+        print('C2_PROMOTE name=%s stage=shadow ok=%d ledger=%s'
+              % (args.name, ok, promote_ledger_path(args.name)))
+        return 0 if ok else 1
+    if args.stage == 'canary':
+        summary, serr = compat_adapter_summary(args.name)
+        print('将执行: ① aik-compat apply %s（W2；宿主零写，落在 '
+              'workspace overlay）② verify（不经 executor uid 档位闸）'
+              % args.name)
+        print(serr or summary)
+        rc, text = compat_run_sub(probe, ['apply', args.name],
+                                  COMPAT_APPLY_TIMEOUT)
+        if rc is None:
+            print('promote canary: %s' % text, file=sys.stderr)
+            return 1
+        compat_forward(text)
+        if rc != 0:
+            ledger['stages']['canary'] = {'ts': int(time.time()),
+                                          'ok': False, 'apply_rc': rc}
+            promote_history_add(ledger, 'promote.canary', 'apply rc=%d' % rc)
+            promote_save(args.name, ledger)
+            return compat_map_cli_exit(rc)
+        vrc, vtext = compat_run_sub(probe, ['verify', args.name],
+                                    COMPAT_VERIFY_TIMEOUT)
+        if vrc is None:
+            print('promote canary: %s' % vtext, file=sys.stderr)
+            return 1
+        compat_forward(vtext)
+        ok = vrc == 0
+        ledger['stages']['canary'] = {'ts': int(time.time()), 'ok': ok,
+                                      'apply_rc': 0, 'verify_rc': vrc}
+        promote_history_add(ledger, 'promote.canary',
+                            'apply ok; verify rc=%d' % vrc)
+        promote_save(args.name, ledger)
+        print('C2_PROMOTE name=%s stage=canary ok=%d ledger=%s'
+              % (args.name, ok, promote_ledger_path(args.name)))
+        return 0 if ok else 1
+    # ---- default：apply + verify 全绿 → 写宿主 launcher（唯一宿主写点）----
+    summary, serr = compat_adapter_summary(args.name)
+    print('将执行: ① aik-compat apply %s ② verify ③ 写宿主 %s/<launcher>'
+          '（唯一宿主写点；写前记 pre= 快照两态入台账；不经 executor '
+          'uid 档位闸）' % (args.name, COMPAT_LAUNCHER_DIR))
+    print(serr or summary)
+    launcher = args.launcher or args.name
+    if not LAUNCHER_NAME_RE.match(launcher):
+        print('promote default: 非法 launcher 名（[A-Za-z0-9][A-Za-z0-9_.-]'
+              '{0,63}）：%s' % launcher, file=sys.stderr)
+        return 2
+    lpath = os.path.join(COMPAT_LAUNCHER_DIR, launcher)
+    rc, text = compat_run_sub(probe, ['apply', args.name],
+                              COMPAT_APPLY_TIMEOUT)
+    if rc is None:
+        print('promote default: %s' % text, file=sys.stderr)
+        return 1
+    compat_forward(text)
+    if rc != 0:
+        ledger['stages']['default'] = {'ts': int(time.time()), 'ok': False,
+                                       'apply_rc': rc}
+        promote_history_add(ledger, 'promote.default',
+                            'apply rc=%d（未写宿主）' % rc)
+        promote_save(args.name, ledger)
+        return compat_map_cli_exit(rc)
+    vrc, vtext = compat_run_sub(probe, ['verify', args.name],
+                                COMPAT_VERIFY_TIMEOUT)
+    if vrc is None:
+        print('promote default: %s' % vtext, file=sys.stderr)
+        return 1
+    compat_forward(vtext)
+    if vrc != 0:
+        ledger['stages']['default'] = {'ts': int(time.time()), 'ok': False,
+                                       'apply_rc': 0, 'verify_rc': vrc}
+        promote_history_add(ledger, 'promote.default',
+                            'verify rc=%d（未写宿主）' % vrc)
+        promote_save(args.name, ledger)
+        return compat_map_cli_exit(vrc)
+    wrapper, werr = promote_build_wrapper(args.name)
+    if wrapper is None:
+        print('promote default: %s（未写宿主）' % werr, file=sys.stderr)
+        return 1
+    pre = {'exists': False}
+    bak = os.path.join(compat_root(), 'promote',
+                       '%s.launcher.bak' % args.name)
+    if os.path.exists(lpath):
+        try:
+            os.makedirs(os.path.dirname(bak), exist_ok=True)
+            shutil.copy2(lpath, bak)
+            pre = {'exists': True, 'md5': _md5_file(lpath)}
+        except OSError as e:
+            print('promote default: pre 快照/备份失败（不写宿主）: %s' % e,
+                  file=sys.stderr)
+            return 1
+    try:
+        tmp = '%s.tmp.%d' % (lpath, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
+        try:
+            os.write(fd, wrapper.encode('utf-8'))
+        finally:
+            os.close(fd)
+        os.replace(tmp, lpath)
+    except OSError as e:
+        print('promote default: 写 %s 失败: %s' % (lpath, e), file=sys.stderr)
+        return 1
+    installed_md5 = _md5_file(lpath)
+    ledger['launcher'] = {'name': launcher, 'path': lpath, 'pre': pre,
+                          'installed_md5': installed_md5,
+                          'backup': bak if pre['exists'] else None}
+    ledger['stages']['default'] = {'ts': int(time.time()), 'ok': True,
+                                   'apply_rc': 0, 'verify_rc': 0}
+    promote_history_add(ledger, 'promote.default',
+                        'launcher=%s installed_md5=%s pre_exists=%s'
+                        % (launcher, installed_md5, pre['exists']))
+    promote_save(args.name, ledger)
+    print('C2_PROMOTE name=%s stage=default ok=1 launcher=%s md5=%s pre=%s '
+          'ledger=%s' % (args.name, lpath, installed_md5,
+                         'exists' if pre['exists'] else 'absent',
+                         promote_ledger_path(args.name)))
+    return 0
+
+
+def promote_rollback_launcher(name):
+    """按台账恢复/删除 launcher（幂等）。→ (exit_code, 消息 or None)。
+    exit_code 0=无需处理/已恢复；1=需人工介入（md5 漂移/备份缺失）。"""
+    ledger = promote_load(name)
+    if not ledger:
+        return 0, None
+    la = ledger.get('launcher')
+    if not isinstance(la, dict) or not la.get('installed_md5'):
+        return 0, None
+    lpath = la.get('path')
+    if not lpath or not os.path.exists(lpath):
+        la['installed_md5'] = None     # 已不在场：幂等清账
+        promote_history_add(ledger, 'rollback.launcher',
+                            'launcher 已不在场（幂等）')
+        promote_save(name, ledger)
+        return 0, None
+    cur = _md5_file(lpath) if os.access(lpath, os.R_OK) else None
+    if cur != la.get('installed_md5'):
+        promote_history_add(ledger, 'rollback.launcher',
+                            'md5 漂移（installed=%s current=%s），不自动删除'
+                            % (la.get('installed_md5'), cur))
+        promote_save(name, ledger)
+        return 1, ('launcher %s 与台账 md5 不符（可能被外部修改），未自动'
+                   '删除。下一步：人工确认后处理，或重新 promote default。'
+                   % lpath)
+    pre = la.get('pre') if isinstance(la.get('pre'), dict) else {'exists': False}
+    try:
+        if pre.get('exists'):
+            bak = la.get('backup')
+            if bak and os.path.exists(bak):
+                shutil.copy2(bak, lpath)
+                os.chmod(lpath, 0o755)
+                msg = 'launcher %s 已按 pre 备份恢复' % lpath
+            else:
+                promote_history_add(ledger, 'rollback.launcher',
+                                    'pre 备份缺失，未恢复')
+                promote_save(name, ledger)
+                return 1, ('pre 备份缺失（%s），launcher %s 未动。'
+                           '下一步：人工恢复。' % (la.get('backup'), lpath))
+        else:
+            os.unlink(lpath)
+            msg = 'launcher %s 已删除（pre=不存在态）' % lpath
+    except OSError as e:
+        return 1, 'launcher 恢复/删除失败: %s' % e
+    la['installed_md5'] = None
+    promote_history_add(ledger, 'rollback.launcher', msg)
+    promote_save(name, ledger)
+    return 0, msg
+
+
+def cmd_compat_rollback(args):
+    """=aik-compat rollback（幂等）+ promote 台账 launcher 恢复/删除。"""
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    sub = ['rollback', args.name]
+    if args.workspace:
+        sub += ['--workspace', args.workspace]
+    rc, text = compat_run_sub(probe, sub, COMPAT_APPLY_TIMEOUT)
+    if rc is None:
+        print('compat rollback: %s' % text, file=sys.stderr)
+        return 1
+    compat_forward(text)
+    lrc, lmsg = promote_rollback_launcher(args.name)
+    if lmsg:
+        print(lmsg)
+    if rc != 0:
+        return compat_map_cli_exit(rc)
+    return lrc
+
+
+# ---------------------------------------------------------------- monitor ----
+def compat_monitor_once(probe, no_trace=False):
+    """单轮：promote 台账 + compat state 在场 + verify 复跑 + default 级
+    launcher 有效性。→ (problems, [行])。launcher 失效只报告不自动删。"""
+    lines, problems = [], 0
+    pdir = os.path.join(compat_root(), 'promote')
+    try:
+        entries = sorted(e for e in os.listdir(pdir) if e.endswith('.json'))
+    except OSError:
+        lines.append('C2_MONITOR ledger_dir=%s 不可读（无 promote 台账）'
+                     % pdir)
+        lines.append('C2_MONITOR checked=0 problems=0')
+        return 0, lines
+    checked = 0
+    for ent in entries:
+        name = ent[:-5]
+        ledger = promote_load(name)
+        if not ledger:
+            lines.append('PROBLEM name=%s 台账不可读/非 JSON：%s' % (name, ent))
+            problems += 1
+            continue
+        checked += 1
+        stages = ledger.get('stages') or {}
+        applied = os.path.exists(compat_state_path(name))
+        vstat = 'not_applied'
+        if applied:
+            vrc, _vt = compat_run_sub(
+                probe, ['verify', name] + (['--no-trace'] if no_trace else []),
+                COMPAT_VERIFY_TIMEOUT)
+            vstat = 'ok' if vrc == 0 else ('rc=%s' % vrc)
+            if vrc != 0:
+                problems += 1
+        la = ledger.get('launcher') or {}
+        lstat = 'n/a'
+        lpath = la.get('path')
+        if la.get('installed_md5'):
+            if not lpath or not os.path.exists(lpath):
+                lstat = 'MISSING'
+                problems += 1
+            else:
+                try:
+                    cur = _md5_file(lpath)
+                except OSError:
+                    cur = None
+                if cur != la.get('installed_md5'):
+                    lstat = 'TAMPER'
+                    problems += 1
+                else:
+                    lstat = 'ok'
+        stage_now = max(stages) if stages else '-'
+        lines.append('C2_MON name=%s last_stage=%s applied=%d verify=%s '
+                     'launcher=%s' % (name, stage_now, applied, vstat, lstat))
+        if lstat == 'MISSING':
+            lines.append('PROBLEM name=%s default 级 launcher %s 已失效'
+                         '（如实报告；未自动删除/重建）' % (name, lpath))
+        elif lstat == 'TAMPER':
+            lines.append('PROBLEM name=%s launcher %s md5 与台账不符'
+                         '（如实报告；未自动处理）' % (name, lpath))
+    lines.append('C2_MONITOR checked=%d problems=%d' % (checked, problems))
+    return problems, lines
+
+
+def cmd_compat_monitor(args):
+    """轮询 promote 台账+compat state+verify 复跑（--once 单轮即退，供
+    cron；缺省 --interval 60s 循环，Ctrl-C 退）。"""
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    while True:
+        problems, lines = compat_monitor_once(probe, args.no_trace)
+        for ln in lines:
+            print(ln)
+        if args.once:
+            return 0 if problems == 0 else 1
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -1009,6 +1722,101 @@ def main(argv=None):
                       help='manifest 输出文件（缺省打 stdout；末行 C1_SCAN '
                            '汇总随 manifest 同流）')
     p_cs.set_defaults(func=cmd_compat_scan)
+
+    # C2（COMPAT-C2-DESIGN §1 棒2）：plan/run/verify/rollback/promote/monitor
+    p_cp2 = cpsub.add_parser(
+        'plan', help='probe+generate 二段 → 完整适配 manifest（C2）')
+    p_cp2.add_argument('target', metavar='TARGET', help='宿主目标路径')
+    p_cp2.add_argument('--name', default=None, metavar='N',
+                       help='适配器名（缺省从 target basename 派生）')
+    p_cp2.add_argument('--jsonl', default=None, metavar='OUT',
+                       help='manifest 输出文件（缺省 stdout；末行 C2_PLAN）')
+    p_cp2.add_argument('--probe', default=None, metavar='BIN',
+                       help='aik-compat 二进制（默认 PATH 上找）')
+    p_cp2.add_argument('--workspace', default=None, metavar='W',
+                       help='L2 workspace 名（缺省 cmp-<name>）')
+    p_cp2.add_argument('--interpreter-map', action='append', default=[],
+                       metavar='K=V', help='解释器映射（可多次）')
+    p_cp2.add_argument('--lib-source', action='append', default=[],
+                       metavar='S=PATH', help='库来源（可多次）')
+    p_cp2.add_argument('--env', action='append', default=[], metavar='K=V',
+                       help='注入环境变量（可多次）')
+    p_cp2.add_argument('--expect-exit', type=int, default=None, metavar='N',
+                       help='契约期望退出码')
+    p_cp2.add_argument('--expect-stdout', action='append', default=[],
+                       metavar='S', help='契约 stdout 须含（可多次）')
+    p_cp2.add_argument('--expect-stderr-not', action='append', default=[],
+                       metavar='S', help='契约 stderr 须不含（可多次）')
+    p_cp2.add_argument('--expect-max-ms', type=int, default=None, metavar='N',
+                       help='契约耗时上限毫秒')
+    p_cp2.add_argument('--arg', action='append', default=[], metavar='A',
+                       help='传给目标的参数（可多次）')
+    p_cp2.add_argument('--timeout-s', type=int, default=None, metavar='N',
+                       help='试跑超时秒 1-600')
+    p_cp2.add_argument('--dry-run', action='store_true',
+                       help='generate write=false 只回显不落盘')
+    p_cp2.set_defaults(func=cmd_compat_plan)
+
+    p_cr = cpsub.add_parser(
+        'run', help='=aik-compat apply（W2；无 --yes 拒绝并给下一步）')
+    p_cr.add_argument('name', metavar='NAME', help='适配器名')
+    p_cr.add_argument('--yes', action='store_true',
+                      help='确认执行（W2 硬门；缺省拒绝）')
+    p_cr.add_argument('--workspace', default=None, metavar='W',
+                      help='覆盖适配器声明的 workspace')
+    p_cr.add_argument('--probe', default=None, metavar='BIN',
+                      help='aik-compat 二进制')
+    p_cr.set_defaults(func=cmd_compat_run)
+
+    p_cv2 = cpsub.add_parser(
+        'verify', help='=aik-compat verify（契约+三类负向自检）')
+    p_cv2.add_argument('name', metavar='NAME', help='适配器名')
+    p_cv2.add_argument('--no-trace', action='store_true',
+                       help='不采集 syscall 轨迹（轨迹断言判不可验证）')
+    p_cv2.add_argument('--probe', default=None, metavar='BIN',
+                       help='aik-compat 二进制')
+    p_cv2.set_defaults(func=cmd_compat_verify)
+
+    p_cr2 = cpsub.add_parser(
+        'rollback', help='=aik-compat rollback（幂等）+ launcher 恢复/删除')
+    p_cr2.add_argument('name', metavar='NAME', help='适配器名')
+    p_cr2.add_argument('--workspace', default=None, metavar='W',
+                       help='覆盖适配器声明的 workspace')
+    p_cr2.add_argument('--probe', default=None, metavar='BIN',
+                       help='aik-compat 二进制')
+    p_cr2.set_defaults(func=cmd_compat_rollback)
+
+    p_pm = cpsub.add_parser(
+        'promote', help='shadow/canary/default 三级晋级（C2；default 为'
+                        '唯一宿主写点）')
+    p_pm.add_argument('name', metavar='NAME', help='适配器名')
+    p_pm.add_argument('--stage', required=True,
+                      choices=['shadow', 'canary', 'default'],
+                      help='shadow=只跑 verify；canary=apply 落 workspace '
+                           'overlay（宿主零写）；default=apply+verify 全绿'
+                           '后写宿主 /usr/local/bin/<launcher>')
+    p_pm.add_argument('--yes', action='store_true',
+                      help='canary/default 级确认门（W2 硬门；缺省拒绝）')
+    p_pm.add_argument('--launcher', default=None, metavar='NAME',
+                      help='default 级宿主 launcher 名（缺省=适配器名）')
+    p_pm.add_argument('--no-trace', action='store_true',
+                      help='shadow 级 verify 不采集轨迹')
+    p_pm.add_argument('--probe', default=None, metavar='BIN',
+                      help='aik-compat 二进制')
+    p_pm.set_defaults(func=cmd_compat_promote)
+
+    p_cm = cpsub.add_parser(
+        'monitor', help='轮询 promote 台账+state+verify 复跑（launcher '
+                        '失效只报告不删）')
+    p_cm.add_argument('--interval', type=int, default=60, metavar='S',
+                      help='轮询间隔秒（缺省 60）')
+    p_cm.add_argument('--once', action='store_true',
+                      help='单轮即退（供 cron）')
+    p_cm.add_argument('--no-trace', action='store_true',
+                      help='verify 复跑不采集轨迹')
+    p_cm.add_argument('--probe', default=None, metavar='BIN',
+                      help='aik-compat 二进制')
+    p_cm.set_defaults(func=cmd_compat_monitor)
 
     args = ap.parse_args(argv)
     return args.func(args)

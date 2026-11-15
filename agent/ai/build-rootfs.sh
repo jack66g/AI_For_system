@@ -135,7 +135,9 @@ echo "=== [5] 拷入 AI 二进制 (strip 后进镜像) ==="
 # AIKernel 内核(#28 实测)上启动即 SIGSEGV（VM 宿主内核正常），strip
 # 改变布局后稳定（另使镜像更小 3.2M→2.2M）。
 # T9e: aikernel-shell/ai 已出厂移除，控制台入口换 occ。
-strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl"
+# C2: aik-compat 进镜像即 strip（W4A 裁定统一适用——未 strip 布局在
+# AIKernel 内核上启动即 SIGSEGV 的风险对静态小二进制同样成立）。
+strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl" "$SRC/agent/ai/aik-compat"
 install -D -m755 "$SRC/agent/ai/occ/occ"  "$MNT/usr/local/bin/occ"
 install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
 # C1: aik-compat（compat probe 生产 CLI 面；COMPAT-C1-DESIGN §2.2）

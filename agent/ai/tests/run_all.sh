@@ -157,6 +157,25 @@ else
     failed+=("c1_compat_samples")
 fi
 
+echo "== C2 compat dual-account bench (COMPAT-C2-DESIGN §1 棒3) =="
+# 第 63 门：双账户台架 default 模式（非 root）：AIKERNEL_COMPAT_ROOT 指向
+# mktemp 临时根零全局副作用（台架内自建自清）；账户①=可修类 13 样本
+# aikctl compat plan→adapter 落盘+manifest 九字段完整率 100% 机判，
+# 账户②=不可修类 10 样本零静默成功（拒绝输出带 code/layer 人话）。
+# probe 沿第 62 门口径指向仓内构建件；aikctl 由台架按 probe 兄弟路径
+# （aikctl/aikctl）自解析。--live root 全链（apply/verify/rollback+回滚
+# 六条+promote 三轮）由主会话 sudo -n 亲跑，不进 run_all。仓内件缺失
+# （未 make）/缺 gcc/缺 aikctl = 如实 FAIL 非跳过。
+if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+   timeout 420 python3 "$here/c2_compat_samples.py" > /tmp/aik-c2_compat_samples.log 2>&1; then
+    echo "PASS c2_compat_samples"
+    pass=$((pass + 1))
+else
+    echo "FAIL c2_compat_samples (see /tmp/aik-c2_compat_samples.log)"
+    fail=$((fail + 1))
+    failed+=("c2_compat_samples")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then

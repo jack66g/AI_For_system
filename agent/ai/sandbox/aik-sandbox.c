@@ -134,6 +134,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <linux/fs.h>    /* BLKGETSIZE64（loop 容量安定检查） */
 #include <linux/loop.h>
 
 /*
@@ -644,21 +645,87 @@ static int loop_find_backing(const char *image, char *dev, size_t devsz)
 	return found;
 }
 
+/* 容量+数据面安定检查：loop 设备可读大小追平镜像当前文件大小，且
+ * superblock 位移真读 2 字节成功，才算接好。两路竞态都要堵：
+ * ① LOOP_SET_CAPACITY 返回≠新容量已传播（内核异步，dmesg「capacity
+ * change from 0」）；② 容量已对但数据读仍在 EIO 窗内（ioctl 不走数
+ * 据面，superblock pread 才是真门）——C2 棒2 施工 100% 复现 + 主会话
+ * 首修后 4/5 实证。轮询 2s 上限；不安定=诚实失败（调用方报错，不把
+ * EIO 静默留给挂载层）。 */
+static int loop_capacity_settled(const char *dev, const char *image)
+{
+	struct stat st;
+	uint64_t want = 0;
+	int i;
+
+	if (stat(image, &st) != 0 || st.st_size == 0)
+		return -1;
+	want = (uint64_t)st.st_size;
+	for (i = 0; i < 20; i++) {
+		int fd = open(dev, O_RDWR | O_CLOEXEC);
+
+		if (fd >= 0) {
+			uint64_t got = 0;
+			unsigned char sb[2];
+			int rc = ioctl(fd, BLKGETSIZE64, &got);
+			ssize_t pr = (rc == 0 && got >= want)
+				? pread(fd, sb, 2, 1024) : -1;
+
+			close(fd);
+			if (pr == 2)
+				return 0;
+		}
+		usleep(100 * 1000);
+	}
+	return -1;
+}
+
+/* 清 LO_FLAGS_AUTOCLEAR：该标志让 loop 在最后一个 fd 关闭时自动解绑
+ * （谁设的不可考——可能历史绑定残留；内核 SET_FD 语义不重置它）。
+ * create 收尾关 fd → 绑定自灭 → run 子进程 mount 吃 EIO「读不出
+ * superblock」且持续（设备已解绑，重试无用）——主会话 C2 整合期
+ * 实锤：失败现场 backing_file 空、losetup 无行。显式清之，绑定跨
+ * 进程存活。 */
+static void loop_clear_autoclear(const char *dev)
+{
+	int fd = open(dev, O_RDWR | O_CLOEXEC);
+	struct loop_info64 info;
+
+	if (fd < 0)
+		return;
+	memset(&info, 0, sizeof(info));
+	if (ioctl(fd, LOOP_GET_STATUS64, &info) == 0 &&
+	    (info.lo_flags & LO_FLAGS_AUTOCLEAR)) {
+		info.lo_flags &= ~(uint32_t)LO_FLAGS_AUTOCLEAR;
+		(void)ioctl(fd, LOOP_SET_STATUS64, &info);
+	}
+	close(fd);
+}
+
 /* 把镜像接到空闲 loop 上（已接则复用）；返回 0 成功，dev 出参 */
 static int loop_attach(const char *image, char *dev, size_t devsz)
 {
 	int attempt;
 
 	if (loop_find_backing(image, dev, devsz) == 0) {
-		/* 复用已有 loop 时强制刷新容量：镜像可能被 quota/重建改过
-		 * 大小，loop 块设备的 capacity 不刷新会让 ext4 读到 EIO。 */
-		int fd = open(dev, O_RDWR | O_CLOEXEC);
-
-		if (fd >= 0) {
-			(void)ioctl(fd, LOOP_SET_CAPACITY, 0);
-			close(fd);
+		/* 复用已有 loop：先纯探（容量对+superblock 位可读即过），
+		 * 不对才 SET_CAPACITY 强刷后再探——镜像可能被 quota/重建
+		 * 改过大小，capacity 不刷新会让 ext4 读 EIO；但容量本已
+		 * 对时省掉 SET_CAPACITY（其再验证本身就是 EIO 源之一，
+		 * create→run 紧邻同 loop 号重绑场景主会话实证）。 */
+		if (loop_capacity_settled(dev, image) == 0) {
+			loop_clear_autoclear(dev);
+			return 0;
 		}
-		return 0;
+		{
+			int fd = open(dev, O_RDWR | O_CLOEXEC);
+
+			if (fd >= 0) {
+				(void)ioctl(fd, LOOP_SET_CAPACITY, 0);
+				close(fd);
+			}
+		}
+		return loop_capacity_settled(dev, image) == 0 ? 0 : -1;
 	}
 	for (attempt = 0; attempt < 3; attempt++) {
 		struct loop_info64 info;
@@ -694,6 +761,9 @@ static int loop_attach(const char *image, char *dev, size_t devsz)
 		(void)ioctl(lfd, LOOP_SET_CAPACITY, 0);
 		close(lfd);
 		close(img);
+		if (loop_capacity_settled(dev, image) != 0)
+			continue;       /* 容量不安定：换设备重试 */
+		loop_clear_autoclear(dev);
 		return 0;
 	}
 	return -1;
@@ -2021,12 +2091,23 @@ static int sandbox_child(void *argp)
 		die(2, "mount private: %s", strerror(errno));
 
 	/* 3. 根：W79 磁盘后端挂 ext4 镜像；默认仍为 tmpfs 空根
-	 *    （nosuid+nodev；/dev 节点走独立 bind 挂载不受影响） */
+	 *    （nosuid+nodev；/dev 节点走独立 bind 挂载不受影响）。
+	 *    EIO 有界重试：同一 loop 号被 create→run 紧邻快速重绑时，
+	 *    块层再验证窗口内首挂可读 EIO（容量探针杀不净的残余，
+	 *    主会话 10 轮实证 4 复发）；2s 上限后仍败=诚实退出。 */
 	if (a->backing_disk) {
-		if (mount(a->loopdev, mnt, "ext4",
-			  MS_NOSUID | MS_NODEV, NULL))
-			die(2, "挂载工作区镜像 %s -> %s: %s", a->loopdev,
-			    mnt, strerror(errno));
+		int mretry;
+
+		for (mretry = 0; mretry < 20; mretry++) {
+			if (mount(a->loopdev, mnt, "ext4",
+				  MS_NOSUID | MS_NODEV, NULL) == 0)
+				break;
+			if (errno != EIO || mretry == 19)
+				die(2, "挂载工作区镜像 %s -> %s: %s"
+				    "（EIO 重试 %d 次后放弃）", a->loopdev,
+				    mnt, strerror(errno), mretry);
+			usleep(100 * 1000);
+		}
 	} else if (mount("tmpfs", mnt, "tmpfs", MS_NOSUID | MS_NODEV,
 			 "mode=0755")) {
 		die(2, "tmpfs %s: %s", mnt, strerror(errno));

@@ -13,6 +13,11 @@
  *   - registry：237 件 / compat 通道 4 件 / 风险 R,W1,W2,W1
  *   - compat_generate 非法名/非法 target → AI_ERR_INVALID_ARG；
  *     compat_apply 不存在的适配器 → 诚实报错（不静默成功）
+ *   - C2 棒1（plan 补全）：§4.4 manifest 五字段（risk 查表边界 4/5 条、
+ *     limitations 三路汇入、provides 派生、created_by/trace_id 透传）；
+ *     expect.exit_code 实装（42/缺省 0/97→负向 98 避撞/300 拒绝）；
+ *     六类超限诚实报错（generate 面 env/argv/map/自动 env + 加载面
+ *     env/map/lib/chmod/install/argv 全集 + §4.4 缺字段拒绝）
  *
  * --live（需要 root + 真 aik-sandbox + gcc）：走 tool_executor_run 真链路
  *   构造样本 A（#!/usr/bin/python4.9 脚本）与样本 B（DT_NEEDED
@@ -584,6 +589,744 @@ static void test_honest_errors(void)
 	tool_registry_free(&reg);
 }
 
+/* ------------------------------------------------------------------
+ * C2（棒1 plan 补全）：SYSTEM-EVOLUTION §4.4 manifest 五字段 +
+ * expect.exit_code 实装 + 六类超限诚实报错（generate 面 + 加载面）。
+ * 全部非 root 零副作用：write:false 只回显；fixture 走 tmp compat root。
+ * ------------------------------------------------------------------ */
+
+/*
+ * 合成最小 ELF64（只带一条 DT_NEEDED，无 PT_INTERP/无 verneed）：
+ * 触发 MISSING_LIBRARY（fatal/adaptable）+ STATIC_ELF（非 fatal）双路径，
+ * 让 generate 在无 gcc 的 unit 环境里也能走到 lib_redirect/limitations。
+ * d_val 口径 = dynstr 内偏移（与 cp_elf_scan 的 DT_NEEDED 处理一致）。
+ */
+static int write_synth_elf_lib(const char *path, const char *soname)
+{
+	unsigned char buf[512];
+	char st[160];
+	size_t st_n = 1, o_soname;
+	const off_t strtab_off = 64, dyn_off = 192, sh_off = 256;
+	Elf64_Ehdr eh;
+	Elf64_Shdr sh[3];
+	Elf64_Dyn dyn[2];
+
+	memset(buf, 0, sizeof(buf));
+	st[0] = '\0';
+	o_soname = st_n;
+	st_n = st_add(st, st_n, soname);
+
+	memset(&eh, 0, sizeof(eh));
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS64;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_type = ET_DYN;
+#if defined(__x86_64__)
+	eh.e_machine = EM_X86_64;
+#elif defined(__aarch64__)
+	eh.e_machine = EM_AARCH64;
+#else
+	eh.e_machine = 0;
+#endif
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	eh.e_shoff = sh_off;
+	eh.e_shentsize = sizeof(Elf64_Shdr);
+	eh.e_shnum = 3;
+
+	memset(sh, 0, sizeof(sh));
+	sh[1].sh_type = SHT_STRTAB;
+	sh[1].sh_offset = strtab_off;
+	sh[1].sh_size = st_n;
+	sh[2].sh_type = SHT_DYNAMIC;
+	sh[2].sh_link = 1;		/* sh_link → dynstr */
+	sh[2].sh_offset = dyn_off;
+	sh[2].sh_size = sizeof(dyn);
+	sh[2].sh_entsize = sizeof(Elf64_Dyn);
+
+	memset(dyn, 0, sizeof(dyn));
+	dyn[0].d_tag = DT_NEEDED;
+	dyn[0].d_un.d_val = (uint64_t)o_soname;
+	dyn[1].d_tag = DT_NULL;
+
+	memcpy(buf, &eh, sizeof(eh));
+	memcpy(buf + strtab_off, st, st_n);
+	memcpy(buf + dyn_off, dyn, sizeof(dyn));
+	memcpy(buf + sh_off, sh, sizeof(sh));
+	return write_file_bin(path, buf, sizeof(buf), 0755);
+}
+
+/* 拼 {"K0":"v0",...} 共 n 对（env 入参构造器） */
+static void build_env_obj(char *dst, size_t cap, int n)
+{
+	size_t u = 0;
+	int i;
+
+	u += (size_t)snprintf(dst + u, cap - u, "\"env\":{");
+	for (i = 0; i < n && u < cap; i++)
+		u += (size_t)snprintf(dst + u, cap - u, "%s\"C2A_K%d\":\"v%d\"",
+				      i ? "," : "", i, i);
+	snprintf(dst + u, cap - u, "}");
+}
+
+/* 拼 "argv":["a0","a1",...] 共 n 项 */
+static void build_argv_arr(char *dst, size_t cap, int n)
+{
+	size_t u = 0;
+	int i;
+
+	u += (size_t)snprintf(dst + u, cap - u, "\"argv\":[");
+	for (i = 0; i < n && u < cap; i++)
+		u += (size_t)snprintf(dst + u, cap - u, "%s\"a%d\"",
+				      i ? "," : "", i);
+	snprintf(dst + u, cap - u, "]");
+}
+
+/* 拼 "path_map":{"/usr/bin/c2a-fake-i":"/bin/sh",...} 共 n 对 */
+static void build_pmap_obj(char *dst, size_t cap, int n)
+{
+	size_t u = 0;
+	int i;
+
+	u += (size_t)snprintf(dst + u, cap - u, "\"path_map\":{");
+	for (i = 0; i < n && u < cap; i++)
+		u += (size_t)snprintf(dst + u, cap - u,
+				      "%s\"/usr/bin/c2a-fake-%d\":\"/bin/sh\"",
+				      i ? "," : "", i);
+	snprintf(dst + u, cap - u, "}");
+}
+
+/* C2：manifest 五字段（risk 查表 / limitations 汇入 / provides 派生 /
+ * created_by+trace_id 透传往返 / exit_code 实装含非零期望与撞车规避） */
+static void test_generate_manifest(void)
+{
+	struct tool_registry reg;
+	char *err = NULL, *out = NULL;
+	char dir[] = "/tmp/c2a-unit-XXXXXX";
+	char script[512], synth[512], synthlib[512], libfile[512];
+	char seg[2048], args[4096];
+	int ok = 0;
+
+	memset(&reg, 0, sizeof(reg));
+	if (tool_registry_load(&reg, &err) != AI_OK) {
+		CHECK(0, "tools.json 加载（C2 manifest 用例）");
+		return;
+	}
+	CHECK(mkdtemp(dir) != NULL, "mkdtemp（C2 manifest 用例）");
+	snprintf(script, sizeof(script), "%s/nosh", dir);
+	CHECK(write_file(script, "#!/usr/bin/c2a-nosh\necho hi\n", 0755) == 0,
+	      "写缺解释器样本（c2a-nosh）");
+	snprintf(synth, sizeof(synth), "%s/static", dir);
+	CHECK(write_synth_elf(synth, "GLIBC_2.2.5") == 0,
+	      "写合成静态 ELF（STATIC_ELF 非 fatal）");
+	snprintf(synthlib, sizeof(synthlib), "%s/needlib", dir);
+	snprintf(libfile, sizeof(libfile), "%s/libc2a.so.1", dir);
+	CHECK(write_synth_elf_lib(synthlib, "libc2a.so.1") == 0,
+	      "写合成 DT_NEEDED ELF（缺 libc2a.so.1）");
+	CHECK(write_file(libfile, "c2a-dummy-lib\n", 0644) == 0,
+	      "写库来源占位文件");
+
+	/* 基线：/bin/sh（runnable、零 L0 规则）→ low / 空 provides /
+	 * 缺省 created_by / trace_id=null / 三条静态 caveats 在场 */
+	run_tool(&reg, "compat_generate",
+		 "{\"name\":\"c2a-base\",\"target\":\"/bin/sh\","
+		 "\"write\":false}", &out, &ok);
+	CHECK(ok && out, "generate 基线（/bin/sh）成功");
+	CHECK(out && strstr(out, "\"risk\":\"low\""), "零规则 → risk=low");
+	CHECK(out && strstr(out, "\"trace_id\":null"),
+	      "缺省 trace_id 如实为 null");
+	CHECK(out && strstr(out,
+	      "\"created_by\":\"ai-tool:compat_generate\""),
+	      "缺省 created_by=ai-tool:compat_generate");
+	CHECK(out && strstr(out, "\"provides\":[]"),
+	      "零重定向 → provides 空数组");
+	CHECK(out && strstr(out, "ld.so.cache"),
+	      "limitations 含 caveat：不读 ld.so.cache");
+	CHECK(out && strstr(out, "非 libc"),
+	      "limitations 含 caveat：非 libc 符号版本只记录");
+	CHECK(out && strstr(out, "32 位"),
+	      "limitations 含 caveat：32 位不解析 DT_NEEDED");
+	free(out);
+	out = NULL;
+
+	/* risk 查表边界：env 恰 4 条（+0 其他）→ low；5 条 → medium */
+	build_env_obj(seg, sizeof(seg), 4);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-env4\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"risk\":\"low\""),
+	      "L0 规则恰 4 条 → low（查表边界）");
+	free(out);
+	out = NULL;
+	build_env_obj(seg, sizeof(seg), 5);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-env5\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"risk\":\"medium\""),
+	      "L0 规则 5 条 → medium（查表边界）");
+	free(out);
+	out = NULL;
+
+	/* 解释器重映射（显式 interpreter_map）→ overlay 在用 → medium；
+	 * provides 派生解释器映射目标名（basename） */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-imap\",\"target\":\"%s\","
+		 "\"write\":false,\"interpreter_map\":"
+		 "{\"/usr/bin/c2a-nosh\":\"/bin/sh\"}}", script);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"risk\":\"medium\""),
+	      "path_map→/usr overlay（L2 层）→ medium");
+	CHECK(out && strstr(out, "\"provides\":[\"sh\"]"),
+	      "provides 含解释器映射目标名（sh）");
+	CHECK(out && strstr(out, "\"usr_overlay\":true"),
+	      "overlay 视图如实标记");
+	free(out);
+	out = NULL;
+
+	/* STATIC_ELF 非 fatal → 自动汇入 limitations */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-static\",\"target\":\"%s\","
+		 "\"write\":false}", synth);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "STATIC_ELF"),
+	      "probe 非 fatal 原因（STATIC_ELF）汇入 limitations");
+	free(out);
+	out = NULL;
+
+	/* 缺库 + lib_sources → provides 派生 soname（无 gcc 的 unit 路径） */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-lib\",\"target\":\"%s\","
+		 "\"write\":false,\"lib_sources\":"
+		 "{\"libc2a.so.1\":\"%s\"}}", synthlib, libfile);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"provides\":[\"libc2a.so.1\"]"),
+	      "provides 含 lib_redirect soname");
+	CHECK(out && strstr(out, "\"risk\":\"low\""),
+	      "lib(1)+自动 LD_LIBRARY_PATH(1) 共 2 条 → low");
+	free(out);
+	out = NULL;
+
+	/* created_by/trace_id 透传往返 */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-ids\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"created_by\":\"aik-compat\","
+		 "\"trace_id\":\"c2a-tr1\"}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"created_by\":\"aik-compat\""),
+	      "created_by 透传（CLI 面标识）");
+	CHECK(out && strstr(out, "\"trace_id\":\"c2a-tr1\""),
+	      "trace_id 透传");
+	free(out);
+	out = NULL;
+
+	/* 显式 path_map（C2『路径假设』类）→ limitations 如实标注 */
+	build_pmap_obj(seg, sizeof(seg), 1);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-pmap\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "路径假设"),
+	      "显式 path_map 的不可验证性如实写 limitations");
+	CHECK(out && strstr(out, "\"risk\":\"medium\""),
+	      "显式 path_map 动用 overlay → medium");
+	free(out);
+	out = NULL;
+
+	/* expect.exit_code 实装：显式 42 / 缺省 0 / 撞车规避 / 非法拒绝 */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-ec42\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"expect\":{\"exit_code\":42}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out,
+	      "\"type\":\"exit_code\",\"op\":\"eq\",\"value\":42"),
+	      "expect.exit_code=42 → 断言 eq 42");
+	CHECK(out && strstr(out, "调用方显式声明期望退出码 42"),
+	      "非零期望的 because 如实说明来源");
+	free(out);
+	out = NULL;
+	run_tool(&reg, "compat_generate",
+		 "{\"name\":\"c2a-ec0\",\"target\":\"/bin/sh\","
+		 "\"write\":false}", &out, &ok);
+	CHECK(ok && out && strstr(out,
+	      "\"type\":\"exit_code\",\"op\":\"eq\",\"value\":0,"),
+	      "未声明 exit_code → 维持 eq 0（缺省兼容）");
+	free(out);
+	out = NULL;
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-ec97\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"expect\":{\"exit_code\":97}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"exit\":98"),
+	      "期望 97 时负向变异改用 98（避开撞车）");
+	free(out);
+	out = NULL;
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-ec300\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"expect\":{\"exit_code\":300}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "ERROR"),
+	      "exit_code=300 超出 0-255 → 拒绝");
+	free(out);
+	out = NULL;
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-ecstr\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"expect\":{\"exit_code\":\"x\"}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "ERROR"),
+	      "exit_code 非数字 → 拒绝不静默回落 0");
+	free(out);
+	out = NULL;
+
+	{
+		char p[512];
+
+		snprintf(p, sizeof(p), "%s/nosh", dir);
+		unlink(p);
+		snprintf(p, sizeof(p), "%s/static", dir);
+		unlink(p);
+		snprintf(p, sizeof(p), "%s/needlib", dir);
+		unlink(p);
+		snprintf(p, sizeof(p), "%s/libc2a.so.1", dir);
+		unlink(p);
+	}
+	rmdir(dir);
+	tool_registry_free(&reg);
+}
+
+/* C2：六类超限改诚实报错（generate 面：env/map/lib/install/argv/chmod；
+ * unit 可达路径 = env/argv/map/自动 env；lib/chmod/install 的 generate
+ * 面守卫已埋但 v0 结构性不可达（probe 自身上限=generate 上限），
+ * 加载面在 test_load_manifest 全覆盖） */
+static void test_generate_limits(void)
+{
+	struct tool_registry reg;
+	char *err = NULL, *out = NULL;
+	char dir[] = "/tmp/c2a-lim-XXXXXX";
+	char synthlib[512], libfile[512];
+	char seg[2048], args[4096];
+	int ok = 0;
+
+	memset(&reg, 0, sizeof(reg));
+	if (tool_registry_load(&reg, &err) != AI_OK) {
+		CHECK(0, "tools.json 加载（C2 超限用例）");
+		return;
+	}
+	CHECK(mkdtemp(dir) != NULL, "mkdtemp（C2 超限用例）");
+	snprintf(synthlib, sizeof(synthlib), "%s/needlib", dir);
+	snprintf(libfile, sizeof(libfile), "%s/libc2a.so.1", dir);
+	CHECK(write_synth_elf_lib(synthlib, "libc2a.so.1") == 0,
+	      "写合成缺库 ELF（超限用例）");
+	CHECK(write_file(libfile, "c2a-dummy-lib\n", 0644) == 0,
+	      "写库来源占位（超限用例）");
+
+	/* env>16：第 17 条报错并指名上限 */
+	build_env_obj(seg, sizeof(seg), 17);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-env17\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "ERROR") &&
+	      strstr(out, "env") && strstr(out, "上限 16"),
+	      "env 第 17 条 → 报错指名（不再静默丢）");
+	free(out);
+	out = NULL;
+
+	/* env 恰 16 条（无库）→ 成功（边界不误伤） */
+	build_env_obj(seg, sizeof(seg), 16);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-env16\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out && strstr(out, "\"risk\":\"medium\""),
+	      "env 恰 16 条 → 成功（16>4 → medium）");
+	free(out);
+	out = NULL;
+
+	/* env 满员 + 缺库：自动 LD_LIBRARY_PATH 追加会超限 → 报错 */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-envfull\",\"target\":\"%s\","
+		 "\"write\":false,%s,\"lib_sources\":"
+		 "{\"libc2a.so.1\":\"%s\"}}",
+		 synthlib, seg, libfile);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "LD_LIBRARY_PATH") &&
+	      strstr(out, "上限 16"),
+	      "env 满员时自动 LD_LIBRARY_PATH 超限 → 报错（不静默跳过）");
+	free(out);
+	out = NULL;
+
+	/* argv：连同程序本体上限 8 → 第 8 个用户参数报错 */
+	build_argv_arr(seg, sizeof(seg), 8);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-argv8\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "argv") &&
+	      strstr(out, "上限 8"),
+	      "argv 第 8 项（共 9 条）→ 报错指名");
+	free(out);
+	out = NULL;
+	build_argv_arr(seg, sizeof(seg), 7);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-argv7\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out, "argv 恰 7 项（共 8 条）→ 成功（边界）");
+	free(out);
+	out = NULL;
+
+	/* path_map>8：第 9 条报错；恰 8 条成功 */
+	build_pmap_obj(seg, sizeof(seg), 9);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-pmap9\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "path_map") &&
+	      strstr(out, "上限 8"),
+	      "path_map 第 9 条 → 报错指名");
+	free(out);
+	out = NULL;
+	build_pmap_obj(seg, sizeof(seg), 8);
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-pmap8\",\"target\":\"/bin/sh\","
+		 "\"write\":false,%s}", seg);
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(ok && out, "path_map 恰 8 条 → 成功（边界）");
+	free(out);
+	out = NULL;
+
+	/* path_map 非法源（不在系统视图内）/ 重复源 → 拒绝 */
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-pmapbad\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"path_map\":"
+		 "{\"/tmp/c2a-not-sys\":\"/bin/sh\"}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "系统视图"),
+	      "path_map 源不在系统视图 → 拒绝");
+	free(out);
+	out = NULL;
+	snprintf(args, sizeof(args),
+		 "{\"name\":\"c2a-pmapdup\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"path_map\":"
+		 "{\"/usr/bin/c2a-dup\":\"/bin/sh\","
+		 "\"/usr/bin/c2a-dup\":\"/bin/sh\"}}");
+	run_tool(&reg, "compat_generate", args, &out, &ok);
+	CHECK(!ok && out && strstr(out, "重复"),
+	      "path_map 源重复声明 → 拒绝（矛盾数据）");
+	free(out);
+	out = NULL;
+
+	/* env 值非字符串 → 拒绝（静默丢值=黑箱） */
+	run_tool(&reg, "compat_generate",
+		 "{\"name\":\"c2a-envnum\",\"target\":\"/bin/sh\","
+		 "\"write\":false,\"env\":{\"C2A_N\":123}}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "不是字符串"),
+	      "env 值非字符串 → 拒绝");
+	free(out);
+	out = NULL;
+
+	unlink(synthlib);
+	unlink(libfile);
+	rmdir(dir);
+	tool_registry_free(&reg);
+}
+
+/* 手写 fixture 适配器（tmp compat root）；manifest 为合法五字段集 */
+static int write_fixture(const char *root, const char *name,
+			 const char *manifest, const char *env,
+			 const char *pmap, const char *lib, const char *chm,
+			 const char *inst, const char *argv)
+{
+	char path[512], buf[6144];
+	int n;
+
+	n = snprintf(buf, sizeof(buf),
+		     "{\"schema\":\"aikernel.compat/v0\",\"adapter\":\"%s\""
+		     "%s,"
+		     "\"target\":{\"host\":\"/bin/sh\",\"kind\":\"elf\","
+		     "\"inside\":\"/opt/aik-compat/%s/app/sh\",\"size\":1,"
+		     "\"because\":\"fixture\"},"
+		     "\"layers\":{\"L0\":{\"env\":[%s],\"path_map\":[%s],"
+		     "\"lib_redirect\":[%s],\"chmod\":[%s]},"
+		     "\"L2\":{\"workspace\":\"cmp-%s\",\"backing\":\"disk\","
+		     "\"stage\":\"/opt/aik-compat/%s\",\"install\":[%s],"
+		     "\"usr_overlay\":false,\"mount_view\":[]}},"
+		     "\"contract\":{\"argv\":[%s],\"timeout_s\":10,"
+		     "\"assert\":[],\"negative\":[]},"
+		     "\"rollback\":{\"paths\":[],\"steps\":[]}}",
+		     name, manifest, name, env, pmap, lib, chm, name, name,
+		     inst, argv);
+	if (n <= 0 || (size_t)n >= sizeof(buf))
+		return -1;
+	snprintf(path, sizeof(path), "%s/adapters/%s.json", root, name);
+	return write_file(path, buf, 0644);
+}
+
+#define C2A_MANIFEST_OK \
+	",\"risk\":\"low\",\"limitations\":[\"fixture\"]," \
+	"\"provides\":[],\"created_by\":\"c2a-fixture\",\"trace_id\":null"
+
+/* C2：加载面——§4.4 字段校验（先例=缺 because 拒绝）+ 六类超限拒绝 */
+static void test_load_manifest(void)
+{
+	struct tool_registry reg;
+	char *err = NULL, *out = NULL;
+	const char *root = getenv("AIKERNEL_COMPAT_ROOT");
+	char adir[512], seg[4096];
+	int ok = 0;
+
+	if (!root || !root[0]) {
+		CHECK(0, "AIKERNEL_COMPAT_ROOT 在场（C2 加载面用例）");
+		return;
+	}
+	memset(&reg, 0, sizeof(reg));
+	if (tool_registry_load(&reg, &err) != AI_OK) {
+		CHECK(0, "tools.json 加载（C2 加载面用例）");
+		return;
+	}
+	snprintf(adir, sizeof(adir), "%s/adapters", root);
+	mkdir(adir, 0755);
+
+	/* 控制组：真 generate 的适配器（write:true 落盘）加载+安检全过
+	 *（apply 后续失败属 unit 环境无沙盒/无 root，与 manifest 无关） */
+	run_tool(&reg, "compat_generate",
+		 "{\"name\":\"c2a-loadok\",\"target\":\"/bin/sh\",\"write\":true}",
+		 &out, &ok);
+	CHECK(ok && out && strstr(out, "\"written\":true"),
+	      "控制组：真适配器落盘");
+	free(out);
+	out = NULL;
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-loadok\"}", &out, &ok);
+	CHECK(out && strstr(out, "适配器不可用") == NULL,
+	      "控制组：新版适配器通过 §4.4 加载校验");
+	free(out);
+	out = NULL;
+
+	/* 缺 risk / risk 非法 / 缺 limitations / 缺 provides /
+	 * 缺 created_by / 缺 trace_id / trace_id 类型错 */
+	CHECK(write_fixture(root, "c2a-norisk", "", "", "", "", "", "",
+			    "\"/opt/aik-compat/c2a-norisk/app/sh\"") == 0,
+	      "写 fixture：缺 risk");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-norisk\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "适配器不可用") &&
+	      strstr(out, "risk"), "缺 risk → 拒绝加载");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-badrisk",
+			     ",\"risk\":\"high\",\"limitations\":[],"
+			     "\"provides\":[],\"created_by\":\"f\","
+			     "\"trace_id\":null", "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-badrisk/app/sh\"") == 0,
+	      "写 fixture：risk=high");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-badrisk\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "risk 非法"),
+	      "risk=high → 拒绝（只允许 low/medium）");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-nolimit",
+			     ",\"risk\":\"low\",\"provides\":[],"
+			     "\"created_by\":\"f\",\"trace_id\":null",
+			     "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-nolimit/app/sh\"") == 0,
+	      "写 fixture：缺 limitations");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-nolimit\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "limitations"),
+	      "缺 limitations → 拒绝加载");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-noprov",
+			     ",\"risk\":\"low\",\"limitations\":[],"
+			     "\"created_by\":\"f\",\"trace_id\":null",
+			     "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-noprov/app/sh\"") == 0,
+	      "写 fixture：缺 provides");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-noprov\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "provides"),
+	      "缺 provides → 拒绝加载");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-nocb",
+			     ",\"risk\":\"low\",\"limitations\":[],"
+			     "\"provides\":[],\"trace_id\":null",
+			     "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-nocb/app/sh\"") == 0,
+	      "写 fixture：缺 created_by");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-nocb\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "created_by"),
+	      "缺 created_by → 拒绝加载");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-notrace",
+			     ",\"risk\":\"low\",\"limitations\":[],"
+			     "\"provides\":[],\"created_by\":\"f\"",
+			     "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-notrace/app/sh\"") == 0,
+	      "写 fixture：缺 trace_id 键");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-notrace\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "trace_id"),
+	      "缺 trace_id 键 → 拒绝（null 也必须在场）");
+	free(out);
+	out = NULL;
+	CHECK(write_fixture(root, "c2a-badtrace",
+			     ",\"risk\":\"low\",\"limitations\":[],"
+			     "\"provides\":[],\"created_by\":\"f\","
+			     "\"trace_id\":5",
+			     "", "", "", "", "",
+			     "\"/opt/aik-compat/c2a-badtrace/app/sh\"") == 0,
+	      "写 fixture：trace_id=数字");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-badtrace\"}", &out,
+		 &ok);
+	CHECK(!ok && out && strstr(out, "trace_id"),
+	      "trace_id 非null/字符串 → 拒绝加载");
+	free(out);
+	out = NULL;
+
+	/* 六类超限（加载面；含 generate 面 v0 不可达的 lib/chmod/install） */
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 17; i++) {
+			char one[128];
+
+			snprintf(one, sizeof(one),
+				 "%s{\"key\":\"K%d\",\"value\":\"v\","
+				 "\"because\":\"b\"}", i ? "," : "", i);
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-env", C2A_MANIFEST_OK, seg, "", "",
+			     "", "", "\"/opt/aik-compat/c2a-fx-env/app/sh\"") == 0,
+	      "写 fixture：env 17 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-env\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "env[16]") &&
+	      strstr(out, "上限 16"), "加载面 env 17 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 25; i++) {
+			char one[256];
+
+			snprintf(one, sizeof(one),
+				 "%s{\"soname\":\"l%d.so.1\",\"from\":\"/bin/sh\","
+				 "\"to\":\"/opt/aik-compat/c2a-fx-lib/lib/l%d.so.1\","
+				 "\"because\":\"b\"}", i ? "," : "", i, i);
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-lib", C2A_MANIFEST_OK, "", "", seg,
+			     "", "", "\"/opt/aik-compat/c2a-fx-lib/app/sh\"") == 0,
+	      "写 fixture：lib_redirect 25 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-lib\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "lib_redirect") &&
+	      strstr(out, "上限 24"), "加载面 lib 25 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 5; i++) {
+			char one[192];
+
+			snprintf(one, sizeof(one),
+				 "%s{\"path\":\"/opt/aik-compat/c2a-fx-chm/app\","
+				 "\"mode\":\"0755\",\"because\":\"b\"}",
+				 i ? "," : "");
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-chm", C2A_MANIFEST_OK, "", "", "",
+			     seg, "", "\"/opt/aik-compat/c2a-fx-chm/app/sh\"") == 0,
+	      "写 fixture：chmod 5 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-chm\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "chmod") &&
+	      strstr(out, "上限 4"), "加载面 chmod 5 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 9; i++) {
+			char one[256];
+
+			snprintf(one, sizeof(one),
+				 "%s{\"from\":\"/bin/sh\",\"to\":\"/opt/"
+				 "aik-compat/c2a-fx-inst/f%d\",\"because\":\"b\"}",
+				 i ? "," : "", i);
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-inst", C2A_MANIFEST_OK, "", "", "",
+			     "", seg, "\"/opt/aik-compat/c2a-fx-inst/app/sh\"") == 0,
+	      "写 fixture：install 9 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-inst\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "install") &&
+	      strstr(out, "上限 8"), "加载面 install 9 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 9; i++) {
+			char one[64];
+
+			snprintf(one, sizeof(one), "%s\"arg%d\"", i ? "," : "",
+				 i);
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-argv", C2A_MANIFEST_OK, "", "", "",
+			     "", "", seg) == 0,
+	      "写 fixture：argv 9 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-argv\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "argv") &&
+	      strstr(out, "上限 8"), "加载面 argv 9 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	{
+		int i;
+
+		seg[0] = '\0';
+		for (i = 0; i < 9; i++) {
+			char one[192];
+
+			snprintf(one, sizeof(one),
+				 "%s{\"from\":\"/usr/bin/c2a-f%d\",\"to\":"
+				 "\"/bin/sh\",\"because\":\"b\"}", i ? "," : "",
+				 i);
+			strncat(seg, one, sizeof(seg) - strlen(seg) - 1);
+		}
+	}
+	CHECK(write_fixture(root, "c2a-fx-map", C2A_MANIFEST_OK, "", seg, "",
+			     "", "", "\"/opt/aik-compat/c2a-fx-map/app/sh\"") == 0,
+	      "写 fixture：path_map 9 条");
+	run_tool(&reg, "compat_apply", "{\"name\":\"c2a-fx-map\"}", &out, &ok);
+	CHECK(!ok && out && strstr(out, "path_map") &&
+	      strstr(out, "上限 8"), "加载面 path_map 9 条 → 拒绝");
+	free(out);
+	out = NULL;
+
+	tool_registry_free(&reg);
+}
+
 static int unit(void)
 {
 	char root[] = "/tmp/w82b-compat-root-XXXXXX";
@@ -608,6 +1351,9 @@ static int unit(void)
 	test_probe_versions();
 	test_registry();
 	test_honest_errors();
+	test_generate_manifest();
+	test_generate_limits();
+	test_load_manifest();
 	printf("SUMMARY(unit): %d checks, %d failed\n", checks, fails);
 	rmdir(root);
 	return fails ? 1 : 0;

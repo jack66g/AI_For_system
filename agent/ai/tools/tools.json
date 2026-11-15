@@ -7502,7 +7502,7 @@
       "name": "compat_generate",
       "channel": "compat",
       "risk": "W1",
-      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。interpreter_map/lib_sources 可显式指定来源；探测到缺解释器/缺库但给不出来源时诚实失败，不猜。",
+      "description": "生成适配器数据 adapters/<name>.json（D1 写）：先跑同一套 probe，再把结论编译成声明式规则——L0 path_map（路径重映射 shim）/ env（环境变量）/ lib_redirect（库重定向）/ chmod（workspace 副本补位，宿主原件权限不动）；L2（workspace + stage + install + /usr overlay 挂载视图）；contract（退出码/stdout 非空/含指定输出/耗时上限 + syscall 轨迹关键项 + 三类负向用例）；rollback（stage 与 upper shim 路径）。每条规则强制带 because，缺 because 拒绝应用。adapter 还带 SYSTEM-EVOLUTION §4.4 manifest 五字段：risk（查表 low/medium）/limitations（probe 非 fatal 原因+v0 静态边界自动汇入）/provides（lib_redirect sonames+解释器映射目标名）/created_by/trace_id。interpreter_map/lib_sources/path_map 可显式指定；探测到缺解释器/缺库但给不出来源时诚实失败，不猜；env(16)/path_map(8)/lib_redirect(24)/install(8)/argv(8 含程序本体)/chmod(4) 超上限直接报错，不静默截断。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -7526,20 +7526,24 @@
             "type": "object",
             "description": "可选：{soname: 宿主库文件绝对路径}"
           },
+          "path_map": {
+            "type": "object",
+            "description": "可选：{系统视图路径(/usr /bin /sbin /lib /lib64 内): 替代可执行文件绝对路径}；『路径假设』类显式重映射——probe 不读目标正文，假设无法静态验证，如实写 limitations"
+          },
           "env": {
             "type": "object",
-            "description": "可选：{KEY: VALUE} 注入变量"
+            "description": "可选：{KEY: VALUE} 注入变量（值必须是字符串；上限 16 条）"
           },
           "expect": {
             "type": "object",
-            "description": "可选：{exit_code, stdout_contains:[...], stderr_not_contains:[...], max_ms}"
+            "description": "可选：{exit_code（0-255，缺省断言 eq 0；负向变异自动避开撞车）, stdout_contains:[...], stderr_not_contains:[...], max_ms}"
           },
           "argv": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "可选：传给目标的参数（不含 argv[0]）"
+            "description": "可选：传给目标的参数（不含 argv[0]；连同程序本体上限 8 条）"
           },
           "timeout_s": {
             "type": "integer",
@@ -7552,6 +7556,16 @@
             "type": "boolean",
             "description": "是否落盘（默认 true；false=只回显）",
             "default": true
+          },
+          "created_by": {
+            "type": "string",
+            "description": "可选：调用方标识，写入 manifest.created_by（缺省 ai-tool:compat_generate；CLI 面传 aik-compat）",
+            "maxLength": 128
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "可选：意图链路 trace_id，写入 manifest.trace_id（缺省 null 如实）",
+            "maxLength": 128
           }
         },
         "required": [
