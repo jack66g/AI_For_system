@@ -415,5 +415,94 @@ def main():
     return 1 if fail else 0
 
 
+
+# ---- E1' card/replay（自主施工：导出自动 card + 影子回放双向判定） ----
+def _e1_check():
+    import importlib.util as _ilu
+    ak_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           '..', 'aikctl', 'aikctl')
+    tmp = tempfile.mkdtemp(prefix='e1-')
+    try:
+        import pyarrow as _pa
+        import pyarrow.parquet as _pqp
+        ok_all = True
+        # ① 影子 parquet：50 净行 + 10 投毒行 → FAIL(<0.95)
+        rows = {'data_0': [], 'data_1': [], 'data_2': [], 'data_3': [],
+                'data_4': [], 'decision_type': []}
+        for i in range(50):
+            psi = 5000 if i % 2 else 100
+            rows['data_0'].append(1000000)
+            rows['data_1'].append(5)
+            rows['data_2'].append(psi)
+            rows['data_3'].append(0)
+            rows['data_4'].append(15)
+            rows['decision_type'].append(1 if psi > 409 else 0)
+        for i in range(10):                      # 投毒：决策列翻转
+            rows['data_0'].append(1000000)
+            rows['data_1'].append(5)
+            rows['data_2'].append(100)
+            rows['data_3'].append(0)
+            rows['data_4'].append(15)
+            rows['decision_type'].append(2)
+        bad = os.path.join(tmp, 'shadow_bad.parquet')
+        _pqp.write_table(_pa.table(rows), bad)
+        r = subprocess.run([sys.executable, ak_path, 'dataset', 'replay',
+                            bad], capture_output=True, text=True)
+        RESULTS.append((r.returncode == 1 and 'rate=0.8333' in r.stdout
+                        and 'FAIL' in r.stdout, 'e1_replay_poison_fail',
+                        r.stdout.strip()[-90:]))
+        # ② 净表 → PASS
+        for i in range(10):
+            for k in rows:
+                rows[k].pop()
+        clean = os.path.join(tmp, 'shadow_clean.parquet')
+        _pqp.write_table(_pa.table(rows), clean)
+        r = subprocess.run([sys.executable, ak_path, 'dataset', 'replay',
+                            clean], capture_output=True, text=True)
+        RESULTS.append((r.returncode == 0
+                        and 'rate=1.0000' in r.stdout, 'e1_replay_clean',
+                        r.stdout.strip()[-90:]))
+        # ③ card：最小 curated 根 → export 自动 .card.json + sha 对拍
+        from importlib.machinery import SourceFileLoader as _SFL
+        aik = _SFL('e1aikctl', ak_path).load_module()
+        day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        cdir = os.path.join(tmp, 'root', 'curated', day)
+        os.makedirs(cdir)
+        tel = {c: [0] for c in aik.DATASET_TEL_COLS}
+        tel['timestamp_ns'] = [int(datetime.now(timezone.utc).timestamp()
+                                   * 10**9)]
+        tel['pid'] = [4242]
+        tel['tgid'] = [4242]
+        tel['data'] = ['k:v e1']
+        tel['data_len'] = [6]
+        _pqp.write_table(_pa.table(tel),
+                         os.path.join(cdir, 'telemetry_0001.parquet'))
+        out = os.path.join(tmp, 'e1.jsonl')
+        r = subprocess.run([sys.executable, ak_path, 'dataset', 'export',
+                            '--layer', 'curated', '--since', day,
+                            '--until', day, '--out', out,
+                            '--root', os.path.join(tmp, 'root')],
+                           capture_output=True, text=True)
+        cpath = out + '.card.json'
+        okc = (r.returncode == 0 and os.path.isfile(cpath))
+        if okc:
+            card = json.load(open(cpath))
+            h = hashlib.sha256(open(out, 'rb').read()).hexdigest()
+            okc = (card.get('schema') == 'aikernel.dataset/card/1'
+                   and card.get('rows') == 1
+                   and card.get('sha256') == h
+                   and card.get('time_window_ns') is not None
+                   and card.get('license'))
+        RESULTS.append((okc, 'e1_export_card', cpath if okc
+                        else r.stdout.strip()[-90:]))
+        ok_all = all(okk for okk, _, _ in RESULTS[-3:])
+        return ok_all
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_e1_check()
+
+
 if __name__ == '__main__':
     sys.exit(main())
