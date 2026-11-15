@@ -1,14 +1,17 @@
 #!/bin/sh
-# aik-console v3 — q17 修复版（取代 auto-fbterm.sh 的 tty1 吞链）：
+# aik-console v5 — P2 修复（2026-11-16 验尸：串口 occ 永久空屏）。
+#   根因：串口 tty 无内核 winsize（tty1 fbcon 有 80×25）——occ resize
+#   路径 0×0=空屏（occ 侧 tui_frame_check_resize 已同步补 0 兜底双保险）。
+#   v4 语义：serial 分支补齐 v2 同款循环兜底+取证（v3 只给 tty1/2/3 上了
+#   链，serial 裸 exec——occ 瞬退=死黑零取证）。
 #   tty1/2/3 = fbterm 内跑 occ（中文渲染 + /zoom 可缩放；FBTERM=1 门）；
-#              fbterm 缺失时退原生 fbcon 直跑 occ。
-#   退出码 70 = /zoom 字号重启环（新 fbtermrc 生效后回 occ）。
-#   循环兜底（v2 语义=重拉不退出）+ 取证：chain-start/occ-exit 落
+#   退出码 70 = /zoom 字号重启环；chain-start/occ-exit 落
 #   /root/aik-console.log，occ+fbterm stderr 落 /root/aik-console.err。
 TTY=$(tty 2>/dev/null) || exit 0
+log() { echo "$(date +%s) $*" >> /root/aik-console.log; }
 case "$TTY" in
   /dev/tty1|/dev/tty2|/dev/tty3)
-    echo "$(date +%s) chain-start $TTY" >> /root/aik-console.log
+    log "chain-start $TTY"
     FBTERM_BIN=$(command -v fbterm 2>/dev/null)
     [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
     n=0
@@ -20,13 +23,23 @@ case "$TTY" in
       fi
       rc=$?
       n=$((n+1))
-      echo "$(date +%s) occ-exit rc=$rc n=$n fb=${FBTERM_BIN:+y}" >> /root/aik-console.log
+      log "occ-exit rc=$rc n=$n tty=fb fb=${FBTERM_BIN:+y}"
       [ "$rc" -eq 70 ] && continue
       sleep 2
     done
     ;;
   /dev/ttyS*)
-    exec /usr/local/bin/occ
+    stty rows 24 cols 80 2>> /root/aik-console.err || true
+    log "chain-start $TTY"
+    n=0
+    while :; do
+      /usr/local/bin/occ 2>> /root/aik-console.err
+      rc=$?
+      n=$((n+1))
+      log "occ-exit rc=$rc n=$n tty=serial"
+      [ "$rc" -eq 70 ] && continue
+      sleep 2
+    done
     ;;
 esac
 exit 0

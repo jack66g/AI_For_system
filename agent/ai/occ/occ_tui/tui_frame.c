@@ -70,6 +70,12 @@ int tui_frame_check_resize(int fd, int *rows, int *cols)
 	*rows = ws.ws_row;
 	if (cols)
 		*cols = ws.ws_col;
+	/* P2 兜底（串口 winsize 0×0 经 WINCH 进 resize=永久空屏；
+	 * tui_term_get_size 同款兜底，此路径漏了——2026-11-16 实锤） */
+	if (*rows <= 0)
+		*rows = 24;
+	if (cols && *cols <= 0)
+		*cols = 80;
 	return 1;
 }
 
