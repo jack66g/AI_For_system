@@ -1,0 +1,23 @@
+[Unit]
+Description=AIKernel AI Decision Shadow Daemon (M1 aipd, shadow-only)
+Documentation=file:/etc/aikernel/aipd.conf
+After=aikernel-streams.service
+Wants=aikernel-streams.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=LC_ALL=C
+ExecStartPre=/usr/bin/test -f /etc/aikernel/aipd.conf
+ExecStart=/usr/local/sbin/aipd --conf /etc/aikernel/aipd.conf
+Restart=on-failure
+RestartSec=5
+# 单实例由 daemon 自身 flock 保证（/run/aipd.lock）；Restart 仅在真崩溃
+# 时拉起。stdout/stderr → journald（"aipd: " 前缀，aistreamd/desktopd 风格）。
+# M1 影子期裁定（AIPD-M1-DESIGN §2.2）：出厂只 install 不 enable——
+# 未过金丝雀不自动上线（诚实）；影子观察=手动 `systemctl start
+# aikernel-aipd`（SHADOW=1 恒，只记影子+对照内核 decision_id 流，绝无
+# ACT 下发）。自启=M2 金丝雀过闸后拍板项。
+
+[Install]
+WantedBy=multi-user.target

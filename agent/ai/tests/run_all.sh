@@ -223,6 +223,28 @@ else
     failed+=("l1_data_bench")
 fi
 
+echo "== M1 AI fast-path bench (AIPD-M1-DESIGN §2.3) =="
+# 第 66 门：M1 毫秒级快路径台架（非 root）四件：①p99——aipd bench
+# --n 10000（mock 源+内置表）解析 AIPD_BENCH 行断言 p99_ns<1ms；②CPU
+# ——mock 源起 aipd 30s，/proc/<pid>/stat utime+stime 折算 <1%（附
+# TERM 优雅退出于查）；③不一致率口径——mock 双流 fixture 喂 aipd
+# mismatch 计算路径（无该子命令面则台架同公式退化实现，输出明示走
+# 哪条路——口径演示，真值=rig/VM E2E 登记）；④降级演练——起→
+# SIGKILL→lock 释放（flock 非阻塞可获）/stats 终态静止/影子目录无
+# ACT 痕迹/参数面零写（/sys/kernel/ai/policy 快照 hash；宿主无该面
+# 则该项如实 SKIP 标注）。前置自检缺件（aipd 未 make——Lane-A 未
+# 合入的树上）=如实 FAIL 非跳过（c3 台「如实红」同款纪律，期望冻结
+# 不因工树态调低）。conf 全 mktemp 临时根零全局副作用。
+if AIK_AIPD_BIN="$agent/aipd/aipd" \
+   timeout 600 python3 "$here/m1_bench.py" > /tmp/aik-m1_bench.log 2>&1; then
+    echo "PASS m1_bench"
+    pass=$((pass + 1))
+else
+    echo "FAIL m1_bench (see /tmp/aik-m1_bench.log)"
+    fail=$((fail + 1))
+    failed+=("m1_bench")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then

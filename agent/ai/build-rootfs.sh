@@ -168,6 +168,30 @@ sha256sum "$FACTORY/etc/aikernel/models.allow" "$MNT/etc/aikernel/models.allow"
 cmp -s "$FACTORY/etc/aikernel/models.allow" "$MNT/etc/aikernel/models.allow" || { echo "models.allow mismatch"; exit 1; }
 head -3 "$MNT/etc/aikernel/models.allow"
 
+echo "=== [5.6] M1 aipd: AI 决策影子守护出厂（install+strip；不 enable） ==="
+# AIPD-M1-DESIGN §2.2：aipd 出厂三件=二进制（strip+install）+systemd
+# unit+conf；【不挂自启 enable——影子期手动起（设计裁定：未过金丝雀
+# 不自动上线，M2 拍板）；[9] 的 enable 列表不含 aikernel-aipd】。
+# strip 统一沿 W4A 裁定（未 strip 的特定 ELF 布局在 AIKernel 内核上
+# 启动即 SIGSEGV 的实测风险，对静态小二进制同样成立——C1/C2/L1 同款）。
+# 缺件（Lane-A aipd 未构建）=构建失败（不静默降级，与 occ/aikctl 同
+# 口径）。conf/unit 沿 models.allow 三处 sha256 一致手法（factory 源→
+# 镜像→构建日志证据值；漂移即失败）。
+strip "$SRC/agent/ai/aipd/aipd"
+install -D -m755 "$SRC/agent/ai/aipd/aipd" "$MNT/usr/local/sbin/aipd"
+install -D -m644 "$FACTORY/etc/systemd/system/aikernel-aipd.service" \
+        "$MNT/etc/systemd/system/aikernel-aipd.service"
+install -D -m644 "$FACTORY/etc/aikernel/aipd.conf" "$MNT/etc/aikernel/aipd.conf"
+sha256sum "$FACTORY/etc/aikernel/aipd.conf" "$MNT/etc/aikernel/aipd.conf" \
+          "$FACTORY/etc/systemd/system/aikernel-aipd.service" \
+          "$MNT/etc/systemd/system/aikernel-aipd.service"
+cmp -s "$FACTORY/etc/aikernel/aipd.conf" "$MNT/etc/aikernel/aipd.conf" \
+        || { echo "aipd.conf mismatch"; exit 1; }
+cmp -s "$FACTORY/etc/systemd/system/aikernel-aipd.service" \
+      "$MNT/etc/systemd/system/aikernel-aipd.service" \
+        || { echo "aikernel-aipd.service mismatch"; exit 1; }
+file "$MNT/usr/local/sbin/aipd" | sed 's/, BuildID.*//'
+
 echo "=== [6] 拷入 SME (/opt/sme) + python 依赖 ==="
 rm -rf "$MNT/opt/sme"
 cp -a /home/jack66g/sme "$MNT/opt/sme"
@@ -326,6 +350,8 @@ cat "$MNT/root/.aikernel/model.toml"
 
 echo "=== [9] 启用服务 + chroot 冒烟测试 ==="
 chroot "$MNT" /bin/bash -e -x <<'CHROOT2'
+# M1 影子期裁定：aikernel-aipd 不进 enable（[5.6] 已装件；影子期手动起，
+# 自启=M2 金丝雀过闸后拍板——AIPD-M1-DESIGN §2.2）。
 systemctl enable aikernel-memory.service ollama.service ssh 2>&1 | tail -2 || true
 ls /etc/systemd/system/multi-user.target.wants/ 
 echo "--- python deps smoke ---"

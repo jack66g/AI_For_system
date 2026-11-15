@@ -1,0 +1,67 @@
+{
+  "_comment": "aipd 静态阈值表 spec（gen_aip_table.py 输入）。schema 契约冻结于 aip_model.h + aip_table.h（Lane-A 编译合同；M1 整合裁定：生成器向已编译合同对齐）。序列化=128B/条 '<IIQqII'+reason[96] NUL 填充；摘要=sha256(规则串连，无头)。",
+  "version": 1,
+  "rules": [
+    {
+      "id": "psi-reclaim",
+      "feat": "AIP_F_PSI_MEM_SOME",
+      "op": "AIP_OP_GT",
+      "lo": 409,
+      "hi": 0,
+      "action": "AIP_ACT_RECLAIM_AGGRESSIVE",
+      "param": 100,
+      "because": "psi_mem_some>409 (~20%): 建议提升 reclaim 激进度"
+    },
+    {
+      "id": "lat-sched",
+      "feat": "AIP_F_LAT_EWMA_NS",
+      "op": "AIP_OP_GT",
+      "lo": 10000000,
+      "hi": 0,
+      "action": "AIP_ACT_SCHED_COMPENSATE",
+      "param": 10,
+      "because": "lat_ewma_ns>10000000 (10ms): 建议调度补偿"
+    },
+    {
+      "id": "iowait-readahead",
+      "feat": "AIP_F_IOWAIT_PCT",
+      "op": "AIP_OP_GT",
+      "lo": 20,
+      "hi": 0,
+      "action": "AIP_ACT_READAHEAD_BOOST",
+      "param": 512,
+      "because": "iowait_pct>20: 建议 readahead 提升"
+    }
+  ],
+  "schema": {
+    "include_model": "aip_model.h",
+    "include_table": "aip_table.h",
+    "table_symbol": "aip_rules",
+    "len_symbol": "aip_nrules",
+    "ver_symbol": "aip_table_ver",
+    "digest_symbol": "aip_table_sha256",
+    "rules_max_macro": "AIP_RULES_MAX",
+    "reason_max": 96,
+    "rule_ser_struct": "<IIQqII",
+    "digest_algo": "sha256",
+    "feat_syms": {
+      "AIP_F_SEQ": 0,
+      "AIP_F_TS": 1,
+      "AIP_F_LAT_EWMA_NS": 2,
+      "AIP_F_IOWAIT_PCT": 3,
+      "AIP_F_PSI_MEM_SOME": 4,
+      "AIP_F_CACHE_MISSES": 5,
+      "AIP_F_VALID_BITS": 6
+    },
+    "op_syms": {
+      "AIP_OP_IN_RANGE": 0,
+      "AIP_OP_GT": 1
+    },
+    "act_syms": {
+      "AIP_ACT_NONE": 0,
+      "AIP_ACT_RECLAIM_AGGRESSIVE": 1,
+      "AIP_ACT_SCHED_COMPENSATE": 2,
+      "AIP_ACT_READAHEAD_BOOST": 3
+    }
+  }
+}
