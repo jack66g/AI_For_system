@@ -138,6 +138,8 @@ echo "=== [5] 拷入 AI 二进制 (strip 后进镜像) ==="
 strip "$SRC/agent/ai/occ/occ" "$SRC/tools/ai/aikctl"
 install -D -m755 "$SRC/agent/ai/occ/occ"  "$MNT/usr/local/bin/occ"
 install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
+# C1: aik-compat（compat probe 生产 CLI 面；COMPAT-C1-DESIGN §2.2）
+install -D -m755 "$SRC/agent/ai/aik-compat" "$MNT/usr/local/bin/aik-compat"
 # q17: 控制台接管层 aik-console（v3：tty1=fbterm--occ 循环兜底，70=zoom
 # 重启环；factory 树权威文件）
 install -D -m755 "$FACTORY/usr/local/bin/aik-console"     "$MNT/usr/local/bin/aik-console"
@@ -148,7 +150,8 @@ if [ -e "$MNT/etc/profile.d/auto-fbterm.sh" ]; then
     mv "$MNT/etc/profile.d/auto-fbterm.sh"        "$MNT/etc/profile.d/auto-fbterm.sh.superseded17"
     echo "auto-fbterm.sh superseded (q17)"
 fi
-file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl"       "$MNT/usr/local/bin/aik-console" | sed 's/, BuildID.*//'
+file "$MNT/usr/local/bin/occ" "$MNT/usr/local/bin/aikctl"       "$MNT/usr/local/bin/aik-console" \
+     "$MNT/usr/local/bin/aik-compat" | sed 's/, BuildID.*//'
 ls -la "$MNT/usr/local/bin/"
 
 echo "=== [5.5] K6: /etc/aikernel 模型签名白名单 models.allow ==="

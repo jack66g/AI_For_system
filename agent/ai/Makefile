@@ -462,3 +462,41 @@ install-autocondense: autocondense
 	install -m 755 autocondense/autocondensed autocondense/autocondense-mcp autocondense/autocondense-hook /usr/local/sbin/
 	@if [ -f factory/etc/systemd/system/autocondense.service ]; then 		install -d /etc/systemd/system /etc/systemd/system/multi-user.target.wants; 		install -m 644 factory/etc/systemd/system/autocondense.service /etc/systemd/system/; 		ln -sfn /etc/systemd/system/autocondense.service /etc/systemd/system/multi-user.target.wants/autocondense.service; 		echo "$(GREEN)[INSTALL]$(NC) autocondense.service -> /etc/systemd/system/ + enable"; 	fi
 	@if [ -f factory/usr/local/sbin/aik-ac-hook ]; then 		install -m 755 factory/usr/local/sbin/aik-ac-hook /usr/local/sbin/; 		echo "$(GREEN)[INSTALL]$(NC) aik-ac-hook -> /usr/local/sbin/"; 	fi
+
+# ============================================================================
+# C1 aik-compat（compat probe 生产 CLI 面，COMPAT-C1-DESIGN §2.2）：
+# 追加段，既有规则不修改。
+#  - 独立小二进制：tools/compat_main.c + tools/compat_tools.c 两源，
+#    -ffunction-sections -fdata-sections + -Wl,--gc-sections 只保留
+#    probe 调用图（generate/apply/verify 与注册表/工作区面不进产物）
+#  - cp_jstr 依赖 runtime/ai_json_util.c 的 UTF-8 清洗/转义（该文件只
+#    依赖 libc），一并编入 build-compat/（编译 CFLAGS 与主 build/ 不同，
+#    独立目录防混链）
+#  - 挂 all 不挂 install（主会话整合改判：run_all 第 62 门 c1_compat_samples
+#    依赖本产物存在，全量 make 后不产即红灯；install 仍归 build-rootfs.sh
+#    第 [5] 步——构建≠安装）
+# ============================================================================
+CP_BIN   := aik-compat
+CP_BUILD := build-compat
+CP_OBJS  := $(CP_BUILD)/tools/compat_main.o \
+	    $(CP_BUILD)/tools/compat_tools.o \
+	    $(CP_BUILD)/runtime/ai_json_util.o
+
+all: $(CP_BIN)
+
+$(CP_BIN): $(CP_OBJS)
+	@echo "$(GREEN)[LINK]$(NC) $@"
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--gc-sections -o $@ $(CP_OBJS)
+
+$(CP_BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)[CC]$(NC) $< (aik-compat)"
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(DEPFLAGS) \
+		$(INCLUDES) -c -o $@ $<
+
+.PHONY: aik-compat-clean
+clean: aik-compat-clean
+aik-compat-clean:
+	rm -rf $(CP_BUILD) $(CP_BIN)
+
+-include $(CP_OBJS:.o=.d)

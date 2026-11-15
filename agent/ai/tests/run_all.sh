@@ -142,6 +142,21 @@ else
     failed+=("orch_drill")
 fi
 
+echo "== C1 compat classification bench (COMPAT-C1-DESIGN §3.3) =="
+# 第 62 门：20 样本分类台架，python3 直跑、无 rig 依赖；probe 指向仓内
+# 构建件 ../aik-compat（门测当前构建，非可能陈旧的装机副本；与 test_*
+# 门从构建目录跑二进制同口径）。仓内件缺失（未 make）/缺 gcc
+# = 如实 FAIL 非跳过（能力真实，不静默降级）。
+if AIK_COMPAT_PROBE="$(cd "$(dirname "$0")/.." && pwd)/aik-compat" \
+   timeout 300 python3 "$here/c1_compat_samples.py" > /tmp/aik-c1_compat_samples.log 2>&1; then
+    echo "PASS c1_compat_samples"
+    pass=$((pass + 1))
+else
+    echo "FAIL c1_compat_samples (see /tmp/aik-c1_compat_samples.log)"
+    fail=$((fail + 1))
+    failed+=("c1_compat_samples")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then

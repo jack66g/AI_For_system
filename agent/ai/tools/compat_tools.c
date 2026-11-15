@@ -4,7 +4,8 @@
  *
  * 设计说明见 compat_tools.h。本文件分八段：
  *   1) 通用工具（时间/路径/状态目录/原子写/审计/JSON 取值）
- *   2) ELF 静态解析（e_machine / OSABI / PT_INTERP / DT_NEEDED）
+ *   2) ELF 静态解析（e_machine / OSABI / PT_INTERP / DT_NEEDED /
+ *      verneed/verdef 符号版本，C1）
  *   3) probe（脚本 shebang 链、解释器候选、共享库解析、fatal 归因）
  *   4) generate（把 probe 结论编译成适配器数据：L0 规则 + L2 视图 + 契约）
  *   5) workspace 执行面（meta 读取、aik-sandbox argv 组装、独立 stdout/
@@ -20,6 +21,10 @@
  *     且只在 workspace 里发生。
  *   - syscall 轨迹依赖宿主 strace；缺 strace 时 verify 直接判"不可验证"，
  *     不静默放过。
+ *   - 符号版本（C1）只对 libc 家族判 fatal（LIBC_VERSION_TOO_NEW）；
+ *     其他库（libstdc++ 等）的要求只记录（elf.versions.required）；
+ *     宿主 libc 不可定位/无 verdef（musl 等）→ provided=null 不判
+ *     fatal（诚实降级，不出假 fatal）。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -62,6 +67,9 @@
 #define CP_UPPER       "/.aik-compat/usr-upper"
 #define CP_STAGE_PFX   "/opt/aik-compat/"
 #define CP_SB_DEFAULT  "/usr/local/bin/aik-sandbox"
+#define CP_MAX_VREQ     8	/* C1：verneed 库数上限（目标要求集） */
+#define CP_MAX_TOO_NEW  8	/* C1：超新版本清单上限 */
+#define CP_VER_BLOB_MAX 4096	/* C1：verneed/verdef blob 读入上限 */
 
 /* ======================================================================
  * 1) 通用工具
@@ -471,6 +479,8 @@ struct cp_elf {
 	char runpath[PATH_MAX];
 	char needed[CP_MAX_LIBS][128];
 	int n_needed;
+	struct ai_compat_verreq vreq[CP_MAX_VREQ];	/* C1：verneed 要求集 */
+	int n_vreq;
 };
 
 static int cp_pread_full(int fd, void *buf, size_t n, off_t off)
@@ -523,6 +533,243 @@ static void cp_elf_do_needed(const char *strtab, size_t strtab_len,
 		 strtab + off);
 	if (e->needed[e->n_needed][0])
 		e->n_needed++;
+}
+
+/* ---- C1：符号版本（GNU verneed/verdef，GLIBC_2.x 口径） ----
+ *
+ * 走查器是吃内存 buffer 的纯函数（不 pread、不碰全局态），与
+ * ai_compat_probe_json 同一先例导出供 test_compat 用内存 fixture 直测；
+ * 文件 IO 只发生在 cp_elf_scan / cp_verdef_of_file 两处。
+ */
+
+/* 版本串的数值尾："GLIBC_2.9999" → "2.9999"（取首个 '.' 前的数字段
+ * 起点；无 '.' 时取串尾数字段；非版本形态则整串参与比较） */
+static const char *cp_ver_tail(const char *s)
+{
+	const char *dot = strchr(s, '.');
+	const char *p;
+
+	if (!dot)
+		dot = s + strlen(s);
+	p = dot;
+	while (p > s && isdigit((unsigned char)p[-1]))
+		p--;
+	if (p == dot)
+		p = s;
+	return p;
+}
+
+/* 版本比较：'.' 分段数值比较（"2.10">"2.9"、"2.9999">"2.39"；
+ * 前缀（GLIBC_）剥离后比较；段多者大（"2.2.5">"2.2"） */
+int ai_compat_ver_cmp(const char *a, const char *b)
+{
+	a = cp_ver_tail(a);
+	b = cp_ver_tail(b);
+	for (;;) {
+		unsigned long va, vb;
+		char *ea, *eb;
+		int ad, bd;
+
+		va = strtoul(a, &ea, 10);
+		vb = strtoul(b, &eb, 10);
+		if (va != vb)
+			return va < vb ? -1 : 1;
+		ad = (*ea == '.');
+		bd = (*eb == '.');
+		if (ad != bd)
+			return ad ? 1 : -1;
+		if (!ad)
+			return 0;
+		a = ea + 1;
+		b = eb + 1;
+	}
+}
+
+/* strtab 有界取串：off 越界或未闭合 → 空串（不越界读、不崩） */
+static void cp_ver_str(char *dst, size_t cap, const char *strtab,
+		       size_t strtab_len, size_t off)
+{
+	size_t i = 0;
+
+	if (!cap)
+		return;
+	dst[0] = '\0';
+	if (!strtab || off >= strtab_len)
+		return;
+	while (i < cap - 1 && off + i < strtab_len && strtab[off + i]) {
+		dst[i] = strtab[off + i];
+		i++;
+	}
+	dst[i] = '\0';
+}
+
+/*
+ * verneed 走查（纯函数）：vn/vn_len = 目标 DT_VERNEED 指向的 blob（已由
+ * 调用方读入内存），count = DT_VERNEEDNUM；strtab = 已读入的字符串表。
+ * 逐库（Elf64_Verneed.vn_next 链）逐版本（Elf64_Vernaux.vna_next 链）
+ * 收集到 out；越界偏移/版本号不认（vn_version!=1）诚实截断。
+ * 返回库数（同名库合并追加版本）。
+ */
+int ai_compat_verneed_walk(const unsigned char *vn, size_t vn_len, int count,
+			   const char *strtab, size_t strtab_len,
+			   struct ai_compat_verreq *out, int max)
+{
+	size_t off = 0;
+	int n = 0, i;
+
+	if (!out || max <= 0 || !vn || count <= 0)
+		return 0;
+	for (i = 0; i < count; i++) {
+		Elf64_Verneed v;
+		size_t aoff;
+		int j, slot = -1;
+
+		if (off + sizeof(v) > vn_len)
+			break;
+		memcpy(&v, vn + off, sizeof(v));
+		if (v.vn_version != 1)	/* 只认 VER_NEED_CURRENT 布局 */
+			break;
+		{
+			char lib[64];
+
+			cp_ver_str(lib, sizeof(lib), strtab, strtab_len,
+				   v.vn_file);
+			if (lib[0]) {
+				for (j = 0; j < n; j++)
+					if (strcmp(out[j].lib, lib) == 0)
+						slot = j;
+				if (slot < 0 && n < max) {
+					slot = n++;
+					memset(&out[slot], 0,
+					       sizeof(out[slot]));
+					snprintf(out[slot].lib,
+						 sizeof(out[slot].lib), "%s",
+						 lib);
+				}
+			}
+		}
+		if (v.vn_aux >= vn_len)
+			break;
+		aoff = off + v.vn_aux;
+		for (j = 0; j < (int)v.vn_cnt; j++) {
+			Elf64_Vernaux a;
+
+			if (aoff + sizeof(a) > vn_len)
+				break;
+			memcpy(&a, vn + aoff, sizeof(a));
+			if (slot >= 0 &&
+			    out[slot].n_vers < AI_COMPAT_VERS_PER_LIB) {
+				char vers[AI_COMPAT_VER_LEN];
+
+				cp_ver_str(vers, sizeof(vers), strtab,
+					   strtab_len, a.vna_name);
+				if (vers[0])
+					snprintf(out[slot].vers[
+						 out[slot].n_vers++],
+						 AI_COMPAT_VER_LEN, "%s",
+						 vers);
+			}
+			if (!a.vna_next)
+				break;
+			aoff += a.vna_next;
+		}
+		if (!v.vn_next)
+			break;
+		off += v.vn_next;
+	}
+	return n;
+}
+
+/*
+ * verdef 走查（纯函数）：vd/vd_len = 某共享库 DT_VERDEF 指向的 blob，
+ * count = DT_VERDEFNUM。取 GLIBC_* 提供集的最大版本写 out_max（无则
+ * 空串）。返回见到的 GLIBC_* 版本数（0 = 无 verdef 信息）。
+ */
+int ai_compat_verdef_max(const unsigned char *vd, size_t vd_len, int count,
+			 const char *strtab, size_t strtab_len,
+			 char *out_max, size_t cap)
+{
+	size_t off = 0;
+	int n = 0, i;
+
+	if (!out_max || !cap)
+		return 0;
+	out_max[0] = '\0';
+	if (!vd || count <= 0)
+		return 0;
+	for (i = 0; i < count; i++) {
+		Elf64_Verdef d;
+
+		if (off + sizeof(d) > vd_len)
+			break;
+		memcpy(&d, vd + off, sizeof(d));
+		if (d.vd_version != 1)	/* 只认 VER_DEF_CURRENT 布局 */
+			break;
+		if (d.vd_aux < vd_len) {
+			size_t aoff = off + d.vd_aux;
+			int j;
+
+			for (j = 0; j < (int)d.vd_cnt; j++) {
+				Elf64_Verdaux a;
+				char name[AI_COMPAT_VER_LEN];
+
+				if (aoff + sizeof(a) > vd_len)
+					break;
+				memcpy(&a, vd + aoff, sizeof(a));
+				cp_ver_str(name, sizeof(name), strtab,
+					   strtab_len, a.vda_name);
+				if (!strncmp(name, "GLIBC_", 6)) {
+					n++;
+					if (!out_max[0] ||
+					    ai_compat_ver_cmp(name, out_max) > 0)
+						snprintf(out_max, cap, "%s",
+							 name);
+				}
+				if (!a.vda_next)
+					break;
+				aoff += a.vda_next;
+			}
+		}
+		if (!d.vd_next)
+			break;
+		off += d.vd_next;
+	}
+	return n;
+}
+
+/*
+ * libc 家族要求集 vs 宿主提供最大值 → 超新版本清单（纯函数）。
+ * req/provided_max 缺失（无 libc 要求 / 宿主 libc 不可定位 / 无
+ * verdef，如 musl）→ 返回 0：诚实降级，由调用方决定不判 fatal。
+ */
+int ai_compat_ver_too_new(const struct ai_compat_verreq *req,
+			  const char *provided_max,
+			  char out[][AI_COMPAT_VER_LEN], int max)
+{
+	int i, n = 0;
+
+	if (!out || max <= 0)
+		return 0;
+	if (!req || !provided_max || !provided_max[0])
+		return 0;
+	for (i = 0; i < req->n_vers && n < max; i++)
+		if (ai_compat_ver_cmp(req->vers[i], provided_max) > 0)
+			snprintf(out[n++], AI_COMPAT_VER_LEN, "%s",
+				 req->vers[i]);
+	return n;
+}
+
+/* blob 读取长度：按文件实际长度截断（pread_full 在 EOF 会整读失败，
+ * verneed/verdef 常贴文件尾，必须给出诚实上限） */
+static size_t cp_blob_len(int fd, size_t off, size_t cap)
+{
+	struct stat st;
+
+	if (fstat(fd, &st) || st.st_size <= 0 || (size_t)st.st_size <= off)
+		return 0;
+	if ((size_t)st.st_size - off < cap)
+		return (size_t)st.st_size - off;
+	return cap;
 }
 
 static int cp_elf_scan(const char *path, struct cp_elf *e)
@@ -608,6 +855,8 @@ static int cp_elf_scan(const char *path, struct cp_elf *e)
 					size_t n = (size_t)sh[dyn_idx].sh_size /
 						   sizeof(Elf64_Dyn);
 					size_t k;
+					size_t vn_off = 0;
+					int vn_num = 0;
 
 					strtab[sh[str_idx].sh_size] = '\0';
 					for (k = 0; k < n; k++) {
@@ -619,6 +868,14 @@ static int cp_elf_scan(const char *path, struct cp_elf *e)
 								(size_t)sh[str_idx].sh_size,
 								dyn[k].d_un.d_val,
 								e);
+						else if (dyn[k].d_tag ==
+							 DT_VERNEED)
+							vn_off =
+								dyn[k].d_un.d_val;
+						else if (dyn[k].d_tag ==
+							 DT_VERNEEDNUM)
+							vn_num = (int)
+								dyn[k].d_un.d_val;
 						else if ((dyn[k].d_tag == DT_RUNPATH ||
 							  dyn[k].d_tag == DT_RPATH) &&
 							 !e->runpath[0] &&
@@ -629,6 +886,26 @@ static int cp_elf_scan(const char *path, struct cp_elf *e)
 								sizeof(e->runpath),
 								"%s",
 								strtab + dyn[k].d_un.d_val);
+						}
+						/* C1：verneed 要求集（DT_VERNEED 的
+						 * d_val 按 v0 口径视作文件内偏移，
+						 * 同 DT_STRTAB/DT_NEEDED 的处理） */
+						if (vn_off && vn_num > 0 && vn_num <= 256) {
+						unsigned char vb[CP_VER_BLOB_MAX];
+						size_t blen = cp_blob_len(fd,
+									  vn_off,
+									  sizeof(vb));
+
+						if (blen &&
+						    !cp_pread_full(fd, vb, blen,
+								   (off_t)vn_off))
+							e->n_vreq =
+								ai_compat_verneed_walk(
+									vb, blen,
+									vn_num, strtab,
+									(size_t)sh[str_idx].sh_size,
+									e->vreq,
+									CP_MAX_VREQ);
 					}
 				}
 				free(strtab);
@@ -810,6 +1087,106 @@ static int cp_lib_find(const char *soname, const char *runpath, char *out,
 	return -1;
 }
 
+/*
+ * C1：解析一个宿主共享库文件的 DT_VERDEF → GLIBC_* 提供最大值（写入
+ * out，空串 = 无 GLIBC verdef）。只 pread 头部/小段，不 mmap 不执行。
+ * 返回 0 = 已解析到 dynamic 段（out 内容另论），-1 = 不可读/非
+ * ELF64/无 dynamic 段——两种失败在调用方都按 provided=null 诚实降级。
+ */
+static int cp_verdef_of_file(const char *path, char *out, size_t cap)
+{
+	unsigned char ident[EI_NIDENT];
+	unsigned char vd[CP_VER_BLOB_MAX];
+	Elf64_Ehdr eh;
+	Elf64_Shdr *sh = NULL;
+	int fd, i, rv = -1;
+	size_t vd_off = 0;
+	int vd_num = 0;
+
+	if (!out || !cap)
+		return -1;
+	out[0] = '\0';
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	if (cp_pread_full(fd, ident, sizeof(ident), 0))
+		goto out;
+	if (memcmp(ident, ELFMAG, SELFMAG) != 0 ||
+	    ident[EI_CLASS] != ELFCLASS64)
+		goto out;
+	if (cp_pread_full(fd, &eh, sizeof(eh), 0))
+		goto out;
+	if (!eh.e_shnum || eh.e_shnum > 256)
+		goto out;
+	sh = calloc(eh.e_shnum, sizeof(*sh));
+	if (!sh)
+		goto out;
+	if (cp_pread_full(fd, sh, eh.e_shnum * sizeof(*sh), (off_t)eh.e_shoff))
+		goto out;
+	for (i = 0; i < eh.e_shnum; i++) {
+		if (sh[i].sh_type == SHT_DYNAMIC) {
+			int dyn_idx = i, str_idx = (int)sh[i].sh_link;
+
+			if (str_idx < 0 || str_idx >= eh.e_shnum ||
+			    sh[str_idx].sh_size == 0 ||
+			    sh[str_idx].sh_size > 65536 ||
+			    sh[dyn_idx].sh_size == 0 ||
+			    sh[dyn_idx].sh_size > 65536)
+				goto out;
+			{
+				char *strtab = malloc((size_t)sh[str_idx].sh_size + 1);
+				Elf64_Dyn *dyn = malloc((size_t)sh[dyn_idx].sh_size);
+
+				if (strtab && dyn &&
+				    !cp_pread_full(fd, strtab,
+						   (size_t)sh[str_idx].sh_size,
+						   (off_t)sh[str_idx].sh_offset) &&
+				    !cp_pread_full(fd, dyn,
+						   (size_t)sh[dyn_idx].sh_size,
+						   (off_t)sh[dyn_idx].sh_offset)) {
+					size_t n = (size_t)sh[dyn_idx].sh_size /
+						   sizeof(Elf64_Dyn);
+					size_t k;
+
+					strtab[sh[str_idx].sh_size] = '\0';
+					for (k = 0; k < n; k++) {
+						if (dyn[k].d_tag == DT_NULL)
+							break;
+						if (dyn[k].d_tag == DT_VERDEF)
+							vd_off = (size_t)
+								dyn[k].d_un.d_val;
+						else if (dyn[k].d_tag ==
+							 DT_VERDEFNUM)
+							vd_num = (int)
+								dyn[k].d_un.d_val;
+					}
+					rv = 0;	/* 解析到 dynamic 段 */
+					if (vd_off && vd_num > 0 && vd_num <= 256) {
+						size_t blen = cp_blob_len(
+							fd, vd_off, sizeof(vd));
+
+						if (blen &&
+						    !cp_pread_full(fd, vd, blen,
+								   (off_t)vd_off))
+							(void)ai_compat_verdef_max(
+								vd, blen, vd_num,
+								strtab,
+								(size_t)sh[str_idx].sh_size,
+								out, cap);
+					}
+				}
+				free(strtab);
+				free(dyn);
+			}
+			break;
+		}
+	}
+out:
+	free(sh);
+	close(fd);
+	return rv;
+}
+
 /* ======================================================================
  * 3) probe
  * ====================================================================== */
@@ -844,6 +1221,13 @@ struct cp_probe {
 	char cand_base[128];
 	char cand[CP_MAX_CAND][PATH_MAX];
 	int n_cand;
+	/* C1：符号版本（elf.versions；verneed 要求 + 宿主提供 + 超新清单） */
+	struct ai_compat_verreq vreq[CP_MAX_VREQ];
+	int n_vreq;
+	char host_libc[PATH_MAX];
+	char provided_max[AI_COMPAT_VER_LEN];
+	char too_new[CP_MAX_TOO_NEW][AI_COMPAT_VER_LEN];
+	int n_too_new;
 	char because[1024];
 };
 
@@ -1231,6 +1615,76 @@ static void cp_probe_elf(struct cp_probe *p, const struct cp_elf *e)
 			      searched[0] ? searched : "(无)");
 		}
 	}
+
+	/* C1：符号版本核对（GLIBC_2.x 口径；只对 libc 家族判 fatal；
+	 * 宿主 libc 不可定位 / 无 verdef → provided=null 诚实降级） */
+	if (e->is64) {
+		char host[PATH_MAX], searched[1024];
+		const struct ai_compat_verreq *libc_req = NULL;
+		int i, top = 0;
+
+		/* 要求全集入表（含非 libc 库：只记录不判 fatal，v0 口径） */
+		for (i = 0; i < e->n_vreq && p->n_vreq < CP_MAX_VREQ; i++)
+			p->vreq[p->n_vreq++] = e->vreq[i];
+		for (i = 0; i < e->n_vreq; i++)
+			if (!strncmp(e->vreq[i].lib, "libc.so", 7)) {
+				libc_req = &e->vreq[i];
+				break;
+			}
+		/* 宿主 libc 定位：优先复用 DT_NEEDED 解析结果（同一口径），
+		 * 否则按库搜索规则找 libc.so.6 */
+		host[0] = '\0';
+		for (i = 0; i < p->n_needed; i++)
+			if (!strcmp(p->needed[i], "libc.so.6") &&
+			    p->resolved[i][0]) {
+				snprintf(host, sizeof(host), "%s",
+					 p->resolved[i]);
+				break;
+			}
+		if (!host[0] &&
+		    cp_lib_find("libc.so.6", e->runpath, host, sizeof(host),
+				searched, sizeof(searched)) != 0)
+			host[0] = '\0';
+		if (host[0]) {
+			char provided[AI_COMPAT_VER_LEN];
+
+			snprintf(p->host_libc, sizeof(p->host_libc), "%s",
+				 host);
+			provided[0] = '\0';
+			if (cp_verdef_of_file(host, provided,
+					      sizeof(provided)) == 0 &&
+			    provided[0])
+				snprintf(p->provided_max,
+					 sizeof(p->provided_max), "%s",
+					 provided);
+		}
+		p->n_too_new = ai_compat_ver_too_new(
+			libc_req, p->provided_max[0] ? p->provided_max : NULL,
+			p->too_new, CP_MAX_TOO_NEW);
+		if (p->n_too_new > 0) {
+			/* detail 取最大超新版本作主证 */
+			for (i = 1; i < p->n_too_new; i++)
+				if (ai_compat_ver_cmp(p->too_new[i],
+						      p->too_new[top]) > 0)
+					top = i;
+			{
+				struct cp_reason *r = cp_reason(
+					p, "LIBC_VERSION_TOO_NEW", "L1", 1, 0,
+					"需要 %s %s > 宿主 %s",
+					libc_req ? libc_req->lib : "libc.so",
+					p->too_new[top],
+					p->provided_max[0] ? p->provided_max :
+					"(未解析)");
+				cp_ev(r, "required: %s", p->too_new[top]);
+				cp_ev(r, "provided_max: %s",
+				      p->provided_max[0] ? p->provided_max :
+				      "(未解析)");
+				cp_ev(r, "宿主 libc: %s",
+				      p->host_libc[0] ? p->host_libc :
+				      "(未定位)");
+			}
+		}
+	}
 }
 
 static void cp_probe_run(const char *target, struct cp_probe *p)
@@ -1455,7 +1909,39 @@ static int cp_probe_json_inner(FILE *f, struct cp_probe *p)
 			fputc('}', f);
 		}
 	}
-	fputs("]}", f);
+	/* C1：符号版本（required 含非 libc 库；host_libc/provided_max 为
+	 * null = 不可定位/无 verdef，诚实降级不判 fatal） */
+	fputs("],\"versions\":{\"required\":[", f);
+	for (i = 0; i < p->n_vreq; i++) {
+		if (i)
+			fputc(',', f);
+		fputs("{\"lib\":", f);
+		cp_jstr(f, p->vreq[i].lib);
+		fputs(",\"versions\":[", f);
+		for (j = 0; j < p->vreq[i].n_vers; j++) {
+			if (j)
+				fputc(',', f);
+			cp_jstr(f, p->vreq[i].vers[j]);
+		}
+		fputs("]}", f);
+	}
+	fputs("],\"host_libc\":", f);
+	if (p->host_libc[0])
+		cp_jstr(f, p->host_libc);
+	else
+		fputs("null", f);
+	fputs(",\"provided_max\":", f);
+	if (p->provided_max[0])
+		cp_jstr(f, p->provided_max);
+	else
+		fputs("null", f);
+	fputs(",\"too_new\":[", f);
+	for (i = 0; i < p->n_too_new; i++) {
+		if (i)
+			fputc(',', f);
+		cp_jstr(f, p->too_new[i]);
+	}
+	fputs("]}}", f);
 	if (p->shebang[0]) {
 		fputs(",\"shebang\":", f);
 		cp_jstr(f, p->shebang);

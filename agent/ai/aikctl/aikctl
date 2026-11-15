@@ -11,6 +11,8 @@
   audit anchor [-e export.jsonl] [--anchors F]  追加 anchors.jsonl 行链
   audit seed [--anchors F]        锚末行 head_hash → /sys/kernel/ai/chain/seed
   audit status                    /proc/ai/audit 首行 + chain sysfs 状态
+  compat scan PATH [PATH...]      逐目标 aik-compat probe → 分类 manifest
+                                 jsonl（C1；--probe/--jsonl；末行 C1_SCAN 汇总）
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -28,7 +30,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -779,6 +783,181 @@ def cmd_abi(_args):
     return 1 if fail else 0
 
 
+# --------------------------------------------------------------- compat ----
+# C1（COMPAT-C1-DESIGN §3）：兼容分类用户面。分类引擎=aik-compat probe
+# （合同 §2.2：`aik-compat probe <abs>` → stdout 一行 probe JSON + 末行
+# `AIK_COMPAT rc=.. runnable=..`）。本面只做扫描循环 + manifest 聚合，
+# 不重复判定逻辑；解析以 JSON 行为准（第一个 '{' 起），AIK_COMPAT 行
+# 仅做 rc 校验（rc=-1=参数非法 → error 条目）。
+COMPAT_SCHEMA = 'aikernel.compat/scan/1'
+COMPAT_CAVEATS = [
+    'v0 不读 ld.so.cache——cache-only 库可能误报缺库',
+    '非 libc 库的符号版本要求只记录不判 fatal',
+]
+COMPAT_PROBE_NAME = 'aik-compat'    # PATH 上缺省 probe 名（§2.2）
+COMPAT_PROBE_TIMEOUT = 10           # 单目标 probe 超时秒数（§3.1）
+AIK_COMPAT_LINE_RE = re.compile(r'^AIK_COMPAT rc=(-?\d+) runnable=([01])\s*$')
+
+
+def compat_resolve_probe(explicit=None):
+    """→ (probe 路径, None) 或 (None, 人话报错)。能力真实：找不到即报错
+    +下一步，不静默降级（§3.1）。"""
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit, None
+        return None, (
+            'compat scan: --probe 指定的 %r 不存在或无执行位。\n'
+            '下一步：确认 aik-compat 的路径，或改用 PATH 上已安装的'
+            ' aik-compat。' % explicit)
+    found = shutil.which(COMPAT_PROBE_NAME)
+    if found:
+        return found, None
+    return None, (
+        'compat scan: PATH 上找不到 probe 二进制 %r。\n'
+        '下一步：安装 aik-compat（agent/ai 下 make aik-compat 并安装到'
+        ' /usr/local/bin），或用 --probe 显式指定其路径。'
+        % COMPAT_PROBE_NAME)
+
+
+def compat_parse_probe(stdout):
+    """probe stdout（合同 §2.2）→ probe JSON dict；违约抛 RuntimeError。"""
+    text = stdout.decode('utf-8', errors='replace') if isinstance(
+        stdout, bytes) else stdout
+    i = text.find('{')
+    if i < 0:
+        raise RuntimeError('stdout 无 JSON 行')
+    try:
+        obj, _used = json.JSONDecoder().raw_decode(text, i)
+    except ValueError as e:
+        raise RuntimeError('probe JSON 解析失败: %s' % e)
+    if not isinstance(obj, dict):
+        raise RuntimeError('probe JSON 不是 object')
+    line = None
+    for ln in reversed(text.splitlines()):
+        if ln.strip().startswith('AIK_COMPAT'):
+            line = ln.strip()
+            break
+    m = AIK_COMPAT_LINE_RE.match(line or '')
+    if not m:
+        raise RuntimeError('缺/坏 AIK_COMPAT 末行: %r' % (line,))
+    rc, runnable = int(m.group(1)), int(m.group(2))
+    if rc == -1:
+        raise RuntimeError('probe rc=-1（参数非法；目标须绝对路径）')
+    if bool(obj.get('runnable')) != bool(runnable):
+        raise RuntimeError('AIK_COMPAT runnable=%d 与 JSON runnable=%r 不符'
+                           % (runnable, obj.get('runnable')))
+    return obj
+
+
+def compat_manifest_row(target, pj):
+    """probe JSON → manifest 行（§3.2 逐字段；codes 只留归因四元组，
+    detail/evidence 不入表；elf 归一含 versions 四字段）。"""
+    elf = pj.get('elf') if isinstance(pj.get('elf'), dict) else {}
+    ver = elf.get('versions') if isinstance(elf.get('versions'), dict) else {}
+    runnable = 1 if pj.get('runnable') else 0
+    return {
+        'schema': COMPAT_SCHEMA,
+        'target': target,
+        'kind': pj.get('kind'),
+        'runnable': runnable,
+        'verdict': 'runnable' if runnable else 'blocked',
+        'codes': [{'code': r.get('code'), 'layer': r.get('layer'),
+                   'fatal': 1 if r.get('fatal') else 0,
+                   'adaptable': 1 if r.get('adaptable') else 0}
+                  for r in pj.get('reasons') or [] if isinstance(r, dict)],
+        'elf': {
+            'needed': list(elf.get('needed') or []),
+            'missing': list(elf.get('missing') or []),
+            'resolved': list(elf.get('resolved') or []),
+            'versions': {
+                'required': list(ver.get('required') or []),
+                'host_libc': ver.get('host_libc'),
+                'provided_max': ver.get('provided_max'),
+                'too_new': list(ver.get('too_new') or []),
+            },
+        },
+        'caveats': list(COMPAT_CAVEATS),
+        'created_by': 'aikctl',
+        'trace_id': None,        # MVP 恒 null；C2 接审计链时才填（§3.2）
+    }
+
+
+def compat_error_row(target, detail):
+    """单目标失败条目（§3.1：rc=-1/超时/非 JSON → 记 error 继续扫）。"""
+    return {
+        'schema': COMPAT_SCHEMA,
+        'target': target,
+        'kind': 'error',
+        'runnable': None,
+        'verdict': 'error',
+        'codes': [{'code': 'PROBE_ERROR', 'layer': 'L0', 'fatal': 1,
+                   'adaptable': 0, 'detail': detail}],
+        'elf': None,
+        'caveats': [],
+        'created_by': 'aikctl',
+        'trace_id': None,
+    }
+
+
+def cmd_compat_scan(args):
+    probe, err = compat_resolve_probe(args.probe)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    out, opened = sys.stdout, None
+    if args.jsonl:
+        try:
+            parent = os.path.dirname(os.path.abspath(args.jsonl))
+            os.makedirs(parent, exist_ok=True)
+            opened = open(args.jsonl, 'w', encoding='utf-8')
+            out = opened
+        except OSError as e:
+            print('compat scan: 打开 %s 失败: %s' % (args.jsonl, e),
+                  file=sys.stderr)
+            return 1
+    total = len(args.paths)
+    n_run = n_blk = n_err = 0
+    try:
+        for path in args.paths:
+            target = os.path.abspath(path)
+            try:
+                cp = subprocess.run([probe, 'probe', target],
+                                    capture_output=True,
+                                    timeout=COMPAT_PROBE_TIMEOUT)
+                pj = compat_parse_probe(cp.stdout)
+            except subprocess.TimeoutExpired:
+                n_err += 1
+                row = compat_error_row(
+                    target, 'probe 超时（>%ds 被杀）' % COMPAT_PROBE_TIMEOUT)
+            except RuntimeError as e:
+                n_err += 1
+                row = compat_error_row(target, 'probe 输出违约: %s' % e)
+            except OSError as e:
+                n_err += 1
+                row = compat_error_row(target, 'probe 启动失败: %s' % e)
+            else:
+                row = compat_manifest_row(target, pj)
+                if row['runnable']:
+                    n_run += 1
+                else:
+                    n_blk += 1
+            print(json.dumps(row, ensure_ascii=False, sort_keys=True,
+                             separators=(',', ':')), file=out)
+        print('C1_SCAN total=%d runnable=%d blocked=%d error=%d'
+              % (total, n_run, n_blk, n_err), file=out)
+    except OSError as e:
+        print('compat scan: 写 manifest 失败: %s' % e, file=sys.stderr)
+        return 1
+    finally:
+        if opened:
+            opened.close()
+    if total and n_err == total:
+        print('compat scan: 全部 %d 个目标 probe 失败（见各行 error 条目）'
+              % total, file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
@@ -816,6 +995,20 @@ def main(argv=None):
 
     p_st = asub.add_parser('status', help='链状态一览')
     p_st.set_defaults(func=cmd_status)
+
+    p_cp = sub.add_parser('compat', help='兼容分类子族（C1）')
+    cpsub = p_cp.add_subparsers(dest='compat_cmd', required=True)
+
+    p_cs = cpsub.add_parser(
+        'scan', help='逐目标 aik-compat probe → 分类 manifest jsonl')
+    p_cs.add_argument('paths', nargs='+', metavar='PATH',
+                      help='目标路径（不递归；目录按 DIRECTORY_TARGET 入表）')
+    p_cs.add_argument('--probe', default=None, metavar='BIN',
+                      help='probe 二进制（默认 PATH 上找 aik-compat）')
+    p_cs.add_argument('--jsonl', default=None, metavar='OUT',
+                      help='manifest 输出文件（缺省打 stdout；末行 C1_SCAN '
+                           '汇总随 manifest 同流）')
+    p_cs.set_defaults(func=cmd_compat_scan)
 
     args = ap.parse_args(argv)
     return args.func(args)
