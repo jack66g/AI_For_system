@@ -516,7 +516,9 @@ def s5_tamper(root, port):
     for dirpath, _dirnames, filenames in os.walk(sroot):
         for fn in filenames:
             snaps.append(os.path.join(dirpath, fn))
-    copies = [p for p in snaps if not p.endswith(".ABSENT")]
+    # S-FINDING-01 修复后：完整性 sidecar 与快照共存——探针只认内容副本
+    copies = [p for p in snaps if not p.endswith(".ABSENT") and
+              not p.endswith(".sha256")]
     if len(copies) != 1:
         ok(False, "S5-snapshot-tamper",
            "snapshot layout unexpected: %s" % snaps)
@@ -532,7 +534,9 @@ def s5_tamper(root, port):
     if u.returncode == 0 and after == "POISONED":
         print("S5: S-FINDING-01 confirmed（快照零校验）", flush=True)
         ok(True, "S5-snapshot-tamper")
-    elif u.returncode != 0 or "回滚失败" in uerr or "occ undo:" in uerr:
+    elif (u.returncode != 0 or "回滚失败" in uerr or
+          "occ undo:" in uerr or "occ-undo:" in uerr or
+          "校验失败" in uerr):
         print("S5: FIXED", flush=True)
         ok(True, "S5-snapshot-tamper")
     else:

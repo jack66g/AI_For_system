@@ -101,7 +101,9 @@ POLICY_REUSE_OBJS := $(REUSE_DIR)/ai_user_policy.o \
 		  $(REUSE_DIR)/ai_trace.o
 
 # occ_tools（T9b1）：六件套 + aik-sandbox 对接 + trace 审计
-TOOLS_SRCS := occ_tools/tools.c occ_tools/sandbox.c occ_tools/trace.c
+# S-FINDING-01：快照完整性 sha256（libc-only 自含）
+TOOLS_SRCS := occ_tools/tools.c occ_tools/sandbox.c occ_tools/trace.c \
+	      occ_tools/sha256.c
 TOOLS_OBJS := $(TOOLS_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # occ_tui（T9c1 原语 + T9c2 视图层 + T9c3 overlay/keymap/theme/usage）：

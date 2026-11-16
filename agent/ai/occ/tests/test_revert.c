@@ -25,11 +25,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include <sqlite3.h>
 
 #include "occ_core/occ_revert.h"
 #include "occ_tools/occ_tools.h"
+#include "occ_tools/sha256.h"			/* S-FINDING-01 场景 I */
 
 static int n_ok, n_fail;
 
@@ -57,6 +59,46 @@ static void wfile(const char *path, const char *body)
 		fputs(body, f);
 		fclose(f);
 	}
+}
+
+/* I) 助手：定位 <root>/<ses>/ 下首个真快照（跳过 .ABSENT/.sha256/
+ * _redo/隐藏项）——返回 0=找到（out=绝对路径） */
+static int find_snap(const char *root, const char *ses, char *out,
+		     size_t cap)
+{
+	char d[340];
+	DIR *dd, *md;
+	struct dirent *en, *mn;
+
+	snprintf(d, sizeof(d), "%s/%s", root, ses);
+	if (!(dd = opendir(d)))
+		return -1;
+	while ((en = readdir(dd))) {
+		char sub[620];
+
+		if (en->d_name[0] == '.' || !strcmp(en->d_name, "_redo"))
+			continue;
+		snprintf(sub, sizeof(sub), "%s/%s", d, en->d_name);
+		if (!(md = opendir(sub)))
+			continue;
+		while ((mn = readdir(md))) {
+			size_t nl = strlen(mn->d_name);
+
+			if (mn->d_name[0] == '.')
+				continue;
+			if (nl > 7 &&
+			    (!strcmp(mn->d_name + nl - 7, ".ABSENT") ||
+			     !strcmp(mn->d_name + nl - 7, ".sha256")))
+				continue;
+			snprintf(out, cap, "%s/%s", sub, mn->d_name);
+			closedir(md);
+			closedir(dd);
+			return 0;
+		}
+		closedir(md);
+	}
+	closedir(dd);
+	return -1;
 }
 
 static char *rfile(const char *path)
@@ -576,6 +618,117 @@ int main(void)
 			if (db2)
 				occ_db_close(db2);
 		}
+
+	/* ---- I) S-FINDING-01：快照完整性（篡改拒恢复+legacy 兼容+
+	 *      redo 同口径校验） ---- */
+	{
+		char sid7[OCC_ID_LEN], sid8[OCC_ID_LEN], sid9[OCC_ID_LEN];
+		char u7[OCC_ID_LEN], u8[OCC_ID_LEN], u9[OCC_ID_LEN];
+		char f7[192], f8[192], f9[192];
+		char snap[900], side[920], rd[900];
+		char hex[OCC_SHA256_HEX + 1];
+
+		/* I0：实现正确性向量（"abc"）钉死 */
+		OK(occ_sha256_hex("abc", 3, hex) == 0 &&
+		   !strcmp(hex,
+			    "ba7816bf8f01cfea414140de5dae2223"
+			    "b00361a396177a9cb410ff61f20015ad"),
+		   "i0-sha256-abc");
+
+		/* I7：篡改快照+sidecar 在场 → 拒绝恢复（fail closed） */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i7-create");
+		snprintf(sid7, sizeof(sid7), "%s", s.id);
+		occ_session_set_workdir(db, sid7, workdir, err, sizeof(err));
+		snprintf(f7, sizeof(f7), "%s/f7.txt", workdir);
+		wfile(f7, "O7");
+		OK(make_write_turn(db, sid7, "把 f7 改成 T7", f7, "T7",
+				   u7, err, sizeof(err)) == 0, "i7-turn");
+		OK(find_snap(dbpath_of("snapshots"), sid7, snap,
+			      sizeof(snap)) == 0, "i7-snap-found");
+		snprintf(side, sizeof(side), "%s.sha256", snap);
+		OK(!access(side, F_OK), "i7-sidecar-written");
+		wfile(snap, "POISON7");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid7, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i7-undo-rc0");
+		OK(r.nfiles == 1 && r.files[0].failed == 1,
+		   "i7-tamper-refused");
+		OK(!strcmp(rfile(f7), "T7"), "i7-target-kept-current");
+		occ_undo_result_free(&r);
+
+		/* I8：legacy 快照（无 sidecar）→ 照旧恢复（向后兼容） */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i8-create");
+		snprintf(sid8, sizeof(sid8), "%s", s.id);
+		occ_session_set_workdir(db, sid8, workdir, err, sizeof(err));
+		snprintf(f8, sizeof(f8), "%s/f8.txt", workdir);
+		wfile(f8, "O8");
+		OK(make_write_turn(db, sid8, "把 f8 改成 T8", f8, "T8",
+				   u8, err, sizeof(err)) == 0, "i8-turn");
+		OK(find_snap(dbpath_of("snapshots"), sid8, snap,
+			      sizeof(snap)) == 0, "i8-snap-found");
+		snprintf(side, sizeof(side), "%s.sha256", snap);
+		OK(unlink(side) == 0, "i8-sidecar-removed");
+		wfile(snap, "LEGACY8");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid8, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i8-undo-rc0");
+		OK(r.nfiles == 1 && !r.files[0].failed, "i8-legacy-restored");
+		OK(!strcmp(rfile(f8), "LEGACY8"), "i8-legacy-content");
+		occ_undo_result_free(&r);
+
+		/* I9：_redo 段同口径（篡改 _redo 副本 → redo 拒绝还原） */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i9-create");
+		snprintf(sid9, sizeof(sid9), "%s", s.id);
+		occ_session_set_workdir(db, sid9, workdir, err, sizeof(err));
+		snprintf(f9, sizeof(f9), "%s/f9.txt", workdir);
+		wfile(f9, "O9");
+		OK(make_write_turn(db, sid9, "把 f9 改成 T9", f9, "T9",
+				   u9, err, sizeof(err)) == 0, "i9-turn");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid9, 1, NULL, &r, err, sizeof(err)) == 0 &&
+		   !strcmp(rfile(f9), "O9"), "i9-undo-ok");
+		occ_undo_result_free(&r);
+		{
+			char rdir[300];
+			DIR *dd = NULL;
+			struct dirent *mn;
+
+			snprintf(rdir, sizeof(rdir), "%s/%s/_redo",
+				  dbpath_of("snapshots"), sid9);
+			OK((dd = opendir(rdir)) != NULL, "i9-redo-dir");
+			if (dd) {
+				while ((mn = readdir(dd))) {
+					size_t nl = strlen(mn->d_name);
+
+					if (mn->d_name[0] == '.')
+						continue;
+					if (nl > 7 && !strcmp(mn->d_name + nl - 7,
+								 ".sha256"))
+						continue;
+					snprintf(rd, sizeof(rd), "%s/%s",
+						   rdir, mn->d_name);
+					break;
+				}
+				closedir(dd);
+			}
+			OK(rd[0] != '\0', "i9-redo-snap-found");
+			if (rd[0]) {
+				wfile(rd, "POISON9");
+				memset(&r, 0, sizeof(r));
+				OK(occ_redo(db, sid9, NULL, &r, err,
+					      sizeof(err)) == 0,
+				   "i9-redo-rc0");
+				OK(r.nfiles == 1 && r.files[0].failed == 1,
+				   "i9-redo-tamper-refused");
+				OK(!strcmp(rfile(f9), "O9"),
+				   "i9-redo-kept-undone");
+				occ_undo_result_free(&r);
+			}
+		}
+	}
 
 	occ_db_close(db);
 out:

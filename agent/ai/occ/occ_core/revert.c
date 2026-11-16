@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "occ_tools/occ_tools.h"			/* mangle/unmangle/snap_root/resolve */
+#include "occ_tools/sha256.h"		/* S-FINDING-01：快照校验 */
 #include "store/store_json.h"
 
 static void set_err(char *err, size_t errlen, const char *fmt, ...)
@@ -193,6 +194,10 @@ static void scan_msg_dir(const char *root, const char *ses, const char *msg,
 		    (int)sizeof(name))
 			continue;
 		nl = strlen(name);
+		/* S-FINDING-01：完整性 sidecar 不是快照条目（否则计数
+		 * 膨胀+幽灵恢复 <path>.sha256 文件） */
+		if (nl > 7 && !strcmp(name + nl - 7, ".sha256"))
+			continue;
 		if (nl > 7 && !strcmp(name + nl - 7, ".ABSENT")) {
 			name[nl - 7] = '\0';
 			action = OCC_UNDO_DELETE;
@@ -332,6 +337,8 @@ static void str_array_free(char **v, size_t n)
 /* ---- _redo 段（stage 时另存「撤销前现状」；已存在即跳过——叠加 undo
  *      保留最早现状，redo 一步回到首次撤销前） ---- */
 
+static void redo_sidecar(const char *dst);	/* S-FINDING-01 （定义随校验助手在 apply_restore 前） */
+
 static void redo_capture(const char *root, const char *ses,
 			 const snap_ent *e)
 {
@@ -355,6 +362,8 @@ static void redo_capture(const char *root, const char *ses,
 		if (copy_file(e->path, dst))
 			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
 				e->path);
+		else
+			redo_sidecar(dst);	/* S-FINDING-01 */
 		return;
 	}
 	/* 现状不存在 → 墓碑（redo 据此删除） */
@@ -366,6 +375,91 @@ static void redo_capture(const char *root, const char *ses,
 			fputs("absent\n", f);
 			fclose(f);
 		}
+	}
+}
+
+/* ---- S-FINDING-01（S-TRACK §5）：快照完整性校验 ---- */
+
+/* 读文件全量（≤64MB；revert 自留——tools.c read_whole 是 static） */
+static char *rv_read(const char *path, size_t *out_len)
+{
+	FILE *f = fopen(path, "rb");
+	char *buf;
+	long sz;
+
+	if (!f)
+		return NULL;
+	if (fseek(f, 0, SEEK_END) || (sz = ftell(f)) < 0 ||
+	    sz > 64 * 1024 * 1024 || fseek(f, 0, SEEK_SET)) {
+		fclose(f);
+		return NULL;
+	}
+	buf = malloc(sz ? (size_t)sz : 1);
+	if (!buf || (sz && fread(buf, 1, (size_t)sz, f) != (size_t)sz)) {
+		free(buf);
+		fclose(f);
+		return NULL;
+	}
+	fclose(f);
+	*out_len = (size_t)sz;
+	return buf;
+}
+
+/* 校验 <snap>.sha256：无 sidecar=legacy 快照放行（向后兼容）；有则
+ * 比对内容摘要。0=可恢复；-1=校验失败（被篡改/IO 错——拒绝恢复）。 */
+static int snap_verify(const char *snap_path)
+{
+	char side[9280], want[OCC_SHA256_HEX + 2];
+	char *data, *p;
+	size_t len = 0;
+	char hex[OCC_SHA256_HEX + 1];
+	FILE *f;
+
+	snprintf(side, sizeof(side), "%s.sha256", snap_path);
+	f = fopen(side, "r");
+	if (!f)
+		return 0;			/* legacy：无校验面 */
+	if (!fgets(want, sizeof(want), f)) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	for (p = want; *p; p++)
+		if (*p == '\n' || *p == '\r')
+			*p = '\0';
+	if (strlen(want) != OCC_SHA256_HEX)
+		return -1;		/* sidecar 形损：fail closed */
+	data = rv_read(snap_path, &len);
+	if (!data)
+		return -1;
+	if (occ_sha256_hex(data, len, hex) || strcmp(hex, want)) {
+		free(data);
+		return -1;
+	}
+	free(data);
+	return 0;
+}
+
+/* _redo 段捕获后写 sidecar（现状内容摘要；redo 恢复同口径校验） */
+static void redo_sidecar(const char *dst)
+{
+	char *data;
+	size_t len = 0;
+	char hex[OCC_SHA256_HEX + 1];
+	FILE *sf;
+	char sp[9280];
+
+	data = rv_read(dst, &len);
+	if (!data || occ_sha256_hex(data, len, hex)) {
+		free(data);
+		return;
+	}
+	free(data);
+	snprintf(sp, sizeof(sp), "%s.sha256", dst);
+	sf = fopen(sp, "w");
+	if (sf) {
+		fprintf(sf, "%s\n", hex);
+		fclose(sf);
 	}
 }
 
@@ -394,6 +488,12 @@ static int apply_restore(const char *root, const char *ses,
 		return -1;
 	if (access(src, F_OK))
 		return -1;
+	if (snap_verify(src)) {
+		/* S-FINDING-01：篡改/形损快照拒绝恢复（fail closed） */
+		fprintf(stderr, "occ-undo: 快照校验失败（被篡改？）：%s\n",
+			e->path);
+		return -1;
+	}
 	{
 		/* 目标父目录可能已被删（write 递归建过）——尽力重建 */
 		char parent[4096];
@@ -435,6 +535,13 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 	snprintf(src, sizeof(src), "%s/%s", dir, mangled);
 	if (stat(src, &st)) {
 		*failed = 1;			/* _redo 缺该文件 */
+		return -1;
+	}
+	if (snap_verify(src)) {
+		/* S-FINDING-01：_redo 同口径校验（篡改拒绝还原） */
+		fprintf(stderr, "occ-redo: 快照校验失败（被篡改？）：%s\n",
+			e->path);
+		*failed = 1;
 		return -1;
 	}
 	{

@@ -17,6 +17,7 @@
 #define _GNU_SOURCE
 #include "occ_tools.h"
 #include "occ_tools_priv.h"
+#include "sha256.h"			/* S-FINDING-01：快照 sidecar */
 
 #include <dirent.h>
 #include <errno.h>
@@ -2710,6 +2711,28 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 		return -1;
 	}
 	fclose(f);
+	/* S-FINDING-01（S-TRACK §5）：快照完整性 sidecar——原内容摘要落
+	 * <dst>.sha256（undo/redo 恢复前校验；sidecar 写失败不阻断快照
+	 * 本体，stderr 警告=退化为 legacy 无校验语义）。ABSENT 墓碑无
+	 * 内容不记。 */
+	{
+		char hex[OCC_SHA256_HEX + 1];
+
+		if (occ_sha256_hex(data, len, hex) == 0) {
+			FILE *sf;
+			char sp[12560];
+
+			snprintf(sp, sizeof(sp), "%s.sha256", dst);
+			sf = fopen(sp, "w");
+			if (sf) {
+				fprintf(sf, "%s\n", hex);
+				fclose(sf);
+			} else {
+				fprintf(stderr, "occ-snap: sidecar 写失败"
+					"（退化为无校验）：%s\n", sp);
+			}
+		}
+	}
 	free(data);
 	return 0;
 }
