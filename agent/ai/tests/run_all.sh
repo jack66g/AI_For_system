@@ -280,6 +280,18 @@ else
     failed+=("fuzz_parsers")
 fi
 
+# ---- 第 69 门：S 棒红队攻击钻证（恶意 shim/提示注入/外泄/快照篡改）----
+echo "== S-track redteam drill =="
+if timeout 300 python3 "$here/redteam/redteam_drill.py" \
+        > /tmp/aik-redteam.log 2>&1; then
+    echo "PASS redteam_drill"
+    pass=$((pass + 1))
+else
+    echo "FAIL redteam_drill (see /tmp/aik-redteam.log)"
+    fail=$((fail + 1))
+    failed+=("redteam_drill")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then
