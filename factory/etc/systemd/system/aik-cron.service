@@ -1,0 +1,17 @@
+[Unit]
+Description=AIKernel cron 守护（busybox crond；C-P2b）
+After=local-fs.target
+# 用户 crontab 通道：/usr/local/bin/crontab（busybox applet）；
+# spool=/var/spool/cron/crontabs（ExecStartPre 自建）。
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/spool/cron/crontabs
+# -f=前台（busybox crond 缺省会 fork 后台→主进程退 0→systemd 判死；
+# 2026-11-17 lt-vm 实测教训）
+ExecStart=/usr/local/bin/busybox crond -f -S -l 8
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -10,9 +10,17 @@
 # W28 扩展（升级与恢复配套，恢复面 = 数据面 + 引导面 + 防火墙/SSH 基线）：
 #   + /etc/systemd/system/aik*.service|timer（含 upgrade-commit/backup/health 等）
 #   + /etc/ssh/sshd_config.d/50-aik-hardening.conf（B 波 SSH 防爆破基线）
+#   + /etc/apt/apt.conf.d/51-aik-upgrade-policy（C-P1b 升级策略决策件）
 #   + /boot/aik-slot-state（A/B 槽状态机）
 #   + /boot/grub/grub.cfg（引导配置，含 one-shot 逻辑与 try 项）
 #   + /etc/nftables.conf（防火墙基线）
+#
+# C-P2d 扩面（2026-11-17，可选用户数据面——默认关，显式开）：
+#   --with-home  打包 /home（用户工作区）
+#   --with-data  打包 /var/lib/aikernel（telemetry/decisions 数据资产；
+#                量大——与 aistreamd 保留 7 天/aik-log-trim 14 天配合评估）
+#   标签进包名：aikernel-<ts>[-home][-data].tar.gz（可识别、分族保留：
+#   三族各自 KEEP 份，互不挤占）。
 #
 # 约定：本脚本只允许执行不允许改——不在任何写路径白名单内，
 # root:root 0755；恢复口：tar -xzf <包> -C /（先停 aikernel-api）。
@@ -22,20 +30,35 @@ SRC1="/root/.aikernel"
 SRC2="/etc/aikernel"
 BACKUP_DIR="/var/backups"
 KEEP=7
+WITH_HOME=0
+WITH_DATA=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-home) WITH_HOME=1 ;;
+        --with-data) WITH_DATA=1 ;;
+        *) echo "aik-backup: unknown arg: $arg (available: --with-home --with-data)" >&2; exit 2 ;;
+    esac
+done
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="${BACKUP_DIR}/aikernel-${STAMP}.tar.gz"
+TAGP=""
+[ "$WITH_HOME" = 1 ] && TAGP="${TAGP}-home"
+[ "$WITH_DATA" = 1 ] && TAGP="${TAGP}-data"
+OUT="${BACKUP_DIR}/aikernel-${STAMP}${TAGP}.tar.gz"
 
 mkdir -p "${BACKUP_DIR}"
 
 SRCS=()
 [ -d "${SRC1}" ] && SRCS+=("${SRC1}")
 [ -d "${SRC2}" ] && SRCS+=("${SRC2}")
+[ "$WITH_HOME" = 1 ] && [ -d /home ] && SRCS+=("/home")
+[ "$WITH_DATA" = 1 ] && [ -d /var/lib/aikernel ] && SRCS+=("/var/lib/aikernel")
 
 # W28 扩展打包面（存在才打包；glob 逐个存在性过滤，防字面量入列）
 W28_EXTRAS=(
     /etc/systemd/system/aik*.service /etc/systemd/system/aik*.timer
     /etc/systemd/system/aikernel*.service /etc/systemd/system/aikernel*.timer
     /etc/ssh/sshd_config.d/50-aik-hardening.conf
+    /etc/apt/apt.conf.d/51-aik-upgrade-policy
     /boot/aik-slot-state
     /boot/grub/grub.cfg
     /etc/nftables.conf
@@ -59,17 +82,29 @@ if [ "${rc}" -gt 1 ]; then
     exit "${rc}"
 fi
 
-# 保留最近 KEEP 份，超出删除（按修改时间倒序）
+# 保留最近 KEEP 份/族，超出删除（按修改时间倒序；三族互不挤占：
+# 裸族 aikernel-<ts>.tar.gz / home 族 *-home.tar.gz /
+# data 族 *-data.tar.gz〔含 -home-data 组合件——组合属稀有态并入 data 族〕）
 deleted=0
-while [ "$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz 2>/dev/null | wc -l)" -gt "${KEEP}" ]; do
-    oldest="$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz | tail -1)"
-    rm -f "${oldest}"
-    deleted=$((deleted + 1))
-done
+prune_family() {
+    local famlist="$1" n oldest
+    n=$(printf '%s\n' "$famlist" | grep -c . || true)
+    while [ "${n}" -gt "${KEEP}" ]; do
+        oldest="$(printf '%s\n' "$famlist" | tail -1)"
+        rm -f "${oldest}"
+        deleted=$((deleted + 1))
+        famlist="$(printf '%s\n' "$famlist" | head -n -1)"
+        n=$((n - 1))
+    done
+}
+base_list() { ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz 2>/dev/null | grep -vE -- '-(home|data)\.tar\.gz$' || true; }
+prune_family "$(base_list)"
+prune_family "$(ls -1t "${BACKUP_DIR}"/aikernel-*-home.tar.gz 2>/dev/null || true)"
+prune_family "$(ls -1t "${BACKUP_DIR}"/aikernel-*-data.tar.gz 2>/dev/null || true)"
 
-remain="$(ls -1t "${BACKUP_DIR}"/aikernel-*.tar.gz 2>/dev/null | wc -l)"
+remain="$(base_list | wc -l)"
 size="$(du -h "${OUT}" | cut -f1)"
 entries="$(tar -tzf "${OUT}" | wc -l)"
-echo "aik-backup: OK ${OUT} (${size}; kept=${remain} deleted=${deleted} entries=${entries})"
+echo "aik-backup: OK ${OUT} (${size}; base_kept=${remain} deleted=${deleted} entries=${entries})"
 [ -s /tmp/aik-backup.tar.err ] && { echo "aik-backup: tar notes:"; cat /tmp/aik-backup.tar.err; }
 exit 0

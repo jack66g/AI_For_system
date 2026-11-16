@@ -2,18 +2,19 @@
 
 本目录对应 guest rootfs 的绝对路径：`factory/etc/...` ↔ `/etc/...`，`factory/usr/...` ↔ `/usr/...`。只收编**项目自有**资产，不包含发行版文件、运行时密钥或 rootfs 镜像。
 
-## systemd 单元（17 件）
+## systemd 单元（18 件）
 
 | 文件 | 作用 |
 |---|---|
 | `aikernel-api.service` | 远程 AI API（127.0.0.1:8761，Bearer；token 安装时生成） |
 | `autocondense.service` | 上下文压缩服务 autocondensed（127.0.0.1:**8762**，T9d 改号——8761 让给 aikernel-api，撞端口坑清偿） |
-| `aikernel-health.service` / `.timer` | 健康自愈（5min 一轮） |
+| `aikernel-health.service` / `.timer` | 健康自愈（5min 一轮；C-P1e 三闸=宽限/冷却/内存闸；C-P2e 告警出口=webhook+标志文件） |
 | `aikernel-memory.service` | SME 记忆引擎 REST（127.0.0.1:8000） |
-| `aikernel-backup.service` / `.timer` | A/B 备份 |
+| `aikernel-backup.service` / `.timer` | A/B 备份（C-P2d：`--with-home`/`--with-data` 可选用户数据面，分族保留） |
 | `aikernel-upgrade-commit.service` / `.timer` | A/B 升级健康门提交 |
 | `aik-disk-check.service` / `.timer` | 磁盘水位检查 |
 | `aik-log-trim.service` / `.timer` | 文件日志有界化（C-P1c，2026-11-17：追加日志 >8M 保尾 4M；telemetry 天目录保 14 天） |
+| `aik-cron.service` | cron 守护（C-P2b：busybox crond；用户通道=`crontab` 命令，spool=/var/spool/cron/crontabs） |
 | `aik-desktop.service` | Web 桌面 demo（127.0.0.1:8091） |
 | `ollama.service` | 本地模型引擎（127.0.0.1:11434；出厂不预装模型，按需 `aik model install`） |
 | `sme-seed.service` | 首启 seed 幂等导入 |
@@ -33,6 +34,13 @@
 ## /usr/local/sbin
 
 - `aik-backup`、`aik-cert-gen`、`aik-reset`、`aik-token`、`aik-upgrade`、`aikernel-health.sh`、`aik-ac-hook`、`aik-log-trim`（C-P1c）
+- `busybox`（C-P2b/g，2026-11-17：L1 静态 busybox v1.30.1 入厂）+ 同目录
+  `crond`/`crontab`/`fdisk` 符号链（分区面 D2 路径：`fdisk -l`/`fdisk /dev/vda`
+  经 busybox applet 提供；parted/LVM 评估在案 P3）
+- 告警出口（C-P2e）：`/etc/aikernel/health-alert.conf` 写
+  `WEBHOOK_URL=http://host/path` 即开（缺省=仅 journal+wall）；
+  FAIL-ALERT 升级/RECOVERED 各发一次 JSON POST；本地标志
+  `/run/aikernel-health/alert-<item>.flag`
 - `aikernel-api` **不在本目录重复**：源在 `agent/ai/api/aikernel-api`，由发布脚本安装到 `/usr/local/sbin/`。
 - `autocondensed` / `autocondense-mcp` / `autocondense-hook` 同上：源在 `agent/ai/autocondense/`，发布脚本安装。
 
@@ -63,7 +71,7 @@
 
 ## 启用关系
 
-`multi-user.target.wants`：`aikernel-api`、`autocondense`、`aikernel-memory`、`ollama`、`sme-seed`、`ssh-keygen`、`aik-desktop`、`nftables`、`systemd-networkd`、`systemd-resolved`、`systemd-timesyncd`、`ssh`。
+`multi-user.target.wants`：`aikernel-api`、`autocondense`、`aikernel-memory`、`ollama`、`sme-seed`、`ssh-keygen`、`aik-desktop`、`nftables`、`systemd-networkd`、`systemd-resolved`、`systemd-timesyncd`、`ssh`、`aik-cron`。
 `timers.target.wants`：`aikernel-health.timer`、`aikernel-backup.timer`、`aikernel-upgrade-commit.timer`、`aik-disk-check.timer`、`aik-log-trim.timer`。
 
 修改流程：改构建机 rootfs → ISO/qemu 实测 → 按相同相对路径收编回本目录；不要只改本目录当构建层。

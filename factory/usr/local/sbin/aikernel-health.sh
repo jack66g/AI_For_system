@@ -48,6 +48,17 @@ HEAL_GRACE_SEC=${AIK_HEALTH_GRACE_SEC:-1800}
 HEAL_COOLDOWN_SEC=${AIK_HEALTH_COOLDOWN_SEC:-3600}
 HEAL_FREE_GATE_MB=${AIK_HEALTH_FREE_GATE_MB:-400}
 
+# ---- C-P2e 告警出口（可选，默认关）----
+# 配置：/etc/aikernel/health-alert.conf 写一行
+#   WEBHOOK_URL=http://host/path
+# （文件不存在=仅 journal+wall 本地面）。触发面=FAIL-ALERT 升级（3 轮）
+# 与 RECOVERED 恢复——逐态一次，不逐轮轰炸；本地标志
+# /run/aikernel-health/alert-<item>.flag 供巡检/脚本读取。
+# 语义注（C-P2e 修正）：冷却/内存闸只限「重启动作」，不灭「告警升级」
+# ——闸保护期连续失败照常计数升级（宽限窗例外：加载期不算失败）。
+WEBHOOK_URL=""
+[ -r /etc/aikernel/health-alert.conf ] && . /etc/aikernel/health-alert.conf
+
 exec >"/tmp/aikernel-health-last.log" 2>&1
 echo "[aikernel-health] start $(date '+%F %T') (grace=${HEAL_GRACE_SEC}s cooldown=${HEAL_COOLDOWN_SEC}s free_gate=${HEAL_FREE_GATE_MB}MB)"
 mkdir -p "$STATEDIR" 2>/dev/null
@@ -61,6 +72,7 @@ bump_fail() {
         echo "[alert] $name 连续 3 轮失败，升级告警"
         logger -t "$TAG" -p daemon.err "FAIL-ALERT: $name 连续 3 轮失败（连续失败计数=$cnt），请人工介入"
         wall "aikernel-health: $name 连续 3 轮失败，请检查（journalctl -t $TAG）" 2>/dev/null
+        alert_emit alert "$name" "consecutive_failures=${cnt}"
     elif [ "$cnt" -gt 3 ]; then
         logger -t "$TAG" -p daemon.err "FAIL-ALERT: $name 持续失败（连续失败计数=$cnt）"
     fi
@@ -72,12 +84,36 @@ clear_fail() {
     if [ -f "$STATEDIR/$name.cnt" ]; then
         prev=$(cat "$STATEDIR/$name.cnt" 2>/dev/null || echo 0)
         rm -f "$STATEDIR/$name.cnt"
-        [ "$prev" -ge 3 ] && logger -t "$TAG" "RECOVERED: $name 此前连续 ${prev} 轮失败，现已恢复"
+        if [ "$prev" -ge 3 ]; then
+            logger -t "$TAG" "RECOVERED: $name 此前连续 ${prev} 轮失败，现已恢复"
+            alert_emit recovered "$name" "recovered_after=${prev}"
+        fi
     fi
 }
 
 note_fail() { FAIL=$((FAIL + 1)); bump_fail "$1"; }
 note_warn() { WARN=$((WARN + 1)); }
+
+# alert_emit <alert|recovered> <item> <detail> : 本地标志 + 可选 webhook
+# （webhook 失败绝不影响主流程；detail 为受控串，无 JSON 注入面）
+alert_emit() {
+    atype="$1"; aitem="$2"; adetail="$3"
+    case "$atype" in
+        alert)
+            echo "$(date '+%F %T') ${aitem} ${adetail}" \
+                > "$STATEDIR/alert-${aitem}.flag" 2>/dev/null
+            ;;
+        recovered)
+            rm -f "$STATEDIR/alert-${aitem}.flag" 2>/dev/null
+            ;;
+    esac
+    if [ -n "${WEBHOOK_URL:-}" ]; then
+        curl -s -m 5 -o /dev/null -X POST \
+            -H 'Content-Type: application/json' \
+            -d "{\"type\":\"health-${atype}\",\"host\":\"$(hostname 2>/dev/null)\",\"item\":\"${aitem}\",\"detail\":\"${adetail}\",\"ts\":\"$(date '+%F %T')\"}" \
+            "$WEBHOOK_URL" 2>/dev/null || true
+    fi
+}
 
 # ---- C-P1e 助手 ----
 # svc_age_sec <svc> : 距服务最近一次进入 active 的秒数（未知/解析失败=999999）
@@ -163,8 +199,13 @@ check_service() {
                 note_fail "svc:$svc"
             fi
         else
-            # 2/3/4=闸保护跳过：不杀不该杀的，也不给加载期计失败
-            note_warn
+            # 2=宽限（加载期，不判失败）；3=冷却/4=内存闸（真失败，
+            # 只是动作被限/推迟——照常计数升级，C-P2e 语义修正）
+            if [ "$hrc" -eq 2 ]; then
+                note_warn
+            else
+                note_fail "svc:$svc"
+            fi
         fi
     fi
 }
@@ -191,8 +232,14 @@ check_sme_http() {
                 note_fail "sme-http"
             fi
         else
-            # 2=宽限（加载期保护）/3=冷却/4=内存闸：保护性跳过，不计失败
-            echo "[note] SME REST 本轮不处置（闸保护），下轮再看"
+            # 2=宽限（加载期，不判失败）；3=冷却/4=内存闸（真失败，
+            # 动作被限/推迟——照常计数升级，C-P2e 语义修正）
+            if [ "$hrc" -eq 2 ]; then
+                note_warn
+            else
+                note_fail "sme-http"
+            fi
+            echo "[note] SME REST 本轮不处置（闸保护=$hrc），下轮再看"
         fi
     fi
 }
@@ -228,7 +275,12 @@ check_api_http() {
                 note_fail "api-http"
             fi
         else
-            echo "[note] aikernel-api 本轮不处置（闸保护），下轮再看"
+            if [ "$hrc" -eq 2 ]; then
+                note_warn
+            else
+                note_fail "api-http"
+            fi
+            echo "[note] aikernel-api 本轮不处置（闸保护=$hrc），下轮再看"
         fi
     fi
 }
