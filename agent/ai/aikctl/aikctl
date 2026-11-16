@@ -2540,6 +2540,19 @@ def _ts_wall_ns(ts, _btime_cache=[None]):
     return ts + _btime_cache[0] * 10 ** 9 if _btime_cache[0] else ts
 
 
+
+
+def _pq_read(pq_mod, path, fn, what='读取'):
+    """G1 fuzz 兜底：损坏 parquet → 人话错（read_table 与读后变换
+    to_pydict/num_rows 的 decode 异常一并收编——不上裸栈）。"""
+    try:
+        return fn(pq_mod.read_table(path))
+    except SystemExit:
+        raise
+    except Exception as e:
+        raise SystemExit("aikctl: parquet %s失败（损坏文件？）%s: %s"
+                         % (what, path, e))
+
 def _collect_rows(pq, root, since_d, until_d, layer='curated'):
     """窗口内 curated 天目录 cat 文件逐行读出（pyarrow），行级
     timestamp_ns 过滤（天目录为主筛、行级为诚实复核；时基归一见
@@ -2548,7 +2561,7 @@ def _collect_rows(pq, root, since_d, until_d, layer='curated'):
     rows = []
     for _day, ddir in _day_dirs(root, layer, since_d, until_d):
         for path in _cat_files(ddir):
-            cols = pq.read_table(path).to_pydict()
+            cols = _pq_read(pq, path, lambda t: t.to_pydict())
             n = len(cols.get('timestamp_ns', []))
             for i in range(n):
                 ts = _ts_wall_ns(cols['timestamp_ns'][i])
@@ -2613,7 +2626,7 @@ def cmd_dataset_list(args):
               'raw 由 aistreamd 产生，curated 由棒① promotion 双写产生）'
               % (args.layer, base))
         return 0
-    idx = pq.read_table(ipath).to_pydict()
+    idx = _pq_read(pq, ipath, lambda t: t.to_pydict(), 'index 读取')
     n = len(idx.get('file', []))
     if n == 0:
         print('aikctl: %s 层 index.parquet 为空（0 文件）' % args.layer)
@@ -2742,7 +2755,7 @@ def cmd_dataset_replay(args):
         AIP_TABLE_RULES = tuple(
             (fmap[r['feat']], 1 if r['op'] == 'AIP_OP_GT' else 0,
              r['lo'], amap[r['action']]) for r in spec['rules'])
-    cols = pqp.read_table(args.file).to_pydict()
+    cols = _pq_read(pqp, args.file, lambda t: t.to_pydict(), '回放读取')
     for c in ('data_0', 'data_1', 'data_2', 'data_4', 'decision_type'):
         if c not in cols:
             print('aikctl: %s 缺列 %s（回放面=aipd 影子 33 列 parquet）'
@@ -2897,7 +2910,7 @@ def _rebuild_curated_index(pa, pq, root):
                 and os.path.isdir(ddir)):
             continue
         for path in _cat_files(ddir):
-            cols = pq.read_table(path).to_pydict()
+            cols = _pq_read(pq, path, lambda t: t.to_pydict())
             ts = cols.get('timestamp_ns') or []
             if not ts:
                 continue
@@ -2935,7 +2948,7 @@ def cmd_dataset_delete(args):
     rows_n = 0
     for day, ddir in days:
         for path in _cat_files(ddir):
-            rows_n += pq.read_table(path).num_rows
+            rows_n += _pq_read(pq, path, lambda t: t.num_rows)
             targets.append(path)
     sme_url = args.sme_url
     try:

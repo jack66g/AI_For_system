@@ -269,6 +269,17 @@ else
     failed+=("m2_bench")
 fi
 
+# ---- 第 68 门：G1 解析器 fuzz（三族×确定性变异；崩溃=红 人话=绿）----
+if FUZZ_CASES=30 timeout 300 python3 "$here/fuzz_parsers.py" \
+        > /tmp/aik-fuzz.log 2>&1; then
+    echo "PASS fuzz_parsers"
+    pass=$((pass + 1))
+else
+    echo "FAIL fuzz_parsers (see /tmp/aik-fuzz.log)"
+    fail=$((fail + 1))
+    failed+=("fuzz_parsers")
+fi
+
 echo
 echo "SUMMARY: pass=$pass fail=$fail"
 if [ "$fail" -ne 0 ]; then
