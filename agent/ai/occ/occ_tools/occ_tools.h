@@ -80,6 +80,35 @@
 const occ_tool_def *occ_tool_defs(size_t *n);
 int occ_tool_is_known(const char *name);
 
+/* ---- O-9/O-4（UX-O §2）：occ 面 W2 高危确认门 ---- */
+struct occ_tool_ctx;			/* 前向（本块早于 ctx typedef） */
+#define OCC_W2_TIER_PRIVILEGED 0	/* root / /su 提权：W2=确认后放行 */
+#define OCC_W2_TIER_CONFIRMED  1	/* sudo 组：W1 only */
+#define OCC_W2_TIER_RESTRICTED 2	/* 其他用户：W1 only（安全兜底档） */
+
+typedef struct occ_w2_gate {
+	volatile int tier;	/* 档位（O-10：main 按 policy 初始化；
+				 * /su 成功→PRIVILEGED、/su 0→回落） */
+	int allow_w2;		/* headless --allow-w2：显式开门免确认 */
+	int denied;		/* 已拒绝计数（-p 收尾 stderr 指引用） */
+	/* 交互确认回调（TUI）：1=放行 0=拒绝/超时；NULL=headless（默认拒） */
+	int (*confirm)(void *ud, const char *title, const char *detail);
+	void *ud;
+} occ_w2_gate;
+
+/*
+ * occ_w2_classify - 判定一次调用的有效风险级（O-9/O-4）
+ * 返回 "R"/"W1"/"W2"；W2 时 detail 填人话理由。口径：
+ *   write/edit 目标出安全区（workdir/$HOME 子树 + /tmp）→ W2；
+ *   bash 命令级 W2 表（mkfs 前缀/dd of=/rm -r/reboot/kill 等）+
+ *   O-4 粘贴形态（多行/sudo/管道进 sh/链式≥2）→ W2；
+ *   bash 其余=W1（aik-sandbox 面隔离；通道级 W2 上限以 tools.json
+ *   正典为准——本门是命令级有效风险，口径同 executor 哲学）。
+ */
+const char *occ_w2_classify(const struct occ_tool_ctx *ctx,
+				    const char *name,
+			    const char *args_json, char *detail, size_t dcap);
+
 /* ---- 执行上下文 ---- */
 struct occ_orch;			/* 前向（occ_core/orch.h；避免头环） */
 typedef struct occ_tool_ctx {
@@ -95,6 +124,8 @@ typedef struct occ_tool_ctx {
 	struct occ_orch *orch;		/* E3：编排运行时（task 工具执行
 					 * 面；NULL=编排未启用——task
 					 * 调用返回结构化人话错误） */
+	struct occ_w2_gate *w2;		/* O-9（UX-O §2）：W2 确认门；
+					 * NULL=嵌入/测试面零行为变化 */
 } occ_tool_ctx;
 
 /* ---- 执行结果 ---- */

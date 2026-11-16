@@ -93,6 +93,7 @@ typedef struct occ_sink {
 	void *ud;
 } occ_sink;
 
+struct occ_w2_gate;			/* 前向（occ_tools.h；O-9 W2 门） */
 typedef struct occ_loop_opts {
 	const char *prompt;		/* 本轮用户输入；NULL=重放中断环 */
 	occ_llm_call_fn llm_call;	/* NULL=默认（含 forwarder→direct） */
@@ -107,6 +108,9 @@ typedef struct occ_loop_opts {
 	struct occ_orch *orch;		/* E3：编排运行时（透传 occ_tool_ctx
 					 * ——task 第七工具执行面；NULL=
 					 * 编排未启用，task 调用回人话错） */
+	struct occ_w2_gate *w2;		/* O-9（UX-O §2）：W2 确认门
+					 * （NULL=旧行为）；透传
+					 * occ_tool_ctx.w2 */
 } occ_loop_opts;
 
 typedef struct occ_loop_result {

@@ -1,9 +1,12 @@
 #!/bin/sh
-# aik-console v5 — P2 修复（2026-11-16 验尸：串口 occ 永久空屏）。
-#   根因：串口 tty 无内核 winsize（tty1 fbcon 有 80×25）——occ resize
-#   路径 0×0=空屏（occ 侧 tui_frame_check_resize 已同步补 0 兜底双保险）。
-#   v4 语义：serial 分支补齐 v2 同款循环兜底+取证（v3 只给 tty1/2/3 上了
-#   链，serial 裸 exec——occ 瞬退=死黑零取证）。
+# aik-console v6 — O-1（UX-O §1）退出即注销。
+#   v6：occ 退出码 71=用户主动退出（/exit、ctrl+c/ctrl+d/<leader>q）
+#   → 断链 exit 0：.profile 的 exec 结束 → autologin 会话结束 →
+#   getty 重出 login 面（=退出即注销；SSH/pts 场景 rc=71 落回 shell 无害）。
+#   v5：P2 修复（2026-11-16 验尸：串口 occ 永久空屏）——串口 tty 无内核
+#   winsize（tty1 fbcon 有 80×25），occ resize 路径 0×0=空屏（occ 侧
+#   tui_frame_check_resize 已同步补 0 兜底双保险）；v4 语义：serial 分支
+#   补齐 v2 同款循环兜底+取证。
 #   tty1/2/3 = fbterm 内跑 occ（中文渲染 + /zoom 可缩放；FBTERM=1 门）；
 #   退出码 70 = /zoom 字号重启环；chain-start/occ-exit 落
 #   /root/aik-console.log，occ+fbterm stderr 落 /root/aik-console.err。
@@ -24,6 +27,7 @@ case "$TTY" in
       rc=$?
       n=$((n+1))
       log "occ-exit rc=$rc n=$n tty=fb fb=${FBTERM_BIN:+y}"
+      [ "$rc" -eq 71 ] && { log "occ-logout tty=fb"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
     done
@@ -37,6 +41,7 @@ case "$TTY" in
       rc=$?
       n=$((n+1))
       log "occ-exit rc=$rc n=$n tty=serial"
+      [ "$rc" -eq 71 ] && { log "occ-logout tty=serial"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
     done

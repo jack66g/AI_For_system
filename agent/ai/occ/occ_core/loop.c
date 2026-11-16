@@ -675,6 +675,7 @@ static size_t exec_pending(occ_db *db, const char *sess_id,
 	tc.msg_id = asst_msg_id;
 	tc.timeout_ms = 0;			/* 缺省（env 可配） */
 	tc.orch = opts ? opts->orch : NULL;	/* E3：task 工具执行面 */
+	tc.w2 = opts ? opts->w2 : NULL;	/* O-9：W2 确认门透传（UX-O §2） */
 	if (opts && opts->workdir && opts->workdir[0]) {
 		tc.workdir = opts->workdir;
 	} else if (getcwd(cwd, sizeof(cwd))) {

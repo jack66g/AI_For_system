@@ -93,6 +93,13 @@ PQ_REUSE_SRCS := ../aistreamd/as_parquet.c ../aistreamd/as_snappy.c \
 PQ_REUSE_OBJS := $(REUSE_DIR)/as_parquet.o $(REUSE_DIR)/as_snappy.o \
 		 $(REUSE_DIR)/as_value.o
 
+# O-10（UX-O §3）：用户档位（只读复用 policy/ai_user_policy.c——
+# libc-only：INI 解析 + /etc/passwd、/etc/group 静态判档）
+POLICY_REUSE_OBJS := $(REUSE_DIR)/ai_user_policy.o \
+		  $(REUSE_DIR)/ai_lease.o \
+		  $(REUSE_DIR)/lang.o \
+		  $(REUSE_DIR)/ai_trace.o
+
 # occ_tools（T9b1）：六件套 + aik-sandbox 对接 + trace 审计
 TOOLS_SRCS := occ_tools/tools.c occ_tools/sandbox.c occ_tools/trace.c
 TOOLS_OBJS := $(TOOLS_SRCS:%.c=$(OBJ_DIR)/%.o)
@@ -158,10 +165,10 @@ test: $(PURE_BINS) $(CORE_BINS)
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
-		  tests/test_orch tests/test_review; do \
+		  tests/test_orch tests/test_review tests/test_w2gate; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
@@ -217,6 +224,22 @@ $(REUSE_DIR)/sme_client.o: ../memory/sme_client.c
 	@mkdir -p $(REUSE_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+$(REUSE_DIR)/ai_user_policy.o: ../policy/ai_user_policy.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(REUSE_DIR)/ai_lease.o: ../policy/ai_lease.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(REUSE_DIR)/lang.o: ../i18n/lang.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(REUSE_DIR)/ai_trace.o: ../trace/ai_trace.c
+	@mkdir -p $(REUSE_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 $(REUSE_DIR)/local_http.o: ../local/local_http.c
 	@mkdir -p $(REUSE_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
@@ -241,11 +264,30 @@ $(REUSE_DIR)/as_value.o: ../aistreamd/as_value.c
 	@mkdir -p $(REUSE_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# O-9/O-4（UX-O §2）：W2 门单测（分类器+三态矩阵；无 TUI/无 DB，
+# 放行路径仅触 /var/tmp 探针——真实无害）
+tests/test_w2gate: tests/test_w2gate.c $(TOOLS_OBJS) \
+		  $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_llm/catalog.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		  $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_w2gate.c \
+		  $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_llm/catalog.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+
 # ---- occ 主程序（T9a3+b1+c2+d1）：headless 一次对话 + 工具环 + 交互 TUI ----
-$(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)
+$(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ occ.c $(CORE_OBJS) \
 		$(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) \
-		$(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
+		$(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
 
 # occ_tui 对象：-D_DEFAULT_SOURCE（与各 .c 顶部同值定义共存，照 occ_tui/Makefile）
 # +$(INCLUDES)：tui_data.c 需 store/store_json.h（-I../include）

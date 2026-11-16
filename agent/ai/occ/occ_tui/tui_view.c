@@ -301,6 +301,40 @@ static int tv_drain(tui_view *v)
 							 e->text ? e->text :
 							 "");
 			break;
+		case TUI_VIEW_CONFIRM_REQ:
+			/* O-9（UX-O §2）：worker 请求 W2 确认——开 y/n 面板，
+			 * 应答走既有 on_overlay_submit / on_overlay_close；
+			 * text 空=urlWorker 超时收尾——关面板（应答已无人等） */
+			if (!e->text || !e->text[0]) {
+				tui_overlay_clear(v->ov);
+				v->dirty_needed = 1;
+				break;
+			}
+			{
+				char title[TUI_OV_TITLE_MAX];
+				const char *nl = strchr(e->text, '\n');
+				size_t tl = nl ? (size_t)(nl - e->text) :
+					 strlen(e->text);
+				tui_ov_item it[2];
+
+				if (tl >= sizeof(title))
+					tl = sizeof(title) - 1;
+				memcpy(title, e->text, tl);
+				title[tl] = '\0';
+				memset(it, 0, sizeof(it));
+				snprintf(it[0].text, sizeof(it[0].text),
+					 "y 执行");
+				snprintf(it[0].detail, sizeof(it[0].detail),
+					 "%.199s",
+					 nl && nl[1] ? nl + 1 : "");
+				snprintf(it[1].text, sizeof(it[1].text),
+					 "n 取消");
+				(void)tui_overlay_set_list(v->ov, e->rc,
+						       title, it, 2, 0,
+						       "Enter 确认 · Esc 取消");
+				v->dirty_needed = 1;
+			}
+			break;
 		default:
 			break;
 		}
@@ -362,8 +396,7 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 "commands: /exit /clear /help (built-in) · /new /sessions"
 		 " /status /models /rename /tools /sandbox /trace /lease"
 		 " /compact /shell (live) · /tasks 任务面板\n"
-		 "/tasks: 编排任务面板（状态/回炉/预算；面板 1s 轮询刷新；"
-		 "Enter=in_review 验收提示）\n"
+		 "/tasks: 编排任务面板（状态/回炉/预算）\n"
 		 "/compact: 手动 autocondense 换窗（OCC_AC=on）\n"
 		 "/shell: 退到 bash，exit 返回（turn 运行中拒绝）\n"
 		 "三分：/compact=摘要进新窗 · /clear=归档+换窗（可找回）"
@@ -377,7 +410,7 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		 " Home/End=顶/底 · exit=%s · leader=%s (2s timeout;"
 		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
 		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
-		 "mouse: %s",
+		 "mouse: %s\n		 档位：/su 提权（W2 门）· /su 0 回落 · /exit=退出并注销",
 		 exitb[0] ? exitb : "ctrl+c, ctrl+d",
 		 v->km ? tui_keymap_leader(v->km) : "ctrl+x",
 		 mline);

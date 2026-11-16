@@ -61,6 +61,16 @@
 #include "occ_tui/tui_utf8.h"
 #include "occ_tui/tui_view.h"
 #include "occ_tui/tui_gate.h"
+#include "policy/ai_user_policy.h"	/* O-10（UX-O §3）：uid→档位 */
+#include "occ_tools/occ_tools.h"	/* O-9（UX-O §2）：occ_w2_gate 面 */
+
+/* O-9/O-10（UX-O §2/§3）：occ 面 W2 门 + /su 档位（main 初始化一次；
+ * g_w2.tier 主线程写（/su）·worker 读——volatile int 单字，benign） */
+static occ_w2_gate g_w2;
+static int g_w2_base_tier = OCC_W2_TIER_RESTRICTED;
+static int g_w2_ready;
+
+#include "policy/ai_user_policy.h"	/* O-10（UX-O §3）：uid→档位 */
 #include "occ_zoomrc.h"
 #include "store/store_json.h"			/* E8：occ tasks --json 机读 */
 
@@ -68,6 +78,7 @@ static const char USAGE[] =
 	"occ — AIKernel 编码助手（headless，T9a3+b2）\n"
 	"用法：\n"
 	"  occ -p \"<prompt>\" [--session <id>]   一次性对话（流式输出到 stdout）\n"
+	"  （-p 下 W2 高危工具默认拒绝；--allow-w2 显式开门——O-9）\n"
 	"  occ --recover <id> [prompt]          重放中断环续跑 / 打开续接\n"
 	"  occ undo --session <id> [--step N]   撤销最近 N 步（文件回滚+消息隐藏）\n"
 	"  occ redo --session <id>              恢复上次 undo\n"
@@ -226,6 +237,7 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 		if (getcwd(cwd, sizeof(cwd)))
 			opts.workdir = cwd;
 	}
+	opts.w2 = &g_w2;			/* O-9：W2 门（headless 默认拒） */
 	sigint_install(&old_int);		/* b2：环内安全点中断 */
 	rc = occ_loop_run(db, p, session_id, &opts, &res, err, sizeof(err));
 	sigaction(SIGINT, &old_int, NULL);	/* 恢复默认（子命令期 Ctrl+C=杀） */
@@ -463,7 +475,9 @@ enum {
 	OV_WIZ_PROVIDER = 12,		/* 向导 2/4 provider */
 	OV_WIZ_BASE = 13,		/* 向导 2.5 自定义 base_url（输入） */
 	OV_WIZ_KEY = 14,		/* 向导 3/4 key（输入，mask） */
-	OV_RENAME = 21			/* /rename 无参（输入） */
+	OV_RENAME = 21,			/* /rename 无参（输入） */
+	OV_W2 = 22,			/* O-9：W2 确认面板（worker 请求开） */
+	OV_SU = 23			/* O-10：/su 密码输入（mask） */
 };
 
 /* ov_map 值：SIZE_MAX=分组头（不可选）；OV_MAP_CUSTOM=向导自定义项 */
@@ -511,6 +525,16 @@ struct tui_app {
 	int ctx_fallback;		/* 1=catalog 未命中/不可读 → 200k* */
 	char cwd[4096];			/* 启动目录（workdir + 状态行） */
 	pthread_mutex_t mu;		/* session/tokens/prompt/worker_live */
+	/* O-9：W2 确认应答单槽（worker 问→view 面板应答；mu+w2_cond） */
+	pthread_cond_t w2_cond;
+	int w2_answered;
+	int w2_verdict;
+	/* O-10：/su 提权态（mu 保护；计数/冷却照 T4 gate 口径） */
+	struct {
+		int fails;
+		long long cooldown_until;
+		int elevated;
+	} su;
 
 	/* ---- c3：配置/目录/注册表（进程常驻；headless 不走此路径） ---- */
 	char model_toml[512];
@@ -895,6 +919,61 @@ static void tui_sink_cb(void *ud, const occ_sink_ev *ev)
 	(void)tui_view_post(v, ev->kind, ev->text, ev->len, ev->arg, ev->rc);
 }
 
+/* O-9（UX-O §2）：worker 侧 W2 确认——投 CONFIRM_REQ 事件后分片等
+ * 应答（200ms 切片查 occ_interrupt_flag：SIGINT 不惊醒 cond_wait）；
+ * 超时（OCC_W2_TIMEOUT_MS，缺省 5 分钟）=拒绝并投空事件收面板。 */
+static int tui_w2_confirm(void *ud, const char *title, const char *detail)
+{
+	struct tui_app *a = ud;
+	char payload[TUI_OV_TITLE_MAX + TUI_OV_DETAIL_MAX + 2];
+	const char *env = getenv("OCC_W2_TIMEOUT_MS");
+	long long timeout_ms = (env && atoll(env) > 0) ? atoll(env) :
+			      300000;
+	uint64_t t0;
+
+	(void)title;
+	snprintf(payload, sizeof(payload), "%.63s\n%.199s",
+		 "W2 高危操作确认", detail ? detail : "");
+	pthread_mutex_lock(&a->mu);
+	a->w2_answered = 0;
+	a->w2_verdict = 0;
+	pthread_mutex_unlock(&a->mu);
+	if (!a->view || tui_view_post(a->view, TUI_VIEW_CONFIRM_REQ,
+				      payload, strlen(payload), NULL,
+				      OV_W2) != 0)
+		return 0;		/* 视图关闭中=拒绝 */
+	t0 = tui_now_ms();
+	while (1) {
+		struct timespec ts;
+		int yes;
+
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += 200 * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec++;
+			ts.tv_nsec -= 1000000000L;
+		}
+		pthread_mutex_lock(&a->mu);
+		while (!a->w2_answered)
+			if (pthread_cond_timedwait(&a->w2_cond, &a->mu,
+						    &ts) != 0)
+				break;	/* 超时/打断→外层复查 */
+		yes = a->w2_verdict;
+		pthread_mutex_unlock(&a->mu);
+		if (a->w2_answered)
+			return yes;
+		if (occ_interrupt_flag)
+			break;		/* b2 中断=拒绝 */
+		if ((long long)(tui_now_ms() - t0) >= timeout_ms)
+			break;		/* 超时=拒绝 */
+	}
+	/* 收面板（worker 已不等——面板留着只会误导） */
+	if (a->view)
+		(void)tui_view_post(a->view, TUI_VIEW_CONFIRM_REQ, "", 0,
+				    NULL, OV_W2);
+	return 0;
+}
+
 /* worker 线程：跑一个 turn，收口发 TURN_END（footer 按裁定 7 格式） */
 static void *tui_worker_main(void *arg)
 {
@@ -918,6 +997,7 @@ static void *tui_worker_main(void *arg)
 	opts.sink.ud = a->view;
 	opts.workdir = a->cwd;
 	opts.orch = g_orch;			/* E3：task 工具执行面 */
+	opts.w2 = &g_w2;			/* O-9：W2 门（TUI 交互确认） */
 
 	t0 = tui_now_ms();
 	rc = occ_loop_run(a->db, &a->p, sid[0] ? sid : NULL, &opts, &res,
@@ -2642,6 +2722,7 @@ static int cmd_rename(struct tui_app *a, const char *args)
 static int g_t4_theme_req;
 static int g_t4_exit_code;
 
+
 /* T4 /theme：列出/切换内嵌预置主题（写 theme.ini + 重建 view 热重载） */
 static int cmd_theme(struct tui_app *a, const char *arg)
 {
@@ -3002,6 +3083,44 @@ static int tui_app_on_command(void *ud, const char *line)
 		return cmd_sessions_overlay(a);
 	if (!strcmp(line, "/tasks"))		/* E8：任务面板（ORCH §7） */
 		return cmd_tasks_overlay(a);
+	/* O-10（UX-O §3）：/su gate 密码提权（/su 0 回落；/exit 注销同效） */
+	if (!strcmp(line, "/su")) {
+		long long now = (long long)tui_now_ms();
+
+		if (a->su.elevated) {
+			tui_view_notice(a->view, "已在特权档（/su 0 回落）");
+			return 0;
+		}
+		if (!g_w2_ready || g_w2.tier == OCC_W2_TIER_PRIVILEGED) {
+			tui_view_notice(a->view,
+					"当前已是特权档（无需 /su）");
+			return 0;
+		}
+		if (now < a->su.cooldown_until) {
+			char nb[96];
+
+			snprintf(nb, sizeof(nb), "冷却中（%lld 秒后再试）",
+				 (a->su.cooldown_until - now + 999) / 1000);
+			tui_view_notice(a->view, nb);
+			return 0;
+		}
+		(void)tui_view_open_input(a->view, OV_SU, "/su 提权",
+					  "admin 密码", "", 1);
+		return 0;
+	}
+	if (!strcmp(line, "/su 0")) {
+		if (!a->su.elevated) {
+			tui_view_notice(a->view, "未在提权档");
+			return 0;
+		}
+		pthread_mutex_lock(&a->mu);
+		a->su.elevated = 0;
+		if (g_w2_ready)
+			g_w2.tier = g_w2_base_tier;
+		pthread_mutex_unlock(&a->mu);
+		tui_view_notice(a->view, "已回落基础档位");
+		return 0;
+	}
 	if (!strcmp(line, "/status")) {
 		char buf[640];
 		char t1[24], t2[24], items[96], pbuf[16];
@@ -3154,6 +3273,16 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 	if (idx < 0)
 		return 1;
 	switch (ov_id) {
+	case OV_W2: {
+		/* O-9：y=执行（idx 0）/n=取消——唤醒在途 worker */
+		pthread_mutex_lock(&a->mu);
+		a->w2_verdict = (idx == 0);
+		a->w2_answered = 1;
+		pthread_cond_broadcast(&a->w2_cond);
+		pthread_mutex_unlock(&a->mu);
+		tui_view_close_overlay(a->view);
+		return 0;
+	}
 	case OV_MODELS: {
 		size_t mi;
 		const occ_reg_model *rm;
@@ -3376,6 +3505,63 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		wiz_open_key(a);
 		return 0;
 	}
+	if (ov_id == OV_SU) {
+		/* O-10：tui_gate crypt 复用（console-gate admin hash）；
+		 * 3 错→10s 冷却（照 gate 口径）。 */
+		char hash[128];
+		long long ts;
+		long long now = (long long)tui_now_ms();
+		int ok;
+
+		pthread_mutex_lock(&a->mu);
+		if (now < a->su.cooldown_until) {
+			long long left = (a->su.cooldown_until - now +
+				       999) / 1000;
+
+			pthread_mutex_unlock(&a->mu);
+			{
+				char nb[96];
+
+				snprintf(nb, sizeof(nb),
+					 "冷却中（%lld 秒）", left);
+				tui_view_overlay_status(a->view, nb, 1);
+			}
+			return 0;
+		}
+		if (tui_gate_read(tui_gate_path(), hash, &ts) != 0) {
+			pthread_mutex_unlock(&a->mu);
+			tui_view_overlay_status(a->view,
+						 "凭据未设置（先在 T4 设密向导建 admin 密码）",
+						 1);
+			return 0;
+		}
+		ok = (len > 0 && len < 128 &&
+		      tui_gate_verify(text, hash));
+		if (!ok) {
+			a->su.fails++;
+			if (a->su.fails >= 3) {
+				a->su.fails = 0;
+				a->su.cooldown_until = now + 10000;
+				pthread_mutex_unlock(&a->mu);
+				tui_view_overlay_status(a->view,
+							 "密码错误×3——10 秒冷却",
+							 1);
+				return 0;
+			}
+			pthread_mutex_unlock(&a->mu);
+			tui_view_overlay_status(a->view, "密码错误", 1);
+			return 0;
+		}
+		a->su.fails = 0;
+		a->su.elevated = 1;
+		if (g_w2_ready)
+			g_w2.tier = OCC_W2_TIER_PRIVILEGED;
+		pthread_mutex_unlock(&a->mu);
+		tui_view_close_overlay(a->view);
+		tui_view_notice(a->view,
+				"已提权至特权档（/su 0 回落 · /exit 注销同效）");
+		return 0;
+	}
 	if (ov_id == OV_RENAME) {
 		char e[160];
 		char nb[320];
@@ -3424,6 +3610,12 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 				  int idx)
 {
 	struct tui_app *a = ud;
+
+	if (ov_id == OV_W2) {
+		/* O-9：busy 态 Esc=取消确认——返回未处理，交回
+		 * dialog.close 默认流（on_overlay_close 拒绝并唤醒） */
+		return 1;
+	}
 
 	/* OCC-DEBT：busy 态 Esc → 取消在途验证（面板留步——与失败路径
 	 * 同语义；由 tui_view_set_busy(1) 期间的 dialog.close 改派而来）；
@@ -3513,6 +3705,14 @@ static void tui_app_on_overlay_close(void *ud, int ov_id)
 	if (ov_id == OV_WIZ_MODEL || ov_id == OV_WIZ_PROVIDER ||
 	    ov_id == OV_WIZ_BASE || ov_id == OV_WIZ_KEY)
 		wiz_reset(a);		/* memset 含 key 清零 */
+	if (ov_id == OV_W2) {
+		/* O-9：Esc 关确认面板=拒绝（唤醒在途 worker） */
+		pthread_mutex_lock(&a->mu);
+		a->w2_verdict = 0;
+		a->w2_answered = 1;
+		pthread_cond_broadcast(&a->w2_cond);
+		pthread_mutex_unlock(&a->mu);
+	}
 }
 
 /*
@@ -3617,7 +3817,19 @@ static void tui_app_fill_usage(void *ud, struct tui_footer *out)
 	lim = a->ctx_limit;
 	fb = a->ctx_fallback;
 	pthread_mutex_unlock(&a->mu);
-	snprintf(out->model, sizeof(out->model), "%.60s", a->p.model);
+	{
+		const char *tier_s = "受限";
+
+		if (a->su.elevated)
+			tier_s = "特权*";
+		else if (!g_w2_ready ||
+			 g_w2.tier == OCC_W2_TIER_PRIVILEGED)
+			tier_s = "特权";
+		else if (g_w2.tier == OCC_W2_TIER_CONFIRMED)
+			tier_s = "确认";
+		snprintf(out->model, sizeof(out->model), "%.44s · %s",
+			 a->p.model, tier_s);
+	}
 	snprintf(out->cwd, sizeof(out->cwd), "%.150s", a->cwd);
 	out->in = in;
 	out->out = out2;
@@ -3732,6 +3944,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	memset(&a, 0, sizeof(a));
 	a.db = db;
 	pthread_mutex_init(&a.mu, NULL);
+	pthread_cond_init(&a.w2_cond, NULL);	/* O-9：W2 应答 */
 	if (!getcwd(a.cwd, sizeof(a.cwd)))
 		a.cwd[0] = '\0';
 	snprintf(a.model_toml, sizeof(a.model_toml), "%s", model_toml);
@@ -3755,6 +3968,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 			model_toml);
 		occ_provider_config_free(&a.cfg);
 		pthread_mutex_destroy(&a.mu);
+		pthread_cond_destroy(&a.w2_cond);	/* O-9：W2 应答 */
 		return 1;
 	}
 	a.cfg_ok = 1;
@@ -3804,6 +4018,12 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	h.fill_status = tui_app_fill_status;
 	h.fill_topbar = tui_app_fill_topbar;	/* UXAB A+B：顶栏 */
 	h.fill_usage = tui_app_fill_usage;	/* UXAB A+B：图形 footer */
+	/* O-9/O-10（UX-O §2/§3）：W2 门接交互面（worker 请求→view 面板
+	 * →on_overlay_submit/close 应答；/su 提权改 g_w2.tier） */
+	if (g_w2_ready) {
+		g_w2.confirm = tui_w2_confirm;
+		g_w2.ud = &a;
+	}
 	h.fill_sessions = tui_app_fill_sessions;
 	h.on_shutdown = tui_app_on_shutdown;
 	h.on_overlay_submit = tui_app_on_overlay_submit;
@@ -3913,9 +4133,14 @@ static int run_interactive(occ_db *db, const char *model_toml,
 		free(a.cat);
 		occ_provider_config_free(&a.cfg);
 		pthread_mutex_destroy(&a.mu);
+		pthread_cond_destroy(&a.w2_cond);	/* O-9：W2 应答 */
 			occ_provider_free(&a.p);
 		if (g_t4_exit_code)
 			return g_t4_exit_code;
+		/* O-1（UX-O §1）：用户主动退出 TUI=注销语义（aik-console v6
+		 * 见 71 断链回 login 面；SSH/pts 下落回 shell 无害） */
+		if (rc == 0)
+			return 71;
 		return (rc < 0) ? 1 : rc;
 	}
 
@@ -3966,6 +4191,20 @@ int main(int argc, char **argv)
 	if (!db) {
 		fprintf(stderr, "occ: %s\n", err);
 		return 1;
+	}
+	/* O-10（UX-O §3）：policy 档位初始化（AIKERNEL_POLICY/
+	 * /etc/aikernel/policy.conf；解析失败安全回落 restricted） */
+	{
+		enum ai_policy_mode m;
+
+		(void)ai_policy_init(NULL);
+		m = ai_policy_mode_for_uid(getuid());
+		g_w2_base_tier = (m == AI_POLICY_MODE_PRIVILEGED) ?
+			OCC_W2_TIER_PRIVILEGED :
+			(m == AI_POLICY_MODE_CONFIRMED) ?
+			OCC_W2_TIER_CONFIRMED : OCC_W2_TIER_RESTRICTED;
+		g_w2.tier = g_w2_base_tier;
+		g_w2_ready = 1;
 	}
 	/* E3：编排开关开才建运行时（默认关=零开销零行为变化） */
 	if (occ_orch_tools_enabled()) {
@@ -4154,10 +4393,14 @@ int main(int argc, char **argv)
 		 * 第二个非标志响亮报错（不静默吞参数——红线）。 */
 		const char *prompt = NULL;
 		const char *session_id = NULL;
+		int allow_w2 = 0;
 		int i;
 
 		for (i = 2; i < argc; i++) {
-			if (!strcmp(argv[i], "--session")) {
+			if (!strcmp(argv[i], "--allow-w2")) {
+				/* O-9（UX-O §2）：headless W2 显式开门 */
+				allow_w2 = 1;
+			} else if (!strcmp(argv[i], "--session")) {
 				if (i + 1 >= argc) {
 					fprintf(stderr, "occ -p: --session missing value\n");
 					rc = 2;
@@ -4195,7 +4438,12 @@ int main(int argc, char **argv)
 			rc = 1;
 			goto out;
 		}
+		g_w2.allow_w2 = allow_w2;	/* O-9：--allow-w2（W2 门） */
 		rc = run_turn(db, &p, session_id, prompt, 0);
+		if (g_w2.denied > 0)
+			fprintf(stderr, "occ: %d 次 W2 高危工具调用被拒"
+				"（-p 默认拒绝；--allow-w2 显式开门）\n",
+				g_w2.denied);
 		occ_provider_free(&p);
 		goto out;
 	}

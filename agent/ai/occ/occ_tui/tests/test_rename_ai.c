@@ -320,7 +320,11 @@ static int run_occ(const char *tmpdir, int port,
 			waitpid(pid, &st, 0);
 			rc = -1;
 		} else if (rc == 0 &&
-			   (!WIFEXITED(st) || WEXITSTATUS(st) != 0)) {
+			   (!WIFEXITED(st) ||
+			    (WEXITSTATUS(st) != 0 &&
+			     /* O-1（UX-O §1）：occ 主动退出=71（注销语义，
+			      * aik-console v6 断链）——干净退出同样算过 */
+			     WEXITSTATUS(st) != 71))) {
 			printf("  child exit=%d\n",
 			       WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 			rc = -1;

@@ -2714,6 +2714,235 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 	return 0;
 }
 
+/* ---- O-9/O-4（UX-O §2）：W2 分类与裁决 ---- */
+
+/* 安全区前缀判定（workdir/$HOME 子树 + /tmp）；abs 已由
+ * resolve_arg_path 归一（write/edit 执行面同源——零口径漂移）。 */
+static int w2_path_safe(const occ_tool_ctx *ctx, const char *abs)
+{
+	char base[4096];
+	const char *home = getenv("HOME");
+	const char *wd = (ctx && ctx->workdir && ctx->workdir[0]) ?
+		ctx->workdir : getcwd(base, sizeof(base));
+
+	if (strstr(abs, ".."))
+		return 0;	/* 偏执兜底：归一后不应残留 */
+	if (wd && wd[0]) {
+		size_t l = strlen(wd);
+
+		if (!strncmp(abs, wd, l) &&
+		    (abs[l] == '\0' || abs[l] == '/'))
+			return 1;
+	}
+	if (home && home[0]) {
+		size_t l = strlen(home);
+
+		if (!strncmp(abs, home, l) &&
+		    (abs[l] == '\0' || abs[l] == '/'))
+			return 1;
+	}
+	if (!strcmp(abs, "/tmp") || !strncmp(abs, "/tmp/", 5))
+		return 1;
+	return 0;
+}
+
+static void w2_detail(char *detail, size_t dcap, const char *fmt,
+		      const char *a1)
+{
+	if (detail && dcap)
+		snprintf(detail, dcap, fmt, a1);
+}
+
+/* O-9 命令级 W2 表 + O-4 粘贴形态；命中=1（detail 填理由） */
+static int w2_bash_hit(const char *cmd, char *detail, size_t dcap)
+{
+	static const char *hard[] = {
+		"mkfs", "fdisk", "sfdisk", "parted", "wipefs", "blockdev",
+		"dd", "reboot", "shutdown", "poweroff", "halt", "init",
+		"telinit", "swapon", "swapoff", "mount", "umount",
+		"kill", "killall", "killall5", "pkill", "iptables", "nft",
+		"chattr", NULL
+	};
+	static const char *sc_bad[] = {
+		"stop", "disable", "mask", "kill", "isolate",
+		"emergency", "rescue", NULL
+	};
+	char buf[1024];
+	char *line, *sp;
+
+	if (strchr(cmd, '\n')) {
+		w2_detail(detail, dcap, "多行 shell 命令（疑似粘贴——O-4）",
+			  NULL);
+		return 1;
+	}
+	if (strstr(cmd, "sudo")) {
+		w2_detail(detail, dcap, "含 sudo（疑似粘贴/提权链——O-4）",
+			  NULL);
+		return 1;
+	}
+	if (strstr(cmd, "| sh") || strstr(cmd, "|sh") ||
+	    strstr(cmd, "| bash") || strstr(cmd, "|bash")) {
+		w2_detail(detail, dcap, "管道直接进 shell（curl|sh 形态）",
+			  NULL);
+		return 1;
+	}
+	{
+		int chains = 0;
+		const char *q;
+
+		for (q = cmd; (q = strstr(q, "&&")) != NULL; q += 2)
+			chains++;
+		for (q = cmd; (q = strchr(q, ';')) != NULL; q++)
+			chains++;
+		if (chains >= 2) {
+			w2_detail(detail, dcap,
+				  "长链式命令（&&/; ≥2——疑似粘贴 O-4）",
+				  NULL);
+			return 1;
+		}
+	}
+	if (strstr(cmd, "chmod 777")) {
+		w2_detail(detail, dcap, "chmod 777（世界可写）", NULL);
+		return 1;
+	}
+	snprintf(buf, sizeof(buf), "%s", cmd);	/* 逐行首 token 对表 */
+	for (line = strtok_r(buf, "\n", &sp); line;
+	     line = strtok_r(NULL, "\n", &sp)) {
+		char tok[32], tok2[32];
+		char *p = line;
+		size_t n = 0, n2 = 0;
+		size_t i;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		while (p[n] && p[n] != ' ' && p[n] != '\t' &&
+		       n < sizeof(tok) - 1)
+			n++;
+		if (!n)
+			continue;
+		memcpy(tok, p, n);
+		tok[n] = '\0';
+		for (i = 0; hard[i]; i++) {
+			if (!strcmp(tok, hard[i]) ||
+			    !strncmp(tok, "mkfs.", 5)) {
+				w2_detail(detail, dcap,
+					  "高危命令：%s（W2 表命中）", tok);
+				return 1;
+			}
+		}
+		if (!strcmp(tok, "rm")) {
+			if (strstr(p, " -r") || strstr(p, " -R") ||
+			    strstr(p, "-fr") || strstr(p, "-rf") ||
+			    strstr(p, "--recursive")) {
+				w2_detail(detail, dcap,
+					  "递归删除 rm -r/-f", NULL);
+				return 1;
+			}
+			continue;
+		}
+		if (!strcmp(tok, "systemctl")) {
+			const char *r = p + n;
+
+			while (*r == ' ' || *r == '\t')
+				r++;
+			while (r[n2] && r[n2] != ' ' && r[n2] != '\t' &&
+			       n2 < sizeof(tok2) - 1)
+				n2++;
+			memcpy(tok2, r, n2);
+			tok2[n2] = '\0';
+			for (i = 0; sc_bad[i]; i++)
+				if (!strcmp(tok2, sc_bad[i])) {
+					w2_detail(detail, dcap,
+						  "systemctl %s（服务面写）",
+						  tok2);
+					return 1;
+				}
+			continue;
+		}
+		if (!strcmp(tok, "chown")) {
+			if (strstr(p, " -R") || strstr(p, "--recursive")) {
+				w2_detail(detail, dcap, "chown -R 递归改属",
+					  NULL);
+				return 1;
+			}
+			continue;
+		}
+		if (!strcmp(tok, "curl") || !strcmp(tok, "wget")) {
+			if (strstr(p, " -o ") || strstr(p, " -O")) {
+				w2_detail(detail, dcap,
+					  "%s 落盘（-o/-O）", tok);
+				return 1;
+			}
+			continue;
+		}
+	}
+	return 0;
+}
+
+const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
+			    const char *args_json, char *detail, size_t dcap)
+{
+	occ_args a;
+	const char *r = "R";
+
+	if (detail && dcap)
+		detail[0] = '\0';
+	if (!name)
+		return r;
+	args_init(&a, args_json ? args_json : "{}");
+	if (!strcmp(name, OCC_T_WRITE) || !strcmp(name, OCC_T_EDIT)) {
+		const char *path = args_str(&a, "path");
+		char abs[4096];
+
+		r = "W1";
+		if (path && path[0] &&
+		    resolve_arg_path(ctx, path, abs, sizeof(abs)) == 0 &&
+		    !w2_path_safe(ctx, abs)) {
+			if (detail && dcap)
+				snprintf(detail, dcap,
+					 "写目标出安全区（工作目录//$HOME/"
+					 "/tmp）：%.90s", abs);
+			r = "W2";
+		}
+	} else if (!strcmp(name, OCC_T_BASH)) {
+		const char *cmd = args_str(&a, "command");
+
+		r = "W1";	/* 沙箱面兜底；W2=命令级命中（表/粘贴） */
+		if (cmd && cmd[0] && w2_bash_hit(cmd, detail, dcap))
+			r = "W2";
+	}
+	args_free(&a);
+	return r;
+}
+
+/* 三态裁决：allow_w2 > tier 闸 > confirm 交互 > headless 拒。
+ * 返回 1=放行（o 不动）；0=拒绝（o 填人话错误，denied++）。 */
+static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
+			  const char *why, occ_obuf *o)
+{
+	struct occ_w2_gate *g = c->w2;
+
+	if (g->allow_w2)
+		return 1;	/* 显式开门（headless --allow-w2） */
+	if (g->tier != OCC_W2_TIER_PRIVILEGED) {
+		g->denied++;
+		occ_ob_printf(o, "ERROR: W2 拒绝（%s：%s）——当前档位不允许"
+			      "高危写；/su 提权后重试（policy 见 "
+			      "/etc/aikernel/policy.conf）", name,
+			      why ? why : "?");
+		return 0;
+	}
+	if (g->confirm && g->confirm(g->ud, "W2 高危操作确认",
+				     why ? why : "") == 1)
+		return 1;
+	g->denied++;
+	occ_ob_printf(o, "ERROR: W2 拒绝（%s：%s）——%s", name,
+		      why ? why : "?",
+		      g->confirm ? "已按您的选择取消" :
+		      "headless 默认拒绝（occ -p 需 --allow-w2 显式开门）");
+	return 0;
+}
+
 /* ---- 单入口 ---- */
 
 void occ_tool_result_free(occ_tool_result *r)
@@ -2733,6 +2962,7 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	long long t0, t1;
 	int rc = 0;
 	char err[160];
+	char wd[200];		/* O-9：W2 理由 */
 	occ_tool_ctx c;
 
 	if (!ctx || !name || !out)
@@ -2748,6 +2978,14 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	}
 	args_init(&a, args_json);
 	t0 = occ_monotonic_ms();
+	/* O-9/O-4（UX-O §2）：W2 确认门（ctx->w2==NULL=嵌入/测试面
+	 * 零行为变化；命中→allow_w2/tier/confirm 三态裁决） */
+	if (c.w2 && strcmp(occ_w2_classify(&c, name, args_json,
+					   wd, sizeof(wd)), "W2") == 0 &&
+	    !w2_gate_decide(&c, name, wd, &o)) {
+		rc = -1;
+		goto w2_done;
+	}
 	if (!strcmp(name, OCC_T_READ)) {
 		rc = tool_read(&c, &a, &o);
 	} else if (!strcmp(name, OCC_T_WRITE)) {
@@ -2787,6 +3025,7 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 			      occ_orch_tools_enabled() ? "/recall" : "");
 		rc = -1;
 	}
+w2_done:
 	args_free(&a);
 	t1 = occ_monotonic_ms();
 

@@ -78,7 +78,10 @@ enum {
 	TUI_VIEW_ASYNC_RESULT = 11,
 	/* ---- T2：增量历史加载的视口锚点（text=消息 id，rc=行偏移）。
 	 * 投递顺序契约：HIST_CLEAR → 全部回放事件 → HIST_ANCHOR（最后）。 ---- */
-	TUI_VIEW_HIST_ANCHOR = 12
+	TUI_VIEW_HIST_ANCHOR = 12,
+	TUI_VIEW_CONFIRM_REQ = 13	/* O-9：W2 确认请求（worker→view）；
+					 * text="标题\n详情"、rc=ov_id——view 开 y/n
+					 * 面板；text 空=关确认面板（超时兜底） */
 };
 
 /* occ.c 提供的钩子（全部主线程调用；on_submit/on_interrupt 例外见注） */
