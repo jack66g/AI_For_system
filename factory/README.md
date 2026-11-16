@@ -37,6 +37,11 @@
 - `busybox`（C-P2b/g，2026-11-17：L1 静态 busybox v1.30.1 入厂）+ 同目录
   `crond`/`crontab`/`fdisk` 符号链（分区面 D2 路径：`fdisk -l`/`fdisk /dev/vda`
   经 busybox applet 提供；parted/LVM 评估在案 P3）
+- 静态 IP 工具（C-P2a，2026-11-17）：occ 第九工具 config_write_network
+  （OCC_NETCFG_TOOLS=1 旗控注册——差分红线：默认清单零变化；出厂在
+  aik-console 三处调用与 aikernel-api.service 置位）。write/remove/show
+  三动作，目标恒 /etc/systemd/network/70-static-<iface>.network（先于
+  出厂 80-wired 生效=静态覆盖 DHCP，删文件即回）；全参校验；W2 门。
 - 告警出口（C-P2e）：`/etc/aikernel/health-alert.conf` 写
   `WEBHOOK_URL=http://host/path` 即开（缺省=仅 journal+wall）；
   FAIL-ALERT 升级/RECOVERED 各发一次 JSON POST；本地标志

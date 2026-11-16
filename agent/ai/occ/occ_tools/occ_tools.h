@@ -64,6 +64,9 @@
 #define OCC_T_TASK  "task"			/* E3：第七工具
 						 * （OCC_ORCH_TOOLS=1
 						 * 才注册） */
+/* C-P2a：结构化静态网络写入（OCC_NETCFG_TOOLS=1 才注册——差分红线：
+ * 默认工具清单与请求字节零变化；出厂面在 aik-console/api 侧置位） */
+#define OCC_T_NETCFG "config_write_network"
 
 /* 结果文本化截断上限（任务书：8KB） */
 #define OCC_TOOL_OUT_MAX 8192

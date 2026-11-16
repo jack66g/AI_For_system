@@ -158,7 +158,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
@@ -167,10 +167,11 @@ test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
-		  tests/test_orch tests/test_review tests/test_w2gate; do \
+		  tests/test_orch tests/test_review tests/test_w2gate \
+		  tests/test_netcfg; do \
 		./$$t || exit 1; \
 	done
-	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo): ALL GREEN"
+	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo+p2a): ALL GREEN"
 
 # occ -p 冒烟（本地 mock LLM 回放 SSE；mock 仅测试，明标）
 p-smoke: $(BIN_OCC)
@@ -277,6 +278,24 @@ tests/test_w2gate: tests/test_w2gate.c $(TOOLS_OBJS) \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		  $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_w2gate.c \
+		  $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_llm/catalog.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+
+# C-P2a：netcfg 工具单测（与 w2gate 同链接面——走 occ_tool_exec 真链）
+tests/test_netcfg: tests/test_netcfg.c $(TOOLS_OBJS) \
+		  $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_llm/catalog.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		  $(STORE_LIB) $(SQLITE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_netcfg.c \
 		  $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		  $(OBJ_DIR)/occ_core/review.o \

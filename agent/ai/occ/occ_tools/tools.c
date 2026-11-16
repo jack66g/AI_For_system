@@ -214,33 +214,106 @@ static const char SCHEMA_RECALL[] =
 	"清洁层——防污染）\"}"
 	"},\"required\":[\"query\"]}";
 
+/* C-P2a 第九工具：config_write_network（OCC_NETCFG_TOOLS=1 注册）。
+ * 结构化写 /etc/systemd/network/70-static-<iface>.network（字典序先于
+ * 出厂 80-wired → systemd-networkd 首个匹配生效=静态覆盖 DHCP；删文件
+ * 即回 DHCP）。固定路径模式+全参校验——不经 write 工具的自由路径面；
+ * write/remove 两动作恒 W2（人工确认门），show 只读。 */
+static const char SCHEMA_NETCFG[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"action\":{\"type\":\"string\",\"enum\":[\"write\",\"remove\","
+	"\"show\"],\"description\":\"write=写静态配置文件；remove=删该"
+	"文件回 DHCP；show=列出现存 .network 关键行\"},"
+	"\"iface\":{\"type\":\"string\",\"description\":\"接口名（如 "
+	"eth0/enp0s3；write/remove 必填；show 可选=只看该口）\"},"
+	"\"address\":{\"type\":\"string\",\"description\":\"静态地址 "
+	"CIDR（write 必填，如 192.168.1.10/24，掩码段 0-32）\"},"
+	"\"gateway\":{\"type\":\"string\",\"description\":\"网关 IPv4"
+	"（可选）\"},"
+	"\"dns\":{\"type\":\"string\",\"description\":\"DNS 服务器，"
+	"逗号分隔（可选，如 223.5.5.5,1.1.1.1）\"}"
+	"},\"required\":[\"action\"]}";
+
+static int occ_netcfg_tools_enabled(void)
+{
+	const char *e = getenv("OCC_NETCFG_TOOLS");
+
+	return e && e[0] && strcmp(e, "0") != 0;
+}
+
+/* def 复用段（TOOLS_ORCH 与 TOOLS_NET 两个旗控组装体共用） */
+static void def_task_set(occ_tool_def *d)
+{
+	d->name = OCC_T_TASK;
+	d->description =
+		"主从编排（先按 L0/L1/L2 判级决定是否派发）："
+		"spawn 提交 brief 任务书派发子智能体（goal 与"
+		"非空 fileset 必填；fileset 为独占声明）；"
+		"status 查状态；wait 限时等终局；read_result 读"
+		"子报告；return 对结果表态。返回结构化 JSON。";
+	d->parameters = SCHEMA_TASK;
+}
+
+static void def_recall_set(occ_tool_def *d)
+{
+	d->name = OCC_T_RECALL;
+	d->description =
+		"长期记忆检索（SME）：按 query 查 〈记忆〉；"
+		"layer=t:<task_id> 查任务层私有；"
+		"include_failed=true 含失败/被否决尝试"
+		"（默认防污染只查清洁层）。";
+	d->parameters = SCHEMA_RECALL;
+}
+
+static void def_netcfg_set(occ_tool_def *d)
+{
+	d->name = OCC_T_NETCFG;
+	d->description =
+		"静态 IP 配置（结构化，W2 确认门）：write 写 "
+		"/etc/systemd/network/70-static-<iface>.network（iface+"
+		"address CIDR 必填，gateway/dns 可选——全参校验，覆盖出厂 "
+		"DHCP）；remove 删文件回 DHCP；show 列现存配置。生效指引"
+		"随结果返回。";
+	d->parameters = SCHEMA_NETCFG;
+}
+
 
 static occ_tool_def TOOLS_ORCH[8];
 static int tools_orch_init;
 
+/* C-P2a：netcfg 旗控组装体（6 基础+netcfg；orch 同开时再补 task/recall） */
+static occ_tool_def TOOLS_NET[9];
+static int tools_net_init;
+static size_t tools_net_n;
+
 const occ_tool_def *occ_tool_defs(size_t *n)
 {
+	if (occ_netcfg_tools_enabled()) {
+		if (!tools_net_init) {
+			size_t i, k = 0;
+
+			for (i = 0; i < sizeof(TOOLS) / sizeof(TOOLS[0]); i++)
+				TOOLS_NET[k++] = TOOLS[i];
+			def_netcfg_set(&TOOLS_NET[k++]);
+			if (occ_orch_tools_enabled()) {
+				def_task_set(&TOOLS_NET[k++]);
+				def_recall_set(&TOOLS_NET[k++]);
+			}
+			tools_net_n = k;
+			tools_net_init = 1;
+		}
+		if (n)
+			*n = tools_net_n;
+		return TOOLS_NET;
+	}
 	if (occ_orch_tools_enabled()) {
 		if (!tools_orch_init) {
 			size_t i;
 
 			for (i = 0; i < sizeof(TOOLS) / sizeof(TOOLS[0]); i++)
 				TOOLS_ORCH[i] = TOOLS[i];
-			TOOLS_ORCH[6].name = OCC_T_TASK;
-			TOOLS_ORCH[6].description =
-				"主从编排（先按 L0/L1/L2 判级决定是否派发）："
-				"spawn 提交 brief 任务书派发子智能体（goal 与"
-				"非空 fileset 必填；fileset 为独占声明）；"
-				"status 查状态；wait 限时等终局；read_result 读"
-				"子报告；return 对结果表态。返回结构化 JSON。";
-			TOOLS_ORCH[6].parameters = SCHEMA_TASK;
-			TOOLS_ORCH[7].name = OCC_T_RECALL;
-			TOOLS_ORCH[7].description =
-				"长期记忆检索（SME）：按 query 查 〈记忆〉；"
-				"layer=t:<task_id> 查任务层私有；"
-				"include_failed=true 含失败/被否决尝试"
-				"（默认防污染只查清洁层）。";
-			TOOLS_ORCH[7].parameters = SCHEMA_RECALL;
+			def_task_set(&TOOLS_ORCH[6]);
+			def_recall_set(&TOOLS_ORCH[7]);
 			tools_orch_init = 1;
 		}
 		if (n)
@@ -262,6 +335,9 @@ int occ_tool_is_known(const char *name)
 	if (occ_orch_tools_enabled() && name &&
 	    (!strcmp(OCC_T_TASK, name) || !strcmp(OCC_T_RECALL, name)))
 		return 1;	/* E6：recall 同闸入已知面 */
+	if (occ_netcfg_tools_enabled() && name &&
+	    !strcmp(OCC_T_NETCFG, name))
+		return 1;	/* C-P2a：同闸入已知面 */
 	return 0;
 }
 
@@ -2641,6 +2717,284 @@ const char *occ_snap_root(char *buf, size_t buflen)
 	return buf;
 }
 
+/* ===================== C-P2a：config_write_network =====================
+ * 目标恒为 <NETCFG_DIR>/70-static-<iface>.network（字典序先于出厂
+ * 80-wired.network → systemd-networkd 首个匹配生效：静态覆盖 DHCP；
+ * 删文件即回 DHCP）。NETCFG_DIR 可经 OCC_NETCFG_DIR 覆盖=测试沙盒
+ * 钩子（OCC_CATALOG 同款惯例，出厂不设）。
+ * write/remove 恒 W2（分类器裁定）；show 只读。 */
+
+static const char *netcfg_dir(void)
+{
+	const char *e = getenv("OCC_NETCFG_DIR");
+
+	return (e && e[0]) ? e : "/etc/systemd/network";
+}
+
+static int ip4_valid(const char *s)
+{
+	unsigned a, b, c, d;
+	char extra;
+	size_t i;
+
+	if (!s || !*s)
+		return 0;
+	for (i = 0; s[i]; i++)
+		if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.'))
+			return 0;
+	if (sscanf(s, "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4)
+		return 0;
+	return a <= 255 && b <= 255 && c <= 255 && d <= 255;
+}
+
+static int cidr_valid(const char *s, char *ip, size_t ipcap, int *pfx)
+{
+	const char *slash;
+	char pbuf[8];
+	size_t pl;
+	long v;
+	char *end;
+
+	if (!s)
+		return 0;
+	slash = strchr(s, '/');
+	if (!slash || slash == s || !slash[1])
+		return 0;
+	pl = (size_t)(slash - s);
+	if (pl == 0 || pl >= ipcap)
+		return 0;
+	memcpy(ip, s, pl);
+	ip[pl] = '\0';
+	if (!ip4_valid(ip))
+		return 0;
+	pl = strlen(slash + 1);
+	if (pl < 1 || pl > 2)
+		return 0;
+	memcpy(pbuf, slash + 1, pl);
+	pbuf[pl] = '\0';
+	v = strtol(pbuf, &end, 10);
+	if (*end || v < 0 || v > 32)
+		return 0;
+	*pfx = (int)v;
+	return 1;
+}
+
+static int iface_valid(const char *s)
+{
+	size_t i, n;
+
+	if (!s)
+		return 0;
+	n = strlen(s);
+	if (n < 1 || n > 15)
+		return 0;
+	if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') ||
+	      (s[0] >= '0' && s[0] <= '9')))
+		return 0;
+	for (i = 1; i < n; i++) {
+		char c = s[i];
+
+		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+		      c == '-'))
+			return 0;
+	}
+	return 1;
+}
+
+/* dns 列表校验（逗号分隔 IPv4；空段拒绝） */
+static int dns_valid(const char *s)
+{
+	char buf[256];
+	char *tok, *save;
+	size_t n;
+
+	if (!s || !*s)
+		return 0;
+	n = strlen(s);
+	if (n >= sizeof(buf))
+		return 0;
+	memcpy(buf, s, n + 1);
+	for (tok = strtok_r(buf, ",", &save); tok;
+	     tok = strtok_r(NULL, ",", &save)) {
+		if (!ip4_valid(tok))
+			return 0;
+	}
+	return 1;
+}
+
+static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *action = args_str(a, "action");
+	const char *iface = args_str(a, "iface");
+	const char *dir = netcfg_dir();
+
+	if (!action || !action[0]) {
+		occ_ob_puts(o, "ERROR: config_write_network 缺少 action"
+			      "（write/remove/show）");
+		return -1;
+	}
+	if (!strcmp(action, "show")) {
+		DIR *d = opendir(dir);
+		struct dirent *de;
+		int found = 0;
+
+		if (!d) {
+			occ_ob_printf(o, "ERROR: 打开 %s 失败：%s", dir,
+				      strerror(errno));
+			return -1;
+		}
+		occ_ob_printf(o, "== %s 现存 .network 配置 ==", dir);
+		while ((de = readdir(d)) != NULL) {
+			char fp[600];
+			char *buf;
+			size_t n, i, ls, le;
+
+			if (!strstr(de->d_name, ".network"))
+				continue;
+			if (iface && iface[0] &&
+			    !strstr(de->d_name, iface))
+				continue;
+			snprintf(fp, sizeof(fp), "%s/%s", dir, de->d_name);
+			if (read_whole(fp, 8192, &buf, &n) != 0)
+				continue;
+			found++;
+			occ_ob_printf(o, "-- %s --", de->d_name);
+			for (i = 0; i < n;) {
+				/* 行窗 [ls,le) */
+				ls = i;
+				while (i < n && buf[i] != '\n')
+					i++;
+				le = i;
+				if (i < n)
+					i++;
+				{
+					size_t kl = (size_t)(le - ls);
+					char save_ch = buf[le];
+
+					buf[le] = '\0';
+					if (buf[ls] != '#' &&
+					    (strncmp(buf + ls, "Name=", 5) == 0 ||
+					     strncmp(buf + ls, "Address=", 8) == 0 ||
+					     strncmp(buf + ls, "Gateway=", 8) == 0 ||
+					     strncmp(buf + ls, "DNS=", 4) == 0 ||
+					     strncmp(buf + ls, "DHCP=", 5) == 0)) {
+						if (kl > 100)
+							buf[ls + 100] = '\0';
+						occ_ob_printf(o, "  %s",
+							      buf + ls);
+					}
+					buf[le] = save_ch;
+				}
+			}
+			free(buf);
+		}
+		closedir(d);
+		if (!found)
+			occ_ob_puts(o, "（无匹配 .network 文件）");
+		return 0;
+	}
+	/* write/remove：iface 必填且严格校验（进文件名——拒绝路径花样） */
+	if (!iface || !iface_valid(iface)) {
+		occ_ob_puts(o, "ERROR: iface 非法（[A-Za-z0-9] 开头，"
+			      "[A-Za-z0-9._-]{1,15}，如 eth0/enp0s3）");
+		return -1;
+	}
+	{
+		char path[512];
+		char snapbuf[512];
+
+		snprintf(path, sizeof(path), "%s/70-static-%s.network",
+			 dir, iface);
+		if (!strcmp(action, "remove")) {
+			if (unlink(path) != 0) {
+				if (errno == ENOENT) {
+					occ_ob_printf(o, "%s 不存在"
+						      "（本就无静态配置）",
+						      path);
+					return 0;
+				}
+				occ_ob_printf(o, "ERROR: 删除 %s 失败：%s",
+					      path, strerror(errno));
+				return -1;
+			}
+			occ_ob_printf(o, "已删除 %s。回 DHCP 生效两步："
+				      "networkctl reload && "
+				      "networkctl reconfigure %s",
+				      path, iface);
+			return 0;
+		}
+		if (strcmp(action, "write")) {
+			occ_ob_printf(o, "ERROR: 未知 action「%s」"
+				      "（write/remove/show）", action);
+			return -1;
+		}
+		{
+			const char *addr = args_str(a, "address");
+			const char *gw = args_str(a, "gateway");
+			const char *dns = args_str(a, "dns");
+			char ip[48];
+			int pfx;
+			FILE *f;
+			char dnsbuf[256];
+			char *tok, *save;
+
+			if (!addr || !cidr_valid(addr, ip, sizeof(ip),
+						 &pfx)) {
+				occ_ob_puts(o, "ERROR: address 非法"
+					      "（需 CIDR 如 192.168.1.10/24，"
+					      "掩码段 0-32）");
+				return -1;
+			}
+			if (gw && gw[0] && !ip4_valid(gw)) {
+				occ_ob_puts(o, "ERROR: gateway 非法"
+					      "（IPv4 点分十进制）");
+				return -1;
+			}
+			if (dns && dns[0] && !dns_valid(dns)) {
+				occ_ob_puts(o, "ERROR: dns 非法"
+					      "（逗号分隔 IPv4，"
+					      "如 223.5.5.5,1.1.1.1）");
+				return -1;
+			}
+			/* 快照 stage（undo 地基；与 write 工具同口径） */
+			occ_snapshot_stage(ctx->snaproot, ctx->session_id,
+					   ctx->msg_id, path, snapbuf,
+					   sizeof(snapbuf));
+			f = fopen(path, "wb");
+			if (!f) {
+				occ_ob_printf(o, "ERROR: 打开 %s 失败：%s",
+					      path, strerror(errno));
+				return -1;
+			}
+			fprintf(f, "# AIKernel 静态网络（config_write_network"
+				" 生成；删本文件即回 DHCP 出厂 80-wired）\n"
+				"[Match]\nName=%s\n\n[Network]\nAddress=%s\n",
+				iface, addr);
+			if (gw && gw[0])
+				fprintf(f, "Gateway=%s\n", gw);
+			if (dns && dns[0]) {
+				snprintf(dnsbuf, sizeof(dnsbuf), "%s", dns);
+				for (tok = strtok_r(dnsbuf, ",", &save); tok;
+				     tok = strtok_r(NULL, ",", &save))
+					fprintf(f, "DNS=%s\n", tok);
+			}
+			if (fclose(f) != 0) {
+				occ_ob_printf(o, "ERROR: 关闭 %s 失败：%s",
+					      path, strerror(errno));
+				return -1;
+			}
+			occ_ob_printf(o, "已写入 %s。生效两步（经 bash 执行）："
+				      "networkctl reload && "
+				      "networkctl reconfigure %s；"
+				      "查看 networkctl status %s；"
+				      "撤销=action remove", path, iface,
+				      iface);
+		}
+	}
+	return 0;
+}
+
 int occ_snapshot_stage(const char *snaproot, const char *session_id,
 		       const char *msg_id, const char *abs_path,
 		       char *buf, size_t buflen)
@@ -2951,6 +3305,18 @@ const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
 		r = "W1";	/* 沙箱面兜底；W2=命令级命中（表/粘贴） */
 		if (cmd && cmd[0] && w2_bash_hit(cmd, detail, dcap))
 			r = "W2";
+	} else if (!strcmp(name, OCC_T_NETCFG)) {
+		const char *act = args_str(&a, "action");
+
+		r = "R";
+		if (!act || strcmp(act, "show") != 0) {
+			if (detail && dcap)
+				snprintf(detail, dcap,
+					 "改网络配置（%s/70-static-<iface>"
+					 ".network——连通性风险）",
+					 netcfg_dir());
+			r = "W2";
+		}
 	}
 	args_free(&a);
 	return r;
@@ -3039,6 +3405,16 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		rc = tool_grep(&c, &a, &o);
 	} else if (!strcmp(name, OCC_T_BASH)) {
 		rc = tool_bash(&c, &a, &o);
+	} else if (!strcmp(name, OCC_T_NETCFG)) {
+		/* C-P2a：开关关=未知工具面（差分红线：默认清单零变化） */
+		if (!occ_netcfg_tools_enabled()) {
+			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
+				      "read/write/edit/glob/grep/bash）",
+				      name);
+			rc = -1;
+		} else {
+			rc = tool_netcfg(&c, &a, &o);
+		}
 	} else if (!strcmp(name, OCC_T_TASK)) {
 		/* E3 第七工具：开关关=未知工具面（清单不含 task）；
 		 * 开=五动作（内部再校验 ctx->orch） */
@@ -3061,9 +3437,11 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		}
 	} else {
 		occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用：read/write/"
-			      "edit/glob/grep/bash%s%s）", name,
+			      "edit/glob/grep/bash%s%s%s）", name,
 			      occ_orch_tools_enabled() ? "/task" : "",
-			      occ_orch_tools_enabled() ? "/recall" : "");
+			      occ_orch_tools_enabled() ? "/recall" : "",
+			      occ_netcfg_tools_enabled() ?
+			      "/config_write_network" : "");
 		rc = -1;
 	}
 w2_done:
