@@ -156,7 +156,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS)
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
