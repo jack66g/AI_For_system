@@ -2868,10 +2868,28 @@ static int w2_bash_hit(const char *cmd, char *detail, size_t dcap)
 			continue;
 		}
 		if (!strcmp(tok, "curl") || !strcmp(tok, "wget")) {
+			/* S4（S-TRACK §4）：网络外发=数据泄出面——上传/POST
+			 * 旗标一律 W2（-d/--data/-T/--upload-file/-F/--form/
+			 * --post 系列与 -X POST|PUT|PATCH）；落盘 -o/-O 同 W2。 */
+			static const char *egress[] = {
+				" -d", "--data", " -T", "--upload-file",
+				" -F", "--form", "--post", "-X POST",
+				"-X PUT", "-X PATCH", NULL
+			};
+			size_t ei;
+
 			if (strstr(p, " -o ") || strstr(p, " -O")) {
 				w2_detail(detail, dcap,
 					  "%s 落盘（-o/-O）", tok);
 				return 1;
+			}
+			for (ei = 0; egress[ei]; ei++) {
+				if (strstr(p, egress[ei])) {
+					w2_detail(detail, dcap,
+						  "%s 网络外发（上传/POST——"
+						  "数据外泄面）", tok);
+					return 1;
+				}
 			}
 			continue;
 		}
