@@ -12,13 +12,22 @@
 #   CHECK_JRN         journal 错误增量抽查（近 5 分钟 err+ 条数超阈值记 WARN）
 #   CHECK_DISK        根分区使用率 <90%（W11 原有）
 #
-# 处置语义（W29 自恢复闭环）：
-#   可自动恢复类失败（服务 inactive/dead、探活不通）→ 自动 start/try-restart，
-#   journal 标记 AUTO-HEAL 行；同一检查项连续 3 轮失败 → 升级 FAIL 告警行
-#   （journal daemon.err + wall 终端广播）。恢复后 journal 标记 RECOVERED。
+# 处置语义（W29 自恢复闭环 + C-P1e 三闸）：
+#   可自动恢复类失败（服务 inactive/dead、探活不通）→ 经 heal_restart 出口
+#   自动 start/try-restart，journal 标记 AUTO-HEAL 行；同一检查项连续 3 轮
+#   失败 → 升级 FAIL 告警行（journal daemon.err + wall 终端广播）。
+#   恢复后 journal 标记 RECOVERED。
+#   **C-P1e 三闸（2026-11-17，SME 死亡环教训）**——heal_restart 依次判：
+#   ①重启冷却：同一检查项 AUTO-HEAL 重启至多每 HEAL_COOLDOWN_SEC 秒一次
+#     （限速后「重启→重头加载→再被杀」循环构造性不可能）；
+#   ②启动宽限窗：try-restart 场景下服务启动 HEAL_GRACE_SEC 秒内不杀
+#     （加载期进程活着只是慢——lt-vm 实测 aikd 纯计算加载超周期）；
+#   ③内存闸：内存重服务（aikernel-memory/ollama）重启/拉起前
+#     MemAvailable 须 ≥ HEAL_FREE_GATE_MB（11-16 两冻机=压力下重启触发）。
 #   注意：本脚本不做远程转发（远程告警属 P2-3，另行交付）。
 #
 # 状态文件：/run/aikernel-health/<检查名>.cnt（tmpfs，整机重启清零）
+#           /run/aikernel-health/<检查名>.last-restart（AUTO-HEAL 冷却戳）
 # 输出：/tmp/aikernel-health-last.log（最新一轮）+ journal（tag=aikernel-health）
 TAG=aikernel-health
 STATEDIR=/run/aikernel-health
@@ -34,8 +43,13 @@ CHECK_MEM=1
 CHECK_JRN=1
 CHECK_DISK=1
 
+# ---- C-P1e 自愈安全闸（可经环境变量覆盖调参）----
+HEAL_GRACE_SEC=${AIK_HEALTH_GRACE_SEC:-1800}
+HEAL_COOLDOWN_SEC=${AIK_HEALTH_COOLDOWN_SEC:-3600}
+HEAL_FREE_GATE_MB=${AIK_HEALTH_FREE_GATE_MB:-400}
+
 exec >"/tmp/aikernel-health-last.log" 2>&1
-echo "[aikernel-health] start $(date '+%F %T')"
+echo "[aikernel-health] start $(date '+%F %T') (grace=${HEAL_GRACE_SEC}s cooldown=${HEAL_COOLDOWN_SEC}s free_gate=${HEAL_FREE_GATE_MB}MB)"
 mkdir -p "$STATEDIR" 2>/dev/null
 
 # bump_fail <检查名> : 连续失败计数 +1，达到 3 升级告警（此后每轮持续告警）
@@ -65,26 +79,92 @@ clear_fail() {
 note_fail() { FAIL=$((FAIL + 1)); bump_fail "$1"; }
 note_warn() { WARN=$((WARN + 1)); }
 
-# ---- 1. 三服务 systemd active（W11 原有三项，处置升级为 start + AUTO-HEAL）----
+# ---- C-P1e 助手 ----
+# svc_age_sec <svc> : 距服务最近一次进入 active 的秒数（未知/解析失败=999999）
+svc_age_sec() {
+    ts="$(systemctl show "$1" -p ActiveEnterTimestamp --value 2>/dev/null)"
+    [ -n "$ts" ] || { echo 999999; return; }
+    ep="$(date -d "$ts" +%s 2>/dev/null)"
+    case "$ep" in ''|*[!0-9]*) echo 999999 ;; *) echo $(( $(date +%s) - ep )) ;; esac
+}
+
+# mem_avail_mb : MemAvailable MB（读不到=999999=不拦截）
+mem_avail_mb() {
+    kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null)"
+    case "$kb" in ''|*[!0-9]*) echo 999999 ;; *) echo $((kb / 1024)) ;; esac
+}
+
+# heal_restart <item> <svc> <heavy:0|1> <action:start|try-restart>
+# AUTO-HEAL 唯一出口。返回：0=已执行处置；2=宽限窗保护跳过；
+# 3=冷却限速跳过；4=内存闸推迟。
+heal_restart() {
+    item="$1"; hsvc="$2"; heavy="$3"; action="$4"
+    now="$(date +%s)"
+    last="$(cat "$STATEDIR/$item.last-restart" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$HEAL_COOLDOWN_SEC" ]; then
+        echo "[heal] $item 重启冷却中（每 ${HEAL_COOLDOWN_SEC}s 至多一次）——本轮跳过"
+        logger -t "$TAG" "AUTO-HEAL-SKIP: $item 冷却限速（上次 $((now - last))s 前）"
+        return 3
+    fi
+    # 宽限窗只保护「要被杀的活进程」（try-restart）；start 死服务无杀伤
+    if [ "$action" = "try-restart" ]; then
+        age="$(svc_age_sec "$hsvc")"
+        if [ "$age" -lt "$HEAL_GRACE_SEC" ]; then
+            echo "[wait] $hsvc 启动宽限窗内（age=${age}s < ${HEAL_GRACE_SEC}s，可能仍在加载）——不重启"
+            logger -t "$TAG" "AUTO-HEAL-SKIP: $item $hsvc 启动 ${age}s < 宽限 ${HEAL_GRACE_SEC}s（加载期保护）"
+            return 2
+        fi
+    fi
+    if [ "$heavy" = "1" ]; then
+        av="$(mem_avail_mb)"
+        if [ "$av" -lt "$HEAL_FREE_GATE_MB" ]; then
+            echo "[defer] $hsvc 重启推迟：MemAvailable ${av}MB < ${HEAL_FREE_GATE_MB}MB（内存压力下重启有冻机风险）"
+            logger -t "$TAG" -p daemon.warning "AUTO-HEAL-DEFER: $item 内存闸 MemAvailable=${av}MB < ${HEAL_FREE_GATE_MB}MB，推迟重启"
+            return 4
+        fi
+    fi
+    echo "$now" > "$STATEDIR/$item.last-restart"
+    echo "[heal] AUTO-HEAL: systemctl $action $hsvc"
+    logger -t "$TAG" -p daemon.warning "AUTO-HEAL: $item -> systemctl $action $hsvc"
+    systemctl "$action" "$hsvc" 2>&1
+    return 0
+}
+
+# ---- 1. 三服务 systemd active（W11 原有三项，处置升级为 start + AUTO-HEAL 三闸）----
 check_service() {
     svc="$1"
     state="$(systemctl is-active "$svc" 2>/dev/null)"
     if [ "$state" = "active" ]; then
         echo "[ok]   $svc active"
         clear_fail "svc:$svc"
+    elif [ "$state" = "activating" ]; then
+        age="$(svc_age_sec "$svc")"
+        if [ "$age" -lt "$HEAL_GRACE_SEC" ]; then
+            echo "[wait] $svc activating（age=${age}s 宽限内）——等待就绪，不判失败"
+        else
+            echo "[fail] $svc activating 超宽限（age=${age}s）"
+            note_fail "svc:$svc"
+        fi
     else
         echo "[fail] $svc state=$state -> AUTO-HEAL: start"
-        logger -t "$TAG" -p daemon.warning "AUTO-HEAL: $svc state=$state, systemctl start"
-        systemctl start "$svc" 2>&1
-        after="$(systemctl is-active "$svc" 2>/dev/null)"
-        if [ "$after" = "active" ]; then
-            echo "[heal] $svc 已自动拉起"
-            logger -t "$TAG" "AUTO-HEAL: $svc 自动拉起成功"
-            clear_fail "svc:$svc"
+        case "$svc" in aikernel-memory.service|ollama.service) heavy=1 ;; *) heavy=0 ;; esac
+        heal_restart "svc:$svc" "$svc" "$heavy" start
+        hrc=$?
+        if [ "$hrc" -eq 0 ]; then
+            after="$(systemctl is-active "$svc" 2>/dev/null)"
+            if [ "$after" = "active" ]; then
+                echo "[heal] $svc 已自动拉起"
+                logger -t "$TAG" "AUTO-HEAL: $svc 自动拉起成功"
+                clear_fail "svc:$svc"
+            else
+                echo "[fail] $svc 自动拉起后仍 $after"
+                logger -t "$TAG" -p daemon.err "AUTO-HEAL: $svc 自动拉起失败（仍 $after）"
+                note_fail "svc:$svc"
+            fi
         else
-            echo "[fail] $svc 自动拉起后仍 $after"
-            logger -t "$TAG" -p daemon.err "AUTO-HEAL: $svc 自动拉起失败（仍 $after）"
-            note_fail "svc:$svc"
+            # 2/3/4=闸保护跳过：不杀不该杀的，也不给加载期计失败
+            note_warn
         fi
     fi
 }
@@ -97,17 +177,22 @@ check_sme_http() {
         clear_fail "sme-http"
     else
         echo "[fail] SME REST 127.0.0.1:8000/health 无有效应答 -> AUTO-HEAL: try-restart aikernel-memory"
-        logger -t "$TAG" -p daemon.warning "AUTO-HEAL: SME REST 探活失败，try-restart aikernel-memory.service"
-        systemctl try-restart aikernel-memory.service 2>&1
-        sleep 3
-        body2="$(curl -s -m 3 http://127.0.0.1:8000/health 2>/dev/null)"
-        if echo "$body2" | grep -q '"ok"'; then
-            echo "[heal] SME REST 已自动恢复"
-            logger -t "$TAG" "AUTO-HEAL: SME REST 重启后恢复"
-            clear_fail "sme-http"
+        heal_restart "sme-http" aikernel-memory.service 1 try-restart
+        hrc=$?
+        if [ "$hrc" -eq 0 ]; then
+            sleep 3
+            body2="$(curl -s -m 3 http://127.0.0.1:8000/health 2>/dev/null)"
+            if echo "$body2" | grep -q '"ok"'; then
+                echo "[heal] SME REST 已自动恢复"
+                logger -t "$TAG" "AUTO-HEAL: SME REST 重启后恢复"
+                clear_fail "sme-http"
+            else
+                echo "[fail] SME REST 处置后仍不通（重启后加载需时，宽限窗内下轮再探）"
+                note_fail "sme-http"
+            fi
         else
-            echo "[fail] SME REST 处置后仍不通"
-            note_fail "sme-http"
+            # 2=宽限（加载期保护）/3=冷却/4=内存闸：保护性跳过，不计失败
+            echo "[note] SME REST 本轮不处置（闸保护），下轮再看"
         fi
     fi
 }
@@ -129,17 +214,21 @@ check_api_http() {
         clear_fail "api-http"
     else
         echo "[fail] aikernel-api 127.0.0.1:8761 无应答 -> AUTO-HEAL: try-restart aikernel-api"
-        logger -t "$TAG" -p daemon.warning "AUTO-HEAL: aikernel-api 探活失败，try-restart aikernel-api.service"
-        systemctl try-restart aikernel-api.service 2>&1
-        sleep 2
-        code2="$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8761/ 2>/dev/null)"
-        if [ -n "$code2" ] && [ "$code2" != "000" ]; then
-            echo "[heal] aikernel-api 已自动恢复"
-            logger -t "$TAG" "AUTO-HEAL: aikernel-api 重启后恢复"
-            clear_fail "api-http"
+        heal_restart "api-http" aikernel-api.service 0 try-restart
+        hrc=$?
+        if [ "$hrc" -eq 0 ]; then
+            sleep 2
+            code2="$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8761/ 2>/dev/null)"
+            if [ -n "$code2" ] && [ "$code2" != "000" ]; then
+                echo "[heal] aikernel-api 已自动恢复"
+                logger -t "$TAG" "AUTO-HEAL: aikernel-api 重启后恢复"
+                clear_fail "api-http"
+            else
+                echo "[fail] aikernel-api 处置后仍无应答"
+                note_fail "api-http"
+            fi
         else
-            echo "[fail] aikernel-api 处置后仍无应答"
-            note_fail "api-http"
+            echo "[note] aikernel-api 本轮不处置（闸保护），下轮再看"
         fi
     fi
 }
