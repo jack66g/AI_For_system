@@ -1,0 +1,13 @@
+// AIKernel 升级策略（C-P1b 决策落地，2026-11-17）
+// 决策=显式禁用 unattended-upgrades（TASK-BOOK v3 §2 允许分支之二）：
+//  1) 自研内核 #82 + 自研 GRUB + 15 自研 unit：apt 无人值守升级
+//     （linux-image/openssl/openssh 等关键件）可在无人值守期静默
+//     破坏开机链——演示/长跑机无人值守场景不可接受。
+//  2) 系统理念=AI 代管：升级走 aik-upgrade（A/B 槽+金丝雀+回退）
+//     与 AI 通道（W2 确认门 + undo 兜底），不复制 Ubuntu 默认。
+//  3) 最小攻击面（Alpine 锚立场）。
+// 对标说明：Ubuntu Server 默认开启 u-u（security 源）；我们以
+// 「AI 通道受控升级」替代——差距为安全取舍，非能力缺失。
+// 本件取代已删除的 50unattended-upgrades 草案（该件从未出厂）。
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";

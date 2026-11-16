@@ -2,7 +2,7 @@
 
 本目录对应 guest rootfs 的绝对路径：`factory/etc/...` ↔ `/etc/...`，`factory/usr/...` ↔ `/usr/...`。只收编**项目自有**资产，不包含发行版文件、运行时密钥或 rootfs 镜像。
 
-## systemd 单元（15 件）
+## systemd 单元（17 件）
 
 | 文件 | 作用 |
 |---|---|
@@ -13,6 +13,7 @@
 | `aikernel-backup.service` / `.timer` | A/B 备份 |
 | `aikernel-upgrade-commit.service` / `.timer` | A/B 升级健康门提交 |
 | `aik-disk-check.service` / `.timer` | 磁盘水位检查 |
+| `aik-log-trim.service` / `.timer` | 文件日志有界化（C-P1c，2026-11-17：追加日志 >8M 保尾 4M；telemetry 天目录保 14 天） |
 | `aik-desktop.service` | Web 桌面 demo（127.0.0.1:8091） |
 | `ollama.service` | 本地模型引擎（127.0.0.1:11434；出厂不预装模型，按需 `aik model install`） |
 | `sme-seed.service` | 首启 seed 幂等导入 |
@@ -31,7 +32,7 @@
 
 ## /usr/local/sbin
 
-- `aik-backup`、`aik-cert-gen`、`aik-reset`、`aik-token`、`aik-upgrade`、`aikernel-health.sh`、`aik-ac-hook`
+- `aik-backup`、`aik-cert-gen`、`aik-reset`、`aik-token`、`aik-upgrade`、`aikernel-health.sh`、`aik-ac-hook`、`aik-log-trim`（C-P1c）
 - `aikernel-api` **不在本目录重复**：源在 `agent/ai/api/aikernel-api`，由发布脚本安装到 `/usr/local/sbin/`。
 - `autocondensed` / `autocondense-mcp` / `autocondense-hook` 同上：源在 `agent/ai/autocondense/`，发布脚本安装。
 
@@ -43,7 +44,7 @@
 
 ## /etc 配置
 
-`motd`、`nftables.conf`、`default/locale`、`apt/apt.conf.d/*`、`systemd/journald.conf`、`systemd/timesyncd.conf`、`systemd/network/80-wired.network`、`ssh/sshd_config`、`aikernel/policy.conf`。
+`motd`、`nftables.conf`、`default/locale`、`apt/apt.conf.d/51-aik-upgrade-policy`、`systemd/journald.conf`、`systemd/timesyncd.conf`、`systemd/network/80-wired.network`、`ssh/sshd_config`（纯净基线）+ `ssh/sshd_config.d/50-aik-hardening.conf`（硬化，C-P1a）、`aikernel/policy.conf`。
 
 ## 桌面
 
@@ -52,12 +53,17 @@
 ## 秘密与安全
 
 - 本目录不含 `model.toml`、API token、SSH host key 或任何私钥。`aik-token` 在安装/运维时生成。
-- `ssh/sshd_config` 是当前出厂基线（允许 root/密码登录），**不是最终安全配置**；W83 需重新评估。
+- SSH 出厂硬化（C-P1a/W83，2026-11-17 落地）：`sshd_config`=纯净基线，硬化集中
+  `ssh/sshd_config.d/50-aik-hardening.conf`（prohibit-password+密钥制+防爆破键组）；
+  控制台 gate/TUI 不受影响。首启公钥注入：17.8 起 build 侧 PROV_PUBKEY（可选）。
+- unattended-upgrades **显式禁用**（C-P1b 决策，2026-11-17）：`apt/apt.conf.d/51-aik-upgrade-policy`
+  ——自研开机链经不起 apt 无人值守升级；升级走 aik-upgrade（A/B+金丝雀）与 AI 通道
+  （W2 门+undo）。对标 Ubuntu Server 的差异为安全取舍，非能力缺失。
 - API token 存储位：`~/.aikernel/model.toml [api] token`（默认，600）或 `/etc/aikernel/api-token`（600）。
 
 ## 启用关系
 
 `multi-user.target.wants`：`aikernel-api`、`autocondense`、`aikernel-memory`、`ollama`、`sme-seed`、`ssh-keygen`、`aik-desktop`、`nftables`、`systemd-networkd`、`systemd-resolved`、`systemd-timesyncd`、`ssh`。
-`timers.target.wants`：`aikernel-health.timer`、`aikernel-backup.timer`、`aikernel-upgrade-commit.timer`、`aik-disk-check.timer`。
+`timers.target.wants`：`aikernel-health.timer`、`aikernel-backup.timer`、`aikernel-upgrade-commit.timer`、`aik-disk-check.timer`、`aik-log-trim.timer`。
 
 修改流程：改构建机 rootfs → ISO/qemu 实测 → 按相同相对路径收编回本目录；不要只改本目录当构建层。

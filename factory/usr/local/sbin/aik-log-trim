@@ -1,0 +1,42 @@
+#!/bin/sh
+# aik-log-trim — 文件日志有界化（C-P1c；aik-log-trim.timer 日跑）
+# 策略：
+#   追加式日志（aik-disk-check.log / aik-upgrade.log /
+#   /var/log/aikernel/ 下 audit.log、events.jsonl、*.jsonl）
+#   超 8M 保尾 4M（cat 重写保 inode/权限/属主）；
+#   telemetry 天目录（YYYY-MM-DD）保最近 14 天。
+#   说明：aistreamd PARQUET_RETENTION_DAYS=7 是数据层保留（本仓
+#   conf 显式化），本件是文件系统层兜底——旧件/停服期也有界。
+#   动作行打 stdout → journald 收录（不新增日志文件）。
+#   幂等：无超限即无动作、无输出。
+MAX_BYTES=$((8 * 1024 * 1024))
+KEEP_BYTES=$((4 * 1024 * 1024))
+TELE=/var/lib/aikernel/telemetry
+KEEP_DAYS=14
+
+trim_file() {
+    [ -f "$1" ] || return 0
+    sz=$(stat -c%s "$1" 2>/dev/null) || return 0
+    [ "$sz" -gt "$MAX_BYTES" ] || return 0
+    tmp=$(mktemp "${1%/*}/.trim.XXXXXX") || return 0
+    if tail -c "$KEEP_BYTES" "$1" >"$tmp" 2>/dev/null; then
+        cat "$tmp" >"$1"
+        echo "trim $1: $sz -> $KEEP_BYTES bytes (tail kept)"
+    fi
+    rm -f "$tmp"
+}
+
+for f in /var/log/aik-disk-check.log /var/log/aik-upgrade.log \
+         /var/log/aikernel/audit.log /var/log/aikernel/events.jsonl \
+         /var/log/aikernel/*.jsonl; do
+    trim_file "$f"
+done
+
+if [ -d "$TELE" ]; then
+    ls "$TELE" 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+        | sort -r | tail -n +$((KEEP_DAYS + 1)) | while IFS= read -r d; do
+        rm -rf "${TELE:?}/$d"
+        echo "prune telemetry/$d"
+    done
+fi
+exit 0

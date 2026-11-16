@@ -20,6 +20,15 @@ EVD = os.path.expanduser("~/k10-evidence")
 DISK = "/tmp/w17g-target.qcow2"
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
 
+# C-P1d（2026-11-17 翻案）：boot_round 阶段耗时归因打点——离线/低配
+# 冷启的时间去向不再靠猜（原「occ catalog/provider 超时」判已被 L1
+# 探针推翻：occ 三态首绘 0.2s；分钟级消耗=TCG 冷启+首启 unit 风暴）。
+PHASE_T0 = [0.0]
+
+
+def phase(tag):
+    print("== phase %-14s t=%.1fs ==" % (tag, time.time() - PHASE_T0[0]))
+
 B7GEN = (
     "import json,time\n"
     "f=open('/root/b7.fifo','w')\n"
@@ -82,7 +91,7 @@ def install_round():
         os.unlink(sock)
     if os.path.exists(DISK):
         os.unlink(DISK)
-    r = subprocess.run("qemu-img create -f qcow2 %s 8G" % DISK,
+    r = subprocess.run("qemu-img create -f qcow2 %s 20G" % DISK,
                        shell=True, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     cmd = ("qemu-system-x86_64 -name w17ginst -accel tcg -m 2048 -smp 2 "
@@ -131,12 +140,15 @@ def boot_round():
            % (sock, DISK))
     q = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
+    PHASE_T0[0] = time.time()
+    phase("qemu-start")
     time.sleep(2)
     ser = Serial(sock, os.path.join(EVD, "w17g-boot-serial.log"))
     out = ""
     b6 = (False, False)
     try:
         ser.wait(b"automatic login", 600)
+        phase("autologin-seen")
         wiz = wait_after(ser, len(ser.buf), rb"\+--", 240)
         print("B6 gate render:", wiz)
         assert wiz, "B6 FAIL: 密码门未渲染（occ 串口）"
@@ -147,7 +159,8 @@ def boot_round():
         # 残余字节可污染密码框（追加成错密）→ 3 错冷却循环烧窗。
         # 编排：先 \r 清残场（空提交/失败即清框）再灌正密；锚=空态头
         # 「· occ」（gate 横幅是「· alpha」，横幅「特权模式」不撞）；
-        # 窗 600s（解锁后离线 catalog/provider 超时段长——run4 实测窗外 30s 才首绘）。
+        # 窗 600s 的真实去向=TCG 冷启+首启 unit 风暴（C-P1d 探针翻案
+        # 后以 phase 打点归因；occ 首绘本身离线 0.2s）。
         m1 = "新对话".encode()
         m2 = "· occ".encode()
         for i in range(300):
@@ -160,11 +173,13 @@ def boot_round():
                 ser.send(b"\r")
                 time.sleep(1.2)
                 ser.send(b"aik12345\r")
+        phase("main-tui")
         print("B6 main TUI:", main_tui)
         assert main_tui, "B6 FAIL: 主 TUI 未上串口"
         b6 = (wiz, main_tui)
         ser.send(b"/shell\r")
         time.sleep(8)
+        phase("shell-ready")
         mark = len(ser.buf)
         ser.sendline(
             "echo ==B1==; grep -m1 17.6 /etc/motd; "
@@ -194,6 +209,7 @@ def boot_round():
             "tail -2 /root/b7.log; echo W17FDONE$((1+1))"
             % (b64(B7GEN), b64(B7CONF)))
         wait_after(ser, mark, b"W17FDONE2", 300)
+        phase("battery-done")
         out = ANSI.sub(b"", ser.buf[mark:]).replace(
             b"\r", b"").decode("utf-8", "replace")
         ser.sendline("poweroff -f")
@@ -225,6 +241,9 @@ def main():
         install_round()
         print("== seed gate ==")
         seed_gate()
+    if "--install-only" in sys.argv:
+        print("INSTALL-ONLY-DONE")
+        return 0
     print("== boot round (GRUB) ==")
     out, (b6w, b6t) = boot_round()
     with open(os.path.join(EVD, "w17g-battery.txt"), "w") as fh:

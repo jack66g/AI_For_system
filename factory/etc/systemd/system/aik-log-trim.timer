@@ -1,0 +1,11 @@
+[Unit]
+Description=AIKernel 文件日志有界化日跑（C-P1c）
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+AccuracySec=1min
+Unit=aik-log-trim.service
+
+[Install]
+WantedBy=timers.target

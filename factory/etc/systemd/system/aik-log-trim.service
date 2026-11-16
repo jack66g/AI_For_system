@@ -1,0 +1,6 @@
+[Unit]
+Description=AIKernel 文件日志有界化（C-P1c）
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aik-log-trim

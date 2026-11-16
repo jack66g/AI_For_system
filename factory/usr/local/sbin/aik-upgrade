@@ -508,9 +508,11 @@ cmd_status() {
 EXPORT_BASE=/usr/local/share/aikernel
 EXPORT_LIST=(root/.aikernel etc/aikernel
              etc/ssh/sshd_config.d/50-aik-hardening.conf
+             etc/apt/apt.conf.d/51-aik-upgrade-policy
              etc/nftables.conf boot/aik-slot-state boot/grub/grub.cfg
              usr/local/sbin/aik-upgrade usr/local/sbin/aik-reset
              usr/local/sbin/aik-backup usr/local/sbin/aikernel-health.sh
+             usr/local/sbin/aik-log-trim
              usr/local/sbin/aikernel-api usr/local/bin/start-sme.sh
              usr/local/share/aikernel/tools.json
              usr/local/share/aikernel/sme-seed.jsonl
