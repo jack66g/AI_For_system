@@ -158,10 +158,13 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
  * err 文本人话。路径形态：~/.occ/snapshots/<session>/<msg>/<mangled>；
  * mangled = 百分比编码（'%'→%25、'/'→%2f，单射——b2 修复 b1 的
  * '/'→'_' 碰撞缺陷 /tmp/a_b vs /tmp/a/b，详见 tools.c 头注）。
+ * P-50：db 非 NULL 时随快照落 occ_snap manifest 行（DB 外部锚——
+ * undo/redo 消费前对账；落库失败仅 stderr 警告并退化为 legacy sidecar
+ * 校验，不阻断快照本体，与 sidecar 写失败同款降级哲学）。
  */
-int occ_snapshot_stage(const char *snaproot, const char *session_id,
-		       const char *msg_id, const char *abs_path,
-		       char *buf, size_t buflen);
+int occ_snapshot_stage(occ_db *db, const char *snaproot,
+		       const char *session_id, const char *msg_id,
+		       const char *abs_path, char *buf, size_t buflen);
 
 /* b2（revert.c 复用）：mangle 编码（'%','/','.'→%XX，单射）与反解、
  * 快照根解析。unmangle 返回 0 成功 / -1（NULL 或缓冲不足）。 */

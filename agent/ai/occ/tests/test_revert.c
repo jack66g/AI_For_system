@@ -18,6 +18,11 @@
  *   I) S-FINDING-01 快照完整性（内容篡改拒收/legacy 兼容/redo 同口径）
  *      + P-49：ABSENT 墓碑投毒拒收（I10/I11）、legacy/空墓碑照常
  *      工作（I10b/I10c）
+ *   J) P-50 manifest 对账（DB 外部锚）：I12 换内容+重造 sidecar 拒收、
+ *      I13 墓碑字节/kind 篡改拒收、I14 搬目录拒收、I15 删标记合成
+ *      failed 条目、I16 manifest 清空回 legacy（I9/I10b 语义不变）、
+ *      I17 redo 锚（投毒拒收 + 空 redo_json legacy 正路）、I18 E2E
+ *      （manifest 行直查+undo/redo 全绿）+ v3→v4 迁移
  *
  * 夹具全在 /tmp/occ_rev_t_*（授权范围）；快照根/trace 经 OCC_SNAPROOT/
  * OCC_TRACE_DIR 重定向；write走真工具链（真快照+真 durable 落库）。
@@ -188,6 +193,87 @@ static long long sql_int(const char *dbfile, const char *sql)
 	return sql_count(dbfile, sql, NULL);
 }
 
+/* J) 助手：直连 sqlite 写执行（模拟「DB 侧外部干预」——清 manifest/
+ * 造 v3 老库；返回 0=成功） */
+static int sql_exec(const char *dbfile, const char *sql)
+{
+	sqlite3 *h;
+	char *perr = NULL;
+	int rc = -1;
+
+	if (sqlite3_open_v2(dbfile, &h, SQLITE_OPEN_READWRITE, NULL) !=
+	    SQLITE_OK)
+		return -1;
+	if (sqlite3_exec(h, sql, NULL, NULL, &perr) == SQLITE_OK)
+		rc = 0;
+	sqlite3_free(perr);
+	sqlite3_close(h);
+	return rc;
+}
+
+/* J) 助手：按目标绝对路径定位 <root>/<ses>/ 下该文件的快照在盘文件
+ * （内容或墓碑，mangle 单射比对——不依赖 readdir 顺序；多 msg 目录时
+ * 返回首个命中）。返回 0=找到（out=全路径，墓碑含 .ABSENT 后缀）。 */
+static int find_snap_of(const char *root, const char *ses,
+			const char *want_abs, char *out, size_t cap)
+{
+	char d[340];
+	DIR *dd, *md;
+	struct dirent *en, *mn;
+
+	snprintf(d, sizeof(d), "%s/%s", root, ses);
+	if (!(dd = opendir(d)))
+		return -1;
+	while ((en = readdir(dd))) {
+		char sub[620];
+
+		if (en->d_name[0] == '.' || !strcmp(en->d_name, "_redo"))
+			continue;
+		snprintf(sub, sizeof(sub), "%s/%s", d, en->d_name);
+		if (!(md = opendir(sub)))
+			continue;
+		while ((mn = readdir(md))) {
+			size_t nl = strlen(mn->d_name);
+			char name[1200], abs[4096];
+
+			if (mn->d_name[0] == '.')
+				continue;
+			if (nl > 7 &&
+			    (!strcmp(mn->d_name + nl - 7, ".sha256")))
+				continue;
+			if (nl > 7 && !strcmp(mn->d_name + nl - 7, ".ABSENT"))
+				nl -= 7;
+			if (nl >= sizeof(name))
+				continue;
+			memcpy(name, mn->d_name, nl);
+			name[nl] = '\0';
+			if (occ_snap_unmangle(name, abs, sizeof(abs)))
+				continue;
+			if (strcmp(abs, want_abs))
+				continue;
+			snprintf(out, cap, "%s/%s", sub, mn->d_name);
+			closedir(md);
+			closedir(dd);
+			return 0;
+		}
+		closedir(md);
+	}
+	closedir(dd);
+	return -1;
+}
+
+/* J) 助手：按 path 找 result 条目（readdir 序不定——按 path 断言）；
+ * 找到返回下标，否则 -1 */
+static int result_find(occ_undo_result *r, const char *path)
+{
+	size_t i;
+
+	for (i = 0; i < r->nfiles; i++)
+		if (!strcmp(r->files[i].path, path))
+			return (int)i;
+	return -1;
+}
+
 /* ---- 会话/回合构造助手 ---- */
 
 /* 一轮：user → assistant(toolCall write) → 真执行 → assistant 收口。
@@ -322,9 +408,9 @@ static void test_migration(void)
 	OK(db != NULL, "mig-open");
 	if (!db)
 		return;
-	/* 升级证据（E1：v1 老库直升 v3——v2/v3 迁移链 open 内一次走完；
-	 * v3 全量证据面归 test_task，此处只钉版本与 v2 主件不回退） */
-	OK(sql_int(v1db, "PRAGMA user_version") == 3, "mig-user-version-3");
+	/* 升级证据（E1→P-50：v1 老库直升 v4——v2/v3/v4 迁移链 open 内
+	 * 一次走完；v3 全量证据面归 test_task，此处只钉版本与 v2/v4 主件） */
+	OK(sql_int(v1db, "PRAGMA user_version") == 4, "mig-user-version-4");
 	OK(sql_count(v1db,
 		     "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
 		     " AND name='occ_revert'", NULL) == 1, "mig-revert-table");
@@ -648,13 +734,13 @@ int main(void)
 	   "h-undo-no-session");
 	occ_undo_result_free(&r);
 
-		/* 旧的 v1 迁移库再开一次（幂等；E1：版本钉 v3 不再动） */
+		/* 旧的 v1 迁移库再开一次（幂等；P-50：版本钉 v4 不再动） */
 		{
 			occ_db *db2 = occ_db_open(dbpath_of("v1.db"), err,
 						  sizeof(err));
 
 			OK(db2 != NULL && sql_int(dbpath_of("v1.db"),
-						  "PRAGMA user_version") == 3,
+						  "PRAGMA user_version") == 4,
 			   "mig-reopen-idempotent");
 			if (db2)
 				occ_db_close(db2);
@@ -703,7 +789,9 @@ int main(void)
 		OK(!strcmp(rfile(f7), "T7"), "i7-target-kept-current");
 		occ_undo_result_free(&r);
 
-		/* I8：legacy 快照（无 sidecar）→ 照旧恢复（向后兼容） */
+		/* I8：legacy 快照（无 sidecar 且无 DB manifest 行——P-50 起
+		 *      「legacy」=P-49 前的快照两侧证全无）→ 照旧恢复
+		 *      （向后兼容） */
 		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
 		   "i8-create");
 		snprintf(sid8, sizeof(sid8), "%s", s.id);
@@ -716,6 +804,14 @@ int main(void)
 			      sizeof(snap)) == 0, "i8-snap-found");
 		snprintf(side, sizeof(side), "%s.sha256", snap);
 		OK(unlink(side) == 0, "i8-sidecar-removed");
+		{
+			char sql[600];
+
+			snprintf(sql, sizeof(sql),
+				 "DELETE FROM occ_snap WHERE path='%s';", f8);
+			OK(sql_exec(dbpath_of("sessions.db"), sql) == 0,
+			   "i8-manifest-row-removed");
+		}
 		wfile(snap, "LEGACY8");
 		memset(&r, 0, sizeof(r));
 		OK(occ_undo(db, sid8, 1, NULL, &r, err, sizeof(err)) == 0,
@@ -891,25 +987,465 @@ int main(void)
 				}
 				closedir(dd);
 			}
-			OK(rd[0] != '\0', "i11-redo-tomb-found");
-			if (rd[0]) {
-				FILE *f = fopen(rd, "ab");
+				OK(rd[0] != '\0', "i11-redo-tomb-found");
+				if (rd[0]) {
+					FILE *f = fopen(rd, "ab");
 
-				OK(f != NULL, "i11-open-tomb");
-				if (f) {
-					fputs("POISON11\n", f);
-					fclose(f);
+					OK(f != NULL, "i11-open-tomb");
+					if (f) {
+						fputs("POISON11\n", f);
+						fclose(f);
+					}
+					memset(&r, 0, sizeof(r));
+					OK(occ_redo(db, sid11, NULL, &r, err,
+						    sizeof(err)) == 0, "i11-redo-rc0");
+					OK(r.nfiles == 1 && r.files[0].failed == 1,
+					   "i11-redo-tamper-refused");
+					OK(!fexists(f11), "i11-target-stays-absent");
+					occ_undo_result_free(&r);
 				}
-				memset(&r, 0, sizeof(r));
-				OK(occ_redo(db, sid11, NULL, &r, err,
-					    sizeof(err)) == 0, "i11-redo-rc0");
-				OK(r.nfiles == 1 && r.files[0].failed == 1,
-				   "i11-redo-tamper-refused");
-				OK(!fexists(f11), "i11-target-stays-absent");
-				occ_undo_result_free(&r);
 			}
 		}
-	}
+
+		/* ---- J) P-50：manifest 对账（DB 外部锚） ---- */
+		{
+			char sid12[OCC_ID_LEN], sid13[OCC_ID_LEN];
+			char sid13b[OCC_ID_LEN], sid14[OCC_ID_LEN];
+			char sid15[OCC_ID_LEN], sid16[OCC_ID_LEN];
+			char sid16b[OCC_ID_LEN], sid17[OCC_ID_LEN];
+			char sid18[OCC_ID_LEN];
+			char f12[192], f13[192], f13b[192], f14a[192];
+			char f14b[192], f15[192], f16[192], f16b[192];
+			char f17[192], f18[192];
+			char snap[900], side[960], tomb[920], hex[OCC_SHA256_HEX + 1];
+			char sbuf[128];
+
+			/* I12：anchored 换内容 + sidecar 正确重造——P-49
+			 *      抓不住（sidecar 与快照同目录=自证），DB 锚拒收 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i12-create");
+			snprintf(sid12, sizeof(sid12), "%s", s.id);
+			occ_session_set_workdir(db, sid12, workdir, err,
+						sizeof(err));
+			snprintf(f12, sizeof(f12), "%s/f12.txt", workdir);
+			wfile(f12, "O12");
+			OK(make_write_turn(db, sid12, "把 f12 改成 T12", f12,
+					   "T12", NULL, err, sizeof(err)) == 0,
+			   "i12-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid12, f12,
+					snap, sizeof(snap)) == 0, "i12-snap-found");
+			wfile(snap, "POISON12");
+			OK(occ_sha256_hex("POISON12", 8, hex) == 0, "i12-sha");
+			snprintf(side, sizeof(side), "%s.sha256", snap);
+			snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
+			wfile(side, sbuf);		/* sidecar 一并重造 */
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid12, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i12-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].failed == 1,
+			   "i12-anchor-refused");
+			OK(!strcmp(rfile(f12), "T12"), "i12-target-kept-current");
+			occ_undo_result_free(&r);
+
+			/* I13a：anchored 墓碑字节篡改 + sidecar 重造 → 拒 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i13a-create");
+			snprintf(sid13, sizeof(sid13), "%s", s.id);
+			occ_session_set_workdir(db, sid13, workdir, err,
+						sizeof(err));
+			snprintf(f13, sizeof(f13), "%s/new13.txt", workdir);
+			OK(!fexists(f13), "i13a-before-absent");
+			OK(make_write_turn(db, sid13, "新建 new13.txt", f13,
+					   "NEW13", NULL, err, sizeof(err)) == 0,
+			   "i13a-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid13, f13,
+					snap, sizeof(snap)) == 0, "i13a-marker-found");
+			OK(strlen(snap) > 7 &&
+			   !strcmp(snap + strlen(snap) - 7, ".ABSENT"),
+			   "i13a-is-tombstone");
+			wfile(snap, "absent-POISON13\n");
+			{
+				size_t pl = strlen("absent-POISON13\n");
+
+				OK(occ_sha256_hex("absent-POISON13\n", pl,
+						  hex) == 0, "i13a-sha");
+				snprintf(side, sizeof(side), "%s.sha256", snap);
+				snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
+				wfile(side, sbuf);
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid13, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i13a-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+			   r.files[0].failed == 1, "i13a-tomb-tamper-refused");
+			OK(fexists(f13) && !strcmp(rfile(f13), "NEW13"),
+			   "i13a-target-kept-current");
+			occ_undo_result_free(&r);
+
+			/* I13b：内容快照被换成规范墓碑（kind 不符）→ 拒 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i13b-create");
+			snprintf(sid13b, sizeof(sid13b), "%s", s.id);
+			occ_session_set_workdir(db, sid13b, workdir, err,
+						sizeof(err));
+			snprintf(f13b, sizeof(f13b), "%s/f13b.txt", workdir);
+			wfile(f13b, "O13B");
+			OK(make_write_turn(db, sid13b, "把 f13b 改成 T13B", f13b,
+					   "T13B", NULL, err, sizeof(err)) == 0,
+			   "i13b-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid13b, f13b,
+					snap, sizeof(snap)) == 0, "i13b-snap-found");
+			snprintf(side, sizeof(side), "%s.sha256", snap);
+			OK(unlink(snap) == 0 && unlink(side) == 0,
+			   "i13b-swap-removed");
+			snprintf(tomb, sizeof(tomb), "%s.ABSENT", snap);
+			wfile(tomb, "absent\n");	/* 规范墓碑形态 */
+			OK(occ_sha256_hex("absent\n", 7, hex) == 0, "i13b-sha");
+			snprintf(side, sizeof(side), "%s.sha256", tomb);
+			snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
+			wfile(side, sbuf);
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid13b, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i13b-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].failed == 1,
+			   "i13b-kind-mismatch-refused");
+			OK(!strcmp(rfile(f13b), "T13B"),
+			   "i13b-target-kept-current");
+			occ_undo_result_free(&r);
+
+			/* I14：搬目录——f14a 快照从 msg1 挪进 msg2 目录 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i14-create");
+			snprintf(sid14, sizeof(sid14), "%s", s.id);
+			occ_session_set_workdir(db, sid14, workdir, err,
+						sizeof(err));
+			snprintf(f14a, sizeof(f14a), "%s/f14a.txt", workdir);
+			snprintf(f14b, sizeof(f14b), "%s/f14b.txt", workdir);
+			wfile(f14a, "A1");
+			OK(make_write_turn(db, sid14, "回合1：f14a 改 A2", f14a,
+					   "A2", NULL, err, sizeof(err)) == 0,
+			   "i14-turn1");
+			wfile(f14b, "B1");
+			OK(make_write_turn(db, sid14, "回合2：f14b 改 B2", f14b,
+					   "B2", NULL, err, sizeof(err)) == 0,
+			   "i14-turn2");
+			{
+				char snapA[900], snapB[900], dirB[900];
+				char baseA[900], dst[1900], *slash;
+
+				OK(find_snap_of(dbpath_of("snapshots"), sid14,
+						f14a, snapA, sizeof(snapA)) == 0,
+				   "i14-snapA-found");
+				OK(find_snap_of(dbpath_of("snapshots"), sid14,
+						f14b, snapB, sizeof(snapB)) == 0,
+				   "i14-snapB-found");
+				/* msg 目录不同（两回合两 assistant 消息） */
+				{
+					char dirA[900];
+
+					snprintf(dirA, sizeof(dirA), "%s", snapA);
+					slash = strrchr(dirA, '/');
+					if (slash)
+						*slash = '\0';
+					snprintf(dirB, sizeof(dirB), "%s", snapB);
+					slash = strrchr(dirB, '/');
+					if (slash)
+						*slash = '\0';
+					OK(strcmp(dirA, dirB), "i14-distinct-msg-dirs");
+				}
+				slash = strrchr(snapA, '/');
+				snprintf(baseA, sizeof(baseA), "%s", slash ? slash + 1 : snapA);
+				snprintf(dst, sizeof(dst), "%s/%s", dirB, baseA);
+				OK(rename(snapA, dst) == 0, "i14-moved");
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid14, 2, NULL, &r, err, sizeof(err)) == 0,
+			   "i14-undo-rc0");
+			{
+				int ia = result_find(&r, f14a);
+				int ib = result_find(&r, f14b);
+
+				OK(r.nfiles == 2, "i14-two-files");
+				OK(ia >= 0 && r.files[ia].failed == 1,
+				   "i14-moved-refused");
+				OK(ib >= 0 && !r.files[ib].failed,
+				   "i14-unmoved-restored");
+			}
+			OK(!strcmp(rfile(f14a), "A2"), "i14-f14a-kept-current");
+			OK(!strcmp(rfile(f14b), "B1"), "i14-f14b-restored");
+			occ_undo_result_free(&r);
+
+			/* I15：删标记——墓碑+sidecar 全删 → 合成 failed 条目
+			 *      （action=DELETE）、目标保留不删、rc=0 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i15-create");
+			snprintf(sid15, sizeof(sid15), "%s", s.id);
+			occ_session_set_workdir(db, sid15, workdir, err,
+						sizeof(err));
+			snprintf(f15, sizeof(f15), "%s/new15.txt", workdir);
+			OK(make_write_turn(db, sid15, "新建 new15.txt", f15,
+					   "NEW15", NULL, err, sizeof(err)) == 0,
+			   "i15-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid15, f15,
+					snap, sizeof(snap)) == 0, "i15-marker-found");
+			snprintf(side, sizeof(side), "%s.sha256", snap);
+			OK(unlink(snap) == 0 && unlink(side) == 0,
+			   "i15-marker-deleted");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid15, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i15-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+			   r.files[0].failed == 1, "i15-synth-failed-entry");
+			OK(fexists(f15) && !strcmp(rfile(f15), "NEW15"),
+			   "i15-target-kept");
+			occ_undo_result_free(&r);
+
+			/* I16：manifest 清空（DELETE FROM occ_snap）→ 回纯
+			 *      P-49 legacy 世界 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i16a-create");
+			snprintf(sid16, sizeof(sid16), "%s", s.id);
+			occ_session_set_workdir(db, sid16, workdir, err,
+						sizeof(err));
+			snprintf(f16, sizeof(f16), "%s/f16.txt", workdir);
+			wfile(f16, "O16");
+			OK(make_write_turn(db, sid16, "把 f16 改成 T16", f16,
+					   "T16", NULL, err, sizeof(err)) == 0,
+			   "i16a-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid16, f16,
+					snap, sizeof(snap)) == 0, "i16a-snap-found");
+			wfile(snap, "POISON16");	/* sidecar 不动（I9 手法） */
+			OK(sql_exec(dbpath_of("sessions.db"),
+				    "DELETE FROM occ_snap;") == 0, "i16a-manifest-cleared");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid16, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i16a-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].failed == 1,
+			   "i16a-legacy-poison-refused");
+			OK(!strcmp(rfile(f16), "T16"), "i16a-target-kept");
+			occ_undo_result_free(&r);
+
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i16b-create");
+			snprintf(sid16b, sizeof(sid16b), "%s", s.id);
+			occ_session_set_workdir(db, sid16b, workdir, err,
+						sizeof(err));
+			snprintf(f16b, sizeof(f16b), "%s/new16b.txt", workdir);
+			OK(make_write_turn(db, sid16b, "新建 new16b.txt", f16b,
+					   "NEW16B", NULL, err, sizeof(err)) == 0,
+			   "i16b-turn");
+			OK(find_snap_of(dbpath_of("snapshots"), sid16b, f16b,
+					snap, sizeof(snap)) == 0, "i16b-marker-found");
+			snprintf(side, sizeof(side), "%s.sha256", snap);
+			OK(unlink(side) == 0, "i16b-strip-sidecar");
+			OK(sql_exec(dbpath_of("sessions.db"),
+				    "DELETE FROM occ_snap;") == 0, "i16b-manifest-cleared");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid16b, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i16b-undo-rc0");
+			OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+			   !r.files[0].failed && !fexists(f16b),
+			   "i16b-legacy-marker-still-deletes");
+			occ_undo_result_free(&r);
+
+			/* I17：redo 锚——_redo 投毒 + sidecar 重造 → redo 拒；
+			 *      redo_json 置空（模拟旧 stage）→ legacy 路照常 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i17-create");
+			snprintf(sid17, sizeof(sid17), "%s", s.id);
+			occ_session_set_workdir(db, sid17, workdir, err,
+						sizeof(err));
+			snprintf(f17, sizeof(f17), "%s/f17.txt", workdir);
+			wfile(f17, "O17");
+			OK(make_write_turn(db, sid17, "把 f17 改成 T17", f17,
+					   "T17", NULL, err, sizeof(err)) == 0,
+			   "i17-turn");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid17, 1, NULL, &r, err, sizeof(err)) == 0 &&
+			   !strcmp(rfile(f17), "O17"), "i17-undo-ok");
+			occ_undo_result_free(&r);
+			{
+				char rdir[300];
+				DIR *dd = NULL;
+				struct dirent *mn;
+				char rd[900];
+
+				rd[0] = '\0';
+				snprintf(rdir, sizeof(rdir), "%s/%s/_redo",
+					 dbpath_of("snapshots"), sid17);
+				OK((dd = opendir(rdir)) != NULL, "i17-redo-dir");
+				if (dd) {
+					while ((mn = readdir(dd))) {
+						size_t nl = strlen(mn->d_name);
+
+						if (mn->d_name[0] == '.')
+							continue;
+						if (nl > 7 && !strcmp(mn->d_name + nl - 7,
+								      ".sha256"))
+							continue;
+						snprintf(rd, sizeof(rd), "%s/%s",
+							 rdir, mn->d_name);
+						break;
+					}
+					closedir(dd);
+				}
+				OK(rd[0] != '\0', "i17-redo-snap-found");
+				if (rd[0]) {
+					wfile(rd, "POISON17");
+					OK(occ_sha256_hex("POISON17", 8, hex) == 0,
+					   "i17-sha");
+					snprintf(side, sizeof(side), "%s.sha256", rd);
+					snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
+					wfile(side, sbuf);
+					memset(&r, 0, sizeof(r));
+					OK(occ_redo(db, sid17, NULL, &r, err,
+						    sizeof(err)) == 0, "i17a-redo-rc0");
+					OK(r.nfiles == 1 && r.files[0].failed == 1,
+					   "i17a-redo-anchor-refused");
+					OK(!strcmp(rfile(f17), "O17"),
+					   "i17a-kept-undone");
+					occ_undo_result_free(&r);
+				}
+			}
+			/* 旧 stage 模拟：redo_json='' → legacy 照常（不投毒
+			 * 正例；新回合新捕获——上一 redo 已清 _redo 段） */
+			OK(make_write_turn(db, sid17, "再把 f17 改成 T17B", f17,
+					   "T17B", NULL, err, sizeof(err)) == 0,
+			   "i17b-turn");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid17, 1, NULL, &r, err, sizeof(err)) == 0 &&
+			   !strcmp(rfile(f17), "O17"), "i17b-undo-ok");
+			occ_undo_result_free(&r);
+			{
+				char sql[256];
+
+				snprintf(sql, sizeof(sql),
+					 "UPDATE occ_revert SET redo_json=''"
+					 " WHERE session_id='%s';", sid17);
+				OK(sql_exec(dbpath_of("sessions.db"), sql) == 0,
+				   "i17b-anchor-cleared");
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_redo(db, sid17, NULL, &r, err, sizeof(err)) == 0,
+			   "i17b-redo-rc0");
+			OK(r.nfiles == 1 && !r.files[0].failed,
+			   "i17b-legacy-redo-works");
+			OK(!strcmp(rfile(f17), "T17B"), "i17b-redo-restored");
+			occ_undo_result_free(&r);
+
+			/* I18a：E2E——manifest 行直查（kind/sha 正确）+
+			 *      undo/redo 全绿零 failed */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "i18a-create");
+			snprintf(sid18, sizeof(sid18), "%s", s.id);
+			occ_session_set_workdir(db, sid18, workdir, err,
+						sizeof(err));
+			snprintf(f18, sizeof(f18), "%s/f18.txt", workdir);
+			wfile(f18, "O18");
+			OK(make_write_turn(db, sid18, "把 f18 改成 T18", f18,
+					   "T18", NULL, err, sizeof(err)) == 0,
+			   "i18a-turn");
+			OK(occ_sha256_hex("O18", 3, hex) == 0, "i18a-sha");
+			{
+				char sql[600];
+
+				snprintf(sql, sizeof(sql),
+					 "SELECT COUNT(*) FROM occ_snap"
+					 " WHERE path='%s' AND kind='snap'"
+					 " AND sha256='%s'", f18, hex);
+				OK(sql_int(dbpath_of("sessions.db"), sql) == 1,
+				   "i18a-manifest-row");
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid18, 1, NULL, &r, err, sizeof(err)) == 0,
+			   "i18a-undo-rc0");
+			OK(r.nfiles == 1 && !r.files[0].failed &&
+			   !strcmp(rfile(f18), "O18"), "i18a-undo-green");
+			occ_undo_result_free(&r);
+			OK(occ_revert_get(db, sid18, &st, err, sizeof(err)) == 1,
+			   "i18a-stage-row");
+			{
+				/* redo 锚记录的是 _redo 捕获（撤销前现状 T18）
+				 * 的摘要——不是快照 O18 的 */
+				char hex2[OCC_SHA256_HEX + 1];
+
+				OK(occ_sha256_hex("T18", 3, hex2) == 0,
+				   "i18a-redo-sha");
+				OK(st.redo_json && strstr(st.redo_json, f18) &&
+				   strstr(st.redo_json, hex2),
+				   "i18a-redo-json-anchored");
+			}
+			occ_revert_row_free(&st);
+			memset(&r, 0, sizeof(r));
+			OK(occ_redo(db, sid18, NULL, &r, err, sizeof(err)) == 0,
+			   "i18a-redo-rc0");
+			OK(r.nfiles == 1 && !r.files[0].failed &&
+			   !strcmp(rfile(f18), "T18"), "i18a-redo-green");
+			occ_undo_result_free(&r);
+
+			/* I18b：v3→v4 迁移——老库（无 occ_snap/redo_json）重开
+			 *      无损升级、老 stage 行可读（redo_json 补缺省 ''） */
+			{
+				const char *v3db = dbpath_of("v3mig.db");
+				occ_db *dv;
+				char sidm[OCC_ID_LEN];
+
+				unlink(v3db);
+				dv = occ_db_open(v3db, err, sizeof(err));
+				OK(dv != NULL, "i18b-open-fresh");
+				if (!dv)
+					goto out;
+				OK(occ_session_create(dv, "m", &s, err,
+						      sizeof(err)) == 0,
+				   "i18b-session-create");
+				snprintf(sidm, sizeof(sidm), "%s", s.id);
+				OK(occ_revert_put(dv, sidm, "msg_b18", "msg_n18",
+						  "[]", "[]", NULL, err,
+						  sizeof(err)) == 0,
+				   "i18b-stage-put");
+				occ_db_close(dv);
+				/* 降级回 v3 形态：删 manifest 表 + 拆 redo_json 列 */
+				OK(sql_exec(v3db, "DROP TABLE occ_snap;") == 0,
+				   "i18b-drop-snap");
+				OK(sql_exec(v3db, "ALTER TABLE occ_revert"
+					    " DROP COLUMN redo_json;") == 0,
+				   "i18b-drop-redo-col");
+				OK(sql_exec(v3db, "PRAGMA user_version=3;") == 0,
+				   "i18b-set-v3");
+				OK(sql_int(v3db, "PRAGMA user_version") == 3,
+				   "i18b-downgraded-v3");
+				OK(sql_count(v3db,
+					     "SELECT COUNT(*) FROM sqlite_master"
+					     " WHERE type='table' AND"
+					     " name='occ_snap'", NULL) == 0,
+				   "i18b-snap-gone");
+				dv = occ_db_open(v3db, err, sizeof(err));
+				OK(dv != NULL, "i18b-reopen");
+				if (dv) {
+					OK(sql_int(v3db, "PRAGMA user_version") == 4,
+					   "i18b-migrated-v4");
+					OK(sql_count(v3db,
+						     "SELECT COUNT(*) FROM sqlite_master"
+						     " WHERE type='table' AND"
+						     " name='occ_snap'", NULL) == 1,
+					   "i18b-snap-table-back");
+					OK(sql_count(v3db,
+						     "SELECT COUNT(*) FROM"
+						     " pragma_table_info('occ_revert')"
+						     " WHERE name='redo_json'",
+						     NULL) == 1,
+					   "i18b-redo-col-back");
+					OK(occ_revert_get(dv, sidm, &st, err,
+							  sizeof(err)) == 1 &&
+					   !strcmp(st.boundary_msg, "msg_b18"),
+					   "i18b-old-stage-readable");
+					OK(st.redo_json && st.redo_json[0] == '\0',
+					   "i18b-redo-json-default-empty");
+					occ_revert_row_free(&st);
+					occ_db_close(dv);
+				}
+			}
+		}
 
 	occ_db_close(db);
 out:

@@ -8,7 +8,7 @@
  * sqlite3 C API 管理 occ 自有 schema（schema 详见 occ_session.h 头注）。
  *
  * PRAGMA 对齐 T2 store_sqlite 约定：busy_timeout=5000；另开
- * foreign_keys=ON（CASCADE）与 user_version=3（迁移锚点；E1 升位）。
+ * foreign_keys=ON（CASCADE）与 user_version=4（迁移锚点；P-50 升位）。
  * E2（ORCH §8 B2 销账）：journal_mode 升 WAL——多进程（主会话+子智能体
  * occ -p 并发写同库）读写不互斥，写者仍经 busy_timeout+IMMEDIATE 串行；
  * 本地盘产品（无 NFS 面），开库处一次性设置+读回校验（见 occ_db_open）。
@@ -135,6 +135,18 @@ static void set_err(char *err, size_t errlen, const char *fmt, ...)
 
 /* ---- DB 生命周期 ---- */
 
+/* P-50：快照 manifest 表（occ_snap）——宏供 OCC_DDL（新库）与
+ * occ_migrate_v4（v3 老库）共用一份字面，防两处漂移。 */
+#define OCC_SNAP_DDL \
+	"CREATE TABLE IF NOT EXISTS occ_snap (" \
+	"  message_id TEXT NOT NULL" \
+	"    REFERENCES occ_message(id) ON DELETE CASCADE," \
+	"  path TEXT NOT NULL," \
+	"  kind TEXT NOT NULL," \
+	"  sha256 TEXT NOT NULL," \
+	"  created INTEGER NOT NULL," \
+	"  PRIMARY KEY(message_id, path));"
+
 static const char OCC_DDL[] =
 	"CREATE TABLE IF NOT EXISTS occ_session ("
 	"  id TEXT PRIMARY KEY,"
@@ -186,8 +198,10 @@ static const char OCC_DDL[] =
 	"  note_msg TEXT NOT NULL,"
 	"  created INTEGER NOT NULL,"
 	"  files_json TEXT NOT NULL DEFAULT '',"
-	"  hidden_json TEXT NOT NULL DEFAULT ''"
-	");";
+	"  hidden_json TEXT NOT NULL DEFAULT '',"
+	"  redo_json TEXT NOT NULL DEFAULT ''"
+	");"
+	OCC_SNAP_DDL;
 
 /*
  * schema v1→v2 迁移（T9b2）：occ_message+reverted、新表 occ_revert。
@@ -289,6 +303,53 @@ static int occ_migrate_v3(occ_db *db, char *err, size_t errlen)
 	return 0;
 }
 
+/*
+ * schema v3→v4 迁移（P-50，undo/redo 快照 manifest——DB 外部锚）：
+ * occ_revert+redo_json 列（_redo 段 DB 锚，redo 消费前比对；空=legacy
+ * stage 行兼容）+ 新表 occ_snap（快照写入时落 msg→{path,kind,sha256}，
+ * undo/redo 消费前对账——威胁模型：对快照树有 FS 写权的攻击者无 DB
+ * 写权，sidecar 与快照同目录=自证可重造，DB 行才是真锚）。
+ * 老库（user_version=3）无损升级；v4 库重复打开零副作用（早退不发
+ * 一条 DDL）。ALTER 容忍重复列（新建库 DDL 已含 redo_json）。
+ */
+static int occ_migrate_v4(occ_db *db, char *err, size_t errlen)
+{
+	sqlite3_stmt *st = NULL;
+	int uv = 0;
+	char *perr = NULL;
+
+	if (sqlite3_prepare_v2(db->h, "PRAGMA user_version", -1, &st, NULL)
+	    != SQLITE_OK) {
+		set_err(err, errlen, "migrate: %s", sqlite3_errmsg(db->h));
+		return -1;
+	}
+	if (sqlite3_step(st) == SQLITE_ROW)
+		uv = sqlite3_column_int(st, 0);
+	sqlite3_finalize(st);
+	if (uv >= 4)
+		return 0;
+	/* duplicate column = 新建库已带列（DDL 先行）——非错误 */
+	sqlite3_exec(db->h, "ALTER TABLE occ_revert ADD COLUMN redo_json"
+		    " TEXT NOT NULL DEFAULT '';", NULL, NULL, &perr);
+	sqlite3_free(perr);
+	perr = NULL;
+	if (sqlite3_exec(db->h, OCC_SNAP_DDL, NULL, NULL, &perr) != SQLITE_OK) {
+		set_err(err, errlen, "migrate snap: %s",
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		return -1;
+	}
+	perr = NULL;
+	if (sqlite3_exec(db->h, "PRAGMA user_version=4;", NULL, NULL, &perr)
+	    != SQLITE_OK) {
+		set_err(err, errlen, "migrate uv: %s",
+			perr ? perr : sqlite3_errmsg(db->h));
+		sqlite3_free(perr);
+		return -1;
+	}
+	return 0;
+}
+
 static int occ_default_db_path(char *buf, size_t buflen)
 {
 	const char *home = getenv("HOME");
@@ -364,8 +425,9 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 		free(db);
 		return NULL;
 	}
-	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2→v3 迁移
-	 *（v3=E1：kind 列+occ_task/occ_task_event，见 occ_migrate_v3）。
+	/* 忙等 5s（T2 约定）+ 外键 + schema + v1→v2→v3→v4 迁移
+	 *（v3=E1：kind 列+occ_task/occ_task_event，见 occ_migrate_v3；
+	 *  v4=P-50：redo_json 列+occ_snap manifest 表，见 occ_migrate_v4）。
 	 * B2（T9B2 §8-4 → NEXT-PLAN 波次 B）两处并发面修：
 	 *  a) DDL+迁移包 BEGIN IMMEDIATE——deferred 隐式写事务的
 	 *     SHARED→EXCLUSIVE 升级瞬时 SQLITE_BUSY（死锁回避路径不进
@@ -456,6 +518,8 @@ occ_db *occ_db_open(const char *path, char *err, size_t errlen)
 			else if (occ_migrate_v2(db, err, errlen))
 				ec = SQLITE_ERROR;
 			else if (occ_migrate_v3(db, err, errlen))
+				ec = SQLITE_ERROR;
+			else if (occ_migrate_v4(db, err, errlen))
 				ec = SQLITE_ERROR;
 			else if (sqlite3_exec(db->h, "COMMIT", NULL, NULL,
 					      &perr) != SQLITE_OK)
@@ -1984,6 +2048,7 @@ void occ_revert_row_free(occ_revert_row *r)
 		return;
 	free(r->files_json);
 	free(r->hidden_json);
+	free(r->redo_json);
 	memset(r, 0, sizeof(*r));
 }
 
@@ -1992,7 +2057,7 @@ int occ_revert_get(occ_db *db, const char *session_id, occ_revert_row *out,
 {
 	static const char *sel =
 		"SELECT session_id,boundary_msg,note_msg,created,files_json,"
-		"hidden_json FROM occ_revert WHERE session_id=?1";
+		"hidden_json,redo_json FROM occ_revert WHERE session_id=?1";
 	sqlite3_stmt *st = NULL;
 	int rc;
 
@@ -2019,9 +2084,11 @@ int occ_revert_get(occ_db *db, const char *session_id, occ_revert_row *out,
 		{
 			const unsigned char *fj = sqlite3_column_text(st, 4);
 			const unsigned char *hj = sqlite3_column_text(st, 5);
+			const unsigned char *rj = sqlite3_column_text(st, 6);
 
 			out->files_json = fj ? strdup((const char *)fj) : NULL;
 			out->hidden_json = hj ? strdup((const char *)hj) : NULL;
+			out->redo_json = rj ? strdup((const char *)rj) : NULL;
 		}
 		rc = 1;
 	} else {
@@ -2034,13 +2101,13 @@ int occ_revert_get(occ_db *db, const char *session_id, occ_revert_row *out,
 int occ_revert_put(occ_db *db, const char *session_id,
 		   const char *boundary_msg, const char *note_msg,
 		   const char *files_json, const char *hidden_json,
-		   char *err, size_t errlen)
+		   const char *redo_json, char *err, size_t errlen)
 {
 	static const char *ins =
 		"INSERT OR REPLACE INTO occ_revert"
 		"  (session_id,boundary_msg,note_msg,created,files_json,"
-		"   hidden_json)"
-		"  VALUES (?1,?2,?3,?4,?5,?6)";
+		"   hidden_json,redo_json)"
+		"  VALUES (?1,?2,?3,?4,?5,?6,?7)";
 	sqlite3_stmt *st = NULL;
 
 	if (!db || !session_id || !boundary_msg || !note_msg) {
@@ -2058,6 +2125,8 @@ int occ_revert_put(occ_db *db, const char *session_id,
 	sqlite3_bind_text(st, 5, files_json ? files_json : "", -1,
 			  SQLITE_TRANSIENT);
 	sqlite3_bind_text(st, 6, hidden_json ? hidden_json : "", -1,
+			  SQLITE_TRANSIENT);
+	sqlite3_bind_text(st, 7, redo_json ? redo_json : "", -1,
 			  SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_DONE) {
 		set_err(err, errlen, "step put: %s", sqlite3_errmsg(db->h));
@@ -2081,6 +2150,136 @@ int occ_revert_clear(occ_db *db, const char *session_id,
 		 "DELETE FROM occ_revert WHERE session_id='%s'", session_id);
 	if (exec_tx(db, sql, "occ_revert_clear", err, errlen))
 		return -1;
+	return 0;
+}
+
+/* ---- P-50：快照 manifest（occ_snap 表——DB 外部锚） ---- */
+
+void occ_snap_rows_free(occ_snap_row *rows, size_t n)
+{
+	(void)n;				/* 值拷贝无堆指针——整块释放 */
+	free(rows);
+}
+
+/* 落/换 manifest 行（快照写入侧；B2 同款 IMMEDIATE 包事务） */
+int occ_snap_put(occ_db *db, const char *message_id, const char *path,
+		 const char *kind, const char *sha256, char *err,
+		 size_t errlen)
+{
+	static const char *ins =
+		"INSERT OR REPLACE INTO occ_snap"
+		"  (message_id,path,kind,sha256,created)"
+		"  VALUES (?1,?2,?3,?4,?5)";
+	sqlite3_stmt *st = NULL;
+
+	if (!db || !message_id || !path || !kind || !sha256) {
+		set_err(err, errlen, "occ_snap_put: bad args");
+		return -1;
+	}
+	if (tx_begin(db, err, errlen))
+		return -1;
+	if (sqlite3_prepare_v2(db->h, ins, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "prepare snap: %s",
+			sqlite3_errmsg(db->h));
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_bind_text(st, 1, message_id, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(st, 2, path, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(st, 3, kind, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(st, 4, sha256, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_int64(st, 5, (long long)time(NULL));
+	if (sqlite3_step(st) != SQLITE_DONE) {
+		set_err(err, errlen, "step snap: %s", sqlite3_errmsg(db->h));
+		sqlite3_finalize(st);
+		tx_rollback(db);
+		return -1;
+	}
+	sqlite3_finalize(st);
+	if (tx_commit(db, err, errlen))
+		return -1;
+	return 0;
+}
+
+/* 行填充（值拷贝；NULL 列按空串——本表列均 NOT NULL，防御而已） */
+static void snap_row_fill(occ_snap_row *r, sqlite3_stmt *st)
+{
+	snprintf(r->message_id, sizeof(r->message_id), "%s",
+		 (const char *)sqlite3_column_text(st, 0));
+	snprintf(r->path, sizeof(r->path), "%s",
+		 (const char *)sqlite3_column_text(st, 1));
+	snprintf(r->kind, sizeof(r->kind), "%s",
+		 (const char *)sqlite3_column_text(st, 2));
+	snprintf(r->sha256, sizeof(r->sha256), "%s",
+		 (const char *)sqlite3_column_text(st, 3));
+}
+
+int occ_snap_rows_for_msgs(occ_db *db, const char *const *msg_ids, size_t n,
+			   occ_snap_row **rows, size_t *nout, char *err,
+			   size_t errlen)
+{
+	occ_snap_row *v = NULL;
+	size_t cnt = 0, cap = 0, off = 0;
+
+	if (rows)
+		*rows = NULL;
+	if (nout)
+		*nout = 0;
+	if (!db || !msg_ids || !rows || !nout) {
+		set_err(err, errlen, "occ_snap_rows_for_msgs: bad args");
+		return -1;
+	}
+	/* IN 列表按 64 一段分批（防 SQLITE_MAX_VARIABLE_NUMBER 上限——
+	 * undo 范围消息数无界，SQLite 缺省旧限恰 999、新限 32766 也
+	 * 不该赌）；各批结果合并追加，顺序无关（消费侧按 (msg,path)
+	 * 精确匹配，不依赖行序） */
+	while (off < n) {
+		size_t bs = n - off > 64 ? 64 : n - off;
+		size_t i;
+		char sql[256];
+		sqlite3_stmt *st = NULL;
+
+		i = 0;
+		strcpy(sql, "SELECT message_id,path,kind,sha256 FROM occ_snap"
+		       " WHERE message_id IN (");
+		while (i + 1 < bs) {
+			strcat(sql, "?,");
+			i++;
+		}
+		strcat(sql, "?)");
+		if (sqlite3_prepare_v2(db->h, sql, -1, &st, NULL) != SQLITE_OK) {
+			set_err(err, errlen, "prepare snaps: %s",
+				sqlite3_errmsg(db->h));
+			free(v);
+			return -1;
+		}
+		for (i = 0; i < bs; i++)
+			sqlite3_bind_text(st, (int)i + 1, msg_ids[off + i],
+					  -1, SQLITE_TRANSIENT);
+		while (sqlite3_step(st) == SQLITE_ROW) {
+			if (cnt == cap) {
+				occ_snap_row *nv;
+
+				cap = cap ? cap * 2 : 16;
+				nv = realloc(v, cap * sizeof(*nv));
+				if (!nv) {
+					free(v);
+					sqlite3_finalize(st);
+					set_err(err, errlen,
+						"occ_snap_rows_for_msgs: oom");
+					return -1;
+				}
+				v = nv;
+			}
+			memset(&v[cnt], 0, sizeof(v[cnt]));
+			snap_row_fill(&v[cnt], st);
+			cnt++;
+		}
+		sqlite3_finalize(st);
+		off += bs;
+	}
+	*rows = v;
+	*nout = cnt;
 	return 0;
 }
 

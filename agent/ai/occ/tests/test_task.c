@@ -195,9 +195,9 @@ int main(void)
 	mkdir(tmpdir, 0755);
 	db = occ_db_open(dbpath_of("new.db"), err, sizeof(err));
 
-	/* ---- A) 新库 schema v3 ---- */
+	/* ---- A) 新库 schema v3（P-50 后开库即 v4——迁移链随位对齐） ---- */
 	OK(db != NULL, "db-open");
-	OK(sql_int(dbpath_of("new.db"), "PRAGMA user_version") == 3,
+	OK(sql_int(dbpath_of("new.db"), "PRAGMA user_version") == 4,
 	   "v3-new-user-version");
 	OK(sql_int(dbpath_of("new.db"),
 		   "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
@@ -587,8 +587,8 @@ int main(void)
 	   "v2-fixture-version");
 	db = occ_db_open(dbpath_of("v2.db"), err, sizeof(err));
 	OK(db != NULL, "v2-migrate-open");
-	OK(sql_int(dbpath_of("v2.db"), "PRAGMA user_version") == 3,
-	   "v2-migrate-version-3");
+	OK(sql_int(dbpath_of("v2.db"), "PRAGMA user_version") == 4,
+	   "v2-migrate-version-4");
 	OK(sql_int(dbpath_of("v2.db"),
 		   "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
 		   " AND name='occ_task'") == 1, "v2-migrate-task-table");
@@ -637,7 +637,7 @@ int main(void)
 			occ_db_close(db);
 		}
 		db = occ_db_open(dbpath_of("v2.db"), err, sizeof(err));
-		OK(sql_int(dbpath_of("v2.db"), "PRAGMA user_version") == 3,
+		OK(sql_int(dbpath_of("v2.db"), "PRAGMA user_version") == 4,
 		   "v3-reopen-version-kept");
 		OK(sql_int(dbpath_of("v2.db"),
 			   "SELECT COUNT(*) FROM occ_task") == tasks_before,

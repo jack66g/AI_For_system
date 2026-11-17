@@ -274,15 +274,18 @@ int main(void)
 	OK(table_exists("occ_toolcall"), "schema-occ_toolcall-empty");
 	OK(table_exists("occ_window"), "schema-occ_window");
 	/* b2 schema v2：occ_revert 表 + 两处新列；
-	 * E1 schema v3：user_version 3 + occ_task/occ_task_event 表
-	 * + occ_session.kind 列（v2 断言随迁移升位对齐——详见 test_task） */
-	OK(user_version() == 3, "schema-user_version=3");
+	 * E1 schema v3：occ_task/occ_task_event 表 + occ_session.kind 列
+	 * P-50 schema v4：user_version 4 + occ_revert.redo_json 列 +
+	 * occ_snap manifest 表（版本断言随迁移升位对齐——详见 test_task） */
+	OK(user_version() == 4, "schema-user_version=4");
 	OK(table_exists("occ_revert"), "schema-occ_revert");
 	OK(col_exists("occ_message", "reverted"), "schema-msg-reverted");
 	OK(col_exists("occ_session", "workdir"), "schema-session-workdir");
 	OK(table_exists("occ_task"), "schema-occ_task");
 	OK(table_exists("occ_task_event"), "schema-occ_task_event");
 	OK(col_exists("occ_session", "kind"), "schema-session-kind");
+	OK(col_exists("occ_revert", "redo_json"), "schema-revert-redo_json");
+	OK(table_exists("occ_snap"), "schema-occ_snap");
 
 	/* 重复 open 幂等（DDL IF NOT EXISTS） */
 	occ_db_close(g_db);
@@ -592,8 +595,8 @@ int main(void)
 				   "call_del1", NULL, 0, tcid, sizeof(tcid),
 				   err, sizeof(err)) == 0,
 		   "del-cascade-tool-record");
-		OK(occ_revert_put(g_db, sd.id, amid, amid, "[]", "[]", err,
-				  sizeof(err)) == 0, "del-cascade-revert-put");
+		OK(occ_revert_put(g_db, sd.id, amid, amid, "[]", "[]", NULL,
+				  err, sizeof(err)) == 0, "del-cascade-revert-put");
 		/* 计数从 SQL COUNT 出：user+assistant+tool=3 消息、
 		 * 1 toolcall、1 window 行 */
 		OK(count_msgs(sd.id) == 3 && count_toolcalls(sd.id) == 1 &&

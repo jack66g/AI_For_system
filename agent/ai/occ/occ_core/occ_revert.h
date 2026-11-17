@@ -22,6 +22,12 @@
  *
  * bash 修改的文件无快照（b1 只对 write/edit 快照）→ 不在恢复集内，
  * 报告如实列出（不谎称全量回滚）。
+ *
+ * P-49/P-50 完整性：快照/墓碑篡改逐条 fail-closed（该条 failed=1、
+ * 目标保持现状、undo 整体 rc=0、其余条目照常）。P-50 加 DB manifest
+ * 锚（occ_snap 表 + stage.redo_json）：换内容/换墓碑字节/删标记/搬
+ * 目录四类攻击在对账阶段即判死——sidecar 与快照同目录=自证，DB 行
+ * 才是对快照树无写权可用的真锚；DB 无行=legacy 走 P-49 sidecar 校验。
  */
 #ifndef _OCC_REVERT_H
 #define _OCC_REVERT_H

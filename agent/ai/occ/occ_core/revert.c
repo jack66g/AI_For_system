@@ -17,6 +17,21 @@
  * 仅用于把范围内 write/edit 的相对参数解析回绝对路径，对账「有调用但
  * 无快照」的跳过项（bash 无快照同列）。bash 改动不在恢复集（b1 只对
  * write/edit 快照），报告如实计数，不谎称全量回滚。
+ *
+ * P-50（manifest 对账——DB 外部锚）：P-49 的 sidecar 与快照同目录=自证，
+ * 对快照树有 FS 写权的攻击者可换内容后重造 sidecar。修法：写侧
+ * occ_snapshot_stage 把 manifest（msg→{path,kind,sha256}）落 occ_snap 表
+ * （威胁模型：攻击者无 DB 写权），undo/redo 消费前对账：
+ *   ① 换内容/换墓碑字节：anchored 条目直接比内容 sha 与 DB 期望——
+ *      sidecar 免读（重造也无用）；
+ *   ② 删标记：manifest 有行而 FS 上该 path 的快照/墓碑全缺 → 合成
+ *      failed 条目上报，该文件不回滚；
+ *   ③ 搬目录：FS 位置 (msg,path) 与 manifest 不符（path 出现在其它
+ *      msg 行）→ 该条判死；
+ *   ④ redo 对称锚：undo 捕获 _redo 时把在盘文件 {path,kind,sha256}
+ *      落 stage.redo_json，redo 消费前比对。
+ * db 无行=全 legacy（P-49 sidecar 校验原路）；逐条 fail-closed 语义
+ * 与 P-49 一致：该条 failed=1、目标保持现状、undo 整体 rc=0。
  */
 #define _POSIX_C_SOURCE 200809L
 #include "occ_revert.h"
@@ -124,6 +139,13 @@ typedef struct {
 	char msg[OCC_ID_LEN];		/* 首见快照所在消息 */
 	int action;			/* OCC_UNDO_RESTORE / _DELETE */
 	int failed;			/* 回滚失败标记 */
+	int failed_before;		/* P-50：对账阶段即判死（apply 循环
+					 * 直接标 failed 跳过——stderr 已
+					 * 打过具体原因） */
+	int anchored;			/* P-50：DB manifest 命中（want_*
+					 * 有效——DB 锚比同目录 sidecar 强） */
+	char want_kind[8];		/* manifest 期望类型 snap|absent */
+	char want_sha[65];		/* manifest 期望字节摘要 */
 } snap_ent;
 
 typedef struct {
@@ -131,11 +153,31 @@ typedef struct {
 	size_t n, cap;
 } entvec;
 
+/* P-50：raw 集——FS 实况全集（每 (msg,path) 一条，不做跨 msg 的 path
+ * 去重——去重只属于 ev）。删标记检测按它判「path 在范围内任何 msg
+ * 目录都不在盘」；ev 只是首见投影，不能区分「仅首见副本在盘」。 */
+typedef struct {
+	char msg[OCC_ID_LEN];
+	char path[4096];
+} raw_ent;
+
+typedef struct {
+	raw_ent *v;
+	size_t n, cap;
+} rawvec;
+
 static void entvec_free(entvec *e)
 {
 	free(e->v);
 	e->v = NULL;
 	e->n = e->cap = 0;
+}
+
+static void rawvec_free(rawvec *r)
+{
+	free(r->v);
+	r->v = NULL;
+	r->n = r->cap = 0;
 }
 
 /* 返回 1=已存在（未追加），0=新追加，-1=oom/缓冲不合规 */
@@ -164,13 +206,37 @@ static int entvec_add(entvec *e, const char *path, const char *msg,
 	return 0;
 }
 
+/* (msg,path) 去重追加（同目录同名 readdir 不会重，防御足矣） */
+static int rawvec_add(rawvec *r, const char *path, const char *msg)
+{
+	size_t i;
+
+	for (i = 0; i < r->n; i++)
+		if (!strcmp(r->v[i].path, path) &&
+		    !strcmp(r->v[i].msg, msg))
+			return 1;
+	if (r->n == r->cap) {
+		size_t nc = r->cap ? r->cap * 2 : 16;
+		raw_ent *nv = realloc(r->v, nc * sizeof(*nv));
+
+		if (!nv)
+			return -1;
+		r->v = nv;
+		r->cap = nc;
+	}
+	snprintf(r->v[r->n].path, sizeof(r->v[r->n].path), "%s", path);
+	snprintf(r->v[r->n].msg, sizeof(r->v[r->n].msg), "%s", msg);
+	r->n++;
+	return 0;
+}
+
 /*
  * 扫一条消息的快照目录：<root>/<ses>/<msg>/<mangled>[.ABSENT]。
  * 无目录=该消息无快照（正常）。条目名先剥 .ABSENT 后缀再 unmangle
  * ——mangle 把 '.' 编码为 %2e，裸 '.' 只可能来自后缀，二者不歧义。
  */
 static void scan_msg_dir(const char *root, const char *ses, const char *msg,
-			 entvec *ev)
+			 entvec *ev, rawvec *rv)
 {
 	char dir[768];
 	DIR *d;
@@ -206,6 +272,8 @@ static void scan_msg_dir(const char *root, const char *ses, const char *msg,
 			continue;		/* 异常条目：跳过 */
 		if (abs[0] != '/')
 			continue;
+		if (rawvec_add(rv, abs, msg) < 0)
+			break;			/* oom：停止收集 */
 		if (entvec_add(ev, abs, msg, action) < 0)
 			break;			/* oom：停止收集 */
 	}
@@ -337,14 +405,73 @@ static void str_array_free(char **v, size_t n)
 /* ---- _redo 段（stage 时另存「撤销前现状」；已存在即跳过——叠加 undo
  *      保留最早现状，redo 一步回到首次撤销前） ---- */
 
-static void redo_sidecar(const char *dst);	/* S-FINDING-01 （定义随校验助手在 apply_restore 前） */
+static char *rv_read(const char *path, size_t *out_len);	/* 定义随校验助手在下方 */
 
+/* P-50：读文件算 sha（rv_read+occ_sha256_hex 封装；失败置空串） */
+static int file_sha(const char *path, char hex[OCC_SHA256_HEX + 1])
+{
+	char *data;
+	size_t len = 0;
+	int rc;
+
+	hex[0] = '\0';
+	data = rv_read(path, &len);
+	if (!data)
+		return -1;
+	rc = occ_sha256_hex(data, len, hex);
+	free(data);
+	if (rc)
+		hex[0] = '\0';
+	return rc;
+}
+
+/* P-50：整块写文件（redo_capture 写 _redo 副本用；0=成功） */
+static int write_whole(const char *dst, const void *data, size_t len)
+{
+	FILE *f = fopen(dst, "wb");
+
+	if (!f)
+		return -1;
+	if (len && fwrite(data, 1, len, f) != len) {
+		fclose(f);
+		return -1;
+	}
+	if (fclose(f))
+		return -1;
+	return 0;
+}
+
+/* _redo 段 sidecar 写（P-50：摘要由调用方传入——捕获路径已算过，不再
+ * 写后回读 dst 重算一遍） */
+static void redo_write_sidecar(const char *dst, const char *hex)
+{
+	char sp[9280];
+	FILE *sf;
+
+	snprintf(sp, sizeof(sp), "%s.sha256", dst);
+	sf = fopen(sp, "w");
+	if (sf) {
+		fprintf(sf, "%s\n", hex);
+		fclose(sf);
+	}
+}
+
+/*
+ * redo_capture - 捕获撤销前现状（内容副本或墓碑）。
+ * P-50：sha_out/kind_out 回传在盘 _redo 文件的 {摘要,类型}（undo 据此
+ * 落 stage.redo_json 锚）；捕获失败两者置空串（该条不锚，redo 走 legacy）。
+ * 已存在的捕获（叠加 undo）不覆盖——摘要改读现盘文件回传（锚覆盖全部
+ * _redo 在盘文件，不只本次新捕的）。
+ */
 static void redo_capture(const char *root, const char *ses,
-			 const snap_ent *e)
+			 const snap_ent *e,
+			 char sha_out[OCC_SHA256_HEX + 1], char kind_out[8])
 {
 	char dir[768], dst[9216], mangled[8200], probe[9248];
 	struct stat st;
 
+	sha_out[0] = '\0';
+	kind_out[0] = '\0';
 	if (snprintf(dir, sizeof(dir), "%s/%s/_redo", root, ses) >=
 	    (int)sizeof(dir))
 		return;
@@ -353,17 +480,45 @@ static void redo_capture(const char *root, const char *ses,
 	occ_snap_mangle(e->path, mangled, sizeof(mangled));
 	snprintf(dst, sizeof(dst), "%s/%s", dir, mangled);
 	snprintf(probe, sizeof(probe), "%s", dst);
-	if (!access(probe, F_OK))
-		return;				/* 已捕获：不覆盖 */
-	snprintf(probe, sizeof(probe), "%s.ABSENT", dst);
-	if (!access(probe, F_OK))
+	if (!access(probe, F_OK)) {
+		/* 已捕获：不覆盖——锚仍要回传（读现盘算） */
+		snprintf(kind_out, 8, "%s", "snap");
+		file_sha(probe, sha_out);
 		return;
+	}
+	snprintf(probe, sizeof(probe), "%s.ABSENT", dst);
+	if (!access(probe, F_OK)) {
+		snprintf(kind_out, 8, "%s", "absent");
+		file_sha(probe, sha_out);
+		return;
+	}
 	if (!stat(e->path, &st) && S_ISREG(st.st_mode)) {
-		if (copy_file(e->path, dst))
+		char *data;
+		size_t len = 0;
+
+		data = rv_read(e->path, &len);
+		if (!data) {
 			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
 				e->path);
-		else
-			redo_sidecar(dst);	/* S-FINDING-01 */
+			return;
+		}
+		if (occ_sha256_hex(data, len, sha_out)) {
+			free(data);
+			sha_out[0] = '\0';
+			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
+				e->path);
+			return;
+		}
+		if (write_whole(dst, data, len)) {
+			free(data);
+			sha_out[0] = '\0';
+			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
+				e->path);
+			return;
+		}
+		redo_write_sidecar(dst, sha_out);	/* S-FINDING-01 */
+		snprintf(kind_out, 8, "%s", "snap");
+		free(data);
 		return;
 	}
 	/* 现状不存在 → 墓碑（redo 据此删除） */
@@ -373,8 +528,13 @@ static void redo_capture(const char *root, const char *ses,
 
 		if (f) {
 			fputs("absent\n", f);
-			fclose(f);
-			redo_sidecar(dst);	/* P-49：墓碑同入校验面 */
+			if (fclose(f) == 0) {
+				if (occ_sha256_hex("absent\n", 7, sha_out))
+					sha_out[0] = '\0';
+				else
+					redo_write_sidecar(dst, sha_out);
+				snprintf(kind_out, 8, "%s", "absent");
+			}
 		}
 	}
 }
@@ -494,30 +654,32 @@ static int absent_verify(const char *absent_path,
 	}
 }
 
-/* _redo 段捕获后写 sidecar（现状内容摘要；redo 恢复同口径校验） */
-static void redo_sidecar(const char *dst)
+/* P-50：墓碑规范形态判定（空文件或恰 "absent\n"——与 absent_verify
+ * 第一层同口径；DB 锚路径复用：墓碑语义是常量「目标写前不存在」，
+ * 规范形态即合法表达，与 manifest 锚结论一致）。 */
+static int tomb_canonical(const char *path)
 {
 	char *data;
 	size_t len = 0;
-	char hex[OCC_SHA256_HEX + 1];
-	FILE *sf;
-	char sp[9280];
+	int canon;
 
-	data = rv_read(dst, &len);
-	if (!data || occ_sha256_hex(data, len, hex)) {
-		free(data);
-		return;
-	}
+	data = rv_read(path, &len);
+	if (!data)
+		return 0;
+	canon = len == 0 ||
+		(len == 7 && !memcmp(data, "absent\n", 7));
 	free(data);
-	snprintf(sp, sizeof(sp), "%s.sha256", dst);
-	sf = fopen(sp, "w");
-	if (sf) {
-		fprintf(sf, "%s\n", hex);
-		fclose(sf);
-	}
+	return canon;
 }
 
-/* 还原单文件（快照 → 目标；DELETE=墓碑→删除）。0 成功 */
+/*
+ * 还原单文件（快照 → 目标；DELETE=墓碑→删除）。0 成功。
+ * P-50：e->anchored=1（DB manifest 命中）时跳过 sidecar/规范形态校验
+ * （sidecar 与快照同目录=自证——重造也无法通过 DB 锚），改比内容字节
+ * 摘要与 manifest 期望。墓碑口径：规范形态（空/"absent\n"）直通——
+ * 墓碑语义是常量「目标写前不存在」，规范形态即合法表达，与 DB 锚
+ * 结论一致；非规范形态须字节摘要恰等（append 毒字节必拒）。
+ */
 static int apply_restore(const char *root, const char *ses,
 			 const snap_ent *e)
 {
@@ -534,7 +696,19 @@ static int apply_restore(const char *root, const char *ses,
 			return -1;
 		if (access(src, F_OK))
 			return -1;		/* 墓碑缺失：不谎报成功 */
-		if (absent_verify(src, hex)) {
+		if (e->anchored) {
+			/* P-50：DB 锚——比墓碑字节摘要（规范形态直通） */
+			if (file_sha(src, hex))
+				return -1;
+			if (strcmp(hex, e->want_sha) &&
+			    !tomb_canonical(src)) {
+				fprintf(stderr, "occ-undo: 快照校验失败"
+					"（与 DB manifest 不符，被篡改？"
+					"sha256=%s 期望 %s）：%s\n",
+					hex, e->want_sha, e->path);
+				return -1;
+			}
+		} else if (absent_verify(src, hex)) {
 			/* P-49：墓碑投毒 → 拒绝按墓碑行事（不删目标，
 			 * 与内容快照篡改拒收同款语义，fail closed） */
 			fprintf(stderr, "occ-undo: 快照校验失败（ABSENT 墓碑"
@@ -550,7 +724,17 @@ static int apply_restore(const char *root, const char *ses,
 		return -1;
 	if (access(src, F_OK))
 		return -1;
-	if (snap_verify(src)) {
+	if (e->anchored) {
+		/* P-50：DB 锚——比内容字节摘要，sidecar 免读（重造无效） */
+		if (file_sha(src, hex) || strcmp(hex, e->want_sha)) {
+			fprintf(stderr, "occ-undo: 快照校验失败"
+				"（与 DB manifest 不符，被篡改？sha256=%s"
+				" 期望 %s）：%s\n",
+				hex[0] ? hex : "(读失败)", e->want_sha,
+				e->path);
+			return -1;
+		}
+	} else if (snap_verify(src)) {
 		/* S-FINDING-01：篡改/形损快照拒绝恢复（fail closed） */
 		fprintf(stderr, "occ-undo: 快照校验失败（被篡改？）：%s\n",
 			e->path);
@@ -574,6 +758,39 @@ static int apply_restore(const char *root, const char *ses,
 
 /* ---- redo 还原（_redo 段 → 目标） ---- */
 
+/*
+ * P-50：apply_redo 的锚校验（redo_json 命中时）。want_kind 同时参与
+ * 比对——内容/墓碑对调（kind 不符）与字节摘要任一不符即拒。墓碑与
+ * apply_restore 同口径：规范形态直通、非规范须摘要恰等。
+ * 返回 0=锚校验通过；-1=不符（stderr 已说人话）。
+ */
+static int redo_anchor_verify(const snap_ent *e, const char *src,
+			      int is_tomb)
+{
+	char hex[OCC_SHA256_HEX + 1];
+	const char *want = is_tomb ? "absent" : "snap";
+
+	if (strcmp(e->want_kind, want)) {
+		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？类型 %s 期望 %s）：%s\n",
+			want, e->want_kind, e->path);
+		return -1;
+	}
+	if (file_sha(src, hex)) {
+		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？sha256=(读失败) 期望 %s）：%s\n",
+			e->want_sha, e->path);
+		return -1;
+	}
+	if (strcmp(hex, e->want_sha) && !(is_tomb && tomb_canonical(src))) {
+		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？sha256=%s 期望 %s）：%s\n",
+			hex, e->want_sha, e->path);
+		return -1;
+	}
+	return 0;
+}
+
 static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 		      int *failed)
 {
@@ -590,7 +807,13 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 	if (!stat(src, &st)) {
 		char hex[OCC_SHA256_HEX + 1];
 
-		if (absent_verify(src, hex)) {
+		if (e->anchored) {
+			/* P-50：redo 锚（stage.redo_json）——sidecar 免读 */
+			if (redo_anchor_verify(e, src, 1)) {
+				*failed = 1;
+				return -1;
+			}
+		} else if (absent_verify(src, hex)) {
 			/* P-49：_redo 墓碑同口径校验（投毒拒绝删行） */
 			fprintf(stderr, "occ-redo: 快照校验失败（ABSENT 墓碑"
 				"被篡改？sha256=%s）：%s\n", hex, e->path);
@@ -608,7 +831,13 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 		*failed = 1;			/* _redo 缺该文件 */
 		return -1;
 	}
-	if (snap_verify(src)) {
+	if (e->anchored) {
+		/* P-50：redo 锚——比内容字节摘要（重造 sidecar 无效） */
+		if (redo_anchor_verify(e, src, 0)) {
+			*failed = 1;
+			return -1;
+		}
+	} else if (snap_verify(src)) {
 		/* S-FINDING-01：_redo 同口径校验（篡改拒绝还原） */
 		fprintf(stderr, "occ-redo: 快照校验失败（被篡改？）：%s\n",
 			e->path);
@@ -664,6 +893,106 @@ static int result_push_file(occ_undo_result *out, const char *path,
 	return 0;
 }
 
+/* ---- P-50：redo 锚 JSON（aik_json DOM，路径转义安全） ---- */
+
+/* undo 侧：ev + 捕获摘要 → [{"path":…,"kind":"snap|absent","sha256":…}]
+ * 锚数组（覆盖全部 _redo 在盘文件；捕获失败的条目不锚=redo 走 legacy）。
+ * 返回 heap 文本（"[]" 起），NULL=oom（调用方退化 legacy）。 */
+static char *redo_json_build(const snap_ent *ev, size_t n,
+			     const char (*shas)[OCC_SHA256_HEX + 1],
+			     const char (*kinds)[8])
+{
+	aik_json *arr = aik_json_new_arr();
+	char *out = NULL;
+	size_t i, dummy;
+
+	if (!arr)
+		return NULL;
+	for (i = 0; i < n; i++) {
+		aik_json *o;
+		aik_json *t;
+
+		if (!shas[i][0] || !kinds[i][0])
+			continue;		/* 捕获失败：不锚 */
+		o = aik_json_new_obj();
+		if (!o)
+			goto out;
+		t = aik_json_new_str(ev[i].path);
+		if (!t || aik_json_obj_put(o, "path", t) < 0) {
+			aik_json_free(t);
+			aik_json_free(o);
+			goto out;
+		}
+		t = aik_json_new_str(kinds[i]);
+		if (!t || aik_json_obj_put(o, "kind", t) < 0) {
+			aik_json_free(t);
+			aik_json_free(o);
+			goto out;
+		}
+		t = aik_json_new_str(shas[i]);
+		if (!t || aik_json_obj_put(o, "sha256", t) < 0) {
+			aik_json_free(t);
+			aik_json_free(o);
+			goto out;
+		}
+		if (aik_json_arr_push(arr, o) < 0) {
+			aik_json_free(o);
+			goto out;
+		}
+	}
+	if (aik_json_dump(arr, &out, &dummy) < 0)
+		out = NULL;
+out:
+	aik_json_free(arr);
+	return out;
+}
+
+/* redo 侧：按 path 查锚（空/损 JSON=不命中，走 legacy）。0=查过（命中
+ * 与否见 anchored 回填）；不返回错误——锚损即 legacy，不阻断 redo。 */
+static void redo_anchor_get(const char *redo_json, const char *path,
+			    snap_ent *e)
+{
+	char perr[96];
+	aik_json *arr;
+	size_t n, i;
+
+	e->anchored = 0;
+	if (!redo_json || !redo_json[0] || !strcmp(redo_json, "[]"))
+		return;
+	arr = aik_json_parse(redo_json, strlen(redo_json), perr, sizeof(perr));
+	if (!arr || aik_json_typeof(arr) != AIK_JSON_ARR) {
+		aik_json_free(arr);
+		fprintf(stderr, "occ-redo: redo 锚 JSON 损坏（退化为 legacy "
+			"sidecar 校验）\n");
+		return;
+	}
+	n = aik_json_count(arr);
+	for (i = 0; i < n; i++) {
+		const aik_json *o = aik_json_at(arr, i);
+		const aik_json *t;
+		const char *s;
+
+		if (!o || aik_json_typeof(o) != AIK_JSON_OBJ)
+			continue;
+		t = aik_json_get(o, "path");
+		if (!t || aik_json_typeof(t) != AIK_JSON_STR ||
+		    strcmp(aik_json_str(t), path))
+			continue;
+		t = aik_json_get(o, "kind");
+		s = t && aik_json_typeof(t) == AIK_JSON_STR ? aik_json_str(t) : "";
+		snprintf(e->want_kind, sizeof(e->want_kind), "%s", s);
+		t = aik_json_get(o, "sha256");
+		s = t && aik_json_typeof(t) == AIK_JSON_STR ? aik_json_str(t) : "";
+		snprintf(e->want_sha, sizeof(e->want_sha), "%s", s);
+		/* 形损锚（kind/sha 缺失）不按命中处理——legacy 更安全 */
+		if ((e->want_kind[0] == 's' || e->want_kind[0] == 'a') &&
+		    strlen(e->want_sha) == OCC_SHA256_HEX)
+			e->anchored = 1;
+		break;
+	}
+	aik_json_free(arr);
+}
+
 /* ---- 快照根（参数显式 > OCC_SNAPROOT > ~/.occ/snapshots） ---- */
 
 static const char *resolve_root(const char *snaproot, char *buf,
@@ -687,6 +1016,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	size_t nusers = 0;
 	long long boundary_rowid;
 	entvec ev;
+	rawvec rawv;				/* P-50：FS 实况全集 */
 	char rootbuf[512];
 	const char *root;
 	occ_revert_row oldstage;
@@ -708,9 +1038,24 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	occ_tc_row *tcs = NULL;
 	size_t ntc = 0;
 	char terr[160];
+	/* P-50：manifest 对账 */
+	occ_snap_row *mrows = NULL;
+	size_t nmrows = 0;
+	const char **mids = NULL;
+	size_t nmids = 0;
+	struct {
+		char *path;
+		int action;
+	} synth[OCC_UNDO_MAX_FILES];		/* 删标记合成条目 */
+	size_t nsynth = 0;
+	char (*rshas)[OCC_SHA256_HEX + 1] = NULL;	/* _redo 捕获摘要 */
+	char (*rkinds)[8] = NULL;
+	char *redo_json = NULL;
 
 	memset(&ev, 0, sizeof(ev));
+	memset(&rawv, 0, sizeof(rawv));
 	memset(&oldstage, 0, sizeof(oldstage));
+	memset(synth, 0, sizeof(synth));
 	note_id[0] = '\0';
 	if (out)
 		memset(out, 0, sizeof(*out));
@@ -765,7 +1110,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 
 	/* ---- 先收集：范围内全部消息的快照目录（首见=最早=改动前状态） */
 	for (i = bidx; i < n; i++)
-		scan_msg_dir(root, session_id, rows[i].id, &ev);
+		scan_msg_dir(root, session_id, rows[i].id, &ev, &rawv);
 
 	/* 工具调用对账 → 无快照跳过项（bash 无快照；write/edit 有调用
 	 * 但快照缺失也如实计列） */
@@ -825,19 +1170,128 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		}
 	}
 
-	if (!ev.n) {
+	/* ---- P-50 对账：DB manifest（occ_snap）载入 + anchored 匹配 +
+	 *      删标记检测（db 内无行=全 legacy，零行为变化） ---- */
+	{
+		nmids = n - bidx;
+		mids = calloc(nmids, sizeof(*mids));
+		if (!mids) {
+			set_err(err, errlen, "occ undo: oom");
+			goto out;
+		}
+		for (i = bidx; i < n; i++)
+			mids[i - bidx] = rows[i].id;
+		/* DB 是信任根——读不动的库上不做任何文件动作（fail closed） */
+		if (occ_snap_rows_for_msgs(db, mids, nmids, &mrows, &nmrows,
+					   terr, sizeof(terr))) {
+			set_err(err, errlen, "occ undo: manifest 读失败：%s",
+				terr);
+			goto out;
+		}
+	}
+	/* ③ 删标记检测：manifest 有行而该 path 的快照/墓碑在范围内任何
+	 * msg 目录都不在盘（raw=FS 实况全集）→ 合成 failed 条目 + stderr
+	 * 人话——该文件不回滚；rc 仍 0、DB 提交照常（P-49 部分失败语义）。
+	 * 同 path 多 manifest 行只合成一条；合成条目也占 result 额度
+	 * （OCC_UNDO_MAX_FILES 满即止——stderr 已逐条报过）。 */
+	for (i = 0; i < nmrows; i++) {
+		int present = 0, dup = 0;
+		size_t k, j;
+
+		for (k = 0; k < rawv.n; k++)
+			if (!strcmp(rawv.v[k].path, mrows[i].path)) {
+				present = 1;
+				break;
+			}
+		if (present)
+			continue;
+		for (j = 0; j < nsynth; j++)
+			if (!strcmp(synth[j].path, mrows[i].path)) {
+				dup = 1;
+				break;
+			}
+		if (dup)
+			continue;
+		fprintf(stderr, "occ-undo: DB manifest 有记录但快照缺失"
+			"（被删除？）：%s——该文件未回滚\n", mrows[i].path);
+		if (nsynth >= OCC_UNDO_MAX_FILES)
+			continue;		/* result 满额：stderr 已报 */
+		synth[nsynth].path = strdup(mrows[i].path);
+		if (synth[nsynth].path) {
+			synth[nsynth].action =
+				!strcmp(mrows[i].kind, "absent") ?
+				OCC_UNDO_DELETE : OCC_UNDO_RESTORE;
+			nsynth++;
+		}
+	}
+	if (!ev.n && !nsynth) {
 		set_err(err, errlen,
 			"occ undo: 被撤范围没有文件快照（纯对话轮或快照"
 			"缺失）——不改库、不隐藏消息");
 		goto out;
 	}
+	/* ①② anchored 匹配：对每个 ev 条目查 manifest (msg,path)——
+	 * 命中拷期望并校 kind↔action 一致（换墓碑/换内容类型即判死）；
+	 * 未命中但 path 出现在同会话其它 msg 的 manifest 行=搬目录判死；
+	 * 都不命中=legacy（P-49 sidecar 校验原路）。 */
+	for (i = 0; i < ev.n; i++) {
+		snap_ent *e = &ev.v[i];
+		size_t r;
+		int hit = 0, other_msg = 0;
 
-	/* ---- redo 捕获（撤销前现状；已存在不覆盖） ---- */
+		for (r = 0; r < nmrows; r++) {
+			if (strcmp(mrows[r].path, e->path))
+				continue;
+			if (!strcmp(mrows[r].message_id, e->msg)) {
+				hit = 1;
+				break;
+			}
+			other_msg = 1;		/* 同 path 其余 msg 行：搬动嫌疑 */
+		}
+		if (hit) {
+			e->anchored = 1;
+			snprintf(e->want_kind, sizeof(e->want_kind), "%s",
+				 mrows[r].kind);
+			snprintf(e->want_sha, sizeof(e->want_sha), "%s",
+				 mrows[r].sha256);
+			if ((!strcmp(e->want_kind, "absent")) !=
+			    (e->action == OCC_UNDO_DELETE)) {
+				e->failed_before = 1;
+				fprintf(stderr, "occ-undo: 快照类型与 DB "
+					"manifest 不符（被篡改？）：%s\n",
+					e->path);
+			}
+		} else if (other_msg) {
+			e->failed_before = 1;
+			fprintf(stderr, "occ-undo: 快照出现位置与 DB "
+				"manifest 不符（被搬动？）：%s\n", e->path);
+		}
+	}
+
+	/* ---- redo 捕获（撤销前现状；已存在不覆盖）+ P-50 锚摘要回传 ---- */
+	if (ev.n) {
+		rshas = calloc(ev.n, sizeof(*rshas));
+		rkinds = calloc(ev.n, sizeof(*rkinds));
+		if (!rshas || !rkinds) {
+			set_err(err, errlen, "occ undo: oom");
+			goto out;
+		}
+	}
 	for (i = 0; i < ev.n; i++)
-		redo_capture(root, session_id, &ev.v[i]);
+		redo_capture(root, session_id, &ev.v[i], rshas[i],
+			     rkinds[i]);
+	/* 锚数组覆盖全部 _redo 在盘文件（含叠加 undo 的先前捕获——其摘要
+	 * 由 redo_capture 读现盘回填）；构建失败=空锚，redo 全 legacy */
+	redo_json = redo_json_build(ev.v, ev.n, rshas, rkinds);
 
 	/* ---- 回滚文件（单个失败标记，不中止——部分失败如实列出） ---- */
 	for (i = 0; i < ev.n; i++) {
+		if (ev.v[i].failed_before) {
+			/* P-50：对账阶段已判死（stderr 已说原因）——不碰
+			 * 目标文件，如实标 failed */
+			ev.v[i].failed = 1;
+			continue;
+		}
 		if (apply_restore(root, session_id, &ev.v[i])) {
 			ev.v[i].failed = 1;
 			fprintf(stderr, "occ-undo: 回滚失败 %s\n",
@@ -882,11 +1336,15 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		set_err(err, errlen, "occ undo: hidden_json oom");
 		goto out;
 	}
-	/* files_json（本 stage 全量恢复集；redo 据此查 _redo 段） */
-	file_paths = calloc(ev.n, sizeof(*file_paths));
-	if (!file_paths) {
-		set_err(err, errlen, "occ undo: oom");
-		goto out;
+	/* files_json（本 stage 全量恢复集；redo 据此查 _redo 段）。
+	 * P-50：ev 可为空（纯删标记场景——快照全缺、仅合成条目），
+	 * calloc(0) 可测地返回 NULL 的实现下不能按 oom 处理 */
+	if (ev.n) {
+		file_paths = calloc(ev.n, sizeof(*file_paths));
+		if (!file_paths) {
+			set_err(err, errlen, "occ undo: oom");
+			goto out;
+		}
 	}
 	for (i = 0; i < ev.n; i++) {
 		file_paths[i] = strdup(ev.v[i].path);
@@ -941,9 +1399,9 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 				terr);
 	}
 
-	/* 5) stage 行（边界/注记/文件清单/本 stage 隐藏集） */
+	/* 5) stage 行（边界/注记/文件清单/本 stage 隐藏集/redo 锚） */
 	if (occ_revert_put(db, session_id, rows[bidx].id, note_id,
-			   files_json, hidden_json, err, errlen)) {
+			   files_json, hidden_json, redo_json, err, errlen)) {
 		occ_msg_delete(db, note_id, NULL, 0);
 		goto out;
 	}
@@ -964,17 +1422,32 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 				/* oom：已推条目保留 */
 				break;
 			}
+		/* P-50：删标记合成条目（全部 failed=1，占 result 额度） */
+		for (i = 0; i < nsynth; i++)
+			if (result_push_file(out, synth[i].path,
+					     synth[i].action, 1)) {
+				/* oom：已推条目保留 */
+				break;
+			}
 	}
 	rc = 0;
 out:
 	occ_revert_row_free(&oldstage);
 	entvec_free(&ev);
+	rawvec_free(&rawv);
+	occ_snap_rows_free(mrows, nmrows);
+	free(mids);
 	occ_tc_rows_free(tcs, ntc);
 	free(users);
 	if (rows)
 		occ_msg_rows_free(rows, n);
 	free(hidden_json);
 	free(files_json);
+	free(redo_json);
+	free(rshas);
+	free(rkinds);
+	for (i = 0; i < nsynth; i++)
+		free(synth[i].path);
 	str_array_free(newly_hidden, nhidden);
 	str_array_free(old_hidden, nold_hidden);
 	str_array_free(file_paths, nfiles_json);
@@ -1034,13 +1507,16 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 		set_err(err, errlen, "occ redo: files_json 损坏");
 		goto out;
 	}
-	/* 1) 文件还原（_redo 段 → 目标） */
+	/* 1) 文件还原（_redo 段 → 目标）。P-50：stage.redo_json 锚命中
+	 *    的条目按 {kind,sha256} 比对（sidecar 免读——重造无效）；
+	 *    空/损/未命中=legacy（P-49 sidecar/规范形态检查原路不动） */
 	for (i = 0; i < nfiles; i++) {
 		snap_ent e;
 		int failed = 0;
 
 		memset(&e, 0, sizeof(e));
 		snprintf(e.path, sizeof(e.path), "%s", files[i]);
+		redo_anchor_get(st.redo_json, files[i], &e);
 		apply_redo(root, session_id, &e, &failed);
 		if (failed) {
 			nfailed++;

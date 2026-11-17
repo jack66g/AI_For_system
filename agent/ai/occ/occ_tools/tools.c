@@ -799,8 +799,8 @@ static int tool_write(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	if (write_guard(ctx, abs, o))
 		return -1;
 	/* 快照 stage（原文件不存在 → ABSENT 墓碑；/undo 地基，b2 接） */
-	occ_snapshot_stage(ctx->snaproot, ctx->session_id, ctx->msg_id,
-			   abs, snapbuf, sizeof(snapbuf));
+	occ_snapshot_stage(ctx->db, ctx->snaproot, ctx->session_id,
+			   ctx->msg_id, abs, snapbuf, sizeof(snapbuf));
 	/* 父目录递归建 */
 	{
 		char *slash = strrchr(abs, '/');
@@ -904,8 +904,8 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		return -1;
 	}
 	/* 快照 stage（原文件必然存在——上面 read_whole 已证） */
-	occ_snapshot_stage(ctx->snaproot, ctx->session_id, ctx->msg_id,
-			   abs, snapbuf, sizeof(snapbuf));
+	occ_snapshot_stage(ctx->db, ctx->snaproot, ctx->session_id,
+			   ctx->msg_id, abs, snapbuf, sizeof(snapbuf));
 
 	out = malloc(len + (nnew > nold ? (nnew - nold) * nocc : 0) + 1);
 	if (!out) {
@@ -2958,9 +2958,9 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				return -1;
 			}
 			/* 快照 stage（undo 地基；与 write 工具同口径） */
-			occ_snapshot_stage(ctx->snaproot, ctx->session_id,
-					   ctx->msg_id, path, snapbuf,
-					   sizeof(snapbuf));
+			occ_snapshot_stage(ctx->db, ctx->snaproot,
+					   ctx->session_id, ctx->msg_id, path,
+					   snapbuf, sizeof(snapbuf));
 			f = fopen(path, "wb");
 			if (!f) {
 				occ_ob_printf(o, "ERROR: 打开 %s 失败：%s",
@@ -2995,9 +2995,9 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	return 0;
 }
 
-int occ_snapshot_stage(const char *snaproot, const char *session_id,
-		       const char *msg_id, const char *abs_path,
-		       char *buf, size_t buflen)
+int occ_snapshot_stage(occ_db *db, const char *snaproot,
+		       const char *session_id, const char *msg_id,
+		       const char *abs_path, char *buf, size_t buflen)
 {
 	char dir[4300], dst[12512], mangled[8192];
 	char *data = NULL;
@@ -3028,6 +3028,8 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 	 * （=该消息触及前的原状态）——undo 恢复目标是「进入该回合前」，
 	 * 覆盖会把快照推进到中间态。recover 重放 write 也依赖此（不把
 	 * 快照污染成已写入态）。内容与墓碑任一已存在即跳过。
+	 * P-50：早退路径绝不做 manifest 落库——不给旧快照补锚（攻击者
+	 * 若已改过旧快照内容，补录=给毒内容盖章；只锚本次亲手写的字节）。
 	 */
 	{
 		char probe[12520];
@@ -3072,6 +3074,24 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 					fprintf(stderr, "occ-snap: sidecar 写失败"
 						"（退化为无校验）：%s\n", sp);
 				}
+				/* P-50：墓碑 manifest 落库（DB 外部锚——
+				 * undo 消费侧对账；落库失败=退化为 legacy
+				 * sidecar 校验，不阻断快照本体） */
+				if (db) {
+					char merr[192];
+
+					if (occ_snap_put(db, msg_id, abs_path,
+							 "absent", hex, merr,
+							 sizeof(merr)))
+						fprintf(stderr, "occ-snap: "
+							"manifest 落库失败"
+							"（退化为 legacy 校验）"
+							"：%s\n", merr);
+				} else {
+					fprintf(stderr, "occ-snap: manifest "
+						"落库失败（退化为 legacy 校验）"
+						"：无 DB 句柄\n");
+				}
 			}
 		}
 		return 0;
@@ -3106,6 +3126,21 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 			} else {
 				fprintf(stderr, "occ-snap: sidecar 写失败"
 					"（退化为无校验）：%s\n", sp);
+			}
+			/* P-50：内容快照 manifest 落库（同墓碑分支——sidecar
+			 * 与快照同目录=自证，DB 行才是对快照树无写权可用的
+			 * 真锚；落库失败退化 legacy，不阻断快照本体） */
+			if (db) {
+				char merr[192];
+
+				if (occ_snap_put(db, msg_id, abs_path, "snap",
+						 hex, merr, sizeof(merr)))
+					fprintf(stderr, "occ-snap: manifest "
+						"落库失败（退化为 legacy 校验）"
+						"：%s\n", merr);
+			} else {
+				fprintf(stderr, "occ-snap: manifest 落库失败"
+					"（退化为 legacy 校验）：无 DB 句柄\n");
 			}
 		}
 	}

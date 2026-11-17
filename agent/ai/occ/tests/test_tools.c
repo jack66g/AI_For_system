@@ -451,7 +451,7 @@ int main(void)
 
 		wfile("snap.txt", "ORIGINAL");
 		snprintf(p, sizeof(p), "%s/snap.txt", tmpdir);
-		OK(occ_snapshot_stage(tmpdir, "ses_snap", "msg_snap", p,
+		OK(occ_snapshot_stage(NULL, tmpdir, "ses_snap", "msg_snap", p,
 				      snapbuf, sizeof(snapbuf)) == 0,
 		   "snap-stage-rc");
 		OK(!access(snapbuf, R_OK), "snap-stage-file");
@@ -473,7 +473,7 @@ int main(void)
 		/* 新文件墓碑 */
 		snprintf(p, sizeof(p), "%s/absent.txt", tmpdir);
 		unlink(p);
-		OK(occ_snapshot_stage(tmpdir, "ses_snap", "msg_snap2", p,
+		OK(occ_snapshot_stage(NULL, tmpdir, "ses_snap", "msg_snap2", p,
 				      snapbuf, sizeof(snapbuf)) == 0,
 		   "snap-absent-rc");
 		strcat(snapbuf, ".ABSENT");

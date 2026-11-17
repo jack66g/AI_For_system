@@ -951,7 +951,7 @@ int main(void)
 					    sizeof(err)) == 0, "loop14-note");
 			OK(occ_revert_put(db, sid, "msg_fakeboundary", nid,
 					  "[\"/tmp/x\"]", "[\"msg_fake\"]",
-					  err, sizeof(err)) == 0,
+					  NULL, err, sizeof(err)) == 0,
 			   "loop14-stage-put");
 			opts.prompt = "第十四问";
 			sse_set(SSE_NORMAL);

@@ -49,7 +49,12 @@
  * schema 迁移：user_version 1→2（open 时 ALTER ADD COLUMN reverted +
  * CREATE occ_revert；旧库无损升级，test_revert 覆盖）；
  * 2→3（E1：ALTER occ_session+kind 补缺省 'main' + CREATE occ_task/
- * occ_task_event——DDL 见 task.c；v3 库重复打开零副作用，test_task 覆盖）。
+ * occ_task_event——DDL 见 task.c；v3 库重复打开零副作用，test_task 覆盖）；
+ * 3→4（P-50：occ_revert+redo_json 列（_redo 段 DB 锚，redo 消费侧比对）
+ * + 新表 occ_snap——快照 manifest（msg→{path,kind,sha256} 外部锚；
+ * 威胁模型：对快照树有 FS 写权的攻击者无 DB 写权，sidecar 与快照同
+ * 目录=自证，DB 行才是真锚）。写侧 tools.c occ_snapshot_stage 落行，
+ * 消费侧 revert.c undo/redo 对账，test_revert I12-I18 覆盖）。
  *
  * 测试注入（仅单测使用，生产恒 0；occ_db_test_fault）：
  *   bit0：add_user 在 INSERT 后 COMMIT 前失败 → 断言回滚无半条
@@ -140,7 +145,7 @@ void occ_msg_rows_free(occ_msg_row *rows, size_t n);
  * ~/.occ/sessions.db。PRAGMA busy_timeout=5000（T2 约定）、
  * foreign_keys=ON（CASCADE 生效）、journal_mode=WAL（E2/B2：多进程
  * 读写不互斥；开库处一次性设置+读回校验，非 wal 报错不降级）、
- * user_version=3（E1；v1/v2 旧库自动迁移）。
+ * user_version=4（P-50；v1/v2/v3 旧库自动链式迁移）。
  */
 occ_db *occ_db_open(const char *path, char *err, size_t errlen);
 void occ_db_close(occ_db *db);
@@ -338,7 +343,10 @@ int occ_msgs_set_reverted(occ_db *db, const char *session_id,
 /*
  * occ_revert_row - stage 态（occ_revert 表）。files_json：本 stage
  * 受影响文件绝对路径 JSON 数组（redo 据此查 _redo 段）；hidden_json：
- * 本 stage 隐藏的消息 id JSON 数组（redo 据此精确解隐藏）。
+ * 本 stage 隐藏的消息 id JSON 数组（redo 据此精确解隐藏）；redo_json
+ * （P-50）：_redo 段在盘文件锚 [{"path":…,"kind":"snap|absent",
+ * "sha256":…},…]——undo 捕获时落、redo 消费前比对（空/损=全 legacy
+ * 走 sidecar 校验，旧 stage 行兼容）。
  */
 typedef struct occ_revert_row {
 	char session_id[OCC_ID_LEN];
@@ -347,6 +355,7 @@ typedef struct occ_revert_row {
 	long long created;
 	char *files_json;		/* heap；可 NULL（理论不空） */
 	char *hidden_json;		/* heap；可 NULL（理论不空） */
+	char *redo_json;		/* heap；可 NULL（P-50 redo 锚） */
 } occ_revert_row;
 
 void occ_revert_row_free(occ_revert_row *r);
@@ -355,15 +364,45 @@ void occ_revert_row_free(occ_revert_row *r);
 int occ_revert_get(occ_db *db, const char *session_id, occ_revert_row *out,
 		   char *err, size_t errlen);
 
-/* 写/替换 stage 态（单事务；files/hidden_json 可 NULL） */
+/* 写/替换 stage 态（单事务；files/hidden/redo_json 可 NULL） */
 int occ_revert_put(occ_db *db, const char *session_id,
 		   const char *boundary_msg, const char *note_msg,
 		   const char *files_json, const char *hidden_json,
-		   char *err, size_t errlen);
+		   const char *redo_json, char *err, size_t errlen);
 
 /* 删 stage 态（redo/commit；不存在也返回 0） */
 int occ_revert_clear(occ_db *db, const char *session_id,
 		     char *err, size_t errlen);
+
+/* ---- P-50：快照 manifest（occ_snap 表——DB 外部锚） ---- */
+
+/*
+ * occ_snap_row - manifest 行（值拷贝、无堆指针，直接 free 数组即可）。
+ * 字段长度与 revert.c snap_ent 对齐：kind "snap"|"absent"、sha256 小写
+ * hex（64+NUL）。message_id 形如 "msg_…"（FK occ_message）。
+ */
+typedef struct occ_snap_row {
+	char message_id[OCC_ID_LEN];
+	char path[4096];		/* 还原目标绝对路径 */
+	char kind[8];			/* "snap" | "absent" */
+	char sha256[65];		/* 内容/墓碑字节摘要 */
+} occ_snap_row;
+
+void occ_snap_rows_free(occ_snap_row *rows, size_t n);
+
+/* 落/换 manifest 行（INSERT OR REPLACE；快照写入侧用——tools.c） */
+int occ_snap_put(occ_db *db, const char *message_id, const char *path,
+		 const char *kind, const char *sha256, char *err,
+		 size_t errlen);
+
+/*
+ * occ_snap_rows_for_msgs - 按 msg id 集合载 manifest 行（undo 对账用）。
+ * IN 列表按 64 一段分批查询合并（防 SQLITE_MAX_VARIABLE_NUMBER 上限）。
+ * *rows heap（occ_snap_rows_free）；返回行数（0=无，*rows=NULL）；错 -1。
+ */
+int occ_snap_rows_for_msgs(occ_db *db, const char *const *msg_ids, size_t n,
+			   occ_snap_row **rows, size_t *nout, char *err,
+			   size_t errlen);
 
 /* ---- b2：undo 范围内工具调用对账（revert.c 判「无快照跳过」用） ---- */
 
