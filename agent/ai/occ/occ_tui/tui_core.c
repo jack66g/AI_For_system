@@ -849,9 +849,13 @@ int tui_renderer_heartbeat(tui_renderer *r)
 void tui_out_fatal_kill_parent(void)
 {
 	/* 头注见 tui_core.h：仅 FBTERM 链（aik-console fb 分支 env）且
-	 * 仅致命收口单点调用；getenv 判空即 serial/ssh 零动作 */
+	 * 仅致命收口单点调用；getenv 判空即 serial/ssh 零动作。
+	 * SIGKILL 而非 SIGTERM：fbterm 接住 SIGTERM 走优雅清理后仍以
+	 * 0 退出（真机演练实证）——出带外线索位不亮；SIGKILL 不可捕获
+	 * →shell 必报 137。跳过清理的安全性=P-41 segfault 先例（崩溃
+	 * 链一直无清理自愈）。 */
 	if (getenv("FBTERM"))
-		(void)kill(getppid(), SIGTERM);
+		(void)kill(getppid(), SIGKILL);
 }
 
 /* ================= 滚动视口原语（scrollback 环） ================= */

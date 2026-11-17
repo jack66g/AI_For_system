@@ -18,9 +18,10 @@
  *      rc=72，检出 <2.5s；D2 同参数 master 持续读 → 不误报（存活
  *      ≥2s 后 /exit 正常 rc=0）。
  *   E. 击毙父进程（P-44d）：假 fbterm 中间层（FBTERM=1 树内设置）+
- *      楔死 → 中间层被 SIGTERM 信号死（真楔死 fbterm 不随 pty 关闭
- *      退出——occ 主动击毙+退出码出带外 143）；无 FBTERM 对照 →
- *      ppid 不被击毙（门卫精确）。
+ *      楔死 → 中间层被 SIGKILL 信号死（真楔死 fbterm 不随 pty 关闭
+ *      退出——occ 主动击毙+退出码出带外 137；v7e：SIGTERM 被 fbterm
+ *      接住优雅清理退 0=线索不亮，改不可捕获的 SIGKILL）；无
+ *      FBTERM 对照 → ppid 不被击毙（门卫精确）。
  */
 #define _XOPEN_SOURCE 700	/* posix_openpt 三件套（照 test_pty 口径） */
 #define _DEFAULT_SOURCE 1
@@ -540,6 +541,10 @@ static int detect_run(int consume, uint64_t *ms)
 			close(pt.slave);
 		setenv("OCC_TUI_HB_MS", "300", 1);
 		setenv("OCC_TUI_WD_MS", "800", 1);
+		/* D2 加厚：健康消费端偶发调度迟滞（全套并发时实测 >800ms）
+		 * 不该算误报——WD 放宽到 2s；D1 楔死检出断言（<2.5s）不受扰 */
+		if (consume)
+			setenv("OCC_TUI_WD_MS", "2000", 1);
 		_exit(view_child_main());
 	}
 	close(pt.slave);
@@ -568,7 +573,10 @@ static int detect_run(int consume, uint64_t *ms)
 		for (w = 0; w < 40; w++) {
 			if (waitpid(pid, &st, WNOHANG) == pid)
 				break;
-			usleep(100000);
+			/* 持续消费直到收尸：真 fbterm 读到 occ 寿终——旧写法
+			 * 窗末停读后才发 /exit，子退出收尾期心跳顶满缓冲
+			 * 会「正确地」误触 wd（4.1s 误报实锤=测试自身竞态） */
+			drain_master(pt.master, 60, &total);
 		}
 		*ms = wd_now_ms() - t0;
 		if (w == 40) {
@@ -627,7 +635,8 @@ static void detect_scenario(void)
 
 /* ---- E. P-41/P-44d 击毙父进程（假 fbterm 中间层）----
  * E1. FBTERM=1：楔死（D1 手法：master 不读）自退时，view 子进程在
- *     致命收口击毙 ppid（中间层=假 fbterm）——SIGTERM 信号死。
+ *     致命收口击毙 ppid（中间层=假 fbterm）——SIGKILL 信号死
+ *     （v7e：SIGTERM 被 fbterm 接住退 0，137 才是出带外线索位）。
  * E2. 无 FBTERM：同场景 ppid 不被击毙——中间层正常收尸退出，退出码
  *     透传子进程的 72（非信号死）= 门卫 env 精确生效。 */
 static int fbterm_kill_run(int set_fbterm, int *mid_info)
@@ -706,7 +715,7 @@ static void fbterm_kill_scenario(void)
 	int how, info;
 
 	how = fbterm_kill_run(1, &info);
-	OK(how == 1 && info == SIGTERM, "E1-fbterm-killed-sigterm");
+	OK(how == 1 && info == SIGKILL, "E1-fbterm-killed-sigkill");
 
 	how = fbterm_kill_run(0, &info);
 	OK(how == 0 && info == 72, "E2-no-fbterm-ppid-spared");

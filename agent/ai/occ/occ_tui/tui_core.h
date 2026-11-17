@@ -233,7 +233,8 @@ int tui_renderer_heartbeat(tui_renderer *r);
  *      整链）；
  *   ② 退出码出带外传递：fbterm 转手吞退出码（occ exit(72) → fbterm
  *      以 0 退出——P-47「/exit rc=0 非 71」谜底）；击毙后 shell 报
- *      143 = aik-console v7 的 occ-wd 线索位。
+ *      137 = aik-console v7 的 occ-wd 线索位。SIGKILL 而非 SIGTERM：
+ *      fbterm 接住 SIGTERM 优雅清理后仍退 0（真机实证），线索位不亮。
  * 门卫：FBTERM env 只在 aik-console 的 fb 分支设置（serial/ssh 场景
  * 无此 env → 不误杀 sshd/shell）；只在 wd/IO 致命收口调用（单点、
  * 恰一次——多处调用有 ppid 复用误杀风险），正常退出零动作。

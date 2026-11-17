@@ -1,8 +1,10 @@
 #!/bin/sh
 # aik-console v7 — P-41/P-44 控制台稳定棒（输出看门狗自愈）。
-#   v7d：fb 分支补 143（fbterm 被 occ 击毙=楔死自愈真路径）与 139
+#   v7e：击毙信号 SIGTERM→SIGKILL——fbterm 接住 SIGTERM 优雅清理后
+#   仍退 0（真机实证，143 线索位永不亮）；SIGKILL 不可捕获→137 必亮。
+#   v7d：fb 分支补 137（fbterm 被 occ 击毙=楔死自愈真路径）与 139
 #   （fbterm segfault 崩溃计数，P-41 观测线）两条留痕；fbterm 转手
-#   吞退出码（occ exit(72)→fbterm 以 0 退，P-47 谜底）——143/72 双
+#   吞退出码（occ exit(72)→fbterm 以 0 退，P-47 谜底）——137/72 双
 #   检查防御未来 fbterm 修好传码。
 #   v7：occ 退出码 72=occ 检测 fbterm 楔死（输出看门狗超时/输出 IO 错）
 #   自退——本循环 sleep 2 重启整链（fbterm 随 pty 从端关闭退出，wait
@@ -38,9 +40,10 @@ case "$TTY" in
       # P-41/P-44：72=occ 输出看门狗自退（fbterm 楔死）——单独留痕，
       # 循环行为不变（sleep 2 重启整链自愈）
       [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=fb"
-      # P-41/P-44d：143=SIGTERM——fbterm 被 occ 致命收口击毙（真楔死
-      # 不随 pty 关闭退出；且 fbterm 吞退出码，143=出带外线索位）
-      [ "$rc" -eq 143 ] && log "occ-wd rc=143 tty=fb"
+      # P-41/P-44d/v7e：137=SIGKILL——fbterm 被 occ 致命收口击毙（真楔死
+      # 不随 pty 关闭退出；且 fbterm 吞退出码，137=出带外线索位。
+      # SIGKILL 而非 SIGTERM：fbterm 接住 TERM 清理后仍退 0=线索不亮）
+      [ "$rc" -eq 137 ] && log "occ-wd rc=137 tty=fb"
       # P-41 观测线：139=SIGSEGV fbterm 崩溃计数（4~13 分钟 segfault 面）
       [ "$rc" -eq 139 ] && log "fbterm-crash rc=139 tty=fb"
       [ "$rc" -eq 71 ] && { log "occ-logout tty=fb"; exit 0; }
