@@ -31,7 +31,8 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_keymap.c tests/test_themefile.c \
 	     tests/test_overlay.c tests/test_usage.c \
 	     tests/test_gate.c tests/test_gate_pty.c \
-     tests/test_rename_ai.c tests/test_history_load.c
+     tests/test_rename_ai.c tests/test_history_load.c \
+     tests/test_models_offline.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
@@ -51,6 +52,8 @@ obj/%.o: %.c
 # tui_view 事件环用 pthread——链 -lpthread，tui_view 的自唤醒 pipe 依赖它；
 # B8 test_rename_ai exec 真 ../occ 二进制 + 本地 python3 mock（tests/
 # mock_title_llm.py，127.0.0.1）——../occ 未构建时诚实 skip）
+# P-35 test_models_offline 同样 exec 真 ../occ（拷入 fixture 隔离快照
+# 搜索链）——离线 /models 浮层不自退回归；未构建时诚实 skip
 # T4 登录门纯逻辑测试（tui_gate.o 需 -lcrypt）
 tests/test_gate: tests/test_gate.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_gate.c $(LIB_OBJS) -lpthread -lcrypt

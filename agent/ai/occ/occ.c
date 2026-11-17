@@ -2137,29 +2137,28 @@ static int cmd_models(struct tui_app *a)
 	tui_ov_item *items;
 	size_t *fav = NULL, *rec = NULL, *all = NULL;
 	size_t nfav = 0, nrec = 0, nall = 0;
-	size_t cap, n = 0, i;
+	size_t nmodels, cap, n = 0, i;
 	int rc = 0;
 
+	/* P-35：注册表空（无 model.toml 槽位且无 catalog 快照——离线
+	 * 首装常态）不再静默自退：浮层照开、列 dim 提示行（空数据
+	 * 即关=真机「卡一下→画面一闪→回主界面」根因；浮层开/关与
+	 * Esc 语义不变）。registry 三查对 NULL reg 均零返回。 */
 	app_load_reg(a);
-	if (!a->reg || a->reg->nmodels == 0) {
-		tui_view_notice(a->view,
-				"models: 注册表为空（model.toml 与快照均不可用）");
-		return 0;
-	}
-	cap = a->reg->nmodels + 128;	/* 分组头余量 */
+	nmodels = a->reg ? a->reg->nmodels : 0;
+	cap = nmodels + 130;	/* 分组头 + 提示行余量 */
 	items = calloc(cap, sizeof(*items));
-	fav = malloc((a->reg->nmodels + 1) * sizeof(*fav));
-	rec = malloc((a->reg->nmodels + 1) * sizeof(*rec));
-	all = malloc((a->reg->nmodels + 1) * sizeof(*all));
+	fav = malloc((nmodels + 1) * sizeof(*fav));
+	rec = malloc((nmodels + 1) * sizeof(*rec));
+	all = malloc((nmodels + 1) * sizeof(*all));
 	if (!items || !fav || !rec || !all ||
 	    app_map_reserve(a, cap) != 0) {
 		rc = -1;
 		goto out;
 	}
-	nfav = occ_registry_favorites(a->reg, fav, a->reg->nmodels);
-	nrec = occ_registry_recents(a->reg, rec, a->reg->nmodels);
-	nall = occ_registry_all_by_provider(a->reg, 0, all,
-					    a->reg->nmodels);
+	nfav = occ_registry_favorites(a->reg, fav, nmodels);
+	nrec = occ_registry_recents(a->reg, rec, nmodels);
+	nall = occ_registry_all_by_provider(a->reg, 0, all, nmodels);
 
 /* OCC-DEBT：非对话条目（is_chat==0）默认过滤；ctrl+t 显隐切换后
  * 显示时 dim + tag 标「非对话」（registry 三态位——目录 type 为主、
@@ -2220,17 +2219,40 @@ static int cmd_models(struct tui_app *a)
 	} \
 } while (0)
 
+/* P-35：dim 提示行（不可选语义——ov_map=NONE，回车走「该条目
+ * 不可用」status，不关浮层） */
+#define PUSH_NOTE(NTXT) do { \
+	if (n + 1 < cap) { \
+		snprintf(items[n].text, sizeof(items[n].text), "%s", \
+			 NTXT); \
+		items[n].tag[0] = '\0'; \
+		items[n].detail[0] = '\0'; \
+		items[n].flags = TUI_OV_DIM; \
+		a->ov_map[n] = OV_MAP_NONE; \
+		n++; \
+	} \
+} while (0)
+
+	/* P-35：catalog 缺失（离线/未装快照）= 浮层内一行 dim 提示，
+	 * 绝不因此退出浮层、绝不阻塞（加载链纯本地，无网络取数） */
+	if (!a->cat || a->cat->nmodels == 0) {
+		if (nmodels == 0)
+			PUSH_NOTE("无模型——model.toml 未配置且 catalog 快照"
+				  "未配置（离线）；先配置 model.toml");
+		else
+			PUSH_NOTE("catalog 快照未配置，仅显示已配置模型");
+	}
 	if (nfav) {
 		PUSH_HEADER("Favorites");
 		for (i = 0; i < nfav && n + 1 < cap; i++) {
-			if (fav[i] < a->reg->nmodels)
+			if (fav[i] < nmodels)
 				PUSH_MODEL(&a->reg->models[fav[i]]);
 		}
 	}
 	if (nrec) {
 		PUSH_HEADER("Recent");
 		for (i = 0; i < nrec && n + 1 < cap; i++) {
-			if (rec[i] < a->reg->nmodels)
+			if (rec[i] < nmodels)
 				PUSH_MODEL(&a->reg->models[rec[i]]);
 		}
 	}
@@ -2254,12 +2276,12 @@ static int cmd_models(struct tui_app *a)
 #undef PUSH_HEADER
 #undef PUSH_MODEL
 	if (n == 0) {
-		/* 全量被非对话过滤掏空：诚实说明而非谎报 OOM */
-		tui_view_notice(a->view,
-				"models: 匹配条目全部为非对话（默认隐藏）——"
-				"ctrl+t 显示全部");
-		goto out;
+		/* 全量被非对话过滤掏空：浮层内 dim 说明（P-35：不再
+		 * 静默不开——诚实说明而非谎报 OOM，也不退浮层） */
+		PUSH_NOTE("匹配条目全部为非对话（默认隐藏）——"
+			  "ctrl+t 显示全部");
 	}
+#undef PUSH_NOTE
 	(void)tui_view_open_list(a->view, OV_MODELS, "models", items,
 				 (int)n, 1,
 				 "Enter=切换/接入 · ctrl+a key · ctrl+f * · "
