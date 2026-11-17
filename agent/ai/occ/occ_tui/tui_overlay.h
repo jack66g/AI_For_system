@@ -27,6 +27,10 @@ extern "C" {
 /* item 标志 */
 #define TUI_OV_HEADER 1		/* 分组头：渲染加粗、导航跳过、不可选 */
 #define TUI_OV_DIM 2		/* 次要条目（muted） */
+#define TUI_OV_NOSEL 4		/* P-42：不可选行（dim 提示等）——渲染照常
+				 * （随 DIM 走 muted），但初始选择/导航/
+				 * 回车提交一律跳过（同 HEADER 语义，只差
+				 * 分组头字形） */
 
 #define TUI_OV_TEXT_MAX 176
 #define TUI_OV_TAG_MAX 56

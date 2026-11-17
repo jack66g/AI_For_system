@@ -21,25 +21,30 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 出厂缺省（= c2 编译期常量；顺序与 enum 槽位一致） */
+/* 出厂缺省（= c2 编译期常量；顺序与 enum 槽位一致）。
+ * T1-10 质感精修：底色再压一档（235→234，更沉稳）、次级文字随之下探
+ * （MUTED 242→241，footer/侧栏层次更收敛）、框线 BORDER 238→237（深底
+ * 上更克制）、消息块底色整体随底色平移（USER_BG 236→235 / ASSIST_BG
+ * 234→233——相对层次不变）、LINK 75→81（链接与 accent/KW 统一强调色）。
+ * 其余（FG/ACCENT/ERROR/OK/WARN/语法色/CACHE）不动——小而稳。 */
 static const int TUI_THM_DEFAULTS[TUI_THM_COUNT] = {
 	252,	/* FG */
-	235,	/* BG */
-	242,	/* MUTED */
+	234,	/* BG */
+	241,	/* MUTED */
 	81,	/* ACCENT */
-	238,	/* BORDER */
+	237,	/* BORDER */
 	203,	/* ERROR */
 	114,	/* OK */
 	214,	/* WARN */
-	236,	/* USER_BG */
-	234,	/* ASSIST_BG */
+	235,	/* USER_BG */
+	233,	/* ASSIST_BG */
 	186,	/* CODE_FG */
 	236,	/* CODE_BG */
 	81,	/* KW */
 	114,	/* STR */
 	179,	/* NUM */
 	244,	/* CMT */
-	75,	/* LINK */
+	81,	/* LINK */
 	140	/* CACHE（UXAB：c cache read 紫） */
 };
 
@@ -62,9 +67,9 @@ static int g_pal[TUI_THM_COUNT];
 
 static const struct tui_theme_preset
 tui_theme_presets[TUI_THEME_PRESET_N] = {
-	{ "default", "出厂青（编译期默认）",
-	  { 252, 235, 242, 81, 238, 203, 114, 214, 236, 234,
-	    186, 236, 81, 114, 179, 244, 75, 140 } },
+	{ "default", "出厂青（编译期默认·T1-10 精修）",
+	  { 252, 234, 241, 81, 237, 203, 114, 214, 235, 233,
+	    186, 236, 81, 114, 179, 244, 81, 140 } },
 	{ "amber", "琥珀暖调",
 	  { 252, 235, 243, 214, 237, 196, 150, 214, 236, 234,
 	    222, 236, 208, 186, 215, 245, 180, 179 } },

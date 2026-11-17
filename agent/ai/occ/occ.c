@@ -2219,15 +2219,16 @@ static int cmd_models(struct tui_app *a)
 	} \
 } while (0)
 
-/* P-35：dim 提示行（不可选语义——ov_map=NONE，回车走「该条目
- * 不可用」status，不关浮层） */
+/* P-35：dim 提示行（不可选语义——ov_map=NONE；P-42 起加 TUI_OV_NOSEL：
+ * 初始光标/导航/回车一律跳过，光标直接落首个可选模型条目——旧形态
+ * 首行置光标、首回车必得「该条目不可用」） */
 #define PUSH_NOTE(NTXT) do { \
 	if (n + 1 < cap) { \
 		snprintf(items[n].text, sizeof(items[n].text), "%s", \
 			 NTXT); \
 		items[n].tag[0] = '\0'; \
 		items[n].detail[0] = '\0'; \
-		items[n].flags = TUI_OV_DIM; \
+		items[n].flags = TUI_OV_DIM | TUI_OV_NOSEL; \
 		a->ov_map[n] = OV_MAP_NONE; \
 		n++; \
 	} \

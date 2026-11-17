@@ -6,6 +6,8 @@
  * 不敏感子串（OCD 搜索态去分组语义；fuzzysort 加权取舍见台账裁定 2）。
  * 选择窗在 render 时强制选中可见（top 钳位）；detail/status 行共用
  * （rows-2）：有 status 显示 status，否则显示选中项 detail。
+ * P-42：HEADER 与 NOSEL 都不可选——初始选择/导航/提交统一走
+ * ov_is_pickable（旧：dim 提示行可置光标，首回车必得「该条目不可用」）。
  */
 #define _DEFAULT_SOURCE 1
 #include "tui_overlay.h"
@@ -118,9 +120,11 @@ static size_t ov_scroll_start(const char *s, int avail, int *remain_w)
 	return start;
 }
 
-static int ov_is_header(const tui_overlay *ov, int vi)
+/* P-42：可选行判定——HEADER 与 NOSEL（dim 提示行）都不可选 */
+static int ov_is_pickable(const tui_overlay *ov, int vi)
 {
-	return (ov->items[ov->vis[vi]].flags & TUI_OV_HEADER) != 0;
+	return (ov->items[ov->vis[vi]].flags &
+		(TUI_OV_HEADER | TUI_OV_NOSEL)) == 0;
 }
 
 /* 从 from 起按 dir 找首个可选 vis 下标；无 → -1 */
@@ -130,12 +134,12 @@ static int ov_pick(const tui_overlay *ov, int from, int dir)
 
 	if (dir >= 0) {
 		for (i = from; i < ov->nvis; i++) {
-			if (!ov_is_header(ov, i))
+			if (ov_is_pickable(ov, i))
 				return i;
 		}
 	} else {
 		for (i = from; i >= 0; i--) {
-			if (!ov_is_header(ov, i))
+			if (ov_is_pickable(ov, i))
 				return i;
 		}
 	}
@@ -316,7 +320,7 @@ int tui_overlay_count_selectable(const tui_overlay *ov)
 	if (!ov)
 		return 0;
 	for (i = 0; i < ov->nvis; i++) {
-		if (!ov_is_header(ov, i))
+		if (ov_is_pickable(ov, i))
 			n++;
 	}
 	return n;
@@ -329,7 +333,7 @@ int tui_overlay_sel_no(const tui_overlay *ov)
 	if (!ov || ov->sel < 0)
 		return 0;
 	for (i = 0; i <= ov->sel && i < ov->nvis; i++) {
-		if (!ov_is_header(ov, i))
+		if (ov_is_pickable(ov, i))
 			n++;
 	}
 	return n;
@@ -395,7 +399,7 @@ int tui_overlay_nav(tui_overlay *ov, int dir)
 		return TUI_OVA_HANDLED;
 	}
 	s = ov->sel + dir;
-	while (s >= 0 && s < ov->nvis && ov_is_header(ov, s))
+	while (s >= 0 && s < ov->nvis && !ov_is_pickable(ov, s))
 		s += dir;
 	if (s >= 0 && s < ov->nvis)
 		ov->sel = s;	/* 越界：保持原位 */
@@ -501,6 +505,10 @@ int tui_overlay_submit_idx(const tui_overlay *ov)
 	if (!ov || !ov->active || ov->is_input || ov->sel < 0 ||
 	    ov->sel >= ov->nvis)
 		return -1;
+	/* P-42：不可选行（HEADER/NOSEL）防御性拒绝——正常导航到不了，
+	 * 但外部重排/旧状态兜底（回车得 -1=「无可选项」而非错位提交） */
+	if (!ov_is_pickable(ov, ov->sel))
+		return -1;
 	return ov->vis[ov->sel];
 }
 
@@ -515,7 +523,13 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 					TUI_ST_BOLD);
 	tui_attr a_muted = tui_thm_muted();
 	tui_attr a_fg = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0);
-	tui_attr a_sel = tui_thm_attr(TUI_THM_BG, TUI_THM_ACCENT, 0);
+	/* P-42：选中态改 SGR 7 反色 + accent 前景——旧实现（fg=BG 色、
+	 * bg=ACCENT 色）在 fbterm 等 256 色**背景**不可靠的终端上底色被
+	 * 丢弃（fg≈底色 → 不可见）。反色是核心 ANSI：终端交换 fg/bg 渲染
+	 * ——能力级最差也有「默认底上亮条」；且选中行整行铺反色空格作
+	 * 选中条（不只文字下方），任何终端都能一眼看到光标在哪。 */
+	tui_attr a_sel = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG,
+				      TUI_ST_BOLD | TUI_ST_INVERSE);
 	tui_attr a_err = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
 	tui_attr a_status = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
 
@@ -698,6 +712,16 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 					 it->text);
 			} else if (vi == ov->sel) {
 				a = a_sel;
+				/* P-42：整行反色条（文字前先铺满反色空格，
+				 * 列 [1, cols-1)——选中行不只文字高亮） */
+				{
+					int bx;
+
+					for (bx = 1; bx < cols - 1; bx++)
+						(void)tui_screen_put(s, row, bx,
+								     " ", 1,
+								     a_sel);
+				}
 				snprintf(line, sizeof(line), "▸ %s",
 					 it->text);
 			} else if (it->flags & TUI_OV_DIM) {

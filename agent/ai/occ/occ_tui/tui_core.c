@@ -67,7 +67,7 @@ int tui_attr_eq(const tui_attr *a, const tui_attr *b)
 	       a->style == b->style;
 }
 
-/* 样式位 → SGR 码（顺序固定：bold,dim,italic,underline） */
+/* 样式位 → SGR 码（顺序固定：bold,dim,italic,underline,inverse） */
 static const char *style_code(uint16_t bit)
 {
 	switch (bit) {
@@ -75,6 +75,7 @@ static const char *style_code(uint16_t bit)
 	case TUI_ST_DIM:       return "2";
 	case TUI_ST_ITALIC:    return "3";
 	case TUI_ST_UNDERLINE: return "4";
+	case TUI_ST_INVERSE:   return "7";
 	default:               return NULL;
 	}
 }
@@ -122,7 +123,7 @@ size_t tui_sgr_transition(const tui_attr *cur, const tui_attr *want,
 		/* 有样式位要清：先 ESC[0 再按 want 重建（fg/bg 复位后只需
 		 * 补 indexed 色；default 色复位后已是默认，无需再发） */
 		snprintf(parts[np++], 16, "0");
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < 5; i++) {
 			bits = (uint16_t)(1u << i);
 			if (want->style & bits) {
 				const char *c = style_code(bits);
@@ -136,7 +137,7 @@ size_t tui_sgr_transition(const tui_attr *cur, const tui_attr *want,
 			np = add_bg_part(parts, np, want->bg);
 	} else {
 		/* 无清除：只发增量（新增样式位 + 变化的 fg/bg） */
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < 5; i++) {
 			bits = (uint16_t)(1u << i);
 			if ((want->style & bits) && !(cur->style & bits)) {
 				const char *c = style_code(bits);

@@ -39,18 +39,23 @@ int main(void)
 	char err[256];
 	const char *p;
 
-	/* ---- 出厂缺省（= c2 常量） ---- */
+	/* ---- 出厂缺省（= c2 常量；T1-10 精修后值——BG/MUTED/BORDER/
+	 * USER_BG/ASSIST_BG/LINK 六槽更新，其余不动） ---- */
 	tui_thm_reset();
 	OK(tui_thm_color(TUI_THM_FG) == 252, "def-fg");
-	OK(tui_thm_color(TUI_THM_BG) == 235, "def-bg");
-	OK(tui_thm_color(TUI_THM_MUTED) == 242, "def-muted");
+	OK(tui_thm_color(TUI_THM_BG) == 234, "def-bg");
+	OK(tui_thm_color(TUI_THM_MUTED) == 241, "def-muted");
 	OK(tui_thm_color(TUI_THM_ACCENT) == 81, "def-accent");
 	OK(tui_thm_color(TUI_THM_ERROR) == 203, "def-error");
 	OK(tui_thm_color(TUI_THM_WARN) == 214, "def-warn");
 	OK(tui_thm_color(TUI_THM_CODE_FG) == 186, "def-code-fg");
-	OK(tui_thm_color(TUI_THM_LINK) == 75, "def-link");
+	OK(tui_thm_color(TUI_THM_LINK) == 81, "def-link");
 	OK(tui_thm_color(TUI_THM_CACHE) == 140, "def-cache");
 	OK(tui_thm_color(999) == 252, "def-oob-slot-safe");
+	/* T1-10：精修六槽全量钉死（防后续漂移无声回归） */
+	OK(tui_thm_color(TUI_THM_BORDER) == 237, "def-border");
+	OK(tui_thm_color(TUI_THM_USER_BG) == 235, "def-user-bg");
+	OK(tui_thm_color(TUI_THM_ASSIST_BG) == 233, "def-assist-bg");
 
 	/* ---- 槽位名表 ---- */
 	OK(tui_thm_slot_by_name("fg") == TUI_THM_FG, "name-fg");
@@ -76,7 +81,7 @@ int main(void)
 	OK(tui_thm_color(TUI_THM_FG) == 100, "good-fg");
 	OK(tui_thm_color(TUI_THM_ACCENT) == 196, "good-accent");
 	OK(tui_thm_color(TUI_THM_BG) == 20, "good-bg");
-	OK(tui_thm_color(TUI_THM_MUTED) == 242, "good-unspecified-kept");
+	OK(tui_thm_color(TUI_THM_MUTED) == 241, "good-unspecified-kept");
 	unlink(p);
 
 	/* ---- 坏文件：整文件拒绝、调色板保持加载前状态 ---- */

@@ -43,6 +43,9 @@ typedef struct {
 #define TUI_ST_DIM       0x0002u
 #define TUI_ST_ITALIC    0x0004u
 #define TUI_ST_UNDERLINE 0x0008u
+#define TUI_ST_INVERSE   0x0010u	/* P-42：SGR 7 反色——fbterm 等
+					 * 256 色背景不可靠终端上仍确定
+					 * 可见的选中态原语 */
 
 typedef struct {
 	tui_color fg, bg;

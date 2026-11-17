@@ -135,6 +135,32 @@ static void test_sgr(void)
 		n = tui_sgr_transition(&d, &all, buf, sizeof(buf));
 		ok_sgr("sgr-all-styles", n, buf, "\x1b[1;2;3;4m", 10);
 	}
+
+	/* P-42：SGR 7 反色——默认→粗+反色（增量：1,7）；反色→纯默认
+	 * （有清除走 ESC[0）；粗+反 → 反（清粗重建）；五样式位全开 */
+	{
+		tui_attr bi = tui_attr_default();
+		tui_attr iv = tui_attr_default();
+
+		bi.style = TUI_ST_BOLD | TUI_ST_INVERSE;
+		iv.style = TUI_ST_INVERSE;
+		n = tui_sgr_transition(&d, &bi, buf, sizeof(buf));
+		ok_sgr("sgr-default-to-bold-inverse", n, buf, "\x1b[1;7m", 6);
+		n = tui_sgr_transition(&iv, &d, buf, sizeof(buf));
+		ok_sgr("sgr-inverse-to-default", n, buf, "\x1b[0m", 4);
+		n = tui_sgr_transition(&bi, &iv, buf, sizeof(buf));
+		ok_sgr("sgr-bold-inverse-to-inverse", n, buf, "\x1b[0;7m", 6);
+		iv.fg = tui_color_idx(81);
+		n = tui_sgr_transition(&d, &iv, buf, sizeof(buf));
+		ok_sgr("sgr-default-to-inverse-fg", n, buf,
+		       "\x1b[7;38;5;81m", 12);
+		iv.fg = tui_color_default();
+		iv.style = TUI_ST_BOLD | TUI_ST_DIM | TUI_ST_ITALIC |
+			   TUI_ST_UNDERLINE | TUI_ST_INVERSE;
+		n = tui_sgr_transition(&d, &iv, buf, sizeof(buf));
+		ok_sgr("sgr-all-styles-inverse", n, buf,
+		       "\x1b[1;2;3;4;7m", 12);
+	}
 }
 
 /* ---- 屏幕缓冲结构断言 ---- */

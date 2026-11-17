@@ -255,6 +255,65 @@ int main(void)
 		tui_screen_destroy(s);
 	}
 
+	/* ---- P-42：NOSEL 不可选行（dim 提示）——初始选择跳过落在首个
+	 * 可选条目、导航/家端跳过、提交拒绝越位；选中行整行反色条
+	 * （首格 attr 含 TUI_ST_INVERSE——fbterm 下确定可见） ---- */
+	{
+		tui_ov_item n4[4];
+
+		memset(n4, 0, sizeof(n4));
+		snprintf(n4[0].text, sizeof(n4[0].text),
+			 "catalog 快照未配置，仅显示已配置模型");
+		n4[0].flags = TUI_OV_DIM | TUI_OV_NOSEL;
+		snprintf(n4[1].text, sizeof(n4[1].text), "alpha");
+		snprintf(n4[2].text, sizeof(n4[2].text), "Group");
+		n4[2].flags = TUI_OV_HEADER;
+		snprintf(n4[3].text, sizeof(n4[3].text), "beta");
+		OK(tui_overlay_set_list(ov, 7, "models", n4, 4, 1,
+					"Enter=go") == 0, "p42-set-list");
+		/* 初始光标=首个可选（NOSEL 提示行与分组头都跳过） */
+		OK(tui_overlay_sel(ov) == 1, "p42-sel-skips-nosel");
+		OK(tui_overlay_count_selectable(ov) == 2,
+		   "p42-count-selectable");
+		OK(tui_overlay_submit_idx(ov) == 1, "p42-submit-first-real");
+		OK(tui_overlay_nav(ov, 1) == TUI_OVA_HANDLED &&
+		   tui_overlay_sel(ov) == 3, "p42-nav-skips-header");
+		OK(tui_overlay_nav(ov, -1) == TUI_OVA_HANDLED &&
+		   tui_overlay_sel(ov) == 1, "p42-nav-back-skips-nosel");
+		OK(tui_overlay_home(ov) == TUI_OVA_HANDLED &&
+		   tui_overlay_sel(ov) == 1, "p42-home-skips-nosel");
+		OK(tui_overlay_end(ov) == TUI_OVA_HANDLED &&
+		   tui_overlay_sel(ov) == 3, "p42-end");
+		/* 过滤只命中 NOSEL 行 → 无可选（sel=-1，回车拒绝） */
+		OK(tui_overlay_type(ov, "cat", 3) == TUI_OVA_HANDLED,
+		   "p42-type-query");
+		OK(tui_overlay_sel(ov) == -1, "p42-only-nosel-hit");
+		OK(tui_overlay_submit_idx(ov) == -1, "p42-only-nosel-submit");
+		while (tui_overlay_query(ov)[0])
+			(void)tui_overlay_backspace(ov);
+		/* 渲染：提示行 dim 常规形态 + 选中行 ▸ 文本 + 整行反色条
+		 *（可过滤列表 body 从第 2 行起：NOSEL=2 行、选中=3 行） */
+		s = tui_screen_create(24, 80);
+		OK(s != NULL, "p42-screen");
+		tui_overlay_render(ov, s, &cr, &cc);
+		dump_screen(s, dump, sizeof(dump));
+		OK(strstr(dump, "快照未配置") != NULL, "p42-render-note-dim");
+		OK(strstr(dump, "▸ alpha") != NULL, "p42-render-selected");
+		{
+			/* col 1=▸ 标记、col 2=整行条空格——都须带 INVERSE */
+			tui_cell *mk = tui_screen_at(s, 3, 1);
+			tui_cell *bar = tui_screen_at(s, 3, 2);
+
+			OK(mk && mk->len == 3 &&
+			   (mk->attr.style & TUI_ST_INVERSE) != 0,
+			   "p42-sel-marker-inverse");
+			OK(bar && bar->len == 1 && bar->utf8[0] == ' ' &&
+			   (bar->attr.style & TUI_ST_INVERSE) != 0,
+			   "p42-sel-row-inverse-bar");
+		}
+		tui_screen_destroy(s);
+	}
+
 	/* ---- 关闭 ---- */
 	tui_overlay_clear(ov);
 	OK(!tui_overlay_active(ov), "cleared");

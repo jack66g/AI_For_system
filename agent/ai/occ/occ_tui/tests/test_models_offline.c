@@ -13,7 +13,11 @@
  *   3. 浮层内 dim 提示行（「快照未配置」）——不是 chat notice 退出；
  *   4. 浮层停留窗内进程存活（自退=1s 内退出/回主界面帧）；
  *   5. Esc 关浮层回主界面 → /exit 干净收口（子 rc=0/71）；
- *   6. 全流零「注册表为空」（旧空数据即关文案不复现）。
+ *   6. 全流零「注册表为空」（旧空数据即关文案不复现）；
+ *   7. P-42：浮层打开即选中首个可选条目——首回车直接切换成功
+ *      （「model → cloud/glm-p35」notice），且全流零「该条目不可用」
+ *      （旧：初始光标停 dim 提示行，首回车必报）；选中行反色序列
+ *      （SGR 7 + accent 前景）进字节流（fbterm 高亮可见性的字节证据）。
  * 前置：../occ 已构建；未构建诚实 skip（exit 0）。
  */
 #define _XOPEN_SOURCE 700
@@ -263,7 +267,20 @@ int main(void)
 	OK(find_bytes(out, have, "注册表为空") == NULL,
 	   "no-registry-empty-notice");
 
-	/* 7. Esc 关浮层（单字节孤立——25ms 结算窗）→ /exit 干净收口 */
+	/* 7. P-42：打开即选中首个可选条目——首回车直接切换（成功 notice
+	 *    字节）；零「该条目不可用」（旧症状：光标停 dim 提示行）；
+	 *    选中行 SGR 7 反色 + accent 前景序列在流（fbterm 可见性证据） */
+	if (write(pt.master, "\r", 1) < 0)
+		printf("FAIL write enter (errno=%d)\n", errno);
+	OK(read_until_contains(pt.master, out, OUT_CAP, &have,
+			       "model → cloud/glm-p35", 15000) == 0,
+	   "p42-enter-switches-model");
+	OK(find_bytes(out, have, "该条目不可用") == NULL,
+	   "p42-no-unavailable-status");
+	OK(find_bytes(out, have, "7;38;5;81m") != NULL,
+	   "p42-inverse-sgr-bytes");
+
+	/* 8. Esc 关浮层（单字节孤立——25ms 结算窗）→ /exit 干净收口 */
 	if (write(pt.master, "\x1b", 1) >= 0) {
 		usleep(100000);
 		if (write(pt.master, "/exit\r", 6) >= 0)
