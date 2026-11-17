@@ -41,8 +41,9 @@ typedef struct tui_view tui_view;
  * E 渲染形态（一行流 footer）：`[ctrl+b] 会话 · model · N% ·
  * ↑in ↓out ccr · cwd`（· dim、↑ 绿/↓ 正常/c 紫槽、水位按 tier 着色；
  * 会话名不出现在 footer）。
- * est=1 → 百分比前缀 `~`；fallback=1 → 模型名后缀 `*`
- *（catalog 未命中语义与旧 meta 行一致——进屏 notice 注明口径不变）。
+ * est=1 → 百分比前缀 `~`；fallback=1 → 百分比后缀 `*`
+ *（P-45 从模型名后缀挪来——模型段含 /su 档标（… · 特权*），两星同形
+ * 相叠曾致「特权*」假提权观感；catalog 未命中语义不变）。
  */
 struct tui_footer {
 	char model[64];		/* 模型 id（如 glm-5.3） */
@@ -52,7 +53,7 @@ struct tui_footer {
 	long long cache_read;	/* c cache read tokens */
 	int pct;		/* 上下文占用 %（tui_usage_pct；<0 未知） */
 	int est;		/* 1=估算（~ 前缀） */
-	int fallback;		/* 1=catalog 未命中（* 后缀） */
+	int fallback;		/* 1=catalog 未命中（百分比段 * 后缀） */
 };
 
 /*
@@ -189,8 +190,10 @@ int tui_view_open_input(tui_view *v, int ov_id, const char *title,
 			const char *prompt, const char *initial, int mask);
 /* 关闭覆盖层 */
 void tui_view_close_overlay(tui_view *v);
-/* 框内状态行（向导「验证中…」/错误；msg=NULL 清除） */
-void tui_view_overlay_status(tui_view *v, const char *msg, int is_err);
+	/* 框内状态行（向导「验证中…」/错误；msg=NULL 清除） */
+	void tui_view_overlay_status(tui_view *v, const char *msg, int is_err);
+	/* P-45：清空输入覆盖层当前文本（面板保留——错密码重输防残留拼接） */
+	void tui_view_overlay_clear_input(tui_view *v);
 /* 覆盖层是否打开 */
 int tui_view_overlay_open(const tui_view *v);
 /* E8：覆盖层 ov_id（未开=0）——occ.c 轮询刷新只认自己的面板 */

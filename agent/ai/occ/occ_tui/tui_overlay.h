@@ -99,6 +99,8 @@ int tui_overlay_backspace(tui_overlay *ov);
 int tui_overlay_type(tui_overlay *ov, const char *utf8, size_t len);
 /* Enter：返回原始 items 下标；-1=无可选 */
 int tui_overlay_submit_idx(const tui_overlay *ov);
+/* P-45：清空输入态当前文本（面板保留；提交被拒后调用防错文残留） */
+void tui_overlay_clear_input(tui_overlay *ov);
 
 /* 框内状态行（向导步骤消息/错误；msg=NULL 清除） */
 void tui_overlay_status(tui_overlay *ov, const char *msg, int is_err);

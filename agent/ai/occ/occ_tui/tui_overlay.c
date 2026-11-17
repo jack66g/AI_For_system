@@ -281,6 +281,16 @@ int tui_overlay_set_input(tui_overlay *ov, int ov_id, const char *title,
 	return 0;
 }
 
+/* P-45：清空输入态当前文本（面板保留）——/su 密码错后旧文本残留，
+ * 重输拼在错密码尾部必然再错（真机 P-45 复盘）；提交被拒即清。 */
+void tui_overlay_clear_input(tui_overlay *ov)
+{
+	if (!ov || !ov->is_input)
+		return;
+	ov->text[0] = '\0';
+	ov->tlen = 0;
+}
+
 /* ---- 观察口 ---- */
 
 int tui_overlay_active(const tui_overlay *ov)

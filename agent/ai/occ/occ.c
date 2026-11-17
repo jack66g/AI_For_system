@@ -3106,17 +3106,16 @@ static int tui_app_on_command(void *ud, const char *line)
 		return cmd_sessions_overlay(a);
 	if (!strcmp(line, "/tasks"))		/* E8：任务面板（ORCH §7） */
 		return cmd_tasks_overlay(a);
-	/* O-10（UX-O §3）：/su gate 密码提权（/su 0 回落；/exit 注销同效） */
+	/* O-10（UX-O §3）：/su gate 密码提权（/su 0 回落；/exit 注销同效）
+	 * P-45：「已特权」只看会话提权态 su.elevated（唯一事实源；密码
+	 * 验证成功才置 1）——不再掺策略基础档 g_w2.tier：base=privileged
+	 * 部署下旧判定把未提权会话也当「已是特权档」，/su 永不弹密码框、
+	 * /su 0 永不回落（真机 P-45 实证①②③）。 */
 	if (!strcmp(line, "/su")) {
 		long long now = (long long)tui_now_ms();
 
 		if (a->su.elevated) {
 			tui_view_notice(a->view, "已在特权档（/su 0 回落）");
-			return 0;
-		}
-		if (!g_w2_ready || g_w2.tier == OCC_W2_TIER_PRIVILEGED) {
-			tui_view_notice(a->view,
-					"当前已是特权档（无需 /su）");
 			return 0;
 		}
 		if (now < a->su.cooldown_until) {
@@ -3141,7 +3140,14 @@ static int tui_app_on_command(void *ud, const char *line)
 		if (g_w2_ready)
 			g_w2.tier = g_w2_base_tier;
 		pthread_mutex_unlock(&a->mu);
-		tui_view_notice(a->view, "已回落基础档位");
+		(void)ai_policy_audit(getuid(),
+				      ai_policy_mode_for_uid(getuid()),
+				      "su", "delevate", "ok");
+		tui_view_notice(a->view,
+				(g_w2_ready &&
+				 g_w2_base_tier == OCC_W2_TIER_PRIVILEGED) ?
+				"已回落基础档位（策略基础档=特权）" :
+				"已回落基础档位");
 		return 0;
 	}
 	if (!strcmp(line, "/status")) {
@@ -3562,16 +3568,23 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		      tui_gate_verify(text, hash));
 		if (!ok) {
 			a->su.fails++;
+			/* P-45：错密码必须 audit 记账（fail；×3 连冷却也记）*/
+			(void)ai_policy_audit(getuid(),
+					      ai_policy_mode_for_uid(getuid()),
+					      "su", "elevate", "fail");
 			if (a->su.fails >= 3) {
 				a->su.fails = 0;
 				a->su.cooldown_until = now + 10000;
 				pthread_mutex_unlock(&a->mu);
+				tui_view_overlay_clear_input(a->view);
 				tui_view_overlay_status(a->view,
 							 "密码错误×3——10 秒冷却",
 							 1);
 				return 0;
 			}
 			pthread_mutex_unlock(&a->mu);
+			/* P-45：清空已拒文本——残留拼接会让重输必错 */
+			tui_view_overlay_clear_input(a->view);
 			tui_view_overlay_status(a->view, "密码错误", 1);
 			return 0;
 		}
@@ -3580,6 +3593,10 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		if (g_w2_ready)
 			g_w2.tier = OCC_W2_TIER_PRIVILEGED;
 		pthread_mutex_unlock(&a->mu);
+		/* P-45：提权成功同源记账（ok）——降权后重提权全链路可审计 */
+		(void)ai_policy_audit(getuid(),
+				      ai_policy_mode_for_uid(getuid()),
+				      "su", "elevate", "ok");
 		tui_view_close_overlay(a->view);
 		tui_view_notice(a->view,
 				"已提权至特权档（/su 0 回落 · /exit 注销同效）");
@@ -3843,12 +3860,16 @@ static void tui_app_fill_usage(void *ud, struct tui_footer *out)
 	{
 		const char *tier_s = "受限";
 
+		/* P-45：档标以会话提权态优先（特权*=唯一提权标记；星位
+		 * 独占——ctx fallback 星已挪往水位段，不再拼档标后）；
+		 * g_w2_ready=0（未初始化）安全兜底「受限」而非旧判特权 */
 		if (a->su.elevated)
 			tier_s = "特权*";
-		else if (!g_w2_ready ||
+		else if (g_w2_ready &&
 			 g_w2.tier == OCC_W2_TIER_PRIVILEGED)
 			tier_s = "特权";
-		else if (g_w2.tier == OCC_W2_TIER_CONFIRMED)
+		else if (g_w2_ready &&
+			 g_w2.tier == OCC_W2_TIER_CONFIRMED)
 			tier_s = "确认";
 		snprintf(out->model, sizeof(out->model), "%.44s · %s",
 			 a->p.model, tier_s);

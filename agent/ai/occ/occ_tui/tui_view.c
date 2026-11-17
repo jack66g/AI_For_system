@@ -1375,15 +1375,19 @@ static void tv_render(tui_view *v, uint64_t now)
 
 		memset(&f, 0, sizeof(f));
 		v->hooks.fill_usage(v->hooks.ud, &f);
-		snprintf(modelb, sizeof(modelb), "%s%s", f.model,
-			 f.fallback ? "*" : "");
+		/* P-45：ctx fallback 星挪水位段尾（~42%*）——模型段含
+		 * 档标（… · 特权*），旧位置两星同形相叠致「特权*」假
+		 * 提权观感（真机 P-45 实证①）；水位段无 pct 时随降级
+		 * 丢弃（cwd→tokens→水位递减序不变）。 */
+		snprintf(modelb, sizeof(modelb), "%s", f.model);
 		tui_usage_fmt(f.in > 0 ? f.in : 0, sin, sizeof(sin));
 		tui_usage_fmt(f.out > 0 ? f.out : 0, sout, sizeof(sout));
 		tui_usage_fmt(f.cache_read > 0 ? f.cache_read : 0, scr,
 			      sizeof(scr));
 		if (f.pct >= 0)
-			snprintf(pctb, sizeof(pctb), "%s%d%%",
-				 f.est ? "~" : "", f.pct);
+			snprintf(pctb, sizeof(pctb), "%s%d%%%s",
+				 f.est ? "~" : "", f.pct,
+				 f.fallback ? "*" : "");
 		else
 			pctb[0] = '\0';
 		snprintf(tokb, sizeof(tokb), "↑%s "
@@ -1844,6 +1848,15 @@ void tui_view_overlay_status(tui_view *v, const char *msg, int is_err)
 	if (!v)
 		return;
 	tui_overlay_status(v->ov, msg, is_err);
+	v->dirty_needed = 1;
+}
+
+/* P-45：清空输入覆盖层当前文本（面板保留——/su 错密码后防残留拼接） */
+void tui_view_overlay_clear_input(tui_view *v)
+{
+	if (!v)
+		return;
+	tui_overlay_clear_input(v->ov);
 	v->dirty_needed = 1;
 }
 

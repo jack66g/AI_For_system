@@ -1342,20 +1342,22 @@ int main(void)
 		   "KT3-no-pop-bytes");
 	}
 
-	/* ---- N. E 新布局：框线面板/一行 footer/水印/busy ----
-	 * MOCK_NEWUI=1 → mock 接 fill_topbar+fill_usage（E 忽略 fill_topbar：
-	 * 顶栏退役——会话名→侧栏、模型→footer，信息一职一地）。断言 E 视觉
-	 * 元素全进 pty 字节流：上框/输入框单线框（┌┐└┘）、footer
-	 * `[ctrl+b] 会话 · model* · 12% · ↑12.3k ↓351 c1.6k · mockrepo`
-	 * （· 分隔）、空态水印、busy 水印（正在思考… Esc 中断）、
-	 * ▌你 / ◆ occ 块头。 */
-	{
-		const char *needles[] = {
-			"┌",		/* 上框顶角（E 单线框） */
-			"mock-model*",		/* footer 模型+* 兜底 */
-			"[ctrl+b]",		/* footer 键位提示 */
-			"───",	/* 框线横线（旧顶栏填充线对齐到框线） */
-			"12%",			/* 水位数字 */
+		/* ---- N. E 新布局：框线面板/一行 footer/水印/busy ----
+		 * MOCK_NEWUI=1 → mock 接 fill_topbar+fill_usage（E 忽略 fill_topbar：
+		 * 顶栏退役——会话名→侧栏、模型→footer，信息一职一地）。断言 E 视觉
+		 * 元素全进 pty 字节流：上框/输入框单线框（┌┐└┘）、footer
+		 * `[ctrl+b] 会话 · model · 12%* · ↑12.3k ↓351 c1.6k · mockrepo`
+		 * （· 分隔；P-45 后 ctx fallback 星在水位段尾——模型段含 /su
+		 * 档标，两星同形相叠曾致「特权*」假提权观感）、空态水印、
+		 * busy 水印（正在思考… Esc 中断）、▌你 / ◆ occ 块头。 */
+		{
+			const char *needles[] = {
+				"┌",		/* 上框顶角（E 单线框） */
+				"mock-model",		/* footer 模型段（P-45 无尾星） */
+				"12%*",			/* 水位段尾 * 兜底（P-45 挪位） */
+				"[ctrl+b]",		/* footer 键位提示 */
+				"───",	/* 框线横线（旧顶栏填充线对齐到框线） */
+				"12%",			/* 水位数字 */
 			"↑12.3k",	/* ↑12.3k */
 			"c1.6k",		/* c cache 段（旧 ⟳ 对齐） */
 			"输入消息",		/* 空态水印 */
@@ -1368,7 +1370,7 @@ int main(void)
 		char esc = 0x1b;
 
 		setenv("MOCK_NEWUI", "1", 1);
-		rc = run_scenario(keys, sizeof(keys) - 1, needles, 12, 9,
+		rc = run_scenario(keys, sizeof(keys) - 1, needles, 13, 9,
 				  &esc, 1, -1, NULL, 0,
 				  "/exit\r", 6, out, &out_len, 1 /* slow */);
 		OK(rc == 0, "N-newui-all-elements");

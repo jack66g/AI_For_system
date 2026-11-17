@@ -32,7 +32,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_overlay.c tests/test_usage.c \
 	     tests/test_gate.c tests/test_gate_pty.c \
      tests/test_rename_ai.c tests/test_history_load.c \
-     tests/test_models_offline.c
+     tests/test_models_offline.c tests/test_su_pty.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
