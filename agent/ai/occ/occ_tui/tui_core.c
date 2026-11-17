@@ -846,6 +846,14 @@ int tui_renderer_heartbeat(tui_renderer *r)
 	return tui_sink_drain(&r->sink);
 }
 
+void tui_out_fatal_kill_parent(void)
+{
+	/* 头注见 tui_core.h：仅 FBTERM 链（aik-console fb 分支 env）且
+	 * 仅致命收口单点调用；getenv 判空即 serial/ssh 零动作 */
+	if (getenv("FBTERM"))
+		(void)kill(getppid(), SIGTERM);
+}
+
 /* ================= 滚动视口原语（scrollback 环） ================= */
 
 void tui_sb_init(tui_scrollback *sb, int cap, int view_rows)

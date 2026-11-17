@@ -1791,6 +1791,13 @@ int tui_view_run(tui_view *v)
 	if (v->mouse_on)
 		(void)tui_mouse_enable(&v->term, 0);
 	tui_term_leave(&v->term);
+	/* P-41/P-44d：致命自退（72）单点击毙楔死的 fbterm 父进程——
+	 * 时机选「收口链后、return 前」而非 stderr 行后即杀：单点恰一次
+	 * （多处调用有 ppid 复用误杀风险），且 stderr 本就落 aik-console
+	 * .err 文件（不经 pty）——日志交付与击毙顺序无耦合；收口链
+	 * 在粘性 wd 下按设计全非阻塞，毫秒级延迟可忽略 */
+	if (wd_exit)
+		tui_out_fatal_kill_parent();
 	return wd_exit;		/* 72=输出看门狗/IO 自退；0=正常退出 */
 }
 

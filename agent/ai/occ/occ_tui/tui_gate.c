@@ -315,6 +315,9 @@ static void gate_sink_fatal(tui_renderer *ren, int frc)
 		fprintf(stderr,
 			"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
 	tui_renderer_destroy(ren);
+	/* P-41/P-44d：exit 前击毙楔死的 fbterm 父进程（单点、恰一次；
+	 * 时机取舍同 tui_view_run 收口——人话行已落 stderr 文件） */
+	tui_out_fatal_kill_parent();
 	exit(72);
 }
 

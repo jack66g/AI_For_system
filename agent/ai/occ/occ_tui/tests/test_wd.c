@@ -17,6 +17,10 @@
  *      HB=300/WD=800 → 第二拍 bulk 顶满 EAGAIN→wd→view 子进程
  *      rc=72，检出 <2.5s；D2 同参数 master 持续读 → 不误报（存活
  *      ≥2s 后 /exit 正常 rc=0）。
+ *   E. 击毙父进程（P-44d）：假 fbterm 中间层（FBTERM=1 树内设置）+
+ *      楔死 → 中间层被 SIGTERM 信号死（真楔死 fbterm 不随 pty 关闭
+ *      退出——occ 主动击毙+退出码出带外 143）；无 FBTERM 对照 →
+ *      ppid 不被击毙（门卫精确）。
  */
 #define _XOPEN_SOURCE 700	/* posix_openpt 三件套（照 test_pty 口径） */
 #define _DEFAULT_SOURCE 1
@@ -621,6 +625,93 @@ static void detect_scenario(void)
 	OK(rc == 0, "D2-healthy-no-false-positive");
 }
 
+/* ---- E. P-41/P-44d 击毙父进程（假 fbterm 中间层）----
+ * E1. FBTERM=1：楔死（D1 手法：master 不读）自退时，view 子进程在
+ *     致命收口击毙 ppid（中间层=假 fbterm）——SIGTERM 信号死。
+ * E2. 无 FBTERM：同场景 ppid 不被击毙——中间层正常收尸退出，退出码
+ *     透传子进程的 72（非信号死）= 门卫 env 精确生效。 */
+static int fbterm_kill_run(int set_fbterm, int *mid_info)
+{
+	struct pty pt;
+	pid_t mid, gch;
+	int st = 0;
+	struct winsize ws = { .ws_row = 24, .ws_col = 80 };
+
+	*mid_info = 0;
+	if (pty_open(&pt) != 0)
+		return -1;
+	(void)ioctl(pt.slave, TIOCSWINSZ, &ws);
+	mid = fork();
+	if (mid < 0) {
+		pty_close(&pt);
+		return -1;
+	}
+	if (mid == 0) {
+		/* 假 fbterm 中间层：FBTERM 门卫 env 只在本树内设置
+		 * （测试进程自身不设——别把 pty 测试本体击毙） */
+		if (set_fbterm)
+			setenv("FBTERM", "1", 1);
+		gch = fork();
+		if (gch == 0) {
+			close(pt.master);
+			if (setsid() < 0)
+				_exit(40);
+			if (ioctl(pt.slave, TIOCSCTTY, 0) < 0)
+				_exit(41);
+			if (dup2(pt.slave, STDIN_FILENO) < 0 ||
+			    dup2(pt.slave, STDOUT_FILENO) < 0 ||
+			    dup2(pt.slave, STDERR_FILENO) < 0)
+				_exit(42);
+			if (pt.slave > STDERR_FILENO)
+				close(pt.slave);
+			setenv("OCC_TUI_HB_MS", "300", 1);
+			setenv("OCC_TUI_WD_MS", "800", 1);
+			_exit(view_child_main());
+		}
+		close(pt.master);
+		close(pt.slave);
+		if (waitpid(gch, &st, 0) < 0)
+			st = 0;
+		_exit(WIFEXITED(st) ? WEXITSTATUS(st) : 255);
+	}
+	close(pt.slave);
+	pt.slave = -1;
+	/* master 不读=楔死消费端；等中间层结局 ≤5s（检出 ≈1.1-2.3s） */
+	{
+		int w;
+
+		for (w = 0; w < 50; w++) {
+			if (waitpid(mid, &st, WNOHANG) == mid)
+				break;
+			usleep(100000);
+		}
+		if (w == 50) {
+			kill(mid, SIGKILL);
+			waitpid(mid, &st, 0);
+			pty_close(&pt);
+			return -1;		/* 超时未结 */
+		}
+	}
+	pty_close(&pt);
+	if (WIFSIGNALED(st)) {
+		*mid_info = WTERMSIG(st);
+		return 1;			/* 被信号击毙 */
+	}
+	*mid_info = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	return 0;				/* 正常退出 */
+}
+
+static void fbterm_kill_scenario(void)
+{
+	int how, info;
+
+	how = fbterm_kill_run(1, &info);
+	OK(how == 1 && info == SIGTERM, "E1-fbterm-killed-sigterm");
+
+	how = fbterm_kill_run(0, &info);
+	OK(how == 0 && info == 72, "E2-no-fbterm-ppid-spared");
+}
+
 int main(void)
 {
 	static char out_old[WD_OUT_CAP], out_new[WD_OUT_CAP];
@@ -663,6 +754,12 @@ int main(void)
 
 	/* ---- D. 楔死真检出（pty 对，P-44c 核心）---- */
 	detect_scenario();
+
+	/* ---- E. 击毙父进程（假 fbterm 中间层，P-44d）---- */
+	/* 门卫：测试进程不得带 FBTERM（E 场景只在子树内显式设置）——
+	 * 防本测试的 pty 子进程致命自退时把测试本体击毙 */
+	unsetenv("FBTERM");
+	fbterm_kill_scenario();
 
 	printf("test_wd: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;

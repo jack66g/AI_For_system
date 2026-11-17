@@ -225,6 +225,20 @@ int tui_renderer_flush(tui_renderer *r, int cur_row, int cur_col);
 					 * 必须整除 3（块内全是三字节
 					 * 重复，无填充尾巴） */
 int tui_renderer_heartbeat(tui_renderer *r);
+/*
+ * P-41/P-44d 输出致命自退前击毙父进程（真楔死 fbterm 卡在 evdev
+ * 循环不读 pty：occ 退出关 slave 它也看不到 EOF——aik-console 的
+ * wait 永挂、链条不自愈）。双重目的：
+ *   ① 强制楔死消费端退出（fbterm 死 → pty 释放 → aik-console 重启
+ *      整链）；
+ *   ② 退出码出带外传递：fbterm 转手吞退出码（occ exit(72) → fbterm
+ *      以 0 退出——P-47「/exit rc=0 非 71」谜底）；击毙后 shell 报
+ *      143 = aik-console v7 的 occ-wd 线索位。
+ * 门卫：FBTERM env 只在 aik-console 的 fb 分支设置（serial/ssh 场景
+ * 无此 env → 不误杀 sshd/shell）；只在 wd/IO 致命收口调用（单点、
+ * 恰一次——多处调用有 ppid 复用误杀风险），正常退出零动作。
+ */
+void tui_out_fatal_kill_parent(void);
 
 /* ---- 滚动视口原语（scrollback 环 + 视口 + follow-latest） ----
  * 行=cell 数组（列下标==列）；环按 push 挤出最旧行（dropped 计数）。
