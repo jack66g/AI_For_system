@@ -35,6 +35,11 @@
 #   aik-upgrade export <tar路径> [--no-sme]
 #   aik-upgrade import <tar路径> [--no-sme]
 #   aik-upgrade grubenv get|set|del|dump [args]
+#   aik-upgrade install userland <pkg.tar.gz>   # W-7 用户态散件安装通道
+#       （包由 build/w7_userland_pkg.sh 产出：manifest.tsv + files/ 树；
+#         逐件 sha256 fail-closed，备份/原子替换/失败自动回滚；
+#         AIK_UPGRADE_ROOT 环境变量可作全路径沙箱前缀，缺省 /）
+#   aik-upgrade userland-rollback               # 恢复最近一次 userland 备份
 #
 # 红线：本脚本不改 grub.cfg（W28 一次性改造除外，已备份 .bak-w28）；
 #       nft/sshd/主控 SSH 通道不动；root:root 0755。
@@ -46,6 +51,12 @@ set -euo pipefail
 GRUBENV=/boot/grub/grubenv
 SLOT_STATE=/boot/aik-slot-state
 AUDIT_LOG=/var/log/aik-upgrade.log
+# W-7：用户态通道根前缀（缺省 /，不改变任何既有行为；台架沙箱传入如
+# /tmp/w7-sbx 后，userland 全部路径操作与审计日志都落在前缀下）。
+AIK_UPGRADE_ROOT="${AIK_UPGRADE_ROOT:-/}"
+if [ "$AIK_UPGRADE_ROOT" != "/" ]; then
+    AUDIT_LOG="${AIK_UPGRADE_ROOT%/}/var/log/aik-upgrade.log"
+fi
 TRY_KERNEL=/boot/vmlinuz-aikernel-next
 # T9e 口径（LT-BUG-007）：出厂主入口 = /usr/local/bin/occ；aikernel-shell
 # 与 /usr/local/bin/ai 已随出厂移除。保留 SHELL_* 变量名以兼容既有子命令/
@@ -500,6 +511,19 @@ cmd_status() {
     else
         echo "running: STABLE slot"
     fi
+    echo
+    echo "=== userland (W-7) ==="
+    local ust_f ust upieces ures ubak
+    ust_f="$(ul_path "$USERLAND_STATE")"
+    if [ -f "$ust_f" ]; then
+        ust="$(userland_state_get last_ts || true)"
+        upieces="$(userland_state_get last_pieces || true)"
+        ures="$(userland_state_get last_result || true)"
+        ubak="$(find "$(ul_path "$USERLAND_BACKUP_BASE")" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l || true)"
+        echo "last install: ts=${ust:-?} pieces=${upieces:-?} result=${ures:-?} backups=$ubak"
+    else
+        echo "last install: (none)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -579,8 +603,358 @@ cmd_import() {
 }
 
 # ---------------------------------------------------------------------------
+# install userland（W-7：用户态散件安装通道）
+# ---------------------------------------------------------------------------
+# 包格式（build/w7_userland_pkg.sh 产出）：tar.gz 内含
+#   manifest.tsv  每行 = sha256 \t mode \t owner:group \t type(f|l) \t path
+#   files/<path>  与 manifest 逐行对应；type=l 时 files 内是软链目标文本
+# 纪律（P-49 fail-closed 同款）：逐件 sha256 校验全过才动手，任何不匹配/
+# 缺件/多件在改动前拒收（零改动）；动手后备份现件（含 ABSENT 墓碑与
+# 删除记录）→ 逐件 .new+原子 mv → 装后复验 → 任一步失败自动回滚本次
+# 全部件，不留半装状态。全程审计行落 $AUDIT_LOG。
+USERLAND_BACKUP_BASE=/var/lib/aikernel/userland-backups
+USERLAND_STATE=/var/lib/aikernel/userland-state
+USERLAND_STAGE=""
+# 包内件禁入领地：/boot 归 install kernel/commit 槽机制管，/proc /sys /dev
+# 是伪文件系统；备份目录与状态文件自身也不许被包覆盖（自噬防护）。
+USERLAND_FORBIDDEN='/proc /sys /dev /boot /var/lib/aikernel/userland-backups /var/lib/aikernel/userland-state'
+
+ul_path() {
+    # ul_path <绝对路径>：加 AIK_UPGRADE_ROOT 前缀后的实际路径
+    printf '%s%s' "${AIK_UPGRADE_ROOT%/}" "$1"
+}
+
+userland_state_get() {
+    local key="$1" line f
+    f="$(ul_path "$USERLAND_STATE")"
+    [ -f "$f" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            '#'*)	;;
+            "$key="*)	printf '%s\n' "${line#*=}"; return 0 ;;
+        esac
+    done < "$f"
+    return 1
+}
+
+userland_state_set() {
+    # userland_state_set key=value...（整文件 kv 增量重写，slot_set 同款语义：
+    # 先把现值拷进累积临时文件，逐 key 在临时文件上重写，最后一次性落盘）
+    local f kv k v line found tmp
+    f="$(ul_path "$USERLAND_STATE")"
+    mkdir -p "$(dirname "$f")"
+    touch "$f"
+    tmp="$(mktemp "${f}.new.XXXXXX")"
+    cp "$f" "$tmp"
+    for kv in "$@"; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        found=0
+        while IFS= read -r line; do
+            if [ "${line%%=*}" = "$k" ] && [ -n "$k" ]; then
+                printf '%s=%s\n' "$k" "$v"
+                found=1
+            else
+                printf '%s\n' "$line"
+            fi
+        done < "$tmp" > "${tmp}.out"
+        [ "$found" = 1 ] || printf '%s=%s\n' "$k" "$v" >> "${tmp}.out"
+        cat "${tmp}.out" > "$tmp"; rm -f "${tmp}.out"
+    done
+    cat "$tmp" > "$f"; rm -f "$tmp"
+}
+
+userland_load_manifest() {
+    # $1=staging 根：校验 manifest 合规模 + files/ 树逐件在位，装载全局
+    # M_SHA/M_MODE/M_OG/M_TYPE/M_PATH 数组；任何问题 die（调用点保证零改动）
+    local stage="$1" line sha mode og type path zone n=0 dups extra bad
+    M_SHA=(); M_MODE=(); M_OG=(); M_TYPE=(); M_PATH=()
+    [ -s "$stage/manifest.tsv" ] || die "package manifest.tsv missing or empty"
+    while IFS=$'\t' read -r sha mode og type path || [ -n "${sha:-}" ]; do
+        n=$((n + 1))
+        # read 已按 \t 切列：path 内再出现 \t 说明列数 >5
+        case "$path" in *$'\t'*)	die "manifest line $n: more than 5 columns" ;; esac
+        case "${sha:-}" in *[!0-9a-f]*|'')	die "manifest line $n: bad sha256 '$sha'" ;; esac
+        [ "${#sha}" = 64 ] || die "manifest line $n: sha256 not 64 hex chars"
+        case "$mode" in *[!0-7]*|'')	die "manifest line $n: bad mode '$mode'" ;; esac
+        case "${#mode}" in 3|4)	;; *) die "manifest line $n: mode '$mode' not 3-4 octal digits" ;; esac
+        case "$og" in ''|*[!A-Za-z0-9._:-]*|':'*|*':')	die "manifest line $n: bad owner:group '$og'" ;; esac
+        case "$og" in *:*)	;; *) die "manifest line $n: owner:group missing colon" ;; esac
+        case "$type" in f|l)	;; *) die "manifest line $n: bad type '$type' (want f|l)" ;; esac
+        case "$path" in /*)	;; *)	die "manifest line $n: path '$path' not absolute" ;; esac
+        case "$path" in *..*|*' '*|*$'\t'*)	die "manifest line $n: unsafe path '$path'" ;; esac
+        for zone in $USERLAND_FORBIDDEN; do
+            case "$path" in
+                "$zone"|"$zone"/*)	die "manifest line $n: path '$path' in forbidden zone $zone" ;;
+            esac
+        done
+        [ -f "$stage/files$path" ] || die "manifest line $n: files$path missing from package"
+        M_SHA+=("$sha"); M_MODE+=("$mode"); M_OG+=("$og")
+        M_TYPE+=("$type"); M_PATH+=("$path")
+    done < "$stage/manifest.tsv"
+    [ "${#M_PATH[@]}" -gt 0 ] || die "package manifest empty"
+    dups="$(printf '%s\n' "${M_PATH[@]}" | sort | uniq -d)"
+    [ -z "$dups" ] || die "manifest duplicate paths: $(printf '%s ' $dups)"
+    # 多件拒收：files/ 树内非目录实体必须与 manifest 一一对应
+    bad="$(cd "$stage/files" && find . -mindepth 1 ! -type d ! -type f -print -quit || true)"
+    [ -z "$bad" ] || die "package files/ has non-regular entry: $bad (type=l 也要用文本文件承载)"
+    extra="$(cd "$stage/files" && find . -mindepth 1 ! -type d | sed 's|^\.||' | sort \
+             | comm -23 - <(printf '%s\n' "${M_PATH[@]}" | sort))"
+    [ -z "$extra" ] || die "package has files not in manifest: $(printf '%s ' $extra)"
+}
+
+userland_verify_pkg_files() {
+    # $1=staging 根：逐件 sha256 校验（type=l 校验目标文本），不匹配即 die
+    local stage="$1" i got
+    for i in "${!M_PATH[@]}"; do
+        got="$(sha256sum "$stage/files${M_PATH[$i]}" | awk '{print $1}')"
+        if [ "$got" != "${M_SHA[$i]}" ]; then
+            die "sha256 mismatch: ${M_PATH[$i]} (manifest=${M_SHA[$i]} package=$got) — package rejected, nothing touched"
+        fi
+    done
+}
+
+userland_cp_preserve() {
+    # userland_cp_preserve <src> <dst>：尽力保属性复制；内容为准（权限/属主
+    # 由 record 与显式 chmod/chown 兜底），三级降级避免非 root 下 -a 的
+    # 属主保真告警被 set -e 放大成假失败。
+    cp -a "$1" "$2" 2>/dev/null && return 0
+    cp -p "$1" "$2" 2>/dev/null && return 0
+    cp "$1" "$2" 2>/dev/null
+}
+
+userland_backup_current() {
+    # $1=备份目录：把每件现值（或 ABSENT 墓碑=删除记录）按原 path 落进备份；
+    # record.tsv 列 = op(backup|absent) type sha256 mode owner:group path。
+    # 失败返回 1（调用点清备份目录并 die，保证动手前零残留）。
+    local bak="$1" pkg="$2" i target op type sha mode og rc=0
+    mkdir -p "$bak"
+    : > "$bak/record.tsv"
+    : > "$bak/created-dirs.txt"
+    printf 'ts=%s\npieces=%d\npkg=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" "${#M_PATH[@]}" "$pkg" > "$bak/info"
+    for i in "${!M_PATH[@]}"; do
+        target="$(ul_path "${M_PATH[$i]}")"
+        if [ -L "$target" ]; then
+            op=backup; type=l
+            mkdir -p "$bak$(dirname "${M_PATH[$i]}")"
+            ln -s "$(readlink "$target")" "$bak${M_PATH[$i]}" || rc=1
+            sha="$(printf '%s' "$(readlink "$target")" | sha256sum | awk '{print $1}')"
+            mode="-"; og="-"
+        elif [ -d "$target" ]; then
+            log "ERROR: target ${M_PATH[$i]} is a directory — refusing"
+            return 1
+        elif [ -e "$target" ]; then
+            op=backup; type=f
+            mkdir -p "$bak$(dirname "${M_PATH[$i]}")"
+            userland_cp_preserve "$target" "$bak${M_PATH[$i]}" || rc=1
+            sha="$(sha256sum "$target" | awk '{print $1}')"
+            mode="$(stat -c%a "$target")"
+            og="$(stat -c%U:%G "$target")"
+        else
+            op=absent; type="-"; sha="-"; mode="-"; og="-"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$op" "$type" "$sha" "$mode" "$og" "${M_PATH[$i]}" >> "$bak/record.tsv"
+    done
+    [ "$rc" = 0 ]
+}
+
+userland_chown() {
+    # userland_chown <file> <owner:group> <what> [link]：属主保真。root 下
+    # chown 失败/校验不过即失败；沙箱非 root 降级为 WARN（审计在调用点）。
+    local f="$1" og="$2" what="$3" islink="${4:-}" want got
+    [ "$og" = "-" ] && return 0
+    if [ "$(id -u)" = 0 ]; then
+        if [ "$islink" = link ]; then chown -h "$og" "$f"; else chown "$og" "$f"; fi
+        got="$(stat -c%U:%G "$f")"
+        [ "$got" = "$og" ] || { log "ERROR: owner mismatch for $what (want $og got $got)"; return 1; }
+    else
+        if [ "$islink" = link ]; then chown -h "$og" "$f" 2>/dev/null; else chown "$og" "$f" 2>/dev/null; fi \
+            || log "WARN: sandbox non-root, owner left native for $what (want $og)"
+    fi
+    return 0
+}
+
+userland_install_one() {
+    # $1=staging 根 $2=数组下标 $3=created-dirs 记录文件：先落 .new 再原子
+    # mv；软链经临时链接名 mv -T 替换；返回非 0 = 本件失败（调用点回滚）
+    local stage="$1" i="$2" cdf="$3"
+    local path="${M_PATH[$i]}" mode="${M_MODE[$i]}" og="${M_OG[$i]}" type="${M_TYPE[$i]}" sha="${M_SHA[$i]}"
+    local target d tmp got linkto
+    target="$(ul_path "$path")"
+    # 记录缺失父目录（回滚时按深度逆序 rmdir），再 mkdir -p
+    d="$(dirname "$path")"
+    while [ "$d" != "/" ] && [ ! -d "$(ul_path "$d")" ]; do
+        printf '%s\n' "$d" >> "$cdf"
+        d="${d%/*}"
+        [ -z "$d" ] && d="/"
+    done
+    mkdir -p "$(ul_path "$(dirname "$path")")" || return 1
+    if [ "$type" = l ]; then
+        linkto="$(cat "$stage/files$path")"
+        case "$linkto" in *$'\n'*|'')	return 1 ;; esac
+        tmp="$(dirname "$target")/.userland-ln.$$"
+        rm -f "$tmp"
+        ln -s "$linkto" "$tmp" || return 1
+        mv -Tf "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+        got="$(printf '%s' "$(readlink "$target")" | sha256sum | awk '{print $1}')"
+        [ "$got" = "$sha" ] || return 1
+        userland_chown "$target" "$og" "$path" link || return 1
+    else
+        tmp="${target}.new.$$"
+        rm -f "$tmp"
+        install -m "$mode" "$stage/files$path" "$tmp" || { rm -f "$tmp"; return 1; }
+        got="$(sha256sum "$tmp" | awk '{print $1}')"
+        [ "$got" = "$sha" ] || { rm -f "$tmp"; return 1; }
+        mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+        userland_chown "$target" "$og" "$path" || return 1
+    fi
+    return 0
+}
+
+userland_verify_installed() {
+    # $1=数组下标：装后复验单件（类型/sha/权限）
+    local i="$1" target want got
+    target="$(ul_path "${M_PATH[$i]}")"
+    if [ "${M_TYPE[$i]}" = l ]; then
+        [ -L "$target" ] || return 1
+        got="$(printf '%s' "$(readlink "$target")" | sha256sum | awk '{print $1}')"
+        [ "$got" = "${M_SHA[$i]}" ] || return 1
+        return 0
+    fi
+    { [ -f "$target" ] && [ ! -L "$target" ]; } || return 1
+    got="$(sha256sum "$target" | awk '{print $1}')"
+    [ "$got" = "${M_SHA[$i]}" ] || return 1
+    want="$(printf '%o' "$((8#${M_MODE[$i]}))")"
+    [ "$(stat -c%a "$target")" = "$want" ] || return 1
+    return 0
+}
+
+userland_restore_backup() {
+    # $1=备份目录 $2=用途标记（manual/auto）：按 record.tsv 逆序逐件还原
+    # （absent 墓碑 = 删除）+ 按深度逆序清理本次新建父目录，全部还原校验
+    # 通过才删备份目录；校验不过保留备份供人工处置（绝不销毁回滚凭据）。
+    local bak="$1" note="${2:-restore}" op type sha mode og path target lt rc=0 pieces
+    [ -f "$bak/record.tsv" ] || die "userland-rollback: no record.tsv in $bak"
+    pieces="$(grep -c . "$bak/record.tsv" || true)"
+    while IFS=$'\t' read -r op type sha mode og path; do
+        [ -n "${op:-}" ] || continue
+        target="$(ul_path "$path")"
+        case "$op" in
+            backup)
+                mkdir -p "$(ul_path "$(dirname "$path")")"
+                rm -f "$target"
+                if [ "$type" = l ]; then
+                    lt="$(readlink "$bak$path" 2>/dev/null)" || { log "ERROR: backup link unreadable $path"; rc=1; continue; }
+                    ln -s "$lt" "$target" || { log "ERROR: link restore failed $path"; rc=1; continue; }
+                    [ "$(printf '%s' "$(readlink "$target")" | sha256sum | awk '{print $1}')" = "$sha" ] \
+                        || { log "ERROR: restored link drift $path"; rc=1; }
+                else
+                    userland_cp_preserve "$bak$path" "$target" || { log "ERROR: restore failed $path"; rc=1; continue; }
+                    [ "$(sha256sum "$target" | awk '{print $1}')" = "$sha" ] \
+                        || { log "ERROR: restored file sha mismatch $path"; rc=1; }
+                    chmod "$mode" "$target" 2>/dev/null || true
+                fi
+                if [ "$(id -u)" = 0 ] && [ "$og" != "-" ]; then
+                    if [ "$type" = l ]; then chown -h "$og" "$target"; else chown "$og" "$target"; fi 2>/dev/null || true
+                fi
+                ;;
+            absent)
+                rm -f "$target" || { log "ERROR: cannot remove $path"; rc=1; }
+                ;;
+        esac
+    done < <(tac "$bak/record.tsv")
+    if [ "$rc" != 0 ]; then
+        audit "userland-rollback" "phase=fail note=$note bak=$bak kept-for-manual-recovery"
+        die "userland rollback verification failed — backup kept at $bak for manual recovery"
+    fi
+    # 只删空目录：本次新建的父目录按深度逆序 rmdir，非空/复删静默放过
+    if [ -f "$bak/created-dirs.txt" ]; then
+        awk -F/ '{print NF, $0}' "$bak/created-dirs.txt" | sort -rn | cut -d' ' -f2- \
+            | while IFS= read -r d; do rmdir "$(ul_path "$d")" 2>/dev/null || true; done
+    fi
+    rm -rf "$bak"
+    log "userland restore done ($note): $pieces pieces, backup $bak released"
+    return 0
+}
+
+cmd_install_userland() {
+    local pkg="${1:-}"
+    [ -n "$pkg" ] || die "usage: aik-upgrade install userland <pkg.tar.gz>"
+    [ -f "$pkg" ] || die "no such package: $pkg"
+    case "$pkg" in /*)	;; *)	pkg="$PWD/$pkg" ;; esac
+    local pkg_md5 stage bad n ts bak i
+    pkg_md5="$(md5sum "$pkg" | awk '{print $1}')"
+
+    stage="$(mktemp -d /tmp/aik-userland.XXXXXX)"
+    USERLAND_STAGE="$stage"
+    trap 'rm -rf "${USERLAND_STAGE:-}" 2>/dev/null || true' EXIT
+    # 解包安全门：成员只准 manifest.tsv 或 files/ 前缀（挡绝对路径/../ 夹带）
+    bad="$(tar -tzf "$pkg" 2>/dev/null | grep -vE '^(manifest\.tsv|files/)' || true)"
+    [ -z "$bad" ] || { rm -rf "$stage"; USERLAND_STAGE=""; trap - EXIT
+        die "package contains foreign members (only manifest.tsv + files/ allowed): $bad"; }
+    tar -xzf "$pkg" -C "$stage" 2>/dev/null || { rm -rf "$stage"; USERLAND_STAGE=""; trap - EXIT
+        die "package extract failed (not a valid tar.gz?)"; }
+    userland_load_manifest "$stage"       # 模板/缺件/多件/禁区 → die（零改动）
+    userland_verify_pkg_files "$stage"    # 逐件 sha256 → die（零改动）
+    n="${#M_PATH[@]}"
+
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    bak="$(ul_path "$USERLAND_BACKUP_BASE")/$ts"
+    [ -d "$bak" ] && bak="${bak}-$$"
+    audit "install-userland" "phase=begin pkg=$(basename "$pkg") md5=$pkg_md5 pieces=$n bak=$(basename "$bak")"
+    if ! userland_backup_current "$bak" "$pkg"; then
+        rm -rf "$bak"
+        audit "install-userland" "phase=fail note=backup-phase pkg=$(basename "$pkg")"
+        die "backup phase failed — nothing installed, aborted before any change"
+    fi
+
+    for i in "${!M_PATH[@]}"; do
+        if userland_install_one "$stage" "$i" "$bak/created-dirs.txt"; then
+            audit "install-userland" "phase=ok piece=${M_PATH[$i]} sha=${M_SHA[$i]:0:12}"
+        else
+            audit "install-userland" "phase=fail piece=${M_PATH[$i]}"
+            userland_restore_backup "$bak" "auto-after-install-failure"
+            audit "install-userland" "phase=rollback reason=install-failure pieces=$n"
+            userland_state_set last_ts="$ts" last_pieces="$n" last_result=failed-rolled-back \
+                     last_pkg="$(basename "$pkg")"
+            die "install userland failed at ${M_PATH[$i]} — all $n pieces rolled back"
+        fi
+    done
+    for i in "${!M_PATH[@]}"; do
+        if ! userland_verify_installed "$i"; then
+            audit "install-userland" "phase=fail note=post-verify piece=${M_PATH[$i]}"
+            userland_restore_backup "$bak" "auto-after-postverify-failure"
+            audit "install-userland" "phase=rollback reason=post-verify-failure pieces=$n"
+            userland_state_set last_ts="$ts" last_pieces="$n" last_result=failed-rolled-back \
+                     last_pkg="$(basename "$pkg")"
+            die "post-install verify failed at ${M_PATH[$i]} — all $n pieces rolled back"
+        fi
+    done
+    rm -rf "$stage"; USERLAND_STAGE=""; trap - EXIT
+    userland_state_set last_ts="$ts" last_pieces="$n" last_result=ok \
+             last_pkg="$(basename "$pkg")" last_pkg_md5="$pkg_md5"
+    audit "install-userland" "phase=done pieces=$n bak=$(basename "$bak") result=ok"
+    log "userland: $n pieces installed ok (backup $(basename "$bak")); undo with: aik-upgrade userland-rollback"
+}
+
+cmd_userland_rollback() {
+    local base bak ts
+    base="$(ul_path "$USERLAND_BACKUP_BASE")"
+    [ -d "$base" ] || die "no userland backups under $base (nothing to roll back)"
+    bak="$(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | head -1)"
+    [ -n "$bak" ] || die "no userland backups under $base (nothing to roll back)"
+    bak="$base/$bak"
+    ts="$(basename "$bak")"
+    audit "userland-rollback" "phase=begin bak=$ts"
+    userland_restore_backup "$bak" "manual"
+    userland_state_set last_result=rolled-back rolled_back_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    audit "userland-rollback" "phase=done bak=$ts"
+    log "userland rollback done: restored backup $ts"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 usage() {
-    sed -n '2,40p' "$0" | grep -E '^#( |$)' | sed 's/^# \{0,1\}//'
+    sed -n '2,45p' "$0" | grep -E '^#( |$)' | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -593,12 +967,14 @@ main() {
                 case "$what" in
                     kernel)	cmd_install_kernel "$@" ;;
                     shell)	cmd_install_shell "$@" ;;
+                    userland)	cmd_install_userland "$@" ;;
                     *)		usage ;;
                 esac ;;
         boot)		cmd_boot "$@" ;;
         commit)		cmd_commit "$@" ;;
         auto-commit)	cmd_auto_commit ;;
         rollback)	cmd_rollback "$@" ;;
+        userland-rollback)	cmd_userland_rollback "$@" ;;
         healthcheck)	cmd_healthcheck ;;
         export)		cmd_export "$@" ;;
         import)		cmd_import "$@" ;;
