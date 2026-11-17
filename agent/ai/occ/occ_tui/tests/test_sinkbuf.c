@@ -46,7 +46,8 @@ static uint64_t now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-/* 从 fd 收满 want 字节（超时 -1）——drain 后读回对拍用 */
+/* 从 fd 收满 want 字节（超时 -1）——drain 后读回对拍用。纪律：poll
+ * 无 POLLIN 绝不 read（阻塞 fd 上无数据 read 死等——test_wd 实证） */
 static int read_exact(int fd, char *buf, size_t want, int timeout_ms)
 {
 	size_t have = 0;
@@ -63,6 +64,11 @@ static int read_exact(int fd, char *buf, size_t want, int timeout_ms)
 			if (errno == EINTR)
 				continue;
 			return -1;
+		}
+		if (!(p.revents & POLLIN)) {
+			if (now_ms() - t0 > (uint64_t)timeout_ms)
+				return -1;
+			continue;
 		}
 		n = read(fd, buf + have, want - have);
 		if (n > 0) {
@@ -431,6 +437,112 @@ static void test_env_semantics(void)
 	unsetenv("OCC_TUI_WD_MS");
 }
 
+/* ---- 10. P-41/P-44b 心跳探针（tui_sink_probe / tui_renderer_probe） ---- */
+static void test_probe(void)
+{
+	tui_sink s;
+	FILE *tf;
+	char big[65536];
+	char got[32];
+
+	/* a) 健康 fd：一次 probe=恰好一次 write、字节序精确（tmpfile——
+	 * 普通文件永不 EAGAIN，drain 一次 write 排空） */
+	unsetenv("OCC_TUI_WD_MS");
+	tf = tmpfile();
+	OK(tf != NULL, "pr-tmpfile");
+	if (tf) {
+		int fd = fileno(tf);
+
+		OK(tui_sink_init_fd_buf(&s, fd) == 0, "pr-init");
+		OK(tui_sink_probe(&s, "\x1b[4;4H", 6) == 0, "pr-healthy-0");
+		OK(s.stats_writes == 1, "pr-exactly-one-write");
+		OK(s.stats_drains == 1, "pr-one-drain");
+		OK(s.blen == 0, "pr-buf-empty-after");
+		OK(lseek(fd, 0, SEEK_SET) == 0 &&
+		   read_exact(fd, got, 6, 2000) == 0 &&
+		   memcmp(got, "\x1b[4;4H", 6) == 0, "pr-bytes-exact");
+		tui_sink_set_blocking(&s);
+		tui_sink_fini(&s);
+		fclose(tf);
+	}
+
+	/* b) renderer 级：探针=CUP 回 renderer 跟踪的当前光标位——
+	 * flush(3,3) 后跟踪位 (3,3)，探针字节恰为 ESC[4;4H；全流=
+	 * 帧（行0 P + 尾光标 CUP）+ 探针 CUP，逐字节对拍（探针同位
+	 * =零视觉影响的合同面） */
+	tf = tmpfile();
+	OK(tf != NULL, "prr-tmpfile");
+	if (tf) {
+		int fd = fileno(tf);
+		tui_renderer *r;
+		static const char exp[] =
+			"\x1b[1;1HP"		/* 行0：CUP+P */
+			"\x1b[4;4H"		/* flush 尾光标 CUP */
+			"\x1b[4;4H";		/* 探针 CUP（同位=零视觉） */
+		size_t want = sizeof(exp) - 1;
+		char g[32];
+
+		OK(tui_sink_init_fd_buf(&s, fd) == 0, "prr-init");
+		r = tui_renderer_create(4, 8, s);
+		OK(r != NULL, "prr-ren");
+		tui_screen_puts(tui_renderer_front(r), 0, 0, "P",
+				tui_attr_default());
+		OK(tui_renderer_flush(r, 3, 3) == 1, "prr-flush-1row");
+		OK(tui_renderer_probe(r) == 0, "prr-probe-0");
+		OK(lseek(fd, 0, SEEK_SET) == 0, "prr-seek");
+		OK(read_exact(fd, g, want, 2000) == 0 &&
+		   memcmp(g, exp, want) == 0, "prr-bytes-golden");
+		tui_sink_set_blocking(&r->sink);
+		tui_renderer_destroy(r);
+		fclose(tf);
+	}
+
+	/* c) 满 pipe + 小 wd：probe → -2、wd_fired 置位、缓冲已丢；粘性后
+	 * probe 不再发字节（stats 冻结、blen 恒 0、立返） */
+	setenv("OCC_TUI_WD_MS", "300", 1);
+	{
+		int pfd[2];
+
+		OK(pipe(pfd) == 0, "prw-pipe");
+		OK(tui_sink_init_fd_buf(&s, pfd[1]) == 0, "prw-init");
+		while (write(pfd[1], big, sizeof(big)) > 0)
+			;
+		OK(tui_sink_probe(&s, "\x1b[4;4H", 6) == -2, "prw-probe-neg2");
+		OK(s.wd_fired == 1, "prw-fired");
+		OK(s.blen == 0, "prw-buf-discarded");
+		{
+			long w0 = s.stats_writes, d0 = s.stats_drains;
+			uint64_t t0 = now_ms();
+
+			OK(tui_sink_probe(&s, "\x1b[9;9H", 6) == -2,
+			   "prw-sticky-neg2");
+			OK(s.stats_writes == w0 && s.stats_drains == d0,
+			   "prw-sticky-no-send");
+			OK(s.blen == 0, "prw-sticky-empty");
+			OK(now_ms() - t0 < 200, "prw-sticky-fast");
+		}
+		tui_sink_set_blocking(&s);
+		tui_sink_fini(&s);
+		close(pfd[0]);
+		close(pfd[1]);
+	}
+	unsetenv("OCC_TUI_WD_MS");
+
+	/* d) 直写模式合同：无看门狗（旧语义）——probe 直写返 0 */
+	{
+		int pfd[2];
+
+		OK(pipe(pfd) == 0, "prd-pipe");
+		tui_sink_init_fd(&s, pfd[1]);
+		OK(tui_sink_probe(&s, "\x1b[2;2H", 6) == 0, "prd-direct-0");
+		OK(read_exact(pfd[0], got, 6, 2000) == 0 &&
+		   memcmp(got, "\x1b[2;2H", 6) == 0, "prd-bytes-exact");
+		tui_sink_fini(&s);
+		close(pfd[0]);
+		close(pfd[1]);
+	}
+}
+
 int main(void)
 {
 	test_append_order();
@@ -443,6 +555,7 @@ int main(void)
 	test_overflow();
 	test_renderer_wd();
 	test_env_semantics();
+	test_probe();
 	printf("test_sinkbuf: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
 }

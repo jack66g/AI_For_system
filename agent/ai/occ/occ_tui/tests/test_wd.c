@@ -15,6 +15,7 @@
 #define _DEFAULT_SOURCE 1
 
 #include "tui_core.h"
+#include "tui_view.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -85,7 +86,9 @@ static uint64_t wd_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-/* 从 master 收集输出：EOF（子进程退出）返回 1；静默 quiet_ms 返回 0 */
+/* 从 master 收集输出：EOF（子进程退出）返回 1；静默 quiet_ms 返回 0。
+ * 纪律：poll 无 POLLIN 绝不 read——阻塞 ptmx 上无数据 read 会死等
+ * （心跳静默窗实证：父进程卡死=整套件挂起）。 */
 static int collect(int fd, char *buf, int cap, int *have, int quiet_ms)
 {
 	uint64_t last = wd_now_ms();
@@ -102,6 +105,11 @@ static int collect(int fd, char *buf, int cap, int *have, int quiet_ms)
 				continue;
 			return -1;
 		}
+		if (!(p.revents & POLLIN)) {
+			if (wd_now_ms() - last > (uint64_t)quiet_ms)
+				return 0;	/* 静默：先行返回（等收尸定论） */
+			continue;
+		}
 		n = read(fd, buf + *have, (size_t)(cap - *have));
 		if (n > 0) {
 			*have += (int)n;
@@ -113,7 +121,7 @@ static int collect(int fd, char *buf, int cap, int *have, int quiet_ms)
 		if (errno != EINTR && errno != EAGAIN)
 			return -1;
 		if (wd_now_ms() - last > (uint64_t)quiet_ms)
-			return 0;		/* 静默：先行返回（等收尸定论） */
+			return 0;
 		if (*have >= cap)
 			return 0;
 	}
@@ -240,6 +248,204 @@ static int run_child(int buffered, char *out, int *out_len)
 	return WEXITSTATUS(st);
 }
 
+/* ---- C. P-41/P-44b 空闲心跳（view 级 pty）---- */
+
+/* 有界收集：dur_ms 内持续读（不看静默——心跳场景要按窗取字节）；
+ * 同 collect 纪律：poll 无 POLLIN 绝不 read（防阻塞 ptmx 死等） */
+static void collect_for(int fd, char *buf, int cap, int *have, int dur_ms)
+{
+	uint64_t t0 = wd_now_ms();
+
+	while (wd_now_ms() - t0 < (uint64_t)dur_ms) {
+		struct pollfd p;
+		ssize_t n;
+
+		p.fd = fd;
+		p.events = POLLIN;
+		p.revents = 0;
+		if (poll(&p, 1, 100) < 0) {
+			if (errno == EINTR)
+				continue;
+			return;
+		}
+		if (!(p.revents & POLLIN))
+			continue;
+		n = read(fd, buf + *have, (size_t)(cap - *have));
+		if (n > 0) {
+			*have += (int)n;
+			continue;
+		}
+		if (n == 0 || errno == EIO)
+			return;		/* 子进程已退 */
+	}
+}
+
+/* 等子串出现（有界）——首帧就绪锚点用 */
+static int wait_tok(int fd, char *buf, int cap, int *have, const char *tok,
+		    int timeout_ms)
+{
+	uint64_t t0 = wd_now_ms();
+
+	while (wd_now_ms() - t0 < (uint64_t)timeout_ms) {
+		if (find_bytes(buf, *have, tok) != NULL)
+			return 0;
+		collect_for(fd, buf, cap, have, 200);
+	}
+	return find_bytes(buf, *have, tok) != NULL ? 0 : -1;
+}
+
+/* 校验字节段全是 CUP 序列（\x1b[<r>;<c>H 重复——探针零视觉合同） */
+static int is_cup_only(const char *p, int n)
+{
+	int i = 0;
+
+	while (i < n) {
+		int j = i;
+
+		if (p[j] != 0x1b || j + 1 >= n || p[j + 1] != '[')
+			return 0;
+		j += 2;
+		if (j >= n || p[j] < '0' || p[j] > '9')
+			return 0;
+		while (j < n && p[j] >= '0' && p[j] <= '9')
+			j++;
+		if (j >= n || p[j] != ';')
+			return 0;
+		j++;
+		if (j >= n || p[j] < '0' || p[j] > '9')
+			return 0;
+		while (j < n && p[j] >= '0' && p[j] <= '9')
+			j++;
+		if (j >= n || p[j] != 'H')
+			return 0;
+		j++;
+		i = j;
+	}
+	return i == n;
+}
+
+/* 裸 view 子进程：无 hooks（空态面板）——心跳逻辑与 hooks 无关 */
+static int view_child_main(void)
+{
+	tui_view *v = tui_view_create(NULL);
+	int rc;
+
+	if (!v)
+		return 10;
+	rc = tui_view_run(v);
+	tui_view_destroy(v);
+	return rc == 0 ? 0 : 11;
+}
+
+/*
+ * 单轮：spawn 裸 view 子进程（hb_env 非空则置 OCC_TUI_HB_MS）→ 等首帧
+ * → 快照 → 空闲 idle_ms 收集 → 校验增量（want_cup：应全为 CUP；否则
+ * 应为零）→ /exit → 等 leave → 返回子进程 rc（异常 -1）。*idle_delta
+ * 返回空闲增量长度。
+ */
+static int hb_run(const char *hb_env, int idle_ms, int want_cup,
+		  int *idle_delta)
+{
+	struct pty pt;
+	pid_t pid;
+	static char out[WD_OUT_CAP];
+	int have = 0, snap, st = 0;
+	struct winsize ws = { .ws_row = 24, .ws_col = 80 };
+
+	*idle_delta = -1;
+	if (pty_open(&pt) != 0)
+		return -1;
+	(void)ioctl(pt.slave, TIOCSWINSZ, &ws);
+	pid = fork();
+	if (pid < 0) {
+		pty_close(&pt);
+		return -1;
+	}
+	if (pid == 0) {
+		close(pt.master);
+		if (setsid() < 0)
+			_exit(30);
+		if (ioctl(pt.slave, TIOCSCTTY, 0) < 0)
+			_exit(31);
+		if (dup2(pt.slave, STDIN_FILENO) < 0 ||
+		    dup2(pt.slave, STDOUT_FILENO) < 0 ||
+		    dup2(pt.slave, STDERR_FILENO) < 0)
+			_exit(32);
+		if (pt.slave > STDERR_FILENO)
+			close(pt.slave);
+		if (hb_env)
+			setenv("OCC_TUI_HB_MS", hb_env, 1);
+		else
+			unsetenv("OCC_TUI_HB_MS");
+		_exit(view_child_main());
+	}
+	close(pt.slave);
+	pt.slave = -1;
+
+	/* 等首帧（空态面板标题）→ 稳定期（首帧批次可能部分写跨 poll 窗，
+	 * 等 600ms 静默确保帧完全落地再快照——空闲增量才纯净） */
+	if (wait_tok(pt.master, out, WD_OUT_CAP, &have,
+		     "AIKernel", 5000) != 0) {
+		kill(pid, SIGKILL);
+		waitpid(pid, &st, 0);
+		pty_close(&pt);
+		return -2;
+	}
+	collect_for(pt.master, out, WD_OUT_CAP, &have, 600);
+	snap = have;
+	collect_for(pt.master, out, WD_OUT_CAP, &have, idle_ms);
+	*idle_delta = have - snap;
+	/* 空闲增量校验：心跳开=纯 CUP（≥1 次探针 6 字节；节拍窗内通常
+	 * ≥2 次）；心跳关=零字节 */
+	if (want_cup)
+		OK(*idle_delta >= 6 && is_cup_only(out + snap, *idle_delta),
+		   "C1-idle-delta-cup-only");
+	else
+		OK(*idle_delta == 0, "C2-idle-zero-bytes");
+
+	/* /exit 正常退出（心跳不扰动正常收口） */
+	{
+		char ex[] = "/exit\r";
+
+		(void)!write(pt.master, ex, sizeof(ex) - 1);
+	}
+	{
+		int w;
+
+		for (w = 0; w < 60; w++) {
+			if (waitpid(pid, &st, WNOHANG) == pid)
+				break;
+			collect_for(pt.master, out, WD_OUT_CAP, &have, 150);
+		}
+		if (w == 60) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &st, 0);
+			pty_close(&pt);
+			return -1;
+		}
+	}
+	pty_close(&pt);
+	return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static void hb_scenario(void)
+{
+	int delta;
+	int rc;
+
+	/* C1. HB=1200、空闲 3s：探针到点注入（≥1 次、窗内通常 2-3 次），
+	 * 字节全 CUP（零视觉合同） */
+	rc = hb_run("1200", 3000, 1, &delta);
+	OK(rc == 0, "C1-hb-view-rc0");
+	OK(delta >= 6, "C1-hb-injected");
+
+	/* C2. HB=0（禁用）、同窗口：零注入=与无心跳实现输出流逐字节
+	 * 全等（回归门——空闲段字节一个不多） */
+	rc = hb_run("0", 3000, 0, &delta);
+	OK(rc == 0, "C2-hb-off-view-rc0");
+	OK(delta == 0, "C2-hb-off-zero-delta");
+}
+
 int main(void)
 {
 	static char out_old[WD_OUT_CAP], out_new[WD_OUT_CAP];
@@ -267,7 +473,7 @@ int main(void)
 	}
 
 	/* ---- B. wd 缺省（15000）+ 健康消费端：不误伤 ---- */
-	unsetenv("OCC_TUI_WD_MS");
+	unsetenv("OCC_TUI_HB_MS");
 	{
 		int have = 0;
 
@@ -276,6 +482,15 @@ int main(void)
 		OK(find_bytes(out_new, have, "WD-MARK") != NULL,
 		   "B-frame-content-visible");
 	}
+
+	/* ---- C. P-41/P-44b 空闲心跳（view 级 pty）----
+	 * 覆盖真空：wd 只能伴帧输出计时，空闲（零事件/零输出）窗口的
+	 * 楔死由心跳探针检出。断言对：
+	 *   C1. HB=1200 空闲 3s：注入字节全是 CUP（光标回原位=零视觉）
+	 *       且 ≥2 次（节拍到点）；/exit 正常退出 rc=0。
+	 *   C2. HB=0（禁用）同窗口：零注入——空闲段输出流与无心跳实现
+	 *       逐字节全等（回归门）。 */
+	hb_scenario();
 
 	printf("test_wd: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;

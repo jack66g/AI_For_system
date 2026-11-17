@@ -163,6 +163,14 @@ int tui_sink_drain(tui_sink *s);
 void tui_sink_set_blocking(tui_sink *s);
 /* 释放缓冲（幂等；tui_renderer_destroy 对自家 sink 调用） */
 void tui_sink_fini(tui_sink *s);
+/*
+ * P-41/P-44b 心跳探针：追加 data 进缓冲后立即 drain——一次「带字节的
+ * 消费端健康探测」（wd 只能伴帧输出计时；空闲零输出窗口的楔死由此
+ * 检出）。返回 drain 结果（0/-1/-2）。wd/ovf 已粘性时不再发字节（发
+ * 也到不了楔死端）而如实返回粘性码；直写模式无看门狗（旧语义）：fn
+ * 直写后返回 0。
+ */
+int tui_sink_probe(tui_sink *s, const char *data, size_t len);
 
 /* ---- 渲染器（front/back 双缓冲 + 脏行 diff + 光标跟踪） ---- */
 typedef struct tui_renderer {
@@ -195,6 +203,14 @@ void tui_renderer_clear(tui_renderer *r);
  * 退出自愈，见 tui_view_run/tui_gate）。
  */
 int tui_renderer_flush(tui_renderer *r, int cur_row, int cur_col);
+/*
+ * P-41/P-44b 渲染器级心跳探针：发「光标重定位到 renderer 跟踪的当前
+ * 位」的 CUP（零视觉影响——fbterm 只把光标放回原位）并立即 drain。
+ * 返回同 tui_sink_probe（0/-1/-2）。光标位未知（-1，仅首帧前理论可达）
+ * 回落 (1,1)。空闲心跳（tui_view/tui_gate，OCC_TUI_HB_MS）用此检测
+ * 「无帧可计时」窗口里的消费端楔死。
+ */
+int tui_renderer_probe(tui_renderer *r);
 
 /* ---- 滚动视口原语（scrollback 环 + 视口 + follow-latest） ----
  * 行=cell 数组（列下标==列）；环按 push 挤出最旧行（dropped 计数）。

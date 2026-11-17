@@ -1445,11 +1445,14 @@ int main(void)
 
 	/* ---- N3. T1 计时水印：等首 token 的静默窗口里主循环照常按帧刷
 	 * （回归：只按 dirty 算 poll 超时 → poll(-1) 睡死，spinner 冻帧、
-	 * 秒数不走）。MOCK_STALL=2.4s 静默 + 慢 turn。 ---- */
+	 * 秒数不走）。MOCK_STALL=2.4s 静默 + 慢 turn。
+	 * P-41/P-44b：本用例子进程寿命贴 5s 心跳窗——关心跳防探针 CUP
+	 * 混进字节流（心跳行为由 test_wd C 场景专测）。 ---- */
 	{
 		const char *needles[] = { "SLOWTEXT" };
 
 		setenv("MOCK_STALL", "1", 1);
+		setenv("OCC_TUI_HB_MS", "0", 1);
 		rc = run_scenario("x\r", 2, needles, 1, -1, NULL, 0,
 				  -1, NULL, 0, "/exit\r", 6, out, &out_len,
 				  1 /* slow */);
@@ -1463,6 +1466,7 @@ int main(void)
 			      "\xe2\x80\xa6 0s") != NULL,
 		   "N3-timer-watermark");
 		unsetenv("MOCK_STALL");
+		unsetenv("OCC_TUI_HB_MS");
 	}
 
 	/* ---- T2N. 长历史到顶增量加载：初始 22 条 + 「更早 8 条」→ Home

@@ -72,6 +72,8 @@ struct tui_view {
 	int leader_pending;		/* leader 键已按、等续键（2s 超时） */
 	uint64_t leader_deadline;
 	uint64_t next_tick;		/* E8：on_tick 到点（0=进屏即 tick 一次） */
+	int hb_ms;			/* P-41/P-44b：空闲心跳周期（0=禁用） */
+	uint64_t hb_next;		/* 下次心跳探针到点 */
 	int cursor_hidden;		/* 列表覆盖层隐藏光标（成对恢复） */
 	char init_notice[2][320];	/* theme/keymap 回落 notice（进屏后打） */
 	/* 事件环（worker post / 主循环 drain） */
@@ -1553,6 +1555,19 @@ static int tv_render(tui_view *v, uint64_t now)
 
 /* ---- 主循环 ---- */
 
+/* P-41/P-44：输出致命（flush -2/-1 或心跳探针 -2/-1）的人话日志行
+ * （fbterm 链上 stderr 落 aik-console.err）——wd 行带触发时限毫秒值 */
+static void tv_sink_fatal_msg(const tui_renderer *ren, int frc)
+{
+	if (frc == -2)
+		fprintf(stderr,
+			"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
+			ren->sink.wd_ms);
+	else
+		fprintf(stderr,
+			"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+}
+
 int tui_view_run(tui_view *v)
 {
 	int rc;
@@ -1589,6 +1604,21 @@ int tui_view_run(tui_view *v)
 	/* 权威副本=ren->sink（create 已修正 ctx 自指）；term 的光标/鼠标/
 	 * kitty 序列也走它——渲染过程中的序列与帧同批，不破坏帧原子性 */
 	v->term.bsink = &v->ren->sink;
+	/* P-41/P-44b：空闲心跳周期 env OCC_TUI_HB_MS（缺省 5000，0=禁用，
+	 * 钳位 [0,600000] 防误配抖动）——wd 只能伴帧输出计时，静止窗口
+	 * （chat 空闲无 busy 水印）零输出=楔死不可见；心跳探针补此真空 */
+	v->hb_ms = 5000;
+	{
+		const char *e = getenv("OCC_TUI_HB_MS");
+
+		if (e && e[0]) {
+			long hv = strtol(e, NULL, 10);
+
+			if (hv >= 0 && hv <= 600000)
+				v->hb_ms = (int)hv;
+		}
+	}
+	v->hb_next = tv_now_ms() + (uint64_t)v->hb_ms;
 	/* B5：能力诚实开鼠标（TERM 缺失/dumb → tui_mouse_enable -1 →
 	 * mouse_on=0，无假交互；/help 按此如实展示） */
 	v->mouse_on = (tui_mouse_enable(&v->term, 1) == 0);
@@ -1638,13 +1668,7 @@ int tui_view_run(tui_view *v)
 			 * 统一收口（join/复位/leave——leave 对楔死终端
 			 * 跳过恢复字节防挂死）。 */
 			if (frc == -2 || frc == -1) {
-				if (frc == -2)
-					fprintf(stderr,
-						"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
-						v->ren->sink.wd_ms);
-				else
-					fprintf(stderr,
-						"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+				tv_sink_fatal_msg(v->ren, frc);
 				wd_exit = 72;
 				break;
 			}
@@ -1686,6 +1710,34 @@ int tui_view_run(tui_view *v)
 					trem = 0x7fffffffu;
 				if (timeout < 0 || trem < (uint64_t)timeout)
 					timeout = (int)trem;
+			}
+		}
+		/* P-41/P-44b：空闲心跳——wd 只能伴帧输出计时，静止窗口
+		 * （无事件/无 busy 水印）零输出=楔死不可见。到期发渲染器
+		 * 探针（CUP 回当前光标位，零视觉）+立即 drain；-1/-2 走
+		 * 既有 72 自退路径。心跳自身不置 dirty、不重绘；poll 超时
+		 * 无条件并入「距下次心跳」——探针刚发过也要并入（否则
+		 * timeout 留 -1，空闲 poll(-1) 睡死到下个外部事件，心跳
+		 * 变一次性）。 */
+		if (v->hb_ms > 0) {
+			if (now >= v->hb_next) {
+				int prc = tui_renderer_probe(v->ren);
+
+				v->hb_next = now + (uint64_t)v->hb_ms;
+				if (prc == -2 || prc == -1) {
+					tv_sink_fatal_msg(v->ren, prc);
+					wd_exit = 72;
+					break;
+				}
+			}
+			{
+				uint64_t hrem = v->hb_next > now ?
+						v->hb_next - now : 0;
+
+				if (hrem > 0x7fffffffu)
+					hrem = 0x7fffffffu;
+				if (timeout < 0 || hrem < (uint64_t)timeout)
+					timeout = (int)hrem;
 			}
 		}
 

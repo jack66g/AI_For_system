@@ -624,6 +624,25 @@ void tui_sink_fini(tui_sink *s)
 	memset(s, 0, sizeof(*s));	/* 幂等：二次 fini/误用直写全安全 */
 }
 
+int tui_sink_probe(tui_sink *s, const char *data, size_t len)
+{
+	if (!s || !s->fn)
+		return -1;
+	if (!s->buf_mode) {
+		/* 直写模式无看门狗（旧语义）：直写后视为健康 */
+		s->fn(s->ctx, data, len);
+		return 0;
+	}
+	/* 粘性后不再发字节（楔死端收不到，发了也只是丢弃）；如实返回
+	 * 粘性码——调用方据此走 72 自愈，不产生第二次 drain 计时 */
+	if (s->ovf)
+		return -1;
+	if (s->wd_fired)
+		return -2;
+	s->fn(s->ctx, data, len);
+	return tui_sink_drain(s);
+}
+
 /* ================= 渲染器（front/back 双缓冲 + 脏行 diff） ================= */
 
 tui_renderer *tui_renderer_create(int rows, int cols, tui_sink sink)
@@ -789,6 +808,26 @@ int tui_renderer_flush(tui_renderer *r, int crow, int ccol)
 			return drc;
 	}
 	return redrawn;
+}
+
+int tui_renderer_probe(tui_renderer *r)
+{
+	char cup[32];
+	int row = 1, col = 1;		/* 光标位未知时的零视觉回落 (1,1) */
+	int n;
+
+	if (!r || !r->sink.fn)
+		return -1;
+	/* CUP 到 renderer 跟踪的当前光标位：终端只会把光标放回原位，
+	 * 画面零变化——这就是探针字节（「带字节的健康探测」） */
+	if (r->cur_row >= 0) {
+		row = r->cur_row + 1;
+		col = (r->cur_col >= 0 ? r->cur_col : 0) + 1;
+	}
+	n = snprintf(cup, sizeof(cup), "\x1b[%d;%dH", row, col);
+	if (n <= 0)
+		return -1;
+	return tui_sink_probe(&r->sink, cup, (size_t)n);
 }
 
 /* ================= 滚动视口原语（scrollback 环） ================= */

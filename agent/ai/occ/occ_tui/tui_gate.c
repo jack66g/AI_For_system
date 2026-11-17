@@ -330,6 +330,8 @@ static int gate_run_ui(int mode, int *unlocked)
 	int fails = 0;
 	char hash[128];
 	char login_note[160] = "";	/* 一次性状态（SETUP→LOGIN 切换说明） */
+	int hb_ms;			/* P-41/P-44b：空闲心跳周期（0=禁用） */
+	uint64_t hb_next;		/* 下次心跳探针到点 */
 	tui_attr title_a = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
 	tui_attr txt_a = tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0);
 	tui_attr mut_a = tui_thm_attr(TUI_THM_MUTED, TUI_THM_BG, 0);
@@ -377,11 +379,37 @@ static int gate_run_ui(int mode, int *unlocked)
 
 	memset(&f1, 0, sizeof(f1));
 	memset(&f2, 0, sizeof(f2));
+	/* P-41/P-44b：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
+	 * 计时（真机实测：静止 gate strace 12s 零 write）；时间基准每
+	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发渲染器
+	 * 探针（CUP 回当前光标位=零视觉）检测消费端。规格原文按
+	 * 「sleep(1)×5 次一跳」计数——本循环实为 ~30ms/迭代（输入泵
+	 * poll 30ms），计数会 150ms 一跳刷屏，按时间基准实现同一 5s
+	 * 语义（冷却内环 sleep(1) 同样覆盖）。 */
+	hb_ms = 5000;
+	{
+		const char *e = getenv("OCC_TUI_HB_MS");
+
+		if (e && e[0]) {
+			long hv = strtol(e, NULL, 10);
+
+			if (hv >= 0 && hv <= 600000)
+				hb_ms = (int)hv;
+		}
+	}
+	hb_next = gate_now_ms() + (uint64_t)hb_ms;
 	for (;;) {
 		int done = 0, quit = 0;
 		const char *status;
 		static char status_buf[160];
 
+		if (hb_ms > 0 && gate_now_ms() >= hb_next) {
+			int prc = tui_renderer_probe(ren);
+
+			hb_next = gate_now_ms() + (uint64_t)hb_ms;
+			if (prc == -2 || prc == -1)
+				gate_sink_fatal(ren, prc);
+		}
 		tui_screen_fill(s, tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0));
 		box_frame(s, rows, cols);
 		if (mode == GATE_MODE_SETUP) {
@@ -518,6 +546,17 @@ static int gate_run_ui(int mode, int *unlocked)
 							 cols / 2);
 				if (frc == -2 || frc == -1)
 					gate_sink_fatal(ren, frc);
+				/* P-41/P-44b：冷却 10s > 心跳 5s——内环同
+				 * 步探针，不留盲窗（帧每秒有输出，探针只
+				 * 是补 wd 计时锚点） */
+				if (hb_ms > 0 && gate_now_ms() >= hb_next) {
+					int prc = tui_renderer_probe(ren);
+
+					hb_next = gate_now_ms() +
+						  (uint64_t)hb_ms;
+					if (prc == -2 || prc == -1)
+						gate_sink_fatal(ren, prc);
+				}
 				sleep(1);
 				left--;
 			}
