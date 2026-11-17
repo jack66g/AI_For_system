@@ -15,6 +15,7 @@ log() { echo "$(date +%s) $*" >> /root/aik-console.log; }
 case "$TTY" in
   /dev/tty1|/dev/tty2|/dev/tty3)
     log "chain-start $TTY"
+    printf '\033[2J\033[H' # P-38: fbterm 接管前清屏，清历史残影（boot 输出/printk 残条）
     FBTERM_BIN=$(command -v fbterm 2>/dev/null)
     [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
     n=0
@@ -35,6 +36,7 @@ case "$TTY" in
   /dev/ttyS*)
     stty rows 24 cols 80 2>> /root/aik-console.err || true
     log "chain-start $TTY"
+    printf '\033[2J\033[H' # P-38: occ 接管前清屏，清历史残影
     n=0
     while :; do
       OCC_NETCFG_TOOLS=1 /usr/local/bin/occ 2>> /root/aik-console.err
