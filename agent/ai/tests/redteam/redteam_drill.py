@@ -12,6 +12,10 @@
 #      本 case 预期 FAIL（expected-fail pre-merge），规格写死不放宽。
 #   S5 快照篡改复现（S-FINDING-01 状态探针）
 #      —— 毒化 OCC_SNAPROOT 快照副本后 occ undo；两态皆可过。
+#   S5b ABSENT 墓碑投毒（P-49 状态探针）
+#      —— 新建文件的 .ABSENT 墓碑 append 毒字节（真机实证同款手法）
+#      后 occ undo：须拒收（failed 上报+校验失败人话）且目标文件
+#      保持写后内容（未被毒化动作影响=不遭删除）。
 #
 # 环境隔离：每场景 tempfile.mkdtemp 独立子目录，HOME/OCC_* 全指临时目录，
 # 绝不触碰真实 ~/.occ、~/.aikernel。occ 路径：env AIK_OCC_BIN → 脚本相对。
@@ -545,6 +549,62 @@ def s5_tamper(root, port):
            % (u.returncode, after, uerr[:300]))
 
 
+# ---------- S5b：ABSENT 墓碑投毒（P-49 状态探针） ----------
+
+def s5_absent_tamper(root, port):
+    wd = os.path.join(root, "s5_absent")
+    os.makedirs(wd)
+    stub = os.path.join(wd, "sb_ok.sh")
+    write_exec(stub, STUB_OK)
+    target = os.path.join(wd, "created.txt")
+    # 目标文件写前不存在 → 快照=ABSENT 墓碑（P-49 前零校验面：
+    # 墓碑被 append 毒字节后 undo 照单全收）。
+    mock_set([
+        ("tool", "write", {"path": target, "content": "NEW"}),
+        ("text", "新建完成"),
+    ])
+    e = base_env(wd, port, {"OCC_SANDBOX_BIN": stub})
+    r = run_headless(e, "新建 created.txt 内容写 NEW")
+    err = r.stderr.decode("utf-8", "replace")
+    m = re.search(r"session=(\S+)", err)
+    if not m:
+        ok(False, "S5-absent-tamper", "no session id in stderr=%s" % err[:300])
+        return
+    sid = m.group(1)
+
+    sroot = os.path.join(wd, "snaps", sid)
+    markers = []
+    for dirpath, _dirnames, filenames in os.walk(sroot):
+        for fn in filenames:
+            if fn.endswith(".ABSENT"):
+                markers.append(os.path.join(dirpath, fn))
+    if len(markers) != 1:
+        ok(False, "S5-absent-tamper",
+           "absent marker layout unexpected: %s" % markers)
+        return
+    with open(markers[0], "ab") as f:
+        f.write(b"POISON")                     # 墓碑 append 毒字节（真机同款）
+
+    u = subprocess.run([OCC, "undo", "--session", sid], env=e,
+                       capture_output=True, timeout=60, cwd=wd)
+    uerr = u.stderr.decode("utf-8", "replace")
+    # 判定（B6「撤销且快照不可投毒」）：undo 对墓碑拒收（failed 上报
+    # +校验失败人话或非零退出），且目标文件未被毒化动作影响（保持
+    # 写后内容 NEW——不遭删除/替换）。
+    refused = ("校验失败" in uerr or "回滚失败" in uerr or
+               "occ-undo:" in uerr or "occ undo:" in uerr or
+               u.returncode != 0)
+    kept = (os.path.exists(target) and
+            open(target, errors="replace").read() == "NEW")
+    if refused and kept:
+        print("S5b: FIXED（ABSENT 墓碑纳入完整性校验）", flush=True)
+        ok(True, "S5-absent-tamper")
+    else:
+        ok(False, "S5-absent-tamper",
+           "tampered marker accepted or target harmed: rc=%d kept=%s"
+           " uerr=%s" % (u.returncode, kept, uerr[:300]))
+
+
 # ---------- main ----------
 
 def main():
@@ -556,6 +616,7 @@ def main():
         s2_tui_refuse(root, port)
         s4_exfil(root, port)
         s5_tamper(root, port)
+        s5_absent_tamper(root, port)
     finally:
         srv.shutdown()
         shutil.rmtree(root, ignore_errors=True)

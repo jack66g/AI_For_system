@@ -374,6 +374,7 @@ static void redo_capture(const char *root, const char *ses,
 		if (f) {
 			fputs("absent\n", f);
 			fclose(f);
+			redo_sidecar(dst);	/* P-49：墓碑同入校验面 */
 		}
 	}
 }
@@ -440,6 +441,59 @@ static int snap_verify(const char *snap_path)
 	return 0;
 }
 
+/* P-49（B6 验收线）：ABSENT 墓碑纳入完整性校验。
+ *
+ * 墓碑语义是常量（存在=目标写前不存在，undo 据此删；内容本无信息），
+ * 但对投毒零校验=篡改无感——与内容快照拒收（S-FINDING-01）不同口径
+ * 即缺口（真机实证：append 毒字节后 undo 照单全收）。校验面两层：
+ *   1) 规范形态直通：空文件（0 字节）或生成器写的 "absent\n"（7 字节）
+ *      ——legacy 墓碑无 sidecar 也能判定，合法 undo 行为不变；
+ *   2) 非规范形态须持有 sidecar（<墓碑>.sha256，P-49 起生成器随墓碑
+ *      落盘）且 sha 比对通过——内容快照同款 fail closed。
+ * 返回 0=可信墓碑；-1=被篡改/形损（拒绝按墓碑行事）。actual_hex
+ * 回填墓碑实际内容摘要（人话报错用）。 */
+static int absent_verify(const char *absent_path,
+			 char actual_hex[OCC_SHA256_HEX + 1])
+{
+	char side[9280], want[OCC_SHA256_HEX + 2];
+	char *data;
+	size_t len = 0;
+	FILE *f;
+	int canon;
+
+	if (occ_sha256_hex("", 0, actual_hex))
+		actual_hex[0] = '\0';		/* 兜底：失败也有可打印值 */
+	data = rv_read(absent_path, &len);
+	if (!data)
+		return -1;			/* 读不了≠空墓碑：fail closed */
+	if (occ_sha256_hex(data, len, actual_hex))
+		actual_hex[0] = '\0';
+	canon = len == 0 ||
+		(len == 7 && !memcmp(data, "absent\n", 7));
+	free(data);
+	if (canon)
+		return 0;
+	snprintf(side, sizeof(side), "%s.sha256", absent_path);
+	f = fopen(side, "r");
+	if (!f)
+		return -1;			/* legacy 墓碑被改动：拒 */
+	{
+		char *p;
+		int ok = 0;
+
+		if (fgets(want, sizeof(want), f)) {
+			for (p = want; *p; p++)
+				if (*p == '\n' || *p == '\r')
+					*p = '\0';
+			if (strlen(want) == OCC_SHA256_HEX &&
+			    !strcmp(want, actual_hex))
+				ok = 1;
+		}
+		fclose(f);
+		return ok ? 0 : -1;
+	}
+}
+
 /* _redo 段捕获后写 sidecar（现状内容摘要；redo 恢复同口径校验） */
 static void redo_sidecar(const char *dst)
 {
@@ -468,6 +522,7 @@ static int apply_restore(const char *root, const char *ses,
 			 const snap_ent *e)
 {
 	char dir[768], src[9216], mangled[8200];
+	char hex[OCC_SHA256_HEX + 1];
 
 	if (snprintf(dir, sizeof(dir), "%s/%s/%s", root, ses, e->msg) >=
 	    (int)sizeof(dir))
@@ -479,6 +534,13 @@ static int apply_restore(const char *root, const char *ses,
 			return -1;
 		if (access(src, F_OK))
 			return -1;		/* 墓碑缺失：不谎报成功 */
+		if (absent_verify(src, hex)) {
+			/* P-49：墓碑投毒 → 拒绝按墓碑行事（不删目标，
+			 * 与内容快照篡改拒收同款语义，fail closed） */
+			fprintf(stderr, "occ-undo: 快照校验失败（ABSENT 墓碑"
+				"被篡改？sha256=%s）：%s\n", hex, e->path);
+			return -1;
+		}
 		if (unlink(e->path) && errno != ENOENT)
 			return -1;
 		return 0;
@@ -526,6 +588,15 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 	occ_snap_mangle(e->path, mangled, sizeof(mangled));
 	snprintf(src, sizeof(src), "%s/%s.ABSENT", dir, mangled);
 	if (!stat(src, &st)) {
+		char hex[OCC_SHA256_HEX + 1];
+
+		if (absent_verify(src, hex)) {
+			/* P-49：_redo 墓碑同口径校验（投毒拒绝删行） */
+			fprintf(stderr, "occ-redo: 快照校验失败（ABSENT 墓碑"
+				"被篡改？sha256=%s）：%s\n", hex, e->path);
+			*failed = 1;
+			return -1;
+		}
 		if (unlink(e->path) && errno != ENOENT) {
 			*failed = 1;
 			return -1;

@@ -15,6 +15,9 @@
  *   F) 纯对话轮（无文件快照）拒绝 undo（不改库——设计 §9-2 约束）
  *   G) bash 无快照 → nskipped 如实计数（不谎称全量回滚）
  *   H) 幂等/边界：无 stage 的 commit 无操作；无 stage 的 redo 报错
+ *   I) S-FINDING-01 快照完整性（内容篡改拒收/legacy 兼容/redo 同口径）
+ *      + P-49：ABSENT 墓碑投毒拒收（I10/I11）、legacy/空墓碑照常
+ *      工作（I10b/I10c）
  *
  * 夹具全在 /tmp/occ_rev_t_*（授权范围）；快照根/trace 经 OCC_SNAPROOT/
  * OCC_TRACE_DIR 重定向；write走真工具链（真快照+真 durable 落库）。
@@ -94,6 +97,44 @@ static int find_snap(const char *root, const char *ses, char *out,
 			closedir(md);
 			closedir(dd);
 			return 0;
+		}
+		closedir(md);
+	}
+	closedir(dd);
+	return -1;
+}
+
+/* I10 助手：定位 <root>/<ses>/ 下首个 .ABSENT 墓碑（跳过 sidecar/
+ * 内容副本/_redo）——返回 0=找到（out=绝对路径） */
+static int find_absent(const char *root, const char *ses, char *out,
+		       size_t cap)
+{
+	char d[340];
+	DIR *dd, *md;
+	struct dirent *en, *mn;
+
+	snprintf(d, sizeof(d), "%s/%s", root, ses);
+	if (!(dd = opendir(d)))
+		return -1;
+	while ((en = readdir(dd))) {
+		char sub[620];
+
+		if (en->d_name[0] == '.' || !strcmp(en->d_name, "_redo"))
+			continue;
+		snprintf(sub, sizeof(sub), "%s/%s", d, en->d_name);
+		if (!(md = opendir(sub)))
+			continue;
+		while ((mn = readdir(md))) {
+			size_t nl = strlen(mn->d_name);
+
+			if (mn->d_name[0] == '.')
+				continue;
+			if (nl > 7 && !strcmp(mn->d_name + nl - 7, ".ABSENT")) {
+				snprintf(out, cap, "%s/%s", sub, mn->d_name);
+				closedir(md);
+				closedir(dd);
+				return 0;
+			}
 		}
 		closedir(md);
 	}
@@ -623,9 +664,14 @@ int main(void)
 	 *      redo 同口径校验） ---- */
 	{
 		char sid7[OCC_ID_LEN], sid8[OCC_ID_LEN], sid9[OCC_ID_LEN];
+		char sid10[OCC_ID_LEN], sid10b[OCC_ID_LEN], sid10c[OCC_ID_LEN];
+		char sid11[OCC_ID_LEN];
 		char u7[OCC_ID_LEN], u8[OCC_ID_LEN], u9[OCC_ID_LEN];
+		char u10[OCC_ID_LEN], u10b[OCC_ID_LEN], u10c[OCC_ID_LEN];
+		char u11[OCC_ID_LEN];
 		char f7[192], f8[192], f9[192];
-		char snap[900], side[920], rd[900];
+		char f10[192], f10b[192], f10c[192], f11[192];
+		char snap[900], side[920], rd[900], absent[900];
 		char hex[OCC_SHA256_HEX + 1];
 
 		/* I0：实现正确性向量（"abc"）钉死 */
@@ -723,8 +769,143 @@ int main(void)
 				   "i9-redo-rc0");
 				OK(r.nfiles == 1 && r.files[0].failed == 1,
 				   "i9-redo-tamper-refused");
-				OK(!strcmp(rfile(f9), "O9"),
-				   "i9-redo-kept-undone");
+			OK(!strcmp(rfile(f9), "O9"),
+			   "i9-redo-kept-undone");
+				occ_undo_result_free(&r);
+			}
+		}
+
+		/* I10：P-49——ABSENT 墓碑投毒：undo 拒按墓碑行事（文件
+		 *      保持写后现状、failed 如实上报；与内容快照拒收同款
+		 *      语义）。手法=真机实证同款：墓碑 append 毒字节。 */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i10-create");
+		snprintf(sid10, sizeof(sid10), "%s", s.id);
+		occ_session_set_workdir(db, sid10, workdir, err, sizeof(err));
+		snprintf(f10, sizeof(f10), "%s/new10.txt", workdir);
+		OK(!fexists(f10), "i10-before-absent");
+		OK(make_write_turn(db, sid10, "新建 new10.txt", f10, "NEW10",
+				   u10, err, sizeof(err)) == 0, "i10-turn");
+		OK(find_absent(dbpath_of("snapshots"), sid10, absent,
+			       sizeof(absent)) == 0, "i10-marker-found");
+		snprintf(side, sizeof(side), "%s.sha256", absent);
+		OK(!access(side, F_OK), "i10-marker-sidecar-written");
+		{
+			FILE *f = fopen(absent, "ab");
+
+			OK(f != NULL, "i10-open-marker");
+			if (f) {
+				fputs("POISON10\n", f);
+				fclose(f);
+			}
+		}
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid10, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i10-undo-rc0");
+		OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+		   r.files[0].failed == 1, "i10-tamper-refused");
+		OK(fexists(f10) && !strcmp(rfile(f10), "NEW10"),
+		   "i10-target-kept-current");
+		occ_undo_result_free(&r);
+
+		/* I10b：legacy 墓碑（无 sidecar、内容规范 "absent\n"）照常
+		 *      工作——向后兼容不破坏合法 undo */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i10b-create");
+		snprintf(sid10b, sizeof(sid10b), "%s", s.id);
+		occ_session_set_workdir(db, sid10b, workdir, err, sizeof(err));
+		snprintf(f10b, sizeof(f10b), "%s/new10b.txt", workdir);
+		OK(make_write_turn(db, sid10b, "新建 new10b.txt", f10b,
+				   "NEW10B", u10b, err, sizeof(err)) == 0,
+		   "i10b-turn");
+		OK(find_absent(dbpath_of("snapshots"), sid10b, absent,
+			       sizeof(absent)) == 0, "i10b-marker-found");
+		snprintf(side, sizeof(side), "%s.sha256", absent);
+		OK(unlink(side) == 0, "i10b-strip-sidecar");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid10b, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i10b-undo-rc0");
+		OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+		   !r.files[0].failed && !fexists(f10b),
+		   "i10b-legacy-marker-still-deletes");
+		occ_undo_result_free(&r);
+
+		/* I10c：空墓碑（0 字节、无 sidecar）照常工作——「空
+		 *      ABSENT 标记照常工作」钉死 */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i10c-create");
+		snprintf(sid10c, sizeof(sid10c), "%s", s.id);
+		occ_session_set_workdir(db, sid10c, workdir, err, sizeof(err));
+		snprintf(f10c, sizeof(f10c), "%s/new10c.txt", workdir);
+		OK(make_write_turn(db, sid10c, "新建 new10c.txt", f10c,
+				   "NEW10C", u10c, err, sizeof(err)) == 0,
+		   "i10c-turn");
+		OK(find_absent(dbpath_of("snapshots"), sid10c, absent,
+			       sizeof(absent)) == 0, "i10c-marker-found");
+		snprintf(side, sizeof(side), "%s.sha256", absent);
+		OK(unlink(side) == 0, "i10c-strip-sidecar");
+		wfile(absent, "");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid10c, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i10c-undo-rc0");
+		OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
+		   !r.files[0].failed && !fexists(f10c),
+		   "i10c-empty-marker-still-deletes");
+		occ_undo_result_free(&r);
+
+		/* I11：P-49——_redo 墓碑投毒：redo 拒按墓碑行事（目标保持
+		 *      被撤后状态=不存在，failed 如实上报） */
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "i11-create");
+		snprintf(sid11, sizeof(sid11), "%s", s.id);
+		occ_session_set_workdir(db, sid11, workdir, err, sizeof(err));
+		snprintf(f11, sizeof(f11), "%s/new11.txt", workdir);
+		OK(make_write_turn(db, sid11, "新建 new11.txt", f11, "NEW11",
+				   u11, err, sizeof(err)) == 0, "i11-turn");
+		OK(unlink(f11) == 0, "i11-manual-rm");	/* 撤销前现状=不存在 */
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sid11, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "i11-undo-rc0");	/* 墓碑合法：DELETE 动作 ENOENT 视作成功 */
+		occ_undo_result_free(&r);
+		{
+			char rdir[300];
+			DIR *dd = NULL;
+			struct dirent *mn;
+
+			snprintf(rdir, sizeof(rdir), "%s/%s/_redo",
+				 dbpath_of("snapshots"), sid11);
+			OK((dd = opendir(rdir)) != NULL, "i11-redo-dir");
+			rd[0] = '\0';
+			if (dd) {
+				while ((mn = readdir(dd))) {
+					size_t nl = strlen(mn->d_name);
+
+					if (mn->d_name[0] == '.')
+						continue;
+					if (nl > 7 && !strcmp(mn->d_name + nl - 7,
+							      ".ABSENT")) {
+						snprintf(rd, sizeof(rd), "%s/%s",
+							 rdir, mn->d_name);
+						break;
+					}
+				}
+				closedir(dd);
+			}
+			OK(rd[0] != '\0', "i11-redo-tomb-found");
+			if (rd[0]) {
+				FILE *f = fopen(rd, "ab");
+
+				OK(f != NULL, "i11-open-tomb");
+				if (f) {
+					fputs("POISON11\n", f);
+					fclose(f);
+				}
+				memset(&r, 0, sizeof(r));
+				OK(occ_redo(db, sid11, NULL, &r, err,
+					    sizeof(err)) == 0, "i11-redo-rc0");
+				OK(r.nfiles == 1 && r.files[0].failed == 1,
+				   "i11-redo-tamper-refused");
+				OK(!fexists(f11), "i11-target-stays-absent");
 				occ_undo_result_free(&r);
 			}
 		}

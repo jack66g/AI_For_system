@@ -3052,6 +3052,28 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 			return -1;
 		fputs("absent\n", f);
 		fclose(f);
+		/* P-49（B6 验收线）：墓碑同入完整性校验面——<墓碑>.sha256
+		 * 与内容快照 sidecar 同款（undo/redo 消费侧 absent_verify：
+		 * 规范形态直通，非规范须 sidecar 对上，否则拒收）。写失败
+		 * 不阻断快照本体（退化为 legacy 规范形态校验）。 */
+		{
+			char hex[OCC_SHA256_HEX + 1];
+
+			if (occ_sha256_hex("absent\n", 7, hex) == 0) {
+				FILE *sf;
+				char sp[12560];
+
+				snprintf(sp, sizeof(sp), "%s.sha256", dst);
+				sf = fopen(sp, "w");
+				if (sf) {
+					fprintf(sf, "%s\n", hex);
+					fclose(sf);
+				} else {
+					fprintf(stderr, "occ-snap: sidecar 写失败"
+						"（退化为无校验）：%s\n", sp);
+				}
+			}
+		}
 		return 0;
 	}
 	f = fopen(dst, "wb");
@@ -3067,8 +3089,8 @@ int occ_snapshot_stage(const char *snaproot, const char *session_id,
 	fclose(f);
 	/* S-FINDING-01（S-TRACK §5）：快照完整性 sidecar——原内容摘要落
 	 * <dst>.sha256（undo/redo 恢复前校验；sidecar 写失败不阻断快照
-	 * 本体，stderr 警告=退化为 legacy 无校验语义）。ABSENT 墓碑无
-	 * 内容不记。 */
+	 * 本体，stderr 警告=退化为 legacy 无校验语义）。ABSENT 墓碑的
+	 * sidecar 在上面墓碑分支随写（P-49，同款语义）。 */
 	{
 		char hex[OCC_SHA256_HEX + 1];
 
