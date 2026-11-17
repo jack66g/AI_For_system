@@ -1,5 +1,8 @@
 #!/bin/sh
-# aik-console v6 — O-1（UX-O §1）退出即注销。
+# aik-console v7 — P-41/P-44 控制台稳定棒（输出看门狗自愈）。
+#   v7：occ 退出码 72=occ 检测 fbterm 楔死（输出看门狗超时/输出 IO 错）
+#   自退——本循环 sleep 2 重启整链（fbterm 随 pty 从端关闭退出，wait
+#   自然返回；P-44 楔死=旧版冻结无自愈，v7 起 2s 内恢复）。
 #   v6：occ 退出码 71=用户主动退出（/exit、ctrl+c/ctrl+d/<leader>q）
 #   → 断链 exit 0：.profile 的 exec 结束 → autologin 会话结束 →
 #   getty 重出 login 面（=退出即注销；SSH/pts 场景 rc=71 落回 shell 无害）。
@@ -28,6 +31,9 @@ case "$TTY" in
       rc=$?
       n=$((n+1))
       log "occ-exit rc=$rc n=$n tty=fb fb=${FBTERM_BIN:+y}"
+      # P-41/P-44：72=occ 输出看门狗自退（fbterm 楔死）——单独留痕，
+      # 循环行为不变（sleep 2 重启整链自愈）
+      [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=fb"
       [ "$rc" -eq 71 ] && { log "occ-logout tty=fb"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
@@ -43,6 +49,8 @@ case "$TTY" in
       rc=$?
       n=$((n+1))
       log "occ-exit rc=$rc n=$n tty=serial"
+      # P-41/P-44：serial 无 fbterm，但 tty 卡死时 occ 同路自退——留痕同款
+      [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=serial"
       [ "$rc" -eq 71 ] && { log "occ-logout tty=serial"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2

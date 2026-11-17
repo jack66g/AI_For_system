@@ -116,12 +116,53 @@ int tui_screen_puts(tui_screen *s, int row, int col,
 
 /* ---- 输出汇（渲染字节去向；测试用内存汇做 golden 对拍） ---- */
 typedef void (*tui_sink_fn)(void *ctx, const char *data, size_t len);
+
+/* 缓冲硬上限（P-41/P-44）：一帧全量重绘上限为几十 KB 量级，512KB 已是
+ * 「消费端停摆 + 缓冲无限涨」的异常态——超限按消费失败处理（drain -1，
+ * 进程退出自愈），防失控内存。 */
+#define TUI_SINK_BUF_MAX (512 * 1024)
+
 typedef struct {
 	tui_sink_fn fn;
 	void *ctx;
+	/* P-41/P-44 缓冲模式（buf_mode=1）：fn 只追加进 buf，drain 一次
+	 * 排空——一帧=一个有序完整批次（整帧原子刷）。直写模式
+	 * （buf_mode=0：tui_sink_init_fd/内存汇）语义零变化。 */
+	int buf_mode;
+	int fd;			/* 缓冲模式的目标 fd */
+	int fd_flags_saved;	/* init_fd_buf 前原 flags（set_blocking 还原） */
+	int wd_ms;		/* drain 总时限；0=禁用（无限等=旧直写语义） */
+	int wd_fired;		/* 看门狗已触发（粘性：后续 drain 立返 -2） */
+	int ovf;		/* 追加超硬上限/OOM（粘性；drain 按消费失败 -1） */
+	char *buf;
+	size_t blen, bcap;	/* 已积字节数/缓冲容量 */
+	long stats_writes;	/* drain 内实际 write(2) 次数（测试断言用） */
+	long stats_drains;	/* 成功 drain 次数（测试断言用） */
 } tui_sink;
 
 void tui_sink_init_fd(tui_sink *s, int fd);	/* write(2)，EINTR/短写重试 */
+/*
+ * P-41/P-44：fd 缓冲汇——fd 置 O_NONBLOCK（保存原 flags），缓冲 64KB 起
+ * 可增长（硬上限 TUI_SINK_BUF_MAX）。看门狗时限取 env OCC_TUI_WD_MS
+ * （缺省 15000；0=禁用）。成功 0；fd 坏/分配失败 -1（已回滚零残留）。
+ * 注意：ctx 自指本结构——经 tui_renderer_create 值传入后由其修正指向
+ * renderer 自家副本（权威副本唯一：view 的 term.bsink 也应指它）。
+ */
+int tui_sink_init_fd_buf(tui_sink *s, int fd);
+/*
+ * 排空缓冲：poll(POLLOUT, ≤200ms 片)+write 循环，总时限 wd_ms（每次
+ * poll 前核对已耗累计；wd_ms=0 则无限等=旧直写语义）。
+ *   0=排空成功（stats_drains++/stats_writes 累加实际 write 次数）；
+ *  -2=看门狗超时（wd_fired=1 粘性；丢弃未排空缓冲——楔死终端上保序
+ *      无意义，重启后 need_clear 全量重同步）；
+ *  -1=EPIPE/EBADF/EIO 等 IO 错或超缓冲硬上限（消费端已死，同样丢缓冲）。
+ */
+int tui_sink_drain(tui_sink *s);
+/* 还原 init_fd_buf 保存的 fd flags（幂等；term_leave 与 /shell fork 前
+ * 调——bash 继承非阻塞 tty 会读异常） */
+void tui_sink_set_blocking(tui_sink *s);
+/* 释放缓冲（幂等；tui_renderer_destroy 对自家 sink 调用） */
+void tui_sink_fini(tui_sink *s);
 
 /* ---- 渲染器（front/back 双缓冲 + 脏行 diff + 光标跟踪） ---- */
 typedef struct tui_renderer {
@@ -149,6 +190,9 @@ void tui_renderer_clear(tui_renderer *r);
  * 增量重绘：只 diff 脏行；变化行发 CUP+最短 SGR+内容；末尾按需把光标
  * 移到 (cur_row,cur_col)（<0=不管理光标）。返回本帧重绘行数。
  * 无脏行且光标未变 → 输出 0 字节。
+ * P-41/P-44 返回值扩展：sink 为缓冲模式时本函数尾部一次 drain（整帧
+ * 字节一个有序批次）；drain 看门狗超时 → 返回 -2，IO 错 → -1（调用方
+ * 退出自愈，见 tui_view_run/tui_gate）。
  */
 int tui_renderer_flush(tui_renderer *r, int cur_row, int cur_col);
 
@@ -207,6 +251,13 @@ typedef struct tui_term {
 	int entered;		/* 已进全屏 */
 	int sigs_saved;		/* 旧信号处理已保存 */
 	int mouse_on;		/* B5：鼠标模式已开（leave 时补关——幂等） */
+	/* P-41/P-44：可选缓冲汇（缺省 NULL=原直写）。非空时
+	 * tui_term_write/光标显隐/鼠标序列改走它（fn 追加）——渲染过程中
+	 * 的光标/鼠标序列与帧同批，不破坏帧原子性。指向的 sink 必须比本
+	 * term 活得久（view 里=renderer 自家副本）。tui_term_leave 尾部对
+	 * 它先 drain+set_blocking 再发恢复序列（wd 已触发则跳过恢复字节
+	 * ——楔死终端上阻塞 write 会挂死收尾链）。 */
+	tui_sink *bsink;
 	struct sigaction old_int, old_term, old_hup, old_winch;
 } tui_term;
 

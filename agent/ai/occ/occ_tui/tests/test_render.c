@@ -351,7 +351,7 @@ static void test_flush_golden(void)
 	tui_attr d = tui_attr_default();
 
 	memset(&m, 0, sizeof(m));
-	r = tui_renderer_create(4, 8, (tui_sink){ memsink_fn, &m });
+	r = tui_renderer_create(4, 8, (tui_sink){ .fn = memsink_fn, .ctx = &m });
 	OK(r != NULL, "renderer-create");
 	if (!r)
 		return;
@@ -439,7 +439,7 @@ static void test_span_diff(void)
 	tui_attr d = tui_attr_default();
 
 	memset(&m, 0, sizeof(m));
-	r = tui_renderer_create(1, 8, (tui_sink){ memsink_fn, &m });
+	r = tui_renderer_create(1, 8, (tui_sink){ .fn = memsink_fn, .ctx = &m });
 	if (!r)
 		return;
 

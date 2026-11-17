@@ -294,6 +294,30 @@ static void gate_pump_input(tui_input *in, int *quit)
 		*quit = 1;
 }
 
+/* P-41/P-44：gate 输出致命（wd -2 / IO -1）——gate 在 view 之前、无会话
+ * 无清理链：还原 termios → 人话 stderr → 释放渲染器（含缓冲）→
+ * exit(72)。aik-console v7 对 72 循环 2s 重启整链（gate 卡死同治）。 */
+static void gate_sink_fatal(tui_renderer *ren, int frc)
+{
+	if (gate_term_restore) {
+		tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
+		gate_term_restore = 0;
+	}
+	/* 楔死终端上缓冲无保序意义：丢弃并还原 fd flags（防 exit 路径
+	 * 再碰非阻塞描述） */
+	tui_sink_drain(&ren->sink);
+	tui_sink_set_blocking(&ren->sink);
+	if (frc == -2)
+		fprintf(stderr,
+			"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
+			ren->sink.wd_ms);
+	else
+		fprintf(stderr,
+			"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+	tui_renderer_destroy(ren);
+	exit(72);
+}
+
 static int gate_run_ui(int mode, int *unlocked)
 {
 	tui_sink sink;
@@ -333,10 +357,17 @@ static int gate_run_ui(int mode, int *unlocked)
 		rows = 24;
 		cols = 80;
 	}
-	tui_sink_init_fd(&sink, STDOUT_FILENO);
+	/* P-41/P-44：fd 缓冲汇+看门狗（同主 TUI 口径——gate 也吃同一个
+	 * fbterm 楔死面：整帧一批次，15s 无消费 exit(72) 自愈） */
+	if (tui_sink_init_fd_buf(&sink, STDOUT_FILENO) != 0) {
+		if (gate_term_restore)
+			tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
+		return 1;
+	}
 	ren = tui_renderer_create(rows, cols, sink);
 	if (!ren) {
 		/* q17 audit A-2：raw 已置位后的失败路径必须还 termios */
+		tui_sink_fini(&sink);
 		if (gate_term_restore)
 			tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
 		return 1;
@@ -388,7 +419,13 @@ static int gate_run_ui(int mode, int *unlocked)
 			draw_center(s, rows / 2 + 3, cols,
 				    "Enter 登录 · Ctrl-C 退出", mut_a);
 		}
-		tui_renderer_flush(ren, rows / 2 - 1, cols / 2);
+		{
+			int frc = tui_renderer_flush(ren, rows / 2 - 1,
+						     cols / 2);
+
+			if (frc == -2 || frc == -1)
+				gate_sink_fatal(ren, frc);
+		}
 		gate_pump_input(&in, &quit);
 		if (quit) {
 			rc = 1;
@@ -470,13 +507,17 @@ static int gate_run_ui(int mode, int *unlocked)
 				;
 			tcflush(STDIN_FILENO, TCIFLUSH);
 			while (left > 0) {
+				int frc;
+
 				snprintf(status_buf, sizeof(status_buf),
 					 "尝试过多，冷却 %d 秒…", left);
 				/* 重绘状态行即可 */
 				draw_center(s, rows / 2 + 1, cols,
 					    status_buf, err_a);
-				tui_renderer_flush(ren, rows / 2 - 1,
-						   cols / 2);
+				frc = tui_renderer_flush(ren, rows / 2 - 1,
+							 cols / 2);
+				if (frc == -2 || frc == -1)
+					gate_sink_fatal(ren, frc);
 				sleep(1);
 				left--;
 			}
@@ -516,6 +557,9 @@ static int gate_run_ui(int mode, int *unlocked)
 	}
 	if (gate_term_restore)
 		tcsetattr(STDIN_FILENO, TCSANOW, &gate_term_orig);
+	/* P-41/P-44：正常退出同样还原 fd flags（后续 occ 主 TUI 自会重置
+	 * 自己的缓冲汇；不留非阻塞描述给无关使用者） */
+	tui_sink_set_blocking(&ren->sink);
 	tui_renderer_destroy(ren);
 	return rc;
 }

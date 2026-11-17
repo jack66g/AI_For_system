@@ -12,6 +12,15 @@
  *     async-signal-safe——nano/vim 同款业界惯例，接受；SIGWINCH 处理器
  *     只置 flag（tui_frame_winch_flag_set），零嵌套信号安全问题。
  *   - 非 TTY：stdout 非 tty 拒绝进入全屏，人话报错 stderr，rc=2。
+ *
+ * P-41/P-44（fbterm 稳定性遏制）：输出链改「缓冲汇+整帧原子刷+输出
+ * 看门狗」。机理（strace 实证 ~/k10-evidence/p44-wedge/）：fbterm 1.7
+ * 间歇楔死在 evdev 读循环不再消费 pty 主端，occ 的旧逐格碎片 write
+ * （全屏重绘 2500+ 次 write(2)/帧）最终把 64KB pty 缓冲填满后永久
+ * 阻塞——冻结且无自愈。改为：一帧字节全部积进 sink 缓冲、flush 尾一
+ * 次 drain（消费端健康时一次 write(2) 过整帧；碎片饲喂面同步收敛）；
+ * drain 带 wd_ms 总时限，超时即丢弃缓冲返回 -2——调用方（tui_view/
+ * tui_gate）以退出码 72 自退，aik-console v7 循环 2s 重启整链自愈。
  */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE 1
@@ -22,11 +31,14 @@
 #include "tui_frame.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ================= 颜色 / 属性 / SGR 生成器 ================= */
@@ -440,8 +452,176 @@ static void sink_fd_write(void *ctx, const char *data, size_t len)
 
 void tui_sink_init_fd(tui_sink *s, int fd)
 {
+	/* P-41/P-44：全量清零再装直写回调——语义零变化，且防调用方
+	 * 复用栈上 sink 时残留缓冲字段被误判为缓冲模式 */
+	memset(s, 0, sizeof(*s));
 	s->fn = sink_fd_write;
 	s->ctx = (void *)(intptr_t)fd;
+}
+
+/* ---- P-41/P-44：fd 缓冲汇（整帧原子刷）+ 输出看门狗 ---- */
+
+#define TUI_SINK_BUF_INIT (64 * 1024)
+
+static uint64_t sink_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* 缓冲模式 fn：只追加（增长翻倍；超 512KB 硬上限=按消费失败处理，
+ * drain 返 -1 让调用方退出自愈——异常态下防失控内存优先于保序） */
+static void sink_fdbuf_write(void *ctx, const char *data, size_t len)
+{
+	tui_sink *s = (tui_sink *)ctx;
+	size_t need;
+
+	if (!s || !s->buf_mode || !data || len == 0)
+		return;
+	if (s->ovf)
+		return;			/* 已判死：丢弃（粘性，drain -1） */
+	need = s->blen + len;
+	if (need > TUI_SINK_BUF_MAX) {
+		s->ovf = 1;
+		return;
+	}
+	if (need > s->bcap) {
+		size_t ncap = s->bcap ? s->bcap : TUI_SINK_BUF_INIT;
+		char *nb;
+
+		while (ncap < need)
+			ncap *= 2;
+		nb = realloc(s->buf, ncap);
+		if (!nb) {
+			s->ovf = 1;	/* OOM 同消费失败口径 */
+			return;
+		}
+		s->buf = nb;
+		s->bcap = ncap;
+	}
+	memcpy(s->buf + s->blen, data, len);
+	s->blen = need;
+}
+
+int tui_sink_init_fd_buf(tui_sink *s, int fd)
+{
+	int fl;
+	const char *e;
+
+	if (!s || fd < 0)
+		return -1;
+	memset(s, 0, sizeof(*s));
+	s->buf = malloc(TUI_SINK_BUF_INIT);
+	if (!s->buf)
+		return -1;
+	s->bcap = TUI_SINK_BUF_INIT;
+	s->buf_mode = 1;
+	s->fn = sink_fdbuf_write;
+	s->ctx = s;			/* 自指；renderer 值拷贝后自行修正 */
+	s->fd = fd;
+	fl = fcntl(fd, F_GETFL);
+	if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) != 0) {
+		free(s->buf);
+		memset(s, 0, sizeof(*s));
+		return -1;
+	}
+	s->fd_flags_saved = fl;
+	/* 看门狗时限：env OCC_TUI_WD_MS（缺省 15000，0=禁用=旧直写无限等
+	 * 语义）；负数/超大值视同缺省（防误配把自愈变成秒级抖动） */
+	s->wd_ms = 15000;
+	e = getenv("OCC_TUI_WD_MS");
+	if (e && e[0]) {
+		long v = strtol(e, NULL, 10);
+
+		if (v >= 0 && v <= 600000)
+			s->wd_ms = (int)v;
+	}
+	return 0;
+}
+
+int tui_sink_drain(tui_sink *s)
+{
+	size_t off = 0;
+	long nw = 0;
+	uint64_t t0;
+
+	if (!s || !s->buf_mode)
+		return 0;
+	if (s->ovf) {
+		s->blen = 0;		/* 缓冲硬上限已破：丢弃+按消费失败 */
+		return -1;
+	}
+	if (s->wd_fired)
+		return -2;		/* 粘性：楔死后不再等（含 leave 路径） */
+	t0 = sink_now_ms();
+	while (off < s->blen) {
+		ssize_t w = write(s->fd, s->buf + off, s->blen - off);
+
+		if (w > 0) {
+			off += (size_t)w;
+			nw++;
+			continue;
+		}
+		if (w < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno != EAGAIN && errno != EWOULDBLOCK) {
+				/* EPIPE/EBADF/EIO：消费端已死——丢弃缓冲
+				 * （pty 消亡=SIGHUP 竞态，退出重启即愈） */
+				s->blen = 0;
+				return -1;
+			}
+		}
+		{
+			struct pollfd pfd;
+			int slice = 200;	/* poll 片上限 */
+
+			/* 每次 poll 前核对已耗累计：总时限 wd_ms（0=禁用
+			 * →无限等=旧直写语义） */
+			if (s->wd_ms > 0) {
+				uint64_t gone = sink_now_ms() - t0;
+
+				if (gone >= (uint64_t)s->wd_ms) {
+					s->wd_fired = 1;
+					s->blen = 0;	/* 丢弃：楔死终端上
+							 * 保序无意义 */
+					return -2;
+				}
+				if ((uint64_t)s->wd_ms - gone <
+				    (uint64_t)slice)
+					slice = (int)(s->wd_ms - gone);
+			}
+			pfd.fd = s->fd;
+			pfd.events = POLLOUT;
+			pfd.revents = 0;
+			if (poll(&pfd, 1, slice) < 0 && errno != EINTR) {
+				s->blen = 0;
+				return -1;
+			}
+		}
+	}
+	s->blen = 0;
+	s->stats_drains++;
+	s->stats_writes += nw;
+	return 0;
+}
+
+void tui_sink_set_blocking(tui_sink *s)
+{
+	if (!s || !s->buf_mode)
+		return;
+	/* 幂等：重复 F_SETFL 同一保存值无副作用 */
+	(void)fcntl(s->fd, F_SETFL, s->fd_flags_saved);
+}
+
+void tui_sink_fini(tui_sink *s)
+{
+	if (!s)
+		return;
+	free(s->buf);
+	memset(s, 0, sizeof(*s));	/* 幂等：二次 fini/误用直写全安全 */
 }
 
 /* ================= 渲染器（front/back 双缓冲 + 脏行 diff） ================= */
@@ -464,6 +644,10 @@ tui_renderer *tui_renderer_create(int rows, int cols, tui_sink sink)
 		return NULL;
 	}
 	r->sink = sink;
+	/* P-41/P-44：缓冲汇值传入后，ctx 自指 renderer 自家副本——权威
+	 * 副本唯一（term.bsink 也指它），追加/drain/统计不分叉 */
+	if (r->sink.buf_mode)
+		r->sink.ctx = &r->sink;
 	r->cur_attr = tui_attr_default();
 	r->cur_row = -1;	/* 未知（standalone 假定空白+默认色由调用方保证） */
 	r->cur_col = -1;
@@ -477,6 +661,7 @@ void tui_renderer_destroy(tui_renderer *r)
 		return;
 	tui_screen_destroy(r->front);
 	tui_screen_destroy(r->back);
+	tui_sink_fini(&r->sink);	/* P-41/P-44：缓冲汇缓冲归 renderer 析构 */
 	free(r);
 }
 
@@ -593,6 +778,15 @@ int tui_renderer_flush(tui_renderer *r, int crow, int ccol)
 			r->sink.fn(r->sink.ctx, cup, (size_t)n);
 		r->cur_row = crow;
 		r->cur_col = ccol;
+	}
+	/* P-41/P-44：整帧原子刷——need_clear 与逐行输出已全部积进 sink
+	 * 缓冲，此处一次 drain 收口（一帧=一个有序批次+一次消费）。wd
+	 * 超时 -2 / IO 错 -1 透传调用方（退出自愈）；直写/内存汇不受扰 */
+	if (r->sink.buf_mode) {
+		int drc = tui_sink_drain(&r->sink);
+
+		if (drc != 0)
+			return drc;
 	}
 	return redrawn;
 }
@@ -793,11 +987,22 @@ static int write_all(int fd, const char *buf, size_t len)
 	return 0;
 }
 
+/* P-41/P-44：bsink 非空走缓冲（渲染中的光标/鼠标/kitty 序列与帧同
+ * 批——不破坏帧原子性）；NULL=原直写。缓冲溢出按 -1 上报。 */
+static int term_out(tui_term *t, const char *data, size_t len)
+{
+	if (t->bsink && t->bsink->buf_mode) {
+		t->bsink->fn(t->bsink->ctx, data, len);
+		return t->bsink->ovf ? -1 : 0;
+	}
+	return write_all(t->fd, data, len);
+}
+
 int tui_term_write(tui_term *t, const char *data, size_t len)
 {
 	if (!t || !data)
 		return -1;
-	return write_all(t->fd, data, len);
+	return term_out(t, data, len);
 }
 
 void tui_term_init(tui_term *t, int fd)
@@ -811,13 +1016,13 @@ void tui_term_init(tui_term *t, int fd)
 void tui_term_hide_cursor(tui_term *t)
 {
 	if (t && t->entered)
-		(void)write_all(t->fd, "\x1b[?25l", 6);
+		(void)term_out(t, "\x1b[?25l", 6);
 }
 
 void tui_term_show_cursor(tui_term *t)
 {
 	if (t && t->entered)
-		(void)write_all(t->fd, "\x1b[?25h", 6);
+		(void)term_out(t, "\x1b[?25h", 6);
 }
 
 int tui_mouse_enable(tui_term *t, int on)
@@ -833,8 +1038,7 @@ int tui_mouse_enable(tui_term *t, int on)
 		return -1;		/* 无鼠标能力信号——诚实不开 */
 	if (!!on == !!t->mouse_on)
 		return 0;		/* 幂等 */
-	if (write_all(t->fd, on ? MON : MOFF,
-		      sizeof(MON) - 1) != 0)
+	if (term_out(t, on ? MON : MOFF, sizeof(MON) - 1) != 0)
 		return -1;
 	t->mouse_on = on ? 1 : 0;
 	return 0;
@@ -845,17 +1049,31 @@ int tui_mouse_active(const tui_term *t)
 	return t ? t->mouse_on : 0;
 }
 
-/* 恢复（幂等）：发恢复序列 + 还原 termios + 还原信号处理 */
+/* 恢复（幂等）：发恢复序列 + 还原 termios + 还原信号处理。
+ * P-41/P-44：缓冲汇先 drain（字节序保持：积压帧字节→mouse off→恢复
+ * 序列）+ set_blocking 还原 fd flags（/shell fork bash 前已在阻塞态）；
+ * wd/ovf 已触发则跳过一切恢复字节——楔死终端上 set_blocking 后的
+ * write 会永久挂死收尾链，且字节根本到不了屏幕（重启后 need_clear
+ * 全量重同步）；termios/信号还原不受影响照做。 */
 void tui_term_leave(tui_term *t)
 {
 	static const char seq[] = "\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l";
 	static const char moff[] = "\x1b[?1000;1006l";
+	int skip_bytes = 0;
 
 	if (!t || !t->entered)
 		return;
-	if (t->mouse_on)
-		(void)write_all(t->fd, moff, sizeof(moff) - 1);
-	(void)write_all(t->fd, seq, sizeof(seq) - 1);
+	if (t->bsink && t->bsink->buf_mode) {
+		(void)tui_sink_drain(t->bsink);	/* wd 已触发时粘性立返 */
+		tui_sink_set_blocking(t->bsink);
+		if (t->bsink->wd_fired || t->bsink->ovf)
+			skip_bytes = 1;
+	}
+	if (!skip_bytes) {
+		if (t->mouse_on)
+			(void)write_all(t->fd, moff, sizeof(moff) - 1);
+		(void)write_all(t->fd, seq, sizeof(seq) - 1);
+	}
 	(void)tcsetattr(t->fd, TCSAFLUSH, &t->saved);
 	if (t->sigs_saved) {
 		sigaction(SIGINT, &t->old_int, NULL);

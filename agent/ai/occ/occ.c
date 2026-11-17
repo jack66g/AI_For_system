@@ -4138,6 +4138,12 @@ static int run_interactive(occ_db *db, const char *model_toml,
 				}
 				if (g_t4_exit_code)
 					break;
+				/* P-41/P-44：rc=72（tui_view_run 输出看门狗/IO
+				 * 自退）随 rc!=0 在此直接 break 到进程退出
+				 * （return rc=72）——/shell/theme 重建环绝不
+				 * 拦截它：72 的语义就是「消费端楔死，重启整
+				 * 链」（aik-console v7 sleep 2 循环自愈），
+				 * 在坏终端上重建 view 只会再挂一次。 */
 				if ((rc != 0 || !a.shell_req) && !g_t4_theme_req)
 					break;
 				/* T4 /theme：热重载=重建 view 重读 theme.ini */

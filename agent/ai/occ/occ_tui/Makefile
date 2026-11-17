@@ -24,6 +24,8 @@ LIB_SRCS := tui_utf8.c tui_core.c tui_input.c tui_frame.c tui_chat.c \
 	    tui_usage.c tui_keymap.c tui_overlay.c tui_gate.c
 LIB_OBJS := $(LIB_SRCS:%.c=obj/%.o)
 
+# P-41/P-44：test_sinkbuf（缓冲汇+整帧原子刷+wd 单元）/ test_wd
+# （pty 级 wd 禁用回归门——缓冲化字节总序全等）
 TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_render.c tests/test_input.c \
 	     tests/test_frame.c tests/test_pty.c tests/test_chat.c \
@@ -32,7 +34,8 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_overlay.c tests/test_usage.c \
 	     tests/test_gate.c tests/test_gate_pty.c \
      tests/test_rename_ai.c tests/test_history_load.c \
-     tests/test_models_offline.c tests/test_su_pty.c
+     tests/test_models_offline.c tests/test_su_pty.c \
+     tests/test_sinkbuf.c tests/test_wd.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean

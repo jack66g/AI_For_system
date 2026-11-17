@@ -1045,7 +1045,10 @@ static void tv_render_empty(tui_screen *s, int mx, int y0, int mw)
 	}
 }
 
-static void tv_render(tui_view *v, uint64_t now)
+/* 渲染一帧。P-41/P-44：返回 flush 结果——重绘行数（≥0）；-2=输出看门狗
+ * 超时（消费端楔死）；-1=输出 IO 错（pty 消亡）。主循环据 -1/-2 走 72
+ * 自愈退出；tui_view_paint 忽略返回值（粘性 wd 保证主循环下一帧捕获）。 */
+static int tv_render(tui_view *v, uint64_t now)
 {
 	tui_screen *s = tui_renderer_front(v->ren);
 	int rows = s->rows, cols = s->cols;
@@ -1545,7 +1548,7 @@ static void tv_render(tui_view *v, uint64_t now)
 		v->cursor_hidden = 0;
 	}
 
-	tui_renderer_flush(v->ren, cr, cc);
+	return tui_renderer_flush(v->ren, cr, cc);
 }
 
 /* ---- 主循环 ---- */
@@ -1553,6 +1556,7 @@ static void tv_render(tui_view *v, uint64_t now)
 int tui_view_run(tui_view *v)
 {
 	int rc;
+	int wd_exit = 0;		/* P-41/P-44：72=输出看门狗/IO 自退 */
 	int rows = 24, cols = 80;
 	tui_sink sink;
 
@@ -1567,12 +1571,24 @@ int tui_view_run(tui_view *v)
 		v->hooks.on_entered(v->hooks.ud);
 
 	tui_term_get_size(v->term.fd, &rows, &cols);
-	tui_sink_init_fd(&sink, STDOUT_FILENO);
-	v->ren = tui_renderer_create(rows, cols, sink);
-	if (!v->ren) {
+	/* P-41/P-44：fd 汇改缓冲模式——一帧字节先进缓冲、flush 尾一次
+	 * drain（整帧原子批次；消费端健康时整帧一次 write(2)，fbterm 解析
+	 * 器碎片饲喂面同步收敛），配输出看门狗（fbterm 楔死不消费 pty 时
+	 * 15s 内自退，aik-console v7 重启整链）。O_NONBLOCK 只影响本 fd
+	 * 描述；leave 收尾 set_blocking 还原（/shell fork bash 前已回阻塞）。 */
+	if (tui_sink_init_fd_buf(&sink, STDOUT_FILENO) != 0) {
 		tui_term_leave(&v->term);
 		return -1;
 	}
+	v->ren = tui_renderer_create(rows, cols, sink);
+	if (!v->ren) {
+		tui_sink_fini(&sink);
+		tui_term_leave(&v->term);
+		return -1;
+	}
+	/* 权威副本=ren->sink（create 已修正 ctx 自指）；term 的光标/鼠标/
+	 * kitty 序列也走它——渲染过程中的序列与帧同批，不破坏帧原子性 */
+	v->term.bsink = &v->ren->sink;
 	/* B5：能力诚实开鼠标（TERM 缺失/dumb → tui_mouse_enable -1 →
 	 * mouse_on=0，无假交互；/help 按此如实展示） */
 	v->mouse_on = (tui_mouse_enable(&v->term, 1) == 0);
@@ -1611,9 +1627,27 @@ int tui_view_run(tui_view *v)
 		if (v->running || v->busy)
 			v->dirty_needed = 1;
 		if (v->dirty_needed && tui_frame_due(&v->frame, now)) {
-			tv_render(v, now);
+			int frc = tv_render(v, now);
+
 			tui_frame_mark(&v->frame, now);
 			v->dirty_needed = 0;
+			/* P-41/P-44：输出看门狗/IO 错——退出码 72 自退
+			 * （occ.c 清理链照走后以 72 退出；aik-console v7
+			 * sleep 2 重启整链=冻结自愈）。先人话落 stderr
+			 * （fbterm 链上进 aik-console.err），再走循环尾
+			 * 统一收口（join/复位/leave——leave 对楔死终端
+			 * 跳过恢复字节防挂死）。 */
+			if (frc == -2 || frc == -1) {
+				if (frc == -2)
+					fprintf(stderr,
+						"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
+						v->ren->sink.wd_ms);
+				else
+					fprintf(stderr,
+						"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+				wd_exit = 72;
+				break;
+			}
 		}
 		if (v->quit)
 			break;
@@ -1692,7 +1726,8 @@ int tui_view_run(tui_view *v)
 	}
 
 	/* 收口：拒收新事件 → 中断+join worker（on_shutdown）→ 鼠标/kitty
-	 * 复位（B5/B6：不留终端在增强模式）→ 退屏 */
+	 * 复位（B5/B6：不留终端在增强模式）→ 退屏（leave 内先 drain+
+	 * set_blocking；wd 路径跳过恢复字节防挂死） */
 	pthread_mutex_lock(&v->qm);
 	v->closing = 1;
 	pthread_cond_broadcast(&v->qc);
@@ -1703,7 +1738,7 @@ int tui_view_run(tui_view *v)
 	if (v->mouse_on)
 		(void)tui_mouse_enable(&v->term, 0);
 	tui_term_leave(&v->term);
-	return 0;
+	return wd_exit;		/* 72=输出看门狗/IO 自退；0=正常退出 */
 }
 
 /* ---- 构造/析构 ---- */
@@ -1875,7 +1910,9 @@ void tui_view_paint(tui_view *v)
 {
 	if (!v || !v->ren)
 		return;
-	tv_render(v, tv_now_ms());
+	/* P-41/P-44：paint 由 occ.c 阻塞调用前主动落帧；wd/IO 失败不在此
+	 * 处置——wd 粘性保证主循环下一帧 flush 捕获并 72 自退 */
+	(void)tv_render(v, tv_now_ms());
 	v->dirty_needed = 0;
 }
 
