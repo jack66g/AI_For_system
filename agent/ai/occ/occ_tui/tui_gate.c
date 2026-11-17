@@ -379,13 +379,14 @@ static int gate_run_ui(int mode, int *unlocked)
 
 	memset(&f1, 0, sizeof(f1));
 	memset(&f2, 0, sizeof(f2));
-	/* P-41/P-44b：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
+	/* P-41/P-44c：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
 	 * 计时（真机实测：静止 gate strace 12s 零 write）；时间基准每
-	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发渲染器
-	 * 探针（CUP 回当前光标位=零视觉）检测消费端。规格原文按
-	 * 「sleep(1)×5 次一跳」计数——本循环实为 ~30ms/迭代（输入泵
-	 * poll 30ms），计数会 150ms 一跳刷屏，按时间基准实现同一 5s
-	 * 语义（冷却内环 sleep(1) 同样覆盖）。 */
+	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发体量
+	 * 心跳（56KB SGR 复位拍+cur_attr 重放，零视觉——小探针会被
+	 * pty 缓冲整吞检测不出楔死，见 tui_renderer_heartbeat）检测
+	 * 消费端。规格原文按「sleep(1)×5 次一跳」计数——本循环实为
+	 * ~30ms/迭代（输入泵 poll 30ms），计数会 150ms 一跳刷屏，按
+	 * 时间基准实现同一 5s 语义（冷却内环 sleep(1) 同样覆盖）。 */
 	hb_ms = 5000;
 	{
 		const char *e = getenv("OCC_TUI_HB_MS");
@@ -404,7 +405,7 @@ static int gate_run_ui(int mode, int *unlocked)
 		static char status_buf[160];
 
 		if (hb_ms > 0 && gate_now_ms() >= hb_next) {
-			int prc = tui_renderer_probe(ren);
+			int prc = tui_renderer_heartbeat(ren);
 
 			hb_next = gate_now_ms() + (uint64_t)hb_ms;
 			if (prc == -2 || prc == -1)
@@ -546,11 +547,11 @@ static int gate_run_ui(int mode, int *unlocked)
 							 cols / 2);
 				if (frc == -2 || frc == -1)
 					gate_sink_fatal(ren, frc);
-				/* P-41/P-44b：冷却 10s > 心跳 5s——内环同
-				 * 步探针，不留盲窗（帧每秒有输出，探针只
+				/* P-41/P-44c：冷却 10s > 心跳 5s——内环同
+				 * 步心跳，不留盲窗（帧每秒有输出，心跳只
 				 * 是补 wd 计时锚点） */
 				if (hb_ms > 0 && gate_now_ms() >= hb_next) {
-					int prc = tui_renderer_probe(ren);
+					int prc = tui_renderer_heartbeat(ren);
 
 					hb_next = gate_now_ms() +
 						  (uint64_t)hb_ms;

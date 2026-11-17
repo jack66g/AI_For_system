@@ -624,25 +624,6 @@ void tui_sink_fini(tui_sink *s)
 	memset(s, 0, sizeof(*s));	/* 幂等：二次 fini/误用直写全安全 */
 }
 
-int tui_sink_probe(tui_sink *s, const char *data, size_t len)
-{
-	if (!s || !s->fn)
-		return -1;
-	if (!s->buf_mode) {
-		/* 直写模式无看门狗（旧语义）：直写后视为健康 */
-		s->fn(s->ctx, data, len);
-		return 0;
-	}
-	/* 粘性后不再发字节（楔死端收不到，发了也只是丢弃）；如实返回
-	 * 粘性码——调用方据此走 72 自愈，不产生第二次 drain 计时 */
-	if (s->ovf)
-		return -1;
-	if (s->wd_fired)
-		return -2;
-	s->fn(s->ctx, data, len);
-	return tui_sink_drain(s);
-}
-
 /* ================= 渲染器（front/back 双缓冲 + 脏行 diff） ================= */
 
 tui_renderer *tui_renderer_create(int rows, int cols, tui_sink sink)
@@ -810,24 +791,59 @@ int tui_renderer_flush(tui_renderer *r, int crow, int ccol)
 	return redrawn;
 }
 
-int tui_renderer_probe(tui_renderer *r)
+/* ---- P-41/P-44c 体量心跳 ---- */
+
+/* bulk 块（TUI_HB_BULK 字节 "\x1b[m" 重复）：进程内生成一次复用——
+ * BSS 静态缓冲，零每拍分配（心跳周期级调用，不做 malloc）。
+ * 取代 P-41/P-44b 的 8 字节 CUP 探针：真机 SIGSTOP fbterm 实证小探针
+ * 被 64KB pty 缓冲整吞（write 成功≠被消费），空闲态填不满=wd 永不
+ * 计时；56KB 一拍让楔死端第二拍即 EAGAIN 进看门狗。 */
+static char hb_bulk[TUI_HB_BULK];
+static int hb_bulk_ready;
+
+static const char *hb_bulk_get(void)
 {
-	char cup[32];
-	int row = 1, col = 1;		/* 光标位未知时的零视觉回落 (1,1) */
-	int n;
+	if (!hb_bulk_ready) {
+		int i;
+
+		for (i = 0; i + 3 <= TUI_HB_BULK; i += 3) {
+			hb_bulk[i] = '\x1b';
+			hb_bulk[i + 1] = '[';
+			hb_bulk[i + 2] = 'm';
+		}
+		hb_bulk_ready = 1;
+	}
+	return hb_bulk;
+}
+
+int tui_renderer_heartbeat(tui_renderer *r)
+{
+	tui_attr dflt = tui_attr_default();
+	char sgr[64];
+	size_t sn;
 
 	if (!r || !r->sink.fn)
 		return -1;
-	/* CUP 到 renderer 跟踪的当前光标位：终端只会把光标放回原位，
-	 * 画面零变化——这就是探针字节（「带字节的健康探测」） */
-	if (r->cur_row >= 0) {
-		row = r->cur_row + 1;
-		col = (r->cur_col >= 0 ? r->cur_col : 0) + 1;
+	if (!r->sink.buf_mode) {
+		/* 直写模式无看门狗（旧语义）：直写后视为健康 */
+		r->sink.fn(r->sink.ctx, hb_bulk_get(), TUI_HB_BULK);
+		return 0;
 	}
-	n = snprintf(cup, sizeof(cup), "\x1b[%d;%dH", row, col);
-	if (n <= 0)
+	/* 粘性后不再发字节（楔死端收不到，发了也只是丢弃）；如实返回
+	 * 粘性码——调用方据此走 72 自愈，不产生第二次 drain 计时 */
+	if (r->sink.ovf)
 		return -1;
-	return tui_sink_probe(&r->sink, cup, (size_t)n);
+	if (r->sink.wd_fired)
+		return -2;
+	r->sink.fn(r->sink.ctx, hb_bulk_get(), TUI_HB_BULK);
+	/* 尾随 cur_attr 重放：bulk 把终端 SGR 清回 default，这里一条
+	 * default→cur_attr 转移把状态对齐 renderer 记忆（取舍见头注：
+	 * 3~30 字节换「帧间任何属性段」零错色；cur_attr 本就是 default
+	 * 时转移为 0 字节=零成本） */
+	sn = tui_sgr_transition(&dflt, &r->cur_attr, sgr, sizeof(sgr));
+	if (sn > 0)
+		r->sink.fn(r->sink.ctx, sgr, sn);
+	return tui_sink_drain(&r->sink);
 }
 
 /* ================= 滚动视口原语（scrollback 环） ================= */

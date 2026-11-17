@@ -1604,9 +1604,10 @@ int tui_view_run(tui_view *v)
 	/* 权威副本=ren->sink（create 已修正 ctx 自指）；term 的光标/鼠标/
 	 * kitty 序列也走它——渲染过程中的序列与帧同批，不破坏帧原子性 */
 	v->term.bsink = &v->ren->sink;
-	/* P-41/P-44b：空闲心跳周期 env OCC_TUI_HB_MS（缺省 5000，0=禁用，
+	/* P-41/P-44c：空闲心跳周期 env OCC_TUI_HB_MS（缺省 5000，0=禁用，
 	 * 钳位 [0,600000] 防误配抖动）——wd 只能伴帧输出计时，静止窗口
-	 * （chat 空闲无 busy 水印）零输出=楔死不可见；心跳探针补此真空 */
+	 * （chat 空闲无 busy 水印）零输出=楔死不可见；体量心跳（56KB
+	 * "\x1b[m" 拍，见 tui_renderer_heartbeat）补此真空 */
 	v->hb_ms = 5000;
 	{
 		const char *e = getenv("OCC_TUI_HB_MS");
@@ -1712,16 +1713,16 @@ int tui_view_run(tui_view *v)
 					timeout = (int)trem;
 			}
 		}
-		/* P-41/P-44b：空闲心跳——wd 只能伴帧输出计时，静止窗口
-		 * （无事件/无 busy 水印）零输出=楔死不可见。到期发渲染器
-		 * 探针（CUP 回当前光标位，零视觉）+立即 drain；-1/-2 走
-		 * 既有 72 自退路径。心跳自身不置 dirty、不重绘；poll 超时
-		 * 无条件并入「距下次心跳」——探针刚发过也要并入（否则
-		 * timeout 留 -1，空闲 poll(-1) 睡死到下个外部事件，心跳
-		 * 变一次性）。 */
+		/* P-41/P-44c：空闲心跳——wd 只能伴帧输出计时，静止窗口
+		 * （无事件/无 busy 水印）零输出=楔死不可见。到期发体量
+		 * 心跳（56KB SGR 复位拍+cur_attr 重放，零视觉）+立即
+		 * drain；-1/-2 走既有 72 自退路径。心跳自身不置 dirty、
+		 * 不重绘；poll 超时无条件并入「距下次心跳」——探针刚发
+		 * 过也要并入（否则 timeout 留 -1，空闲 poll(-1) 睡死到
+		 * 下个外部事件，心跳变一次性）。 */
 		if (v->hb_ms > 0) {
 			if (now >= v->hb_next) {
-				int prc = tui_renderer_probe(v->ren);
+				int prc = tui_renderer_heartbeat(v->ren);
 
 				v->hb_next = now + (uint64_t)v->hb_ms;
 				if (prc == -2 || prc == -1) {

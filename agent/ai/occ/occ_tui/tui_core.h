@@ -163,14 +163,6 @@ int tui_sink_drain(tui_sink *s);
 void tui_sink_set_blocking(tui_sink *s);
 /* 释放缓冲（幂等；tui_renderer_destroy 对自家 sink 调用） */
 void tui_sink_fini(tui_sink *s);
-/*
- * P-41/P-44b 心跳探针：追加 data 进缓冲后立即 drain——一次「带字节的
- * 消费端健康探测」（wd 只能伴帧输出计时；空闲零输出窗口的楔死由此
- * 检出）。返回 drain 结果（0/-1/-2）。wd/ovf 已粘性时不再发字节（发
- * 也到不了楔死端）而如实返回粘性码；直写模式无看门狗（旧语义）：fn
- * 直写后返回 0。
- */
-int tui_sink_probe(tui_sink *s, const char *data, size_t len);
 
 /* ---- 渲染器（front/back 双缓冲 + 脏行 diff + 光标跟踪） ---- */
 typedef struct tui_renderer {
@@ -204,13 +196,35 @@ void tui_renderer_clear(tui_renderer *r);
  */
 int tui_renderer_flush(tui_renderer *r, int cur_row, int cur_col);
 /*
- * P-41/P-44b 渲染器级心跳探针：发「光标重定位到 renderer 跟踪的当前
- * 位」的 CUP（零视觉影响——fbterm 只把光标放回原位）并立即 drain。
- * 返回同 tui_sink_probe（0/-1/-2）。光标位未知（-1，仅首帧前理论可达）
- * 回落 (1,1)。空闲心跳（tui_view/tui_gate，OCC_TUI_HB_MS）用此检测
- * 「无帧可计时」窗口里的消费端楔死。
+ * P-41/P-44c 体量心跳：一拍 TUI_HB_BULK 字节的 "\x1b[m"（SGR 复位）
+ * 重复 + 尾随一条 default→cur_attr 重放，一次 drain 收口。
+ *
+ * 为什么体量（真机 SIGSTOP fbterm 实证）：8 字节 CUP 探针会被 64KB
+ * pty 缓冲照单吞下——write 成功≠被消费，drain 只在缓冲满时才计时，
+ * 空闲态小探针填满要 11 小时；56KB 一拍则楔死端第二拍即 EAGAIN→
+ * 看门狗（检出上界 ≈2×HB+WD，通用任何不消费态）。健康端毫秒级吃
+ * 掉无感。TIOCOUTQ 不可用（pty 从端恒 0——数据即刻转入主端读队列，
+ * 从端看不到消费进度）。
+ *
+ * 为什么 "\x1b[m"：属性复位幂等（连续 reset=仍 default）且无字形
+ * 输出=零视觉；无数字参数——P-41 崩溃点在 fbterm 数字解析路径，
+ * 空参数走不同分支，避开饲喂面。
+ *
+ * 为什么尾随 cur_attr 重放（选重放而非依赖下帧兜底）：bulk 把终端
+ * SGR 清回 default，而 renderer 记忆的 cur_attr 可能非默认——不重放
+ * 则下一帧首段「cell attr==stale cur_attr → 不发 SGR」或增量转移
+ * 都会错色，直到某次全量复位才对齐；重放 3~30 字节让终端状态与
+ * 跟踪完全一致，帧间任何属性段渲染正确。
+ *
+ * 串口径：56KB@115200≈4.8s/拍 < wd 缺省 15s——drain 的 poll 等它
+ * 排完（POLLOUT 随 uart 排空恢复），勿把 wd 配小于排空时间。
+ * 返回 drain 结果（0/-1/-2）；wd/ovf 粘性时不再发字节、如实返回；
+ * 直写模式无看门狗（旧语义）直写返 0。bulk 块进程内生成一次复用。
  */
-int tui_renderer_probe(tui_renderer *r);
+#define TUI_HB_BULK (3 * 19148)		/* 57444≈56KB：19148 × "\x1b[m"。
+					 * 必须整除 3（块内全是三字节
+					 * 重复，无填充尾巴） */
+int tui_renderer_heartbeat(tui_renderer *r);
 
 /* ---- 滚动视口原语（scrollback 环 + 视口 + follow-latest） ----
  * 行=cell 数组（列下标==列）；环按 push 挤出最旧行（dropped 计数）。

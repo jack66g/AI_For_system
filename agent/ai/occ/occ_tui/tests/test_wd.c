@@ -2,14 +2,21 @@
 /*
  * test_wd.c - P-41/P-44 输出看门狗 pty 级回归门
  *
- * wd 超时本身由 test_sinkbuf 在 pipe 单元证明（pty 级造「永不读的假
- * 消费端」不现实——pty 缓冲由内核端排空）。pty 级本套验证回归面：
+ * wd 超时本身由 test_sinkbuf 在 pipe 单元证明。pty 级本套验证：
  *   A. wd 禁用（OCC_TUI_WD_MS=0）时行为与旧版全等——同操作序列在
  *      「直写 fd 汇」（旧版）与「缓冲 fd 汇+wd 禁用+term.bsink」
  *      （新版全链）两子进程产生逐字节相同的输出流（enter/帧/光标
  *      序列/leave——缓冲化只改批次不改字节总序）。
  *   B. wd 缺省（15000）+ 健康消费端（父进程持续读）：不误伤，整流
  *      正常进出、rc=0。
+ *   C. P-41/P-44c 体量心跳（view 级）：C1 HB 开=空闲注入全为
+ *      "\x1b[m" 三字节重复（+每拍一条 cur_attr 重放 SGR，无其它
+ *      字节——零视觉合同换字节面）；C2 HB=0 同窗口零注入（=与无
+ *      心跳实现输出流逐字节全等，回归门）。
+ *   D. 楔死真检出（P-44c 核心，pty 对）：D1 master 持着不读+
+ *      HB=300/WD=800 → 第二拍 bulk 顶满 EAGAIN→wd→view 子进程
+ *      rc=72，检出 <2.5s；D2 同参数 master 持续读 → 不误报（存活
+ *      ≥2s 后 /exit 正常 rc=0）。
  */
 #define _XOPEN_SOURCE 700	/* posix_openpt 三件套（照 test_pty 口径） */
 #define _DEFAULT_SOURCE 1
@@ -248,7 +255,7 @@ static int run_child(int buffered, char *out, int *out_len)
 	return WEXITSTATUS(st);
 }
 
-/* ---- C. P-41/P-44b 空闲心跳（view 级 pty）---- */
+/* ---- C/D. P-41/P-44c 体量心跳（view 级 pty）---- */
 
 /* 有界收集：dur_ms 内持续读（不看静默——心跳场景要按窗取字节）；
  * 同 collect 纪律：poll 无 POLLIN 绝不 read（防阻塞 ptmx 死等） */
@@ -294,37 +301,46 @@ static int wait_tok(int fd, char *buf, int cap, int *have, const char *tok,
 	return find_bytes(buf, *have, tok) != NULL ? 0 : -1;
 }
 
-/* 校验字节段全是 CUP 序列（\x1b[<r>;<c>H 重复——探针零视觉合同） */
-static int is_cup_only(const char *p, int n)
+/* 校验空闲增量=体量心跳合同："\x1b[m"（SGR 复位）三字节重复为主体，
+ * 每拍之后至多一条带参数 SGR（cur_attr 重放——default→cur_attr 转移，
+ * 参数非空 [0-9;]+），无任何其它字节。*resets 返回复位三元组数。 */
+static int is_bulk_heartbeat(const char *p, int n, int *resets)
 {
-	int i = 0;
+	int i = 0, r = 0;
 
+	*resets = 0;
 	while (i < n) {
-		int j = i;
+		int run = 0;
 
-		if (p[j] != 0x1b || j + 1 >= n || p[j + 1] != '[')
-			return 0;
-		j += 2;
-		if (j >= n || p[j] < '0' || p[j] > '9')
-			return 0;
-		while (j < n && p[j] >= '0' && p[j] <= '9')
-			j++;
-		if (j >= n || p[j] != ';')
-			return 0;
-		j++;
-		if (j >= n || p[j] < '0' || p[j] > '9')
-			return 0;
-		while (j < n && p[j] >= '0' && p[j] <= '9')
-			j++;
-		if (j >= n || p[j] != 'H')
-			return 0;
-		j++;
-		i = j;
+		/* 一拍：先吃连续 "\x1b[m"（bulk 主体） */
+		while (i + 3 <= n && p[i] == 0x1b && p[i + 1] == '[' &&
+		       p[i + 2] == 'm') {
+			i += 3;
+			run++;
+		}
+		if (run == 0)
+			return 0;		/* 不在拍首=杂字节 */
+		r += run;
+		/* 至多一条带参数 SGR 重放（可有可无——cur_attr==default
+		 * 时转移为 0 字节） */
+		if (i + 3 <= n && p[i] == 0x1b && p[i + 1] == '[' &&
+		    p[i + 2] >= '0' && p[i + 2] <= '9') {
+			int j = i + 2;
+
+			while (j < n && ((p[j] >= '0' && p[j] <= '9') ||
+					 p[j] == ';'))
+				j++;
+			if (j >= n || p[j] != 'm')
+				return 0;
+			i = j + 1;
+		}
 	}
-	return i == n;
+	*resets = r;
+	return 1;
 }
 
-/* 裸 view 子进程：无 hooks（空态面板）——心跳逻辑与 hooks 无关 */
+/* 裸 view 子进程：无 hooks（空态面板）——心跳逻辑与 hooks 无关。
+ * 退出码原样透传（0=正常 /exit；72=wd·心跳自退——D1 断言面） */
 static int view_child_main(void)
 {
 	tui_view *v = tui_view_create(NULL);
@@ -334,16 +350,16 @@ static int view_child_main(void)
 		return 10;
 	rc = tui_view_run(v);
 	tui_view_destroy(v);
-	return rc == 0 ? 0 : 11;
+	return rc;
 }
 
 /*
  * 单轮：spawn 裸 view 子进程（hb_env 非空则置 OCC_TUI_HB_MS）→ 等首帧
- * → 快照 → 空闲 idle_ms 收集 → 校验增量（want_cup：应全为 CUP；否则
- * 应为零）→ /exit → 等 leave → 返回子进程 rc（异常 -1）。*idle_delta
- * 返回空闲增量长度。
+ * → 快照 → 空闲 idle_ms 收集 → 校验增量（want_bulk：应为 bulk 心跳
+ * 字节；否则应为零）→ /exit → 等 leave → 返回子进程 rc（异常 -1）。
+ * *idle_delta 返回空闲增量长度。
  */
-static int hb_run(const char *hb_env, int idle_ms, int want_cup,
+static int hb_run(const char *hb_env, int idle_ms, int want_bulk,
 		  int *idle_delta)
 {
 	struct pty pt;
@@ -395,13 +411,18 @@ static int hb_run(const char *hb_env, int idle_ms, int want_cup,
 	snap = have;
 	collect_for(pt.master, out, WD_OUT_CAP, &have, idle_ms);
 	*idle_delta = have - snap;
-	/* 空闲增量校验：心跳开=纯 CUP（≥1 次探针 6 字节；节拍窗内通常
-	 * ≥2 次）；心跳关=零字节 */
-	if (want_cup)
-		OK(*idle_delta >= 6 && is_cup_only(out + snap, *idle_delta),
-		   "C1-idle-delta-cup-only");
-	else
+	/* 空闲增量校验：心跳开=bulk 主体（≥1 拍 TUI_HB_BULK）+每拍至多
+	 * 一条重放 SGR、无其它字节；心跳关=零字节 */
+	if (want_bulk) {
+		int resets = 0;
+
+		OK(*idle_delta >= TUI_HB_BULK &&
+		   is_bulk_heartbeat(out + snap, *idle_delta, &resets) &&
+		   resets * 3 >= TUI_HB_BULK,
+		   "C1-idle-delta-bulk-only");
+	} else {
 		OK(*idle_delta == 0, "C2-idle-zero-bytes");
+	}
 
 	/* /exit 正常退出（心跳不扰动正常收口） */
 	{
@@ -433,17 +454,171 @@ static void hb_scenario(void)
 	int delta;
 	int rc;
 
-	/* C1. HB=1200、空闲 3s：探针到点注入（≥1 次、窗内通常 2-3 次），
-	 * 字节全 CUP（零视觉合同） */
+	/* C1. HB=1200、空闲 3s：≥1 拍 bulk（57344B "\x1b[m"）+重放，
+	 * 无其它字节（零视觉合同换字节面） */
 	rc = hb_run("1200", 3000, 1, &delta);
 	OK(rc == 0, "C1-hb-view-rc0");
-	OK(delta >= 6, "C1-hb-injected");
+	OK(delta >= TUI_HB_BULK, "C1-hb-injected-bulk");
 
 	/* C2. HB=0（禁用）、同窗口：零注入=与无心跳实现输出流逐字节
 	 * 全等（回归门——空闲段字节一个不多） */
 	rc = hb_run("0", 3000, 0, &delta);
 	OK(rc == 0, "C2-hb-off-view-rc0");
 	OK(delta == 0, "C2-hb-off-zero-delta");
+}
+
+/* ---- D. 楔死真检出（pty 对——P-44c 核心）---- */
+
+/* 持续排空 master（健康消费端仿真）；累计字节数入 *total */
+static void drain_master(int fd, int dur_ms, long *total)
+{
+	uint64_t t0 = wd_now_ms();
+	char sink[4096];
+
+	while (wd_now_ms() - t0 < (uint64_t)dur_ms) {
+		struct pollfd p;
+		ssize_t n;
+
+		p.fd = fd;
+		p.events = POLLIN;
+		p.revents = 0;
+		if (poll(&p, 1, 100) < 0) {
+			if (errno == EINTR)
+				continue;
+			return;
+		}
+		if (!(p.revents & POLLIN))
+			continue;
+		n = read(fd, sink, sizeof(sink));
+		if (n > 0) {
+			*total += (long)n;
+			continue;
+		}
+		if (n == 0 || errno == EIO)
+			return;		/* 子进程已退 */
+	}
+}
+
+/*
+ * D 场景共底：HB=300ms、WD=800ms 的裸 view 子进程。consume=1：父持续
+ * 读 master（健康端——不该误报，窗口后 /exit 收口）；consume=0：master
+ * 持着不读（楔死端——第二拍 bulk 顶满 EAGAIN→wd→rc 72）。返回子进程
+ * 退出码；*ms 返回从起跑到收尸的墙钟。
+ */
+static int detect_run(int consume, uint64_t *ms)
+{
+	struct pty pt;
+	pid_t pid;
+	int st = 0;
+	uint64_t t0;
+	struct winsize ws = { .ws_row = 24, .ws_col = 80 };
+
+	*ms = 0;
+	if (pty_open(&pt) != 0)
+		return -1;
+	(void)ioctl(pt.slave, TIOCSWINSZ, &ws);
+	pid = fork();
+	if (pid < 0) {
+		pty_close(&pt);
+		return -1;
+	}
+	if (pid == 0) {
+		close(pt.master);
+		if (setsid() < 0)
+			_exit(30);
+		if (ioctl(pt.slave, TIOCSCTTY, 0) < 0)
+			_exit(31);
+		if (dup2(pt.slave, STDIN_FILENO) < 0 ||
+		    dup2(pt.slave, STDOUT_FILENO) < 0 ||
+		    dup2(pt.slave, STDERR_FILENO) < 0)
+			_exit(32);
+		if (pt.slave > STDERR_FILENO)
+			close(pt.slave);
+		setenv("OCC_TUI_HB_MS", "300", 1);
+		setenv("OCC_TUI_WD_MS", "800", 1);
+		_exit(view_child_main());
+	}
+	close(pt.slave);
+	pt.slave = -1;
+	t0 = wd_now_ms();
+
+	if (consume) {
+		long total = 0;
+		char ex[] = "/exit\r";
+		int w;
+
+		/* 健康端：2s 持续消费。期间子进程若误判楔死退出（wd 误报）
+		 * 会被下方 waitpid 捕获——返回码非 0 即反例。 */
+		while (wd_now_ms() - t0 < 2000) {
+			drain_master(pt.master, 200, &total);
+			if (waitpid(pid, &st, WNOHANG) == pid) {
+				*ms = wd_now_ms() - t0;
+				pty_close(&pt);
+				OK(total > TUI_HB_BULK,
+				   "D2-bulk-consumed-flow");	/* 心跳在流 */
+				return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+			}
+		}
+		OK(total > TUI_HB_BULK, "D2-bulk-consumed-flow");
+		(void)!write(pt.master, ex, sizeof(ex) - 1);
+		for (w = 0; w < 40; w++) {
+			if (waitpid(pid, &st, WNOHANG) == pid)
+				break;
+			usleep(100000);
+		}
+		*ms = wd_now_ms() - t0;
+		if (w == 40) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &st, 0);
+			pty_close(&pt);
+			return -1;
+		}
+		pty_close(&pt);
+		return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	}
+
+	/* 楔死端：完全不读——期待 2×HB+WD≈1.4s 内 rc=72（容忍 pty 容量
+	 * 差异导致的更早检出；上界断言 2.5s） */
+	{
+		int w;
+
+		for (w = 0; w < 25; w++) {
+			if (waitpid(pid, &st, WNOHANG) == pid)
+				break;
+			usleep(100000);
+		}
+		*ms = wd_now_ms() - t0;
+		if (w == 25) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &st, 0);
+			pty_close(&pt);
+			return -1;		/* 2.5s 未检出 */
+		}
+		pty_close(&pt);
+		return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	}
+}
+
+static void detect_scenario(void)
+{
+	uint64_t ms;
+	int rc;
+
+	/* D1. master 不读（楔死）：检出=rc 72，且 <2.5s */
+	rc = detect_run(0, &ms);
+	if (rc != 72)
+		printf("  dbg: D1 rc=%d ms=%llu (want 72 <2500ms)\n", rc,
+		       (unsigned long long)ms);
+	OK(rc == 72, "D1-wedge-detected-72");
+	OK(ms < 2500, "D1-detected-under-2.5s");
+
+	/* D2. master 持续读（健康）：不误报——2s 窗存活 + bulk 在流 +
+	 * /exit 正常 rc=0 */
+	rc = detect_run(1, &ms);
+	if (rc != 0)
+		printf("  dbg: D2 rc=%d ms=%llu (want 0)\n", rc,
+		       (unsigned long long)ms);
+	OK(rc == 0, "D2-healthy-no-false-positive");
 }
 
 int main(void)
@@ -483,14 +658,11 @@ int main(void)
 		   "B-frame-content-visible");
 	}
 
-	/* ---- C. P-41/P-44b 空闲心跳（view 级 pty）----
-	 * 覆盖真空：wd 只能伴帧输出计时，空闲（零事件/零输出）窗口的
-	 * 楔死由心跳探针检出。断言对：
-	 *   C1. HB=1200 空闲 3s：注入字节全是 CUP（光标回原位=零视觉）
-	 *       且 ≥2 次（节拍到点）；/exit 正常退出 rc=0。
-	 *   C2. HB=0（禁用）同窗口：零注入——空闲段输出流与无心跳实现
-	 *       逐字节全等（回归门）。 */
+	/* ---- C. P-41/P-44c 体量心跳（view 级 pty）---- */
 	hb_scenario();
+
+	/* ---- D. 楔死真检出（pty 对，P-44c 核心）---- */
+	detect_scenario();
 
 	printf("test_wd: %d ok, %d fail\n", n_ok, n_fail);
 	return n_fail ? 1 : 0;
