@@ -11,7 +11,9 @@
  *   C) 两步深撤叠加：--step 从现边界再往深处数；undo#2 后 redo 一步
  *      回到首次撤销前现状（_redo 不被叠加覆盖）
  *   D) ABSENT 墓碑：新建文件撤销=删除；redo 恢复
- *   E) status=running 拒绝 undo（不改库）
+ *   E) status=running 拒绝 undo（不改库；文案含 unstuck 指引）
+ *   U) P-48 解僵链：running 残留 → 归位 interrupted（occ unstuck 的
+ *      库原语）→ undo 放行（文件真回滚）
  *   F) 纯对话轮（无文件快照）拒绝 undo（不改库——设计 §9-2 约束）
  *   G) bash 无快照 → nskipped 如实计数（不谎称全量回滚）
  *   H) 幂等/边界：无 stage 的 commit 无操作；无 stage 的 redo 报错
@@ -635,6 +637,44 @@ int main(void)
 		occ_msg_row_free(&last);
 	}
 	occ_undo_result_free(&r);
+
+	/* ---- U) P-48 unstuck 解僵链：running 挡 undo → 归位
+	 * interrupted（occ unstuck 的库原语 occ_session_set_status）
+	 * → undo 放行（文件真回滚） ---- */
+	{
+		char sidu[OCC_ID_LEN];
+		char fu[192];
+
+		OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+		   "u-create");
+		snprintf(sidu, sizeof(sidu), "%s", s.id);
+		OK(occ_session_set_workdir(db, sidu, workdir, err,
+					   sizeof(err)) == 0, "u-workdir");
+		snprintf(fu, sizeof(fu), "%s/f_u.txt", workdir);
+		wfile(fu, "U0");
+		OK(make_write_turn(db, sidu, "解僵前写一轮", fu, "U1", NULL,
+				   err, sizeof(err)) == 0, "u-turn");
+		OK(!strcmp(rfile(fu), "U1"), "u-before-stuck");
+		/* 楔死/强杀残留形态：环未收口 → status=running 挡 undo */
+		OK(occ_session_set_status(db, sidu, OCC_ST_RUNNING, err,
+					  sizeof(err)) == 0, "u-set-running");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sidu, 1, NULL, &r, err, sizeof(err)) == -1 &&
+		   strstr(err, "running") && strstr(err, "unstuck"),
+		   "u-undo-blocked-with-hint");
+		occ_undo_result_free(&r);
+		/* occ unstuck 的库原语：running→interrupted（上下文原地） */
+		OK(occ_session_set_status(db, sidu, OCC_ST_INTERRUPTED, err,
+					  sizeof(err)) == 0, "u-unstuck");
+		OK(occ_session_get(db, sidu, &s, err, sizeof(err)) == 1 &&
+		   !strcmp(s.status, OCC_ST_INTERRUPTED),
+		   "u-status-readback");
+		memset(&r, 0, sizeof(r));
+		OK(occ_undo(db, sidu, 1, NULL, &r, err, sizeof(err)) == 0,
+		   "u-undo-after-unstuck");
+		OK(!strcmp(rfile(fu), "U0"), "u-file-restored");
+		occ_undo_result_free(&r);
+	}
 
 	/* ---- F) 纯对话轮（无文件快照）拒绝（不改库） ---- */
 	OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0, "s5-create");

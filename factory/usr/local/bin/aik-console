@@ -1,5 +1,10 @@
 #!/bin/sh
-# aik-console v7 — P-41/P-44 控制台稳定棒（输出看门狗自愈）。
+# aik-console v8 — P-47 退出码出带外（fbterm 吞码终解）。
+#   v8：occ 在 FBTERM 门控下把终局退出码写 /run/aik-occ-exit（出带
+#   外 marker）；fb 分支在 rc 判定链之前消费（读后即焚）——71=注销
+#   断链 exit 0（v6 语义在 fb 链终于可触发），其它值留痕观察。
+#   serial 分支不加（无 fbterm 转手，rc 直达 71 原样工作）。
+#   v7 — P-41/P-44 控制台稳定棒（输出看门狗自愈）。
 #   v7e：击毙信号 SIGTERM→SIGKILL——fbterm 接住 SIGTERM 优雅清理后
 #   仍退 0（真机实证，143 线索位永不亮）；SIGKILL 不可捕获→137 必亮。
 #   v7d：fb 分支补 137（fbterm 被 occ 击毙=楔死自愈真路径）与 139
@@ -37,6 +42,13 @@ case "$TTY" in
       rc=$?
       n=$((n+1))
       log "occ-exit rc=$rc n=$n tty=fb fb=${FBTERM_BIN:+y}"
+      # P-47：fbterm 吞退出码——occ 出带外 marker（读后即焚）
+      if [ -f /run/aik-occ-exit ]; then
+        read -r mev < /run/aik-occ-exit
+        rm -f /run/aik-occ-exit
+        [ "$mev" = "71" ] && { log "occ-logout-marker 71 tty=fb"; exit 0; }
+        log "occ-exit-marker $mev tty=fb"
+      fi
       # P-41/P-44：72=occ 输出看门狗自退（fbterm 楔死）——单独留痕，
       # 循环行为不变（sleep 2 重启整链自愈）
       [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=fb"

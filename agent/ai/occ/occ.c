@@ -11,6 +11,8 @@
  *   occ redo --session <id>              恢复上次 undo（revert.clear）
  *   occ retry --session <id>             重发最后一条 user 消息（中断后
  *                                        重发；tail=user/tool 时=重放）
+ *   occ unstuck --session <id>            轻量解僵（running→interrupted，
+ *                                        不重放——P-48 楔死/强杀残留）
  *   occ sessions                         会话列表（id/标题/token/状态/时间）
  *   occ tasks [--session <id>] [--json]  任务列表（id/标题/状态/rework/
  *                                        预算 tokens+cost_usd_ref；--json
@@ -83,6 +85,8 @@ static const char USAGE[] =
 	"  occ undo --session <id> [--step N]   撤销最近 N 步（文件回滚+消息隐藏）\n"
 	"  occ redo --session <id>              恢复上次 undo\n"
 	"  occ retry --session <id>             重发最后一条 user 消息\n"
+	"  occ unstuck --session <id>            轻量解僵（running→interrupted，"
+	"不重放）\n"
 	"  occ sessions                         会话列表\n"
 	"  occ tasks [--session <id>] [--json]  任务列表（状态/rework/预算；"
 	"--json=机读 JSONL）\n"
@@ -459,6 +463,37 @@ static int cmd_retry(occ_db *db, occ_provider *p, const char *id)
 	rc = run_turn(db, p, id, replay ? NULL : text, 0);
 	free(text);
 	return rc;
+}
+
+/* P-48：轻量解僵——楔死/强杀后会话卡 status=running 挡 undo/retry。
+ * occ --recover 可解但重放全上下文（TUI 全量 ~10.7k tokens）；本命令
+ * 只把 running 归位 interrupted：上下文/token 原地保留，零重放零模型
+ * 调用——occ retry 续跑、occ undo 即刻可用。幂等诚实：非 running 不
+ * 改库、直言无需解僵。 */
+static int cmd_unstuck(occ_db *db, const char *id)
+{
+	occ_session_row s;
+	char err[160];
+
+	if (occ_session_get(db, id, &s, err, sizeof(err)) != 1) {
+		fprintf(stderr, "occ unstuck: 会话 %s 不存在"
+			"（occ sessions 可查全部会话）\n", id);
+		return 1;
+	}
+	if (strcmp(s.status, OCC_ST_RUNNING)) {
+		printf("occ unstuck: 会话 %s 状态为 %s（非 running），"
+		       "无需解僵\n", id, s.status);
+		return 0;
+	}
+	if (occ_session_set_status(db, id, OCC_ST_INTERRUPTED,
+				   err, sizeof(err)) != 0) {
+		fprintf(stderr, "occ unstuck: 解僵失败：%s\n", err);
+		return 1;
+	}
+	printf("occ unstuck: 会话 %s 已解僵（running→interrupted）："
+	       "上下文/token 保留零重放；`occ retry --session %s` 续跑、"
+	       "`/undo` 现在可用\n", id, id);
+	return 0;
 }
 
 /* ---- T9c2 交互模式（全屏 TUI；headless 路径零改动） ---- */
@@ -3978,6 +4013,42 @@ static void tui_app_on_shutdown(void *ud)
 	/* mutex/prompt 由 run_interactive 收尾（enter 早退路径也要清） */
 }
 
+/* P-47：fbterm 转手吞掉子进程退出码（occ 退 71 → aik-console 只见
+ * fbterm 的 0，O-1 退出即注销在 fb 链永不触发）——71 出带外：在
+ * FBTERM env 门控（aik-console fb 分支同款 env）下写 marker 文件，
+ * 由 aik-console v8 在 rc 判定链之前消费（读后即焚）。serial/ssh 链
+ * 无 FBTERM env：rc 直达，零动作。
+ * 70（/zoom）不写：fb 循环内重启而非终局退出，marker 会被
+ * aik-console 当作本轮退出消费、污染下一轮判定。
+ * OCC_EXIT_MARKER 仅测试用（指 /tmp 文件）；生产不设——缺省
+ * /run/aik-occ-exit（VM /run 为 tmpfs 可写；不可写回落 /tmp 同名）。
+ * 写失败只 stderr 警告，绝不影响退出码本身。 */
+static void tui_exit_marker(int code)
+{
+	const char *fb = getenv("FBTERM");
+	const char *path;
+	FILE *fp;
+
+	if (code == 70)
+		return;			/* /zoom：非终局退出不出带外 */
+	if (!fb || !fb[0])
+		return;
+	path = getenv("OCC_EXIT_MARKER");
+	if (!path || !path[0])
+		path = "/run/aik-occ-exit";
+	fp = fopen(path, "w");
+	if (!fp && !strcmp(path, "/run/aik-occ-exit")) {
+		path = "/tmp/aik-occ-exit";	/* /run 不可写回落 */
+		fp = fopen(path, "w");
+	}
+	if (!fp) {
+		fprintf(stderr, "occ: 退出 marker 写失败（%s）\n", path);
+		return;
+	}
+	fprintf(fp, "%d\n", code);
+	fclose(fp);
+}
+
 static int run_interactive(occ_db *db, const char *model_toml,
 			   const char *provider_toml)
 {
@@ -4185,12 +4256,20 @@ static int run_interactive(occ_db *db, const char *model_toml,
 		pthread_mutex_destroy(&a.mu);
 		pthread_cond_destroy(&a.w2_cond);	/* O-9：W2 应答 */
 			occ_provider_free(&a.p);
-		if (g_t4_exit_code)
+		if (g_t4_exit_code) {
+			/* P-47：显式终局退出码出带外（70=/zoom 在助手内判
+			 * 掉——循环内重启非终局，防污染下一轮消费） */
+			tui_exit_marker(g_t4_exit_code);
 			return g_t4_exit_code;
+		}
 		/* O-1（UX-O §1）：用户主动退出 TUI=注销语义（aik-console v6
 		 * 见 71 断链回 login 面；SSH/pts 下落回 shell 无害） */
-		if (rc == 0)
+		if (rc == 0) {
+			/* P-47：71 经 fbterm 转手被吞——marker 出带外给
+			 * aik-console v8 消费；serial/ssh 无 FBTERM=零动作 */
+			tui_exit_marker(71);
 			return 71;
+		}
 		return (rc < 0) ? 1 : rc;
 	}
 
@@ -4372,7 +4451,7 @@ int main(int argc, char **argv)
 		goto out;
 	}
 	if (!strcmp(argv[1], "undo") || !strcmp(argv[1], "redo") ||
-	    !strcmp(argv[1], "retry")) {
+	    !strcmp(argv[1], "retry") || !strcmp(argv[1], "unstuck")) {
 		/* 标志任意位置：--session <id>（undo 另有 --step N） */
 		const char *cmd = argv[1];
 		const char *sid = NULL;
@@ -4425,6 +4504,11 @@ int main(int argc, char **argv)
 		}
 		if (!strcmp(cmd, "redo")) {
 			rc = cmd_redo(db, sid);
+			goto out;
+		}
+		/* P-48 unstuck：只归位库状态，无需 provider */
+		if (!strcmp(cmd, "unstuck")) {
+			rc = cmd_unstuck(db, sid);
 			goto out;
 		}
 		/* retry 需要 provider（重发要过 LLM） */

@@ -35,7 +35,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
 	     tests/test_gate.c tests/test_gate_pty.c \
      tests/test_rename_ai.c tests/test_history_load.c \
      tests/test_models_offline.c tests/test_su_pty.c \
-     tests/test_sinkbuf.c tests/test_wd.c
+     tests/test_sinkbuf.c tests/test_wd.c tests/test_exitmarker.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
@@ -57,6 +57,8 @@ obj/%.o: %.c
 # mock_title_llm.py，127.0.0.1）——../occ 未构建时诚实 skip）
 # P-35 test_models_offline 同样 exec 真 ../occ（拷入 fixture 隔离快照
 # 搜索链）——离线 /models 浮层不自退回归；未构建时诚实 skip
+# P-47 test_exitmarker 同样 exec 真 ../occ（FBTERM 门控 marker 出带外
+# M1 写 71 / M2 无 FBTERM 零动作 / M3 /zoom=70 不写；未构建诚实 skip）
 # T4 登录门纯逻辑测试（tui_gate.o 需 -lcrypt）
 tests/test_gate: tests/test_gate.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_gate.c $(LIB_OBJS) -lpthread -lcrypt

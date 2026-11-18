@@ -154,7 +154,7 @@ BIN_OCC := occ
 NORM_SRC := tests/occ_norm.c
 
 .PHONY: all test p-smoke durable-drill recover-drill interrupt-drill \
-	retry-drill b2-drills orch-conc-drill orch-drill clean
+	unstuck-drill retry-drill b2-drills orch-conc-drill orch-drill clean
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
@@ -202,6 +202,11 @@ recover-drill: $(BIN_OCC)
 # 中断重试：SIGINT 安全点停 → status=interrupted → occ retry 重发
 interrupt-drill: $(BIN_OCC)
 	bash tests/interrupt_drill.sh
+
+# P-48 轻量解僵：楔死/强杀残留 running → occ unstuck 归位 interrupted
+# （零重放，上下文/token 原地）→ undo 放行；幂等/不存在/--help 面
+unstuck-drill: $(BIN_OCC)
+	bash tests/unstuck_drill.sh
 
 # 自动重试矩阵：第 N 次成功 / 永不成功封顶 / 超时类上限 / 4xx 不重试
 retry-drill: $(BIN_OCC)

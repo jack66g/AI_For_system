@@ -1068,9 +1068,12 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		return -1;
 	}
 	if (!strcmp(s.status, OCC_ST_RUNNING)) {
+		/* P-48：真在跑等本轮收口即可；楔死/强杀残留的 running 挡
+		 * 路——给 unstuck 指引（轻量归位，不像 recover 全重放） */
 		set_err(err, errlen,
 			"occ undo: 会话正在执行（status=running），"
-			"请等本轮结束或先中断");
+			"请等本轮结束或先中断，或 `occ unstuck --session %s`"
+			" 轻量解僵（不重放）", session_id);
 		return -1;
 	}
 	if (occ_msg_list(db, session_id, &rows, &n, err, errlen))
