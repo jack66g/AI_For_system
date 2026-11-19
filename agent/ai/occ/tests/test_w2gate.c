@@ -164,6 +164,11 @@ int main(void)
 			snprintf(a2, sizeof(a2),
 				 "{\"command\":\"chmod +x %s\"}", rop);
 			cls_case("bash", a1, "W2", "cls_chmod_x_twostep_owfile");
+			/* A6b 真机回归：模型惯加 `; echo $?` 尾——token 剥标点后
+			 * 仍须命中两步检测（TC155 曾漏放） */
+			snprintf(a1, sizeof(a1),
+				 "{\"command\":\"chmod +x %s; echo ok\"}", owp);
+			cls_case("bash", a1, "W2", "cls_chmod_x_polluted_tail");
 			cls_case("bash", a2, "W1", "cls_chmod_x_clean_file_w1");
 		}
 		unlink(owp);

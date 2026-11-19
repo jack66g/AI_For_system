@@ -3245,6 +3245,18 @@ static int w2_chmod_hit(const char *cmd, char *detail, size_t dcap)
 	snprintf(buf, sizeof(buf), "%s", cmd);
 	for (t = strtok_r(buf, " \t", &sp); t && n < 40;
 	     t = strtok_r(NULL, " \t", &sp)) {
+		size_t tl = strlen(t);
+
+		/* P-52 A6b 真机补（TC155）：`; echo $?` 类尾随标点会粘在
+		 * 路径/模式 token 上——stat ENOENT→两步检测漏放。收 token
+		 * 即剥首尾 ;,&|()"'
+		 * 与反引号（引号包裹路径顺带受益） */
+		while (tl > 0 && strchr(";,&|()\"'`", t[tl - 1]))
+			t[--tl] = '\0';
+		while (*t && strchr(";,&|()\"'`", *t))
+			t++;
+		if (!*t)
+			continue;
 		tok[n++] = t;
 		if (n > 1 && t[0] != '-' && mi < 0)
 			mi = n - 1;
