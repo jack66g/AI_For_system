@@ -860,6 +860,14 @@ def main(argv=None):
                     help='保留临时目录（排障用）')
     args = ap.parse_args(argv)
     probe = args.probe or os.environ.get('AIK_COMPAT_PROBE') or 'aik-compat'
+    if os.path.sep not in probe:
+        # P-53 修复：PATH 回退命中时转绝对路径。aikctl compat plan 的
+        # compat_resolve_probe 对 --probe 做 isfile 校验（e999718 C1 起
+        # 合同），裸名必拒且台架表象为 plan-*.jsonl FileNotFoundError
+        # 而预检却过——落绝对路径让 PATH 回退端到端可用（不改解析次序）。
+        found = shutil.which(probe)
+        if found:
+            probe = found
     aikctl = resolve_aikctl(args.aikctl, probe)
     print('C2 samples probe=%s aikctl=%s mode=%s%s'
           % (probe, aikctl, 'live' if args.live else 'default',
