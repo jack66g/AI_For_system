@@ -387,7 +387,10 @@ int occ_path_is_under(const char *abs, const char *base)
 	return !strncmp(abs, base, lb) && abs[lb] == '/';
 }
 
-int occ_write_target_ok(const char *abs, const char *cwd)
+/* ~/.occ（会话库/快照区）子树判定——P-45 红线：一律拒绝，任何豁免
+ * 不得越过（P-52 刀2 write_guard 的 w2_confirmed 豁免复用同口径）。
+ * 抽自 occ_write_target_ok 首步，语义零变化（静态缓存同款）。 */
+static int occ_abs_under_home_occ(const char *abs)
 {
 	static char home_occ[512];
 	static int home_occ_init;
@@ -402,7 +405,14 @@ int occ_write_target_ok(const char *abs, const char *cwd)
 				 home);
 		home_occ_init = 1;
 	}
-	if (home_occ[0] && occ_path_is_under(abs, home_occ))
+	return home_occ[0] && occ_path_is_under(abs, home_occ);
+}
+
+int occ_write_target_ok(const char *abs, const char *cwd)
+{
+	if (!abs || abs[0] != '/')
+		return 0;
+	if (occ_abs_under_home_occ(abs))
 		return 0;			/* 会话库/快照区拒绝 */
 	if (occ_path_is_under(abs, "/tmp") ||
 	    occ_path_is_under(abs, "/var/ai"))
@@ -769,6 +779,15 @@ static int write_guard(const occ_tool_ctx *ctx, const char *abs, occ_obuf *o)
 	const char *cwdp = ctx_cwd(ctx, cwd, sizeof(cwd));
 
 	if (occ_write_target_ok(abs, cwdp ? cwdp : ""))
+		return 0;
+	/* J-7=A（P-52 刀2·病②「双门」）：本次调用已经 W2 门确认/放行
+	 * （w2_confirmed——occ_tool_exec 门后置位，含 --allow-w2 显式
+	 * 开门）且特权档——越界写放行；~/.occ 红线不豁免（occ_write_
+	 * target_ok 首步已拒，此处复判同口径兜底）。受限档仍走下方
+	 * 原样硬拒——W2 门与写域校验自此单门贯通，不再「确认了还拒」。 */
+	if (ctx->w2_confirmed && ctx->w2 &&
+	    ctx->w2->tier == OCC_W2_TIER_PRIVILEGED &&
+	    !occ_abs_under_home_occ(abs))
 		return 0;
 	occ_ob_printf(o, "ERROR: 目标 %s 越界：允许域=工作目录子树 ∪ "
 		      "/tmp ∪ /var/ai（W1 惯例；~/.occ 一律拒绝）", abs);
@@ -3187,6 +3206,116 @@ static void w2_detail(char *detail, size_t dcap, const char *fmt,
 		snprintf(detail, dcap, fmt, a1);
 }
 
+/* O-21（P-52 刀1）：chmod 语义级命中——替代原「chmod 777」字面 strstr
+ * （666/o+w 等全 family 不再漏）。前提=cmd 首个空白分隔 token 是 chmod；
+ * 数字模式 [0-7]{3,4} 看 other-write 位（644/755 不命中）；符号模式
+ * [ugoa]*[+-][rwxXst]+（单子句）：o/a/无前缀授 w 且 +/= 直判命中，
+ * 授 x 且 + 时对 chmod 与模式 token 之后各非 '-' 参数逐个 stat——任一
+ * 已存在且世界可写=两步等效 777（stat 全败/无 o+w 不命中）。u/g 档
+ * 不命中。仅 libc 手写匹配（busybox 语境不引正则）。 */
+static int w2_chmod_hit(const char *cmd, char *detail, size_t dcap)
+{
+	char buf[1024];
+	char t120[128];
+	char *tok[40];
+	char *sp, *t;
+	char head[16];
+	const char *p = cmd;
+	const char *m;
+	size_t hn = 0, wi = 0;
+	int n = 0, i, mi = -1, others = 0, grant_w = 0, grant_x = 0;
+	char op;
+
+	if (strstr(cmd, "chmod 777")) {
+		w2_detail(detail, dcap, "chmod 777（世界可写）", NULL);
+		return 1;	/* 廉价兜底：字面命中直走（原 strstr 语义） */
+	}
+	/* 前提：首个空白分隔 token == chmod（跳过前导空白） */
+	while (*p == ' ' || *p == '\t')
+		p++;
+	while (p[hn] && p[hn] != ' ' && p[hn] != '\t' &&
+	       hn < sizeof(head) - 1)
+		hn++;
+	memcpy(head, p, hn);
+	head[hn] = '\0';
+	if (strcmp(head, "chmod") != 0)
+		return 0;
+	/* 模式 token = chmod 之后首个非 '-' 开头参数（选项先行的惯序）；
+	 * 继续收齐余下 token——两步绕过检测要对模式之后的文件参数 stat */
+	snprintf(buf, sizeof(buf), "%s", cmd);
+	for (t = strtok_r(buf, " \t", &sp); t && n < 40;
+	     t = strtok_r(NULL, " \t", &sp)) {
+		tok[n++] = t;
+		if (n > 1 && t[0] != '-' && mi < 0)
+			mi = n - 1;
+	}
+	if (mi < 0)
+		return 0;
+	m = tok[mi];
+	snprintf(t120, sizeof(t120), "%.120s", cmd);
+	/* 数字模式：3-4 位纯八进制 */
+	if (strlen(m) >= 3 && strlen(m) <= 4) {
+		int oct = 1, mode = 0;
+
+		for (i = 0; m[i]; i++) {
+			if (m[i] < '0' || m[i] > '7') {
+				oct = 0;
+				break;
+			}
+			mode = mode * 8 + (m[i] - '0');
+		}
+		if (oct) {
+			if (mode & 0002) {
+				w2_detail(detail, dcap,
+					  "chmod 数字模式世界可写（%s）",
+					  t120);
+				return 1;
+			}
+			return 0;	/* 644/755 等：数字面干净收场 */
+		}
+	}
+	/* 符号模式：对象前缀 [ugoa]* → 操作 [+-=] → 权限 [rwxXst]+ */
+	while (m[wi] == 'u' || m[wi] == 'g' || m[wi] == 'o' ||
+	       m[wi] == 'a') {
+		if (m[wi] == 'o' || m[wi] == 'a')
+			others = 1;
+		wi++;
+	}
+	if (wi == 0)
+		others = 1;			/* 无对象前缀=默认 a */
+	op = m[wi];
+	if (op != '+' && op != '-' && op != '=')
+		return 0;
+	for (i = 0; m[wi + 1 + i]; i++)
+		if (!strchr("rwxXst", m[wi + 1 + i]))
+			return 0;	/* 形态不符（非模式 token） */
+	if (strchr(m + wi + 1, 'w'))
+		grant_w = 1;
+	if (strchr(m + wi + 1, 'x'))
+		grant_x = 1;
+	if (grant_w && others && (op == '+' || op == '=')) {
+		w2_detail(detail, dcap, "chmod 符号模式授权他人可写", NULL);
+		return 1;
+	}
+	if (grant_x && others && op == '+') {
+		/* 两步绕过检测：+x 落在已世界可写文件上=等效 777 */
+		for (i = mi + 1; i < n; i++) {
+			struct stat st;
+
+			if (tok[i][0] == '-')
+				continue;
+			if (stat(tok[i], &st) == 0 &&
+			    (st.st_mode & S_IWOTH)) {
+				w2_detail(detail, dcap,
+					  "对已世界可写文件加执行位"
+					  "（两步等效 777）", NULL);
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 /* O-9 命令级 W2 表 + O-4 粘贴形态；命中=1（detail 填理由） */
 static int w2_bash_hit(const char *cmd, char *detail, size_t dcap)
 {
@@ -3235,8 +3364,9 @@ static int w2_bash_hit(const char *cmd, char *detail, size_t dcap)
 			return 1;
 		}
 	}
-	if (strstr(cmd, "chmod 777")) {
-		w2_detail(detail, dcap, "chmod 777（世界可写）", NULL);
+	if (w2_chmod_hit(cmd, detail, dcap)) {
+		/* O-21（P-52 刀1）：chmod 语义级判定（数字 o+w/符号 o+a 授
+		 * w/+x 两步绕过——detail 由 w2_chmod_hit 填） */
 		return 1;
 	}
 	snprintf(buf, sizeof(buf), "%s", cmd);	/* 逐行首 token 对表 */
@@ -3445,10 +3575,14 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	/* O-9/O-4（UX-O §2）：W2 确认门（ctx->w2==NULL=嵌入/测试面
 	 * 零行为变化；命中→allow_w2/tier/confirm 三态裁决） */
 	if (c.w2 && strcmp(occ_w2_classify(&c, name, args_json,
-					   wd, sizeof(wd)), "W2") == 0 &&
-	    !w2_gate_decide(&c, name, wd, &o)) {
-		rc = -1;
-		goto w2_done;
+					   wd, sizeof(wd)), "W2") == 0) {
+		if (!w2_gate_decide(&c, name, wd, &o)) {
+			rc = -1;
+			goto w2_done;
+		}
+		/* J-7=A（P-52 刀2）：门已放行（confirm 确认/allow_w2 开
+		 * 门）——标记下传 write_guard，特权档越界写豁免放行 */
+		c.w2_confirmed = 1;
 	}
 	if (!strcmp(name, OCC_T_READ)) {
 		rc = tool_read(&c, &a, &o);

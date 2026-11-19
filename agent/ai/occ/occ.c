@@ -511,7 +511,9 @@ enum {
 	OV_WIZ_BASE = 13,		/* 向导 2.5 自定义 base_url（输入） */
 	OV_WIZ_KEY = 14,		/* 向导 3/4 key（输入，mask） */
 	OV_RENAME = 21,			/* /rename 无参（输入） */
-	OV_W2 = 22,			/* O-9：W2 确认面板（worker 请求开） */
+	OV_W2 = TUI_VIEW_OV_W2,		/* O-9：W2 确认面板（worker 请求开；
+					 * 值=tui_view.h 单源——view 侧 y/n
+					 * 单键应答应答本面板，P-52 病①） */
 	OV_SU = 23			/* O-10：/su 密码输入（mask） */
 };
 

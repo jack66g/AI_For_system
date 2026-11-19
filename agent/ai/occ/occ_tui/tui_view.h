@@ -85,6 +85,10 @@ enum {
 					 * 面板；text 空=关确认面板（超时兜底） */
 };
 
+/* P-52 病①：W2 确认面板 ov_id——与 occ.c 覆盖层枚举 OV_W2 同源单值
+ * （occ.c 以本宏初始化，单一事实）；view 侧 y/n 单键应答需认得该面板 */
+#define TUI_VIEW_OV_W2 22
+
 /* occ.c 提供的钩子（全部主线程调用；on_submit/on_interrupt 例外见注） */
 typedef struct {
 	void *ud;

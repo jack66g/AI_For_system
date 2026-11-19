@@ -129,6 +129,12 @@ typedef struct occ_tool_ctx {
 					 * 调用返回结构化人话错误） */
 	struct occ_w2_gate *w2;		/* O-9（UX-O §2）：W2 确认门；
 					 * NULL=嵌入/测试面零行为变化 */
+	int w2_confirmed;			/* J-7=A（P-52 病②）：本次调用
+						 * 已经 W2 门确认/放行——
+						 * write/edit 域校验对特权档
+						 * 放行越界写（~/.occ 红线
+						 * 不豁免）；occ_tool_exec
+						 * 门后置位，嵌入面恒 0 */
 } occ_tool_ctx;
 
 /* ---- 执行结果 ---- */

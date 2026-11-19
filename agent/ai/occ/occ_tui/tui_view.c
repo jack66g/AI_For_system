@@ -332,8 +332,8 @@ static int tv_drain(tui_view *v)
 				snprintf(it[1].text, sizeof(it[1].text),
 					 "n 取消");
 				(void)tui_overlay_set_list(v->ov, e->rc,
-						       title, it, 2, 0,
-						       "Enter 确认 · Esc 取消");
+							       title, it, 2, 0,
+							       "y/Enter 执行 · n/Esc 取消");
 				v->dirty_needed = 1;
 			}
 			break;
@@ -750,6 +750,29 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 			return;
 		}
 		v->dirty_needed = 1;	/* 其余已绑动作：面板吞 */
+		return;
+	}
+	/* P-52 病①：W2 确认面板 y/n 单键应答——字符落入过滤/输入缓冲前
+	 * 拦截，与 Enter 走完全同一条提交链（on_overlay_submit(OV_W2,
+	 * idx)→occ.c 唤醒在途 worker 并关面板），不另起唤醒逻辑；带修饰
+	 * 键不劫持，其他 overlay（过滤/输入态）字符输入不受影响。 */
+	if (ev->key == TUI_KEY_CHAR &&
+	    tui_overlay_id(v->ov) == TUI_VIEW_OV_W2 &&
+	    !(ev->mods & (TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SUPER)) &&
+	    (ev->ch == 'y' || ev->ch == 'Y' || ev->ch == 'n' ||
+	     ev->ch == 'N')) {
+		int w2idx = (ev->ch == 'y' || ev->ch == 'Y') ? 0 : 1;
+
+		if (!v->hooks.on_overlay_submit) {
+			tui_overlay_status(v->ov, "无处理器", 1);
+		} else if (v->hooks.on_overlay_submit(v->hooks.ud,
+						      tui_overlay_id(v->ov),
+						      w2idx) != 0) {
+			tui_overlay_status(v->ov, "该条目不可用", 1);
+		} else {
+			tv_pull_sessions(v);
+		}
+		v->dirty_needed = 1;
 		return;
 	}
 	/* 无动作 → 字符进过滤/输入缓冲（输入态与可过滤列表） */
