@@ -1,11 +1,12 @@
 # AIKernel 全系统总架构
 
-> 版本：**0.1.0-alpha.14.0** · 内核 **Linux 6.18.39 #61** · 日期：2026-10-31
+> 版本：**0.1.0-alpha.17.8.1** · 内核 **Linux 6.18.39 #82（出厂）** · 日期：2026-11-19
 > 本文是**唯一的系统总介绍**：读完这一份就能知道 AIKernel 是什么、由哪几层组成、
 > 能力与权限怎么走、当前边界在哪。
 >
 > **权威声明**：本文是导览，不是正典。任何数字/接口与代码、`agent/ai/tools/tools.json`
-> 冲突时，**以代码与 tools.json 为准**（下文标 ⭐ 的为 2026-10-31 实读复核）。
+> 冲突时，**以代码与 tools.json 为准**（本文 2026-11-19 回填 alpha.17.8.1 基线；
+> 部分分层数字/表格仍为 2026-10-31 实读，标 ⭐ 处以 tools.json 与代码为准）。
 >
 > 阅读顺序：本文 → `BUILD.md`（怎么构建）→ `SECURITY.md`（安全模型）
 > → `AIKernel/ARCHITECTURE.md`（内核侧细节）→ `agent/ai/docs/ARCHITECTURE-MATRIX.md`（能力矩阵）。
@@ -29,9 +30,9 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 第 3 层  用户态 agent/ai —— 智能与授权                                │
-│   aikernel-shell（静态 ELF）· REPL 命令 · clarify 2.0                 │
-│   ⭐ 197 工具 / 19 通道 / 9 能力域 / seed 214                         │
-│   lease D0–D4 闸门链 · 审计落盘 · trace JSONL                         │
+│   occ TUI（出厂默认入口）· aikernel-shell（REPL/clarify 2.0）        │
+│   ⭐ 237 工具 / 27 通道 / seed 248（occ 通道 6 工具）                 │
+│   lease D0–D4 闸门链 + W2 写域确认门 · 审计落盘 · trace JSONL         │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 第 2 层  in-kernel AIKernel/ 子系统 —— 汇聚与钳制                     │
 │   ⭐ 22,629 行 .c + 9,140 行 .h                                       │
@@ -49,6 +50,7 @@
 │ 服务面  systemd（出厂 rootfs）                                        │
 │   aikernel-api 8761（Bearer）· aikernel-memory 8000（SME REST）·      │
 │   ollama 11434 · aik-desktop 8091（Web Demo）· sme-seed（oneshot）·   │
+│   autocondensed 8762（上下文压缩判官 REST）· aistreamd（事件流）·     │
 │   aik-tls-gateway 8443→8761（mTLS，出厂 disabled）                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -95,7 +97,8 @@
 4. **注册 / 执行 / 权限**：`tools/tool_registry.c`、`tools/executor.c`、`policy/ai_lease.c`
 5. **追踪 / 会话 / 沙箱**：`trace/ai_trace.c`、`~/.aikernel/{trace,sessions}`、`sandbox/aik-sandbox.c`
 
-⭐ 能力面（`tools/tools.json` 实数）：**197 工具 / 19 通道**，通道分布：
+⭐ 能力面（`tools/tools.json` 实数）：**237 工具 / 27 通道**（2026-11-19 复核；
+下表通道分布为 2026-10-31 实读快照，17.x 增量见下方「近期演进」）：
 
 | 通道 | 数量 | 通道 | 数量 | 通道 | 数量 |
 |---|---|---|---|---|---|
@@ -116,6 +119,15 @@ fs 23 / desktop 20 / sandbox 10 / model 6。
 **W80 新增**：`bpf` 通道（裸 `bpf()` 系统调用加载/查询/卸载，无 libbpf；
 `nfqueue_pump` 走裸 nfnetlink，把包交用户态判决）。
 
+**近期演进（alpha.17.x，2026-11）**：出厂默认交互入口从 aikernel-shell 切换为 **occ TUI**
+（aikernel-shell 源码仍在树内，不再随 ISO 出厂）；能力面增至 **237 工具 / 27 通道**，
+新增 `occ` 通道六工具（read / write / edit / glob / grep / bash，occ 会话内工具面）与
+`compat` / `appprofile` / `netchain` / `range` / `device` 等通道；静态 IP 工具
+`config_write_network` 经 `OCC_NETCFG_TOOLS=1` 旗控注册（默认清单零变化）。
+occ 面自带 **W2 写域确认门**（越界写须确认）、/su 提权档位、undo/redo 快照
+（sha256 sidecar + DB manifest 对账外部锚）、会话自动压缩（判官服务见 §3.4）与
+`occ unstuck` 解僵命令。
+
 **文件入口**：`agent/ai/docs/ARCHITECTURE-MATRIX.md`（能力→检索→执行→权限→追踪矩阵）、
 `tools/tools.json`（**工具单一正典**）、`policy/ai_lease.c`。
 注：`agent/ai/core/ai_core.c` 是挂在 agent 目录下的**内核侧**模块，不是用户态代码。
@@ -126,10 +138,16 @@ fs 23 / desktop 20 / sandbox 10 / model 6。
 |---|---|---|---|
 | aikernel-api | 8761 | Remote AI API（Bearer 认证） | enabled |
 | aikernel-memory | 8000 | SME 记忆引擎 REST | enabled |
+| autocondensed | 8762 | 上下文压缩判官 REST（/health /check /judge /begin /commit 等 12 端点；T9d 起改号 8762，8761 让给 aikernel-api） | enabled |
+| aistreamd（aikernel-streams） | — | 常驻事件流→SME 记忆（telemetry parquet 落盘） | enabled |
 | sme-seed | — | 首启语料差异导入（oneshot） | enabled |
 | ollama | 11434 | 本地推理引擎（不预装模型） | enabled |
 | aik-desktop | 8091 | 桌面 Web Demo（非完整桌面） | enabled |
 | aik-tls-gateway | 8443→8761 | mTLS 入站网关（证书就位才启动） | disabled |
+
+（另有 aik-cron、aik-log-trim+timer、aikernel-health+timer、aikernel-backup+timer、
+aikernel-upgrade-commit+timer 等运维单元，见 `factory/etc/systemd/system/` 与
+`factory/README.md`。）
 
 ## §4 一次 ask 的完整路径（能力—权限—审计）
 
@@ -145,6 +163,15 @@ fs 23 / desktop 20 / sandbox 10 / model 6。
   → 审计：写前读旧值 → 审计 → 写 → 回读；~/.aikernel/audit.log + trace JSONL
 ```
 
+**近期演进——occ 的 W2 写域确认门三态（alpha.17.7 起，2026-11-19 P-52 分层后现状）**：
+occ 工具面对越界写（写域外路径、chmod 使世界可写等）设 W2 确认门，放行与否三态：
+①**问**——默认：弹出确认面板（y/Enter 执行、n/Esc 取消），命中判定为语义级
+（`w2_chmod_hit`：数字模式 other-write 位 / 符号 o+w / +x 落世界可写文件=两步等效 777；
+curl/wget 外发旗标同表）；②**豁免**——本次会话经 confirm/allow_w2 确认后置位
+`w2_confirmed`，特权档越界写豁免（`~/.occ` 红线仍双保险）；③**硬拒**——受限档
+tier 闸直接拒绝，不弹面板（档位决定要不要问）。与 lease D0–D4 链并行：
+lease 管内核/系统面动作的授权分级，W2 门管文件写域的越界确认。
+
 ## §5 当前边界（诚实清单）
 
 - **装机盘默认不带 bpf LSM**（B-105）：ISO 光盘引导为 `lsm=ai,bpf`，但安装器写入目标盘的
@@ -158,7 +185,8 @@ fs 23 / desktop 20 / sandbox 10 / model 6。
 - **AI LSM 规则维度刚扩展**：label 与 path_prefix 规则已在内核就绪，但用户态规则注入
   ABI 尚未开放（当前只有 `sec.ws_label` + KUnit）。
 - **加密私钥 PEM 解析被裁剪**：明文 EC/RSA 私钥可解析，加密容器不支持。
-- 工具/通道数以 `tools.json` 实时为准；本文数字为 2026-10-31 alpha.14.0 实读。
+- 工具/通道数以 `tools.json` 实时为准；能力面主数字已按 2026-11-19 复核（237 工具 / 27 通道），
+  分层表格与部分行数仍为 2026-10-31 实读快照。
 
 ## §6 关键文件在哪
 

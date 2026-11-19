@@ -115,3 +115,59 @@ build-rootfs.sh 陈旧 aikctl 引用与 /usr/bin/aikctl 旧装机件不碰（登
 - aistreamd：启动三件套快照 env 事件行落 telemetry parquet + AS_ONCE 单轮/AS_DUMP 逐字段 dump 测试口径（常驻零开销）；
 - AIKernel/test/perf/k11_golden.py 全链 golden 两幕器（rig 注盘：aikctl+python3.10+aistreamd+新 occ+conf）——终跑 GOLDEN_SUMMARY ok=7 fail=0（storm300 全成/链 NEW/OUTCOME 按 decision_id 配对 300:300/ASDump⊆内核 ring/parquet 4 块导出/三件套一致/抽一条 OUTCOME 配对必红=断链即红自证）；
 - 真 finding：tool 动作 outcome 回填=用户态职责（生产 aikd 经 sysfs，rig 无角色=断链；golden 以生产同款面 /sys/kernel/ai/policy/outcome 回填闭环）；outcome attr 真身在 policy/ 子目录（父路径 O_CREAT=EACCES 假象）；rig 盘 occ TUI 占串口（/shell 内建落 bash）；rig 自带 aistreamd 常驻持锁；ONLCR \r 断跨行正则；audit d= 小端字节序。内核侧零改动。
+
+## alpha.17.7→17.8 出厂波（2026-11-16~17，w17g/w17h：S 红队收尾 + P1 安全 + P2 功能）
+
+> 依据：git 52cb976 / 4d468d7 / 2b6b032 / e3fc3ab / 700ff11（17.7）与 f32ed8a / 99accfa / aca6cf7 / 6538b1a / f89fd83（17.8）。
+
+- alpha.17.7 进厂（w17g）：occ rc71、aik-console v6、W2 确认门、/su 提权、occ 快照校验全件出厂（700ff11）。
+- occ undo/redo 快照完整性校验：内容快照随写 `.sha256` sidecar，恢复前比对、被篡改即 fail-closed 拒恢复并保持现状；legacy 无 sidecar 快照照旧兼容（S-FINDING-01）。
+- 红队钻证台架 `redteam_drill.py` 五类攻击场景挂 run_all 门（s1）；curl/wget 外发旗标纳入 W2 确认表、test_w2gate +7（s2）。
+- sshd 出厂硬化：密钥制登录（prohibit-password）、MaxAuthTries 4、LoginGraceTime 30、MaxStartups 6:30:60 等，sshd -T 树断言八键过（C-P1a）。
+- unattended-upgrades 显式禁用：无人值守 apt 升级让位自研受控通道（aik-upgrade），APT::Periodic 两键=0（C-P1b）。
+- 文件日志有界：aistreamd.conf 保留键显式（7/90 天）；新增 aik-log-trim+service+timer——追加日志 >8M 保尾 4M、telemetry 天目录保 14 天（C-P1c）。
+- health 自愈安全三闸：重启冷却（同一检查项至多 3600s 一次）+启动宽限窗（1800s 内 try-restart 不杀加载期进程）+内存闸（MemAvailable<400MB 不重启/拉起）——根治 SME「重启→重头加载→再被杀」死亡环与压力下整机冻机（C-P1e）。
+- cron 守护进厂：busybox crond 前台 + aik-cron.service（multi-user 启用），crontab 真机触发实证；fdisk 经 busybox applet 成文（C-P2b/g）。
+- 备份扩面：aik-backup --with-home/--with-data 三族分立、各 KEEP=7 互不挤占（默认面不变）（C-P2d）。
+- 告警出口：health-alert.conf 可配 WEBHOOK_URL，FAIL 升级与 RECOVERED 各发一次 JSON POST（不逐轮轰炸）（C-P2e）。
+- 静态 IP 工具 config_write_network（occ 面，write/remove/show 三动作、恒 W2 确认、字典序静态覆盖 DHCP、删文件即回 DHCP；OCC_NETCFG_TOOLS=1 旗控注册——默认工具清单与请求字节零变化）（C-P2a）。
+- rootfs man 死重删除：/usr/share/man 1897 页 8.8M（rootfs 无 man 二进制纯死重），ISO 瘦身 6.6M（C-P2c）。
+- alpha.17.8 ISO 出厂：449,536,000B，md5 0aa1beba5d70a1f2a11b2619ca8a737e；内核 #82 沿用（PSI 翻案零内核改动）；QEMU install+boot 钻证+ssh 电池 12/15 PASS（三项为 17.7 期已知伪影）（w17h）。
+
+## 真机首日修复波：控制台 UX / /su / undo 完整性 / aik-upgrade（2026-11-17）
+
+> 依据：git 4db3bda / b5694f1 / a412dbf / e06f719 / 714d868 / 7279102 / 6bcba2d。
+
+- 控制台 CJK 字体修复：fontconfig 最小骨架进厂（prefer Noto Sans Mono CJK SC），登录框乱码/半字消除（P-34）。
+- printk 静默：kernel.printk=3 4 1 3，内核 err 不再上屏覆画 TUI（journal 全量保留）；aik-console 启动清屏除历史残影（P-38）。
+- occ /models 浮层离线修复：空注册表照常开浮层+离线提示行（dim），不再「卡一下→画面一闪→回主界面」（P-35）。
+- 浮层选中修复：初始光标落首个可选条目（提示行不可选）+SGR7 反色高亮条（fbterm 256 色丢底色的绕开）；出厂色板精修（P-42/P-39）。
+- /su 档位流转修复：堵死无密码重提权路径——「已特权」唯一事实源=密码验证成功置位，降权后重提权必过密码框；footer 档标即时刷新；密码框错拒即清输入残留；su elevate/delevate 三态入审计日志（P-45）。
+- undo 快照 ABSENT 墓碑完整性校验：非规范墓碑必须有 `.sha256` sidecar 且比对通过，否则 fail-closed 拒动（P-49）。
+- undo/redo 快照 manifest 对账（DB 外部锚，P-49 审计三开口收口）：写侧快照落 occ_snap 表 manifest 行；undo 消费侧四规则——anchored 条目比内容字节 sha 与 DB 期望（重造 sidecar 无效）、FS 全缺=删标记如实上报、同 path 见于他 msg=搬目录判死、无 manifest 行=legacy 原路；redo 对称锚（捕获全集落 redo_json，消费前 kind+sha 双比对）；schema v3→v4 幂等迁移（P-50）。
+- aik-upgrade 用户态散件安装通道：install userland 逐件 sha256 校验全过才动手+现值备份+`.new` 原子 mv+装后复验+任一步失败自动回滚+审计落 /var/log/aik-upgrade.log；userland-rollback；打包器 build/w7_userland_pkg.sh（六件收集+model.toml 单源一致性断言，漂移拒出包）（W-7）。
+
+## fbterm 稳定遏制与 alpha.17.8.1 出厂线收口（2026-11-18）
+
+> 依据：git 5751afe / 4c35d64 / 41f91fa / 6356480 / c3236d9 / d66c71c / 893bd6b / ee5e6d3。
+
+- 控制台整帧原子刷+输出看门狗：一帧字节全部积进缓冲、flush 尾一次 drain（旧逐格碎片刷 2500+ 次 write/帧填满 64KB pty 即永久冻结）；drain 总时限缺省 15s，超时即楔死实锤走 rc=72 统一收口链；aik-console 循环 2s 重启整链（P-41/P-44）。
+- 体量心跳：每拍 57444B 全 SGR 空参重置探针（零字形零视觉、避开 fbterm 数字解析崩溃路径、BSS 懒生成）——空闲态楔死 ~25s 检出；v1 CUP 回跟踪小探针被 64KB pty 缓冲整吞的盲区由 v2 收口、旧探针删净（P-41/P-44 补棒+44c）。
+- 看门狗击毙 fbterm：楔死实锤后 kill(ppid, SIGKILL)（FBTERM env 门卫仅 fb 分支）——fbterm 吞子进程退出码（occ exit(72) 转手变 0）与真楔死不读 pty（aik-console wait 永挂）双重谜底一并收口；137 线索位必亮，真楔死从「永久冻结」变 ~25s 检出+即时击毙+2s 重启回门（P-41/P-44d/e）。
+- occ /exit 注销链终触发：退出码出带外写 /run/aik-occ-exit（读后即焚；70=/zoom 非终局不写防污染）；aik-console v8 据此走真注销链——「退出即注销」自 v6 写下首次真实触发（P-47）。
+- occ unstuck 轻量解僵：楔死/强杀后会话卡 status=running 挡 undo——`occ unstuck --session <id>` 单点改库 running→interrupted，零上下文重放零模型调用，幂等诚实（P-48）。
+- 17.8.1 出厂线收口（conf/二进制一致）：refresh 时 aistreamd 二进制+conf 同刷（17.8 教训=只刷 conf 不刷二进制→unknown-key 崩溃环 115 重启）；chroot --check-conf 双向断言（好 conf=rc0/毒 conf=rc≠0）；ISO 内四件（aistreamd/occ/aik-console/aik-upgrade）与仓裸件 md5 全等断言（P-32）。
+- softdog 同树进厂：refresh 前置门 bzImage md5 7b35b41f+k2 树 softdog.ko（9e50cb73）进厂+vermagic/modules.dep/modules-load 断言+lsmod 运行时证明；ISO-SNAPSHOT-W82.txt 溯源修正（旧件误写 #62→#82 真值）（P-33）。
+- aistreamd 二进制入库——出厂同源锚：17.8.1 ISO 所装件=库内件，tag 可复现（occ 先例）（P-32 附）。
+- 17.8 后积压出厂面一并收编：occ（unstuck/exit-marker/控制台稳定棒）、aik-console v8、aik-upgrade（W-7 通道）、fonts.conf（P-34 CJK）、50-aik-console-quiet.conf（P-38）。
+- alpha.17.8.1 ISO 出厂：449,699,840B，md5 e705bc82d823305b348bd01821a68fa1；QEMU install+boot 钻证+ssh 电池 17/21 PASS（4 FAIL=17.8 原班已知伪影，零新增）+B8 五项全绿。
+
+## W2 写域分层与测试台架（2026-11-19）
+
+> 依据：git 3866269 / f9237f5 / 0061f13 / f1a6eef。
+
+- W2 写域分层（J-7=A 拍板「必须对齐我」）：w2_chmod_hit 语义级命中替代「chmod 777」字面匹配——数字模式 other-write 位、符号 o/a/无前缀授 w、+x 落世界可写文件=两步等效 777（stat 判 S_IWOTH），u/g 档与 644/755 不命中；occ_tool_ctx.w2_confirmed——W2 门确认（confirm/allow_w2）后置位，特权档越界写豁免（~/.occ 红线原样双保险）；受限档 tier 闸硬拒（档位决定要不要问）；确认面板 y/n 单键应答（P-52）。
+- 测试：新 occ_tui/tests/test_w2_confirm_pty（PTY+真 occ+mock LLM，49 断言：y/Enter/n/Esc/超时/写侧双门端到端）；test_w2gate 扩 14 例（chmod 全家族正反例+豁免端到端）；既有断言零删除（P-52）。
+- w2_chmod_hit token 剥首尾标点：模型惯加分号/echo 尾——标点粘在路径 token 上 stat ENOENT、两步绕过检测漏放；收 token 即剥 `;,&|()` 引号与反引号，补回归用例（P-52 A 轮真机回归）。
+- c2/c3 台架 PATH 回退通道加固：probe 裸名回退撞 aikctl compat_resolve_probe isfile 合同（预检过而 plan 拒跑的表象定因）——PATH 回退命中时 shutil.which 落绝对路径（P-53）。
+- TUI 实链自动压缩台架 test_ac_pty：真 occ TUI（pty）+三路 mock LLM（对话/工具回投/digest 填表）+mock 判官（test_ac.c 协议移植，恒判 COMPRESS_NOW）——断言 AC 请求序列、会话摘要落库 system 行、digest 填表、换窗后 turn 连续性；自动压缩首次具备确定性实链台架（此前仅单测 mock 与真机观察）（P-54）。
