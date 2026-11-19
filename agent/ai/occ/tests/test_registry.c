@@ -437,13 +437,38 @@ static void test_state_json(void)
 	   "state-recents-order");
 	OK(!strcmp(reg2.favorites[0], "deepseek/deepseek-flash"),
 	   "state-favorites");
+	/* O-13 三态之写→读回：touch 两次后 last_model=最后一次 */
+	OK(reg2.last_model_set &&
+	   !strcmp(reg2.last_model, "anthropic/claude-sonnet-4-5"),
+	   "state-last-model-roundtrip");
+	{
+		char k[128];
+
+		OK(occ_state_last_model(path, k, sizeof(k)) == 0 &&
+		   !strcmp(k, "anthropic/claude-sonnet-4-5"),
+		   "state-last-model-peek");
+	}
 
 	/* 坏状态文件 → -1（调用方重建） */
 	write_file(path, "{broken");
 	OK(occ_state_load(&reg2, path) == -1, "state-bad-rejected");
+	/* O-13 三态之坏 JSON：轻量读同口径 -1（静默回默认） */
+	{
+		char k[128];
+
+		OK(occ_state_last_model(path, k, sizeof(k)) == -1,
+		   "state-last-model-bad-rejected");
+	}
 	/* 不存在 → -1（首次运行） */
 	snprintf(path, sizeof(path), "%s/nostate.json", tmpdir);
 	OK(occ_state_load(&reg2, path) == -1, "state-missing-rejected");
+	/* O-13 三态之删文件/缺失：-1（出厂默认路径） */
+	{
+		char k[128];
+
+		OK(occ_state_last_model(path, k, sizeof(k)) == -1,
+		   "state-last-model-missing-rejected");
+	}
 	occ_registry_free(&reg);
 	occ_registry_free(&reg2);
 }

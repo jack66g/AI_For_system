@@ -147,7 +147,8 @@ CORE_BINS := tests/test_session tests/test_tokens tests/test_loop \
 	     tests/test_tools tests/test_revert tests/test_retry tests/test_zoomrc \
 	     tests/test_sink tests/test_tui_data tests/test_sme \
 	     tests/test_ac tests/test_telemetry tests/test_replay \
-	     tests/test_task tests/test_orch tests/test_review
+	     tests/test_task tests/test_orch tests/test_review \
+	     tests/test_cli_rc
 
 BIN_OCC := occ
 
@@ -158,7 +159,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
@@ -168,7 +169,7 @@ test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
 		  tests/test_orch tests/test_review tests/test_w2gate \
-		  tests/test_netcfg; do \
+		  tests/test_netcfg tests/test_cli_rc; do \
 		./$$t || exit 1; \
 	done
 	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo+p2a): ALL GREEN"
@@ -485,6 +486,10 @@ tests/test_telemetry: tests/test_telemetry.c $(OBJ_DIR)/occ_core/occ_telemetry.o
 # tools 对象——mangle/快照与执行同口径；E7 + catalog.o+tokens.o=
 # tools.o budget 段定价查询+orch.o 估算兜底引用）
 # T4 /zoom：fbtermrc 编辑器单测（纯函数）
+# O-23：CLI 退出码六案（fork+exec 真 ./occ；运行时未构建则诚实 skip）
+tests/test_cli_rc: tests/test_cli_rc.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_cli_rc.c
+
 tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
 

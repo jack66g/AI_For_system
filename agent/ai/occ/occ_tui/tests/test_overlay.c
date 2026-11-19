@@ -135,6 +135,37 @@ int main(void)
 		(void)tui_overlay_backspace(ov);
 	OK(tui_overlay_sel(ov) == 1, "query-reset-sel");
 
+	/* ---- O-22：可过滤列表首字符 '/' 守卫（命令被浮层拦住） ---- */
+	{
+		tui_screen *s22 = tui_screen_create(24, 80);
+
+		OK(tui_overlay_type(ov, "/", 1) == TUI_OVA_HANDLED,
+		   "o22-slash-first-guarded");
+		OK(tui_overlay_query(ov)[0] == '\0',
+		   "o22-filter-stays-empty");
+		if (s22) {
+			tui_overlay_render(ov, s22, NULL, NULL);
+			dump_screen(s22, dump, sizeof(dump));
+			OK(strstr(dump, "命令被浮层拦住") != NULL,
+			   "o22-status-hint-shown");
+			tui_screen_destroy(s22);
+		} else {
+			OK(0, "o22-screen-create");
+		}
+		/* 清 status：渲染期 status 优先于 detail 行——残留会压住
+		 * 后续 render-detail 断言 */
+		tui_overlay_status(ov, NULL, 0);
+	}
+	/* 非首字符 '/' 照常过滤（浮层内正常过滤不破坏） */
+	OK(tui_overlay_type(ov, "a", 1) == TUI_OVA_HANDLED,
+	   "o22-type-a");
+	OK(tui_overlay_type(ov, "/", 1) == TUI_OVA_HANDLED,
+	   "o22-slash-second-passes");
+	OK(strcmp(tui_overlay_query(ov), "a/") == 0,
+	   "o22-filter-keeps-slash");
+	while (tui_overlay_query(ov)[0])
+		(void)tui_overlay_backspace(ov);
+
 	/* ---- 渲染（列表态） ---- */
 	s = tui_screen_create(24, 80);
 	OK(s != NULL, "screen-create");

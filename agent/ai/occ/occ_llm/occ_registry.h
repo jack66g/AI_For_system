@@ -69,6 +69,10 @@ typedef struct occ_registry {
 	size_t nfavorites;
 	char recents[OCC_REG_RECENT_MAX][OCC_REG_KEY_MAX];	/* LRU 序：[0] 最新 */
 	size_t nrecents;
+	/* O-13：最近使用模型（"provider/id"）——touch 时同步更新，
+	 * 持久化为 state.json 的 last_model 键（启动恢复用） */
+	char last_model[OCC_REG_KEY_MAX];
+	int last_model_set;
 } occ_registry;
 
 /* 注册表生命周期：init 分配模型表（heap）；free 释放并清零 */
@@ -117,6 +121,10 @@ size_t occ_registry_fuzzy(const occ_registry *reg, const char *query,
 
 int occ_state_load(occ_registry *reg, const char *state_path);
 int occ_state_save(const occ_registry *reg, const char *state_path);
+/* O-13：last_model 键轻量只读（启动恢复用——不必构建整个注册表）；
+ * 缺文件/坏 JSON/无键/空串 → -1（调用方静默回出厂默认） */
+int occ_state_last_model(const char *state_path, char *key,
+			   size_t key_cap);
 
 /* 记一次使用（model.set {recent:true} 语义）：provider/id 提到 recents 头 */
 void occ_registry_touch(occ_registry *reg, const char *provider,

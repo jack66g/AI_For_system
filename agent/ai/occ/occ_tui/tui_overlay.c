@@ -501,6 +501,15 @@ int tui_overlay_type(tui_overlay *ov, const char *utf8, size_t len)
 	}
 	if (!ov->searchable)
 		return TUI_OVA_NONE;
+	/* O-22：可过滤列表 + 过滤串空 + 来字符为首字符 '/'——命令
+	 * 疑似想敲给主输入（浮层开着被静默吞进 filter，实证 /tools
+	 * /trace 被吃）：不进 filter，status 行提示先 Esc 关浮层；
+	 * 非首字符 '/'（qlen>0）照常过滤不受影响。 */
+	if (ov->qlen == 0 && len == 1 && utf8[0] == '/') {
+		tui_overlay_status(ov,
+				   "命令被浮层拦住：先 Esc 关浮层再敲", 1);
+		return TUI_OVA_HANDLED;
+	}
 	if (ov->qlen + len >= sizeof(ov->query))
 		return TUI_OVA_HANDLED;
 	memcpy(ov->query + ov->qlen, utf8, len);

@@ -36,7 +36,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
      tests/test_rename_ai.c tests/test_history_load.c \
      tests/test_models_offline.c tests/test_su_pty.c \
      tests/test_sinkbuf.c tests/test_wd.c tests/test_exitmarker.c \
-     tests/test_w2_confirm_pty.c
+     tests/test_w2_confirm_pty.c tests/test_cmd_tailws.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean

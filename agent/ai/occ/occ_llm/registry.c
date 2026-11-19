@@ -518,6 +518,12 @@ int occ_state_save(const occ_registry *reg, const char *state_path)
 		goto fail;
 	}
 	jfav = NULL;
+	/* O-13：last_model 显式键（旧文件无此键向后兼容；新文件被
+	 * 旧 occ 读亦忽略——键级宽容） */
+	if (reg->last_model_set &&
+	    aik_json_obj_put(root, "last_model",
+			     aik_json_new_str(reg->last_model)) < 0)
+		goto fail;
 	if (aik_json_obj_put(root, "format",
 			     aik_json_new_str("occ-state/1")) < 0)
 		goto fail;
@@ -628,8 +634,51 @@ int occ_state_load(occ_registry *reg, const char *state_path)
 					 sizeof(reg->favorites[0]), "%s",
 					 aik_json_str(v));
 		}
+	{
+		const aik_json *v = aik_json_get(root, "last_model");
+
+		/* O-13：last_model 读回（无键=旧文件，不置位） */
+		if (v && aik_json_typeof(v) == AIK_JSON_STR &&
+		    aik_json_str(v)[0]) {
+			snprintf(reg->last_model,
+				 sizeof(reg->last_model), "%s",
+				 aik_json_str(v));
+			reg->last_model_set = 1;
+		}
+	}
 	aik_json_free(root);
 	return 0;
+}
+
+/* O-13：last_model 键轻量只读——启动恢复路径专用（免建整个注册
+ * 表）；缺文件/坏 JSON/无键/空串 → -1（调用方静默回出厂默认）。 */
+int occ_state_last_model(const char *state_path, char *key,
+			   size_t key_cap)
+{
+	char *txt;
+	size_t len;
+	char perr[96];
+	aik_json *root;
+	const aik_json *v;
+	int rc = -1;
+
+	if (!state_path || !key || key_cap == 0)
+		return -1;
+	txt = read_file(state_path, &len);
+	if (!txt)
+		return -1;		/* 首次运行无状态文件 */
+	root = aik_json_parse(txt, len, perr, sizeof(perr));
+	free(txt);
+	if (!root)
+		return -1;		/* 坏状态文件：宁可回默认 */
+	v = aik_json_get(root, "last_model");
+	if (v && aik_json_typeof(v) == AIK_JSON_STR &&
+	    aik_json_str(v)[0]) {
+		snprintf(key, key_cap, "%s", aik_json_str(v));
+		rc = 0;
+	}
+	aik_json_free(root);
+	return rc;
 }
 
 void occ_registry_touch(occ_registry *reg, const char *provider,
@@ -640,6 +689,10 @@ void occ_registry_touch(occ_registry *reg, const char *provider,
 	if (!reg || reg_key(key, sizeof(key), provider, model_id) < 0)
 		return;
 	push_recent_key(reg, key);
+	/* O-13：last-used 同步（touch 全部调用点=/models 选择生效、
+	 * 向导保存——即持久化写时机） */
+	snprintf(reg->last_model, sizeof(reg->last_model), "%s", key);
+	reg->last_model_set = 1;
 }
 
 int occ_registry_toggle_favorite(occ_registry *reg, const char *provider,

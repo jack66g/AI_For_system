@@ -2980,7 +2980,40 @@ static void cmd_status_kernel_line(struct tui_view *view)
 	tui_view_notice(view, buf);
 }
 
+/* O-19：命令分发兜底——原样匹配未命中（rc==1）且行以 '/' 开头时，
+ * 去行尾空白（空格/制表）后重试一次（"/models " 等价 "/models"）。
+ * 兜底式而非入口统一 trim：带参命令（/rename /theme /zoom）首轮按
+ * 原样前缀匹配即命中，参数尾空白不被裁（如 /rename 标题尾空格）——
+ * 仅无参命令尾随空白场景多走一轮。 */
+static int tui_app_on_command_impl(void *ud, const char *line);
+
 static int tui_app_on_command(void *ud, const char *line)
+{
+	int rc;
+	size_t n, len;
+	char *trim;
+
+	if (!line)
+		return 1;
+	rc = tui_app_on_command_impl(ud, line);
+	if (rc != 1 || line[0] != '/')
+		return rc;
+	len = n = strlen(line);
+	while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '	'))
+		n--;
+	if (n == len)
+		return rc;		/* 行尾无空白——不重试 */
+	trim = malloc(n + 1);
+	if (!trim)
+		return rc;
+	memcpy(trim, line, n);
+	trim[n] = '\0';
+	rc = tui_app_on_command_impl(ud, trim);
+	free(trim);
+	return rc;
+}
+
+static int tui_app_on_command_impl(void *ud, const char *line)
 {
 	struct tui_app *a = ud;
 
@@ -4051,6 +4084,45 @@ static void tui_exit_marker(int code)
 	fclose(fp);
 }
 
+/* O-13：模型 last-used 持久化（读侧）——state.json last_model 键
+ * 存在且仍在注册表（可直调 toml 槽位）→ 恢复为启动模型；坏
+ * JSON/缺失/仅目录条目（无 key 不可直调）→ 静默回出厂默认。
+ * 写侧=occ_registry_touch + occ_state_save（/models 选择生效
+ * 与向导保存两路径已接）。headless 不经此——p-smoke 字节不变。 */
+static void app_restore_last_model(struct tui_app *a)
+{
+	occ_registry *r;
+	const occ_reg_model *rm;
+	char key[OCC_REG_KEY_MAX];
+	char *slash;
+
+	if (occ_state_last_model(a->state_path, key, sizeof(key)) != 0)
+		return;
+	slash = strchr(key, '/');
+	if (!slash)
+		return;
+	*slash = '\0';
+	r = calloc(1, sizeof(*r));
+	if (!r)
+		return;
+	if (occ_registry_init(r) != 0) {
+		free(r);
+		return;
+	}
+	occ_registry_build(r, a->cfg_ok ? &a->cfg : NULL, a->cat);
+	rm = occ_registry_find(r, key, slash + 1);
+	if (rm && rm->source == OCC_REG_SRC_TOML && rm->slot_id[0]) {
+		occ_provider np;
+
+		if (occ_provider_resolve(&a->cfg, rm->slot_id, &np) == 0) {
+			occ_provider_free(&a->p);
+			a->p = np;
+		}
+	}
+	occ_registry_free(r);
+	free(r);
+}
+
 static int run_interactive(occ_db *db, const char *model_toml,
 			   const char *provider_toml)
 {
@@ -4111,6 +4183,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	}
 	/* catalog 分母（exe 锚定搜索链；未命中 → 200k* 进屏 notice） */
 	app_load_catalog(&a);
+	app_restore_last_model(&a);	/* O-13：last-used 恢复先于 ctx */
 	app_resolve_ctx(&a);
 	app_update_model_prov(&a);		/* UXAB：顶栏厂商标签 */
 	a.replay_budget = app_replay_lines_budget();	/* T2：增量加载初值 */
@@ -4173,10 +4246,11 @@ static int run_interactive(occ_db *db, const char *model_toml,
 				if (first_screen && a.ctx_fallback) {
 					char nb[320];
 
+					/* O-5：侧栏两行降一行短句（保留「兜底 200k*」
+					 * 语义与 meta 的 * 标记） */
 					snprintf(nb, sizeof(nb),
-						 "catalog 未命中/不可读：context 分母兜底 200k"
-						 "（OCD 未知窗口默认，meta 标 *）——OCC_CATALOG "
-						 "可指 models.dev 快照");
+						 "catalog 未命中/不可读：context 分母兜底 "
+						 "200k*（OCC_CATALOG 可指 models.dev 快照）");
 					(void)tui_view_post(a.view,
 							     TUI_VIEW_NOTICE,
 							     nb, 0, NULL, 0);
@@ -4461,6 +4535,15 @@ int main(int argc, char **argv)
 		int i;
 
 		for (i = 2; i < argc; i++) {
+			if (!strcmp(argv[i], "--help") ||
+			    !strcmp(argv[i], "-h")) {
+				/* O-23：子命令 --help=用法帮助（标准惯例 rc=0；
+				 * 旧行为当 unexpected argument 报错 rc=2） */
+				printf("用法：occ %s --session <id>%s\n", cmd,
+				       !strcmp(cmd, "undo") ? " [--step N]" : "");
+				rc = 0;
+				goto out;
+			}
 			if (!strcmp(argv[i], "--session")) {
 				if (i + 1 >= argc) {
 					fprintf(stderr, "occ %s: --session"
@@ -4543,6 +4626,16 @@ int main(int argc, char **argv)
 					goto out;
 				}
 				session_id = argv[++i];
+			} else if (!prompt && argv[i][0] == '-' &&
+				   argv[i][1] == '-') {
+				/* O-23：-- 开头且非已知标志（--allow-w2/--session
+				 * 已在前分支消费）占提示词位——疑似 flag 误当提示词：
+				 * 拒绝（rc=2），不发起模型调用 */
+				fprintf(stderr, "occ -p: `%s' 不是已知标志——疑似 flag "
+					"误当提示词（已知：--allow-w2 / --session <id>）\n",
+					argv[i]);
+				rc = 2;
+				goto out;
 			} else if (!prompt) {
 				prompt = argv[i];
 			} else {
