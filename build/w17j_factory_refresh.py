@@ -114,6 +114,18 @@ n_rime = sum(len(fs) for _, _, fs in os.walk(ROOT + "/usr/share/rime-data"))
 n_so = sum(len(fs) for _, _, fs in os.walk(ROOT + "/usr/local/lib/aik-ime"))
 print("p55 staged: rime-data %d files, bundled .so %d" % (n_rime, n_so))
 
+install_file("/etc/ld.so.conf.d/aik-ime.conf",
+             F + "/etc/ld.so.conf.d/aik-ime.conf", 0o644)
+# DT_RUNPATH 不继承间接依赖（snappy/icu=leveldb/boost 的间接 NEEDED）
+# ——ld.so.conf 系统级解析全链覆盖；chroot 生成 cache 进 tar
+r = subprocess.run(["chroot", ROOT, "ldconfig"], capture_output=True)
+assert r.returncode == 0, "ldconfig failed"
+r = subprocess.run(["chroot", ROOT, "ldconfig", "-p"],
+                   capture_output=True, text=True)
+n_hit = r.stdout.count("/usr/local/lib/aik-ime/")
+assert n_hit >= 9, "ld cache lacks bundled so (%d)" % n_hit
+print("ld.so.conf.aik-ime: cache hits=%d" % n_hit)
+
 # 4) P-33 softdog 同树进厂
 install_file(SOFTDOG_REL, ko, 0o644)
 
