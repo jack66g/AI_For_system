@@ -1,0 +1,3 @@
+# AIKernel 出厂（17.9 起）：fbterm IME 通道挂 aik-ime
+# Ctrl+Space = 中/英输入切换（fbterm 自动绑定该 syskey）
+input-method=aik-ime

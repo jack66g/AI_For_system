@@ -2185,6 +2185,35 @@ static int sandbox_child(void *argp)
 		mkdir_p(path, 0755);
 		bind_ro("/etc/aikernel", path, 0);
 	}
+	/* O-8：宿主 awk/which 是经 /etc/alternatives 的链（/etc 白名单不
+	 * 含 alternatives 目录，链在沙箱内断头——AI bash 面 awk: not found
+	 * 实证，T-4 作用面修正：宿主真件全在，缺的只是链名）。修法零二进
+	 * 制变化：在沙箱 /etc/alternatives/ 下补挂两条单文件 bind 直连实体
+	 * （mawk/which.debianutils 均已在 /usr ro 面内），链名复活。
+	 * 注意不能直接 bind 到 /usr/bin/awk 链上——mount(2) 解析挂载点会
+	 * 跟随绝对符号链接跳出沙箱树（strace 实证）。非 Debian 基座（无
+	 * 实体件）诚实跳过。 */
+	{
+		static const struct { const char *real; const char *name; }
+		sb_alt_fixups[] = {
+			{ "/usr/bin/mawk",              "awk" },
+			{ "/usr/bin/which.debianutils", "which" },
+		};
+		unsigned int k;
+
+		snprintf(path, sizeof(path), "%s/etc/alternatives", mnt);
+		mkdir_p(path, 0755);
+		for (k = 0; k < sizeof(sb_alt_fixups) /
+			     sizeof(sb_alt_fixups[0]); k++) {
+			if (!file_exists(sb_alt_fixups[k].real))
+				continue;
+			snprintf(path, sizeof(path),
+				 "%s/etc/alternatives/%s",
+				 mnt, sb_alt_fixups[k].name);
+			close(open(path, O_CREAT | O_WRONLY, 0444));
+			bind_ro(sb_alt_fixups[k].real, path, 0);
+		}
+	}
 
 	/* 7. /dev 最小集（bind 设备节点；设备打开不受根 tmpfs nodev 影响） */
 	for (i = 0; SB_DEV_MUST[i]; i++) {

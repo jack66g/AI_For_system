@@ -1,0 +1,8 @@
+AIKernel rime 数据来源（2026-11-20 组装，P-55）：
+- schema/dict yaml：rime-luna-pinyin + rime-prelude（rime 官方仓，
+  勘探棒 1.11.2 配套 clone）
+- essay.txt：rime/rime-essay 官方仓（LGPL；语言模型词频——排序修复
+  钥匙，实证 nihao→你好〔无 essay=生僻字〕）
+- build/*.bin：L1 librime 1.11.2 静态构建自预编（BUILD_SHARED_LIBS=
+  OFF 配方；预编后首启 0.17s 不重编）
+- 用户词库目录：~/.config/aik-ime（首启自动创建）

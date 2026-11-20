@@ -28,7 +28,7 @@ bad() { FAIL=$((FAIL + 1)); echo "FAIL: $*"; }
 ck()  { local rc=$1; shift; if [ "$rc" = 0 ]; then ok "$*"; else bad "$*"; fi; }
 say() { echo; echo "== $* =="; }
 
-NAMES="w64t-create w64t-cpu w64t-mem w64t-pids w64t-net w64t-net0 \
+NAMES="w64t-o8 w64t-o8w w64t-create w64t-cpu w64t-mem w64t-pids w64t-net w64t-net0 \
 w64t-crash w64t-orphan w64t-stale w64t-stale2 w64t-destroy \
 w64t-destroy-live w64t-export w64t-export2 w64t-degrade w64t-nocg w71t-iso"
 
@@ -66,6 +66,15 @@ cleanup
 mkdir -p "$BASE"
 
 # ---------------------------------------------------------------- T1
+# ---------------------------------------------------------------- TO8
+say "TO8 awk/which 沙箱可见（O-8：alternatives 链断头修复）"
+"$SB" create w64t-o8 >/dev/null 2>&1
+out=$("$SB" run w64t-o8 -- awk 'BEGIN{print 40+2}' 2>&1)
+echo "$out" | grep -qx '42'; ck $? "沙箱内 awk 求值 40+2=42"
+"$SB" create w64t-o8w >/dev/null 2>&1
+out=$("$SB" run w64t-o8w -- which mawk 2>&1)
+echo "$out" | grep -q '/usr/bin/mawk'; ck $? "沙箱内 which 定位 mawk"
+
 say "T1 create + meta 落盘 + cgroup 限额"
 out=$("$SB" create w64t-create --cpus 0.5 --mem-mb 256 --pids 64 2>&1)
 rc=$?
