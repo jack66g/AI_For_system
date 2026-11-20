@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0
 # w7_userland_pkg.sh - W-7 用户态散件打包器（aik-upgrade install userland 的包源）
 #
-# 六件实体从本仓实际源收集（occ/aistreamd 为仓内构建产物，需先构建在位）：
+# 七件实体从本仓实际源收集（occ/aistreamd 为仓内构建产物，需先构建在位）：
 #   agent/ai/occ/occ                      -> /usr/local/bin/occ
 #   agent/ai/aistreamd/aistreamd          -> /usr/local/sbin/aistreamd
+#   agent/ai/aipd/aipd                     -> /usr/local/sbin/aipd
 #   ~/linux-k2/drivers/watchdog/softdog.ko
 #                                        -> /lib/modules/6.18.39/kernel/drivers/watchdog/softdog.ko
 #     （落位=modprobe/depmod 真实管理树（真机实证 11-17：modprobe 即从此
@@ -53,6 +54,7 @@ PIECES="
 /usr/local/bin/occ|agent/ai/occ/occ|0755|root:root|f
 /lib/modules/6.18.39/kernel/drivers/watchdog/softdog.ko|SOFTDOG_SRC|0644|root:root|f
 /usr/local/sbin/aistreamd|agent/ai/aistreamd/aistreamd|0755|root:root|f
+/usr/local/sbin/aipd|agent/ai/aipd/aipd|0755|root:root|f
 "
 
 # ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ EOF
     done <<EOF
 $PIECES
 EOF
-    [ "$n" = 6 ] || die "expected 6 pieces, collected $n — PIECES table broken"
+    [ "$n" = 7 ] || die "expected 7 pieces, collected $n — PIECES table broken"
 
     tar -czf "$out" -C "$work" manifest.tsv files
     # 出包自检：成员恰为 manifest.tsv + files/ 树，件数对得上
