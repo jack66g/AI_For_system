@@ -80,6 +80,16 @@ int main(void)
 	}
 	snprintf(root, sizeof(root), "%s/root", tmpdir);
 
+	/* ---- 0) P-56：列名契约——唯一性 + 关键位定名 ---- */
+	CHECK(aip_shadow_cols_unique() == 0, "P-56 colnames all-unique");
+	CHECK(aip_shadow_ncols() == 33, "33 cols");
+	CHECK(aip_shadow_colname(20) && strcmp(aip_shadow_colname(20),
+	      "source") == 0, "col20 = source (int 决策源)");
+	CHECK(aip_shadow_colname(32) && strcmp(aip_shadow_colname(32),
+	      "producer") == 0, "col32 = producer (P-56 改名)");
+	CHECK(aip_shadow_colname(-1) == NULL && aip_shadow_colname(33) == NULL,
+	      "colname 越界 NULL");
+
 	/* ---- 1) 直写单文件：33 列 + footer 行数（独立读路径验证） ---- */
 	snprintf(path, sizeof(path), "%s/day-direct.parquet", tmpdir);
 	for (int i = 0; i < 5; i++)
@@ -90,7 +100,7 @@ int main(void)
 	memset(&fs, 0, sizeof(fs));
 	CHECK(as_pq_file_stats(path, &fs) == 0, "footer readable");
 	CHECK(fs.num_rows == 5, "footer num_rows==5");
-	CHECK(fs.has_ncols && fs.ncols == 33, "footer ncols==33 (32+source)");
+	CHECK(fs.has_ncols && fs.ncols == 33, "footer ncols==33 (32+producer)");
 	{
 		FILE *f = fopen(path, "r");
 		char magic[5] = "";

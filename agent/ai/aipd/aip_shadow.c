@@ -315,9 +315,36 @@ static const struct pq_coldef shadow_cols[AIP_SHADOW_NCOL] = {
 	{ "cost_ns",			PQ_INT64,	PQ_LG_I64 },
 	{ "side_effect_mask",		PQ_INT32,	PQ_LG_I32 },
 	{ "value",			PQ_DOUBLE,	PQ_LG_NONE },
-	/* 尾列（Lane-B 合同：按列位 32=第 33 列） */
-	{ "source",			PQ_BYTE_ARRAY,	PQ_LG_STR },
+	/* 尾列（Lane-B 合同：按列位 32=第 33 列）。P-56：列名 source 与
+	 * 决策块 int source（列位 20）撞名——标准读者（pyarrow
+	 * read_table）对重复列名直接拒读（E1' 回放断链真身）；改名
+	 * producer（值恒=AIP_SHADOW_SOURCE_STR，语义=行生产者标识），
+	 * 列位合同不动。 */
+	{ "producer",			PQ_BYTE_ARRAY,	PQ_LG_STR },
 };
+
+/* P-56：列名访问/唯一性自检（见 aip_shadow.h 尾注） */
+const char *aip_shadow_colname(int ci)
+{
+	if (ci < 0 || ci >= AIP_SHADOW_NCOL)
+		return NULL;
+	return shadow_cols[ci].name;
+}
+
+int aip_shadow_ncols(void)
+{
+	return AIP_SHADOW_NCOL;
+}
+
+int aip_shadow_cols_unique(void)
+{
+	for (int i = 0; i < AIP_SHADOW_NCOL; i++)
+		for (int j = i + 1; j < AIP_SHADOW_NCOL; j++)
+			if (strcmp(shadow_cols[i].name,
+				   shadow_cols[j].name) == 0)
+				return -1;
+	return 0;
+}
 
 static int64_t narrow(enum pq_lg lg, int64_t v)
 {
@@ -904,7 +931,7 @@ int aip_shadow_write_file(const char *path, const struct aip_shadow_row *rows,
 		return -1;
 	}
 	/* 数值列 0..31（31 int 列 + 列 31=value DOUBLE 位型）；
-	 * BA 列=列位 32（source 尾列） */
+	 * BA 列=列位 32（producer 尾列，P-56 改名） */
 	for (int c = 0; c < AIP_SHADOW_NCOL - 1; c++)
 		cols[c] = blob + n * (size_t)c;
 	srclen = strlen(AIP_SHADOW_SOURCE_STR);

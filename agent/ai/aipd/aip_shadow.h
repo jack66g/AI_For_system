@@ -140,6 +140,19 @@ int aip_shadow_write_file(const char *path, const struct aip_shadow_row *rows,
 /* 影子根下一天目录的下一序号（shadow_NNNN 扫描；测试断言旋转用） */
 long aip_shadow_next_seq(const char *root, const char *day);
 
+/* ---- P-56：列名面（重复列名=标准读者拒读的自检/契约访问） ---- */
+
+/*
+ * aip_shadow_colname - 第 ci 列（0 基）列名；越界返回 NULL。
+ * aip_shadow_cols_unique - 全列名两两互异返回 0，有重名返回 -1。
+ * （教训：旧 schema 决策块 int "source" 与尾列 string "source" 撞名，
+ * pyarrow read_table 对重复列名直接 ArrowInvalid——E1' 回放断链，
+ * T-2 B7 真机实证 11-20。启动期+测试期双用。）
+ */
+const char *aip_shadow_colname(int ci);
+int aip_shadow_ncols(void);
+int aip_shadow_cols_unique(void);
+
 /* ---- 对照 mismatch 滚动窗（语义见文件头；纯逻辑） ---- */
 
 struct aip_cmp_ent {

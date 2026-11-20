@@ -352,10 +352,11 @@ def write_labeled_jsonl(path, labeled):
 
 # ------------------------------------------------- 影子读取器 ----
 # ↓↓↓ parquet 读取器自 l1_data_bench.py read_day_rows 复制改造（禁
-# import 纪律）。坑（pyarrow 25 实测）：影子 33 列含两个 source 列
-# （dec v3 同构 i8 + 尾列 string）——read_table（dataset 扫描器）对重复
-# 列名直接抛 ArrowInvalid 'Multiple matches'；须走低层
-# ParquetFile.read(columns=唯一名列)（名字解析只炸在被点名重复时）↓↓↓
+# import 纪律）。坑（pyarrow 25 实测）：旧版影子 33 列含两个 source
+# 列（dec v3 同构 i8 + 尾列 string）——read_table 对重复列名直接抛
+# ArrowInvalid 'Multiple matches'。**P-56 已修（11-20）：尾列改名
+# producer，新件可整读**；旧件（修复前产物）仍须走低层
+# ParquetFile.read(columns=唯一名列)。挑列读法对两代件通用，保持。↓↓↓
 SHADOW_PICK_COLS = ['decision_id', 'trigger_event_id', 'decision_type',
                     'data_5', 'data_6', 'executed']
 

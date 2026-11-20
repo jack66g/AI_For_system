@@ -393,6 +393,13 @@ int main(int argc, char **argv)
 	}
 	aip_log("table: ver=%u rules=%zu sha256=%s (self-check OK)",
 		aip_table_ver, aip_nrules, aip_table_sha256);
+	/* P-56：影子列名唯一性自检——撞名=标准读者拒读（E1' 断链教训），
+	 * 属 schema 级缺陷：拒绝启动（写出的文件天生不可外读）。 */
+	if (aip_shadow_cols_unique() != 0) {
+		aip_log("FATAL: shadow schema 撞名（重复列名不可外读）");
+		return 1;
+	}
+	aip_log("shadow: %d cols all-unique (self-check OK)", AIP_SHADOW_NCOL);
 
 	/* M2 §2.1 金丝雀启动：REG（ENABLED=0=零动作零输出=M1 等价；
 	 * REG 失败=journal ERROR+reg_ok=0 诚实降级存活——R7/L1 验证面） */

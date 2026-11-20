@@ -2550,8 +2550,14 @@ def _pq_read(pq_mod, path, fn, what='读取'):
     except SystemExit:
         raise
     except Exception as e:
-        raise SystemExit("aikctl: parquet %s失败（损坏文件？）%s: %s"
-                         % (what, path, e))
+        hint = ''
+        if 'Multiple matches' in str(e):
+            # P-56（11-20 T-2 B7 真机实证）：旧版影子件 source 列
+            # 重名（决策块 int + 尾列 string）——标准读者拒读。
+            hint = ('；旧版影子件列名重份（P-56 修复前产物不可整读——'
+                    '用修复后 aipd 重生数据，或按列挑选读）')
+        raise SystemExit("aikctl: parquet %s失败（损坏文件？）%s: %s%s"
+                         % (what, path, e, hint))
 
 def _collect_rows(pq, root, since_d, until_d, layer='curated'):
     """窗口内 curated 天目录 cat 文件逐行读出（pyarrow），行级
