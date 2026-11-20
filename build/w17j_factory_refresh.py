@@ -102,7 +102,7 @@ install_file("/root/.fbtermrc", F + "/root/.fbtermrc", 0o644)
 def _copytree(src, dst):
     if os.path.isdir(dst):
         shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    shutil.copytree(src, dst, symlinks=True)
     for root, dirs, files in os.walk(dst):
         os.chown(root, 0, 0)
         for fn in files:
