@@ -55,6 +55,8 @@ PIECES="
 /lib/modules/6.18.39/kernel/drivers/watchdog/softdog.ko|SOFTDOG_SRC|0644|root:root|f
 /usr/local/sbin/aistreamd|agent/ai/aistreamd/aistreamd|0755|root:root|f
 /usr/local/sbin/aipd|agent/ai/aipd/aipd|0755|root:root|f
+/usr/local/bin/aik-pqdump|agent/ai/aistreamd/aik-pqdump|0755|root:root|f
+/usr/local/bin/aikctl|agent/ai/aikctl/aikctl|0755|root:root|f
 "
 
 # ---------------------------------------------------------------------------
@@ -140,7 +142,7 @@ EOF
     done <<EOF
 $PIECES
 EOF
-    [ "$n" = 7 ] || die "expected 7 pieces, collected $n — PIECES table broken"
+    [ "$n" = 9 ] || die "expected 9 pieces, collected $n — PIECES table broken"
 
     tar -czf "$out" -C "$work" manifest.tsv files
     # 出包自检：成员恰为 manifest.tsv + files/ 树，件数对得上

@@ -45,10 +45,15 @@ REUSE_OBJS := $(REUSE_DIR)/sme_client.o $(REUSE_DIR)/local_http.o \
 BIN := aistreamd
 INJECT := ai_inject
 PQ_DUMP := pq_dump		# T8 差分向量驱动（仅链 snappy/parquet 库）
+PQDUMP := aik-pqdump		# P-27 C 版 parquet 读者（出厂件/W-7 通道）
 
 .PHONY: all test clean asan-leak
 
-all: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP)
+all: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(PQDUMP)
+
+$(PQDUMP): aik_pqdump.c as_snappy.c \
+		../include/aistreamd/as_snappy.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ aik_pqdump.c as_snappy.c
 
 $(BIN): $(OWN_OBJS) $(REUSE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -102,6 +107,13 @@ test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
 			echo "FAIL $$t (see /tmp/as-$$t.log)"; fail=1; \
 		fi \
 	done; \
+	if timeout 300 python3 tests/test_pqdump.py \
+			> /tmp/as-test_pqdump.log 2>&1; then \
+		echo "PASS test_pqdump"; \
+	else \
+		echo "FAIL test_pqdump (see /tmp/as-test_pqdump.log)"; \
+		fail=1; \
+	fi; \
 	exit $$fail
 
 tests/test_%: tests/test_%.c $(TEST_LIBS)

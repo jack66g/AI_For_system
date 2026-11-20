@@ -2368,6 +2368,22 @@ def _require_pyarrow():
         sys.exit(1)
 
 
+def _find_pqdump():
+    """P-27：C 版 parquet 读者 aik-pqdump 定位——env AIK_PQDUMP >
+    PATH > 仓内 aistreamd 构建产物。缺席=回退 pyarrow（开发机）。"""
+    env = os.environ.get('AIK_PQDUMP')
+    if env:
+        return env
+    w = shutil.which('aik-pqdump')
+    if w:
+        return w
+    cand = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'aistreamd', 'aik-pqdump')
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    return None
+
+
 def _parse_date(s, what):
     try:
         return datetime.strptime(s, '%Y-%m-%d').date()
@@ -2542,13 +2558,38 @@ def _ts_wall_ns(ts, _btime_cache=[None]):
 
 
 
-def _pq_read(pq_mod, path, fn, what='读取'):
-    """G1 fuzz 兜底：损坏 parquet → 人话错（read_table 与读后变换
-    to_pydict/num_rows 的 decode 异常一并收编——不上裸栈）。"""
+def _pq_read(path, what='读取'):
+    """P-27 双后端：aik-pqdump（C，出厂件，读自家写入面）优先；
+    缺席回退 pyarrow（开发机）。返回列式 dict（to_pydict 同构）。
+    损坏/超面 → 人话错。"""
+    c = _find_pqdump()
+    cerr = None
+    if c:
+        r = subprocess.run([c, '--bycol', path], capture_output=True)
+        if r.returncode == 0:
+            try:
+                return json.loads(r.stdout)
+            except Exception as e:
+                cerr = 'C 后端输出异常: %s' % e
+        else:
+            cerr = r.stderr.decode('utf-8', 'replace').strip()
+            # 损坏（非超面）时 pyarrow 也救不了——但开发机 oracle
+            # 对照语义保留：一律下探 pyarrow，最终错误择实报
+    # pyarrow 回退（C 缺席/超面〔如 pyarrow 写的通用面——l1_data_bench
+    # curated fixture 形态〕/异常；缺席且 C 有错=报 C 的错）
     try:
-        return fn(pq_mod.read_table(path))
+        import pyarrow.parquet as pqp
+        return pqp.read_table(path).to_pydict()
     except SystemExit:
         raise
+    except ImportError as e:
+        if cerr is not None:
+            raise SystemExit("aikctl: parquet %s失败 %s: %s"
+                             % (what, path, cerr))
+        raise SystemExit(
+            'aikctl: dataset 子族读侧无可用后端（aik-pqdump 缺席且 '
+            'pyarrow 导入失败：%s）；出厂面装 aik-pqdump（W-7 通道）'
+            '或开发机 pip install pyarrow' % e)
     except Exception as e:
         hint = ''
         if 'Multiple matches' in str(e):
@@ -2567,7 +2608,7 @@ def _collect_rows(pq, root, since_d, until_d, layer='curated'):
     rows = []
     for _day, ddir in _day_dirs(root, layer, since_d, until_d):
         for path in _cat_files(ddir):
-            cols = _pq_read(pq, path, lambda t: t.to_pydict())
+            cols = _pq_read(path)
             n = len(cols.get('timestamp_ns', []))
             for i in range(n):
                 ts = _ts_wall_ns(cols['timestamp_ns'][i])
@@ -2624,7 +2665,7 @@ def _find_gcm_bin():
 
 
 def cmd_dataset_list(args):
-    pa, pq = _require_pyarrow()
+    pq = None  # P-27：读侧双后端（_pq_read 内解析）
     base = _layer_dir(args.root, args.layer)
     ipath = os.path.join(base, 'index.parquet')
     if not os.path.isfile(ipath):
@@ -2632,7 +2673,7 @@ def cmd_dataset_list(args):
               'raw 由 aistreamd 产生，curated 由棒① promotion 双写产生）'
               % (args.layer, base))
         return 0
-    idx = _pq_read(pq, ipath, lambda t: t.to_pydict(), 'index 读取')
+    idx = _pq_read(ipath, 'index 读取')
     n = len(idx.get('file', []))
     if n == 0:
         print('aikctl: %s 层 index.parquet 为空（0 文件）' % args.layer)
@@ -2744,12 +2785,6 @@ def cmd_dataset_replay(args):
     if not os.path.isfile(args.file):
         print('aikctl: 文件不存在：%s' % args.file, file=sys.stderr)
         return 1
-    try:
-        import pyarrow.parquet as pqp
-    except ImportError:
-        print('aikctl: 回放需要 pyarrow（pip install pyarrow）',
-              file=sys.stderr)
-        return 1
     global AIP_TABLE_RULES
     if args.table:
         with open(args.table, 'r', encoding='utf-8') as f:
@@ -2761,7 +2796,7 @@ def cmd_dataset_replay(args):
         AIP_TABLE_RULES = tuple(
             (fmap[r['feat']], 1 if r['op'] == 'AIP_OP_GT' else 0,
              r['lo'], amap[r['action']]) for r in spec['rules'])
-    cols = _pq_read(pqp, args.file, lambda t: t.to_pydict(), '回放读取')
+    cols = _pq_read(args.file, '回放读取')
     for c in ('data_0', 'data_1', 'data_2', 'data_4', 'decision_type'):
         if c not in cols:
             print('aikctl: %s 缺列 %s（回放面=aipd 影子 33 列 parquet）'
@@ -2916,7 +2951,7 @@ def _rebuild_curated_index(pa, pq, root):
                 and os.path.isdir(ddir)):
             continue
         for path in _cat_files(ddir):
-            cols = _pq_read(pq, path, lambda t: t.to_pydict())
+            cols = _pq_read(path)
             ts = cols.get('timestamp_ns') or []
             if not ts:
                 continue
@@ -2954,7 +2989,8 @@ def cmd_dataset_delete(args):
     rows_n = 0
     for day, ddir in days:
         for path in _cat_files(ddir):
-            rows_n += _pq_read(pq, path, lambda t: t.num_rows)
+            _c = _pq_read(path)
+            rows_n += len(next(iter(_c.values()))) if _c else 0
             targets.append(path)
     sme_url = args.sme_url
     try:
