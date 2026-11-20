@@ -96,6 +96,12 @@
 const occ_tool_def *occ_tool_defs(size_t *n);
 int occ_tool_is_known(const char *name);
 
+/* O-6：cwd 是否命中 aik-sandbox 显式 bind 源拒绝面（ro/rw 共用表，
+ * 与 agent/ai/sandbox/aik-sandbox.c valid_bind_src 同源硬编码——见
+ * sandbox.c 注）。启动处命中即回退 workdir=/var/ai/work（mkdir -p
+ * 0755），否则首发 bash 全灭（rw-path 拒挂）。纯判定不动文件系统。 */
+int occ_sandbox_cwd_denied(const char *cwd);
+
 /* ---- O-9/O-4（UX-O §2）：occ 面 W2 高危确认门 ---- */
 struct occ_tool_ctx;			/* 前向（本块早于 ctx typedef） */
 #define OCC_W2_TIER_PRIVILEGED 0	/* root / /su 提权：W2=确认后放行 */
@@ -110,7 +116,21 @@ typedef struct occ_w2_gate {
 	/* 交互确认回调（TUI）：1=放行 0=拒绝/超时；NULL=headless（默认拒） */
 	int (*confirm)(void *ud, const char *title, const char *detail);
 	void *ud;
+	/* O-18：会话级放行表（面板「s 本会话同类放行」入键；decide 在
+	 * confirm 前查表命中即放行——同会话同理由键免再问，跨会话不
+	 * 复用（进程退出即焚）；headless 无面板→表恒空→行为零变化）。
+	 * last_key=最近一次 classify W2 的归一理由键（occ_tool_exec
+	 * decide 前存；TUI s 应答侧经 occ_w2_ses_allow_add 取去入表——
+	 * 主线程写与 worker 读的序由 w2 应答 cond 链定序）。 */
+	char ses_allow[8][48];
+	int ses_allow_n;
+	int ses_allow_hits;
+	char last_key[48];
 } occ_w2_gate;
+
+/* O-18：把最近一次 W2 的归一理由键入会话放行表（TUI 面板 s 应答侧
+ * 调；去重；满 8 槽淘汰最老）。 */
+void occ_w2_ses_allow_add(struct occ_w2_gate *g);
 
 /*
  * occ_w2_classify - 判定一次调用的有效风险级（O-9/O-4）

@@ -221,6 +221,25 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 	}
 }
 
+/* O-6：workdir 求值收口——cwd 命中 aik-sandbox 显式 bind 拒绝面
+ * （/root 等，occ_sandbox_cwd_denied 同源表）→ 回退 /var/ai/work
+ * （拒绝面外约定 rw 通道；mkdir -p 0755 尽力——失败留给沙箱面人话
+ * 报错，不阻断启动）。TUI 与 headless 两路共用；*fb=是否回退（TUI
+ * 首屏 notice/headless stderr 各自披露）。 */
+static void occ_workdir_resolve(char *cwd, size_t cap, int *fb)
+{
+	*fb = 0;
+	if (!occ_sandbox_cwd_denied(cwd))
+		return;
+	mkdir("/var/ai", 0755);			/* EEXIST 忽略 */
+	if (mkdir("/var/ai/work", 0755) != 0 && errno != EEXIST) {
+		/* 尽力建（root 常态可建；非 root 建不成不回退——原
+		 * cwd 同样全灭，不更糟），失败留给沙箱面人话报错 */
+	}
+	snprintf(cwd, cap, "/var/ai/work");
+	*fb = 1;
+}
+
 static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 		    const char *prompt, int recover_mode)
 {
@@ -237,9 +256,17 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 	{
 		/* b1：工具工作目录=occ 启动目录（glob/grep/bash rw 面） */
 		static char cwd[4096];
+		int wd_fb;			/* O-6：沙箱拒绝面回退标志 */
 
-		if (getcwd(cwd, sizeof(cwd)))
+		if (getcwd(cwd, sizeof(cwd))) {
+			/* O-6：cwd=/root 等拒绝面首发 bash 全灭（rw-path
+			 * 拒挂）——回退 /var/ai/work，stderr 一行披露 */
+			occ_workdir_resolve(cwd, sizeof(cwd), &wd_fb);
 			opts.workdir = cwd;
+			if (wd_fb)
+				fprintf(stderr, "occ: workdir 回退 "
+					"/var/ai/work（cwd 不可挂沙箱）\n");
+		}
 	}
 	opts.w2 = &g_w2;			/* O-9：W2 门（headless 默认拒） */
 	sigint_install(&old_int);		/* b2：环内安全点中断 */
@@ -563,6 +590,8 @@ struct tui_app {
 	long long ctx_limit;		/* catalog limit.context；缺省 200k */
 	int ctx_fallback;		/* 1=catalog 未命中/不可读 → 200k* */
 	char cwd[4096];			/* 启动目录（workdir + 状态行） */
+	int workdir_fb;			/* O-6：cwd 命中沙箱拒绝面→已回退
+					 * /var/ai/work（首屏 notice 用；0=未回退） */
 	pthread_mutex_t mu;		/* session/tokens/prompt/worker_live */
 	/* O-9：W2 确认应答单槽（worker 问→view 面板应答；mu+w2_cond） */
 	pthread_cond_t w2_cond;
@@ -3496,12 +3525,17 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 		return 1;
 	switch (ov_id) {
 	case OV_W2: {
-		/* O-9：y=执行（idx 0）/n=取消——唤醒在途 worker */
+		/* O-9：y=执行（idx 0）/n=取消——唤醒在途 worker；
+		 * O-18：idx 2=s 本会话同类放行——verdict=1 且当前理由键
+		 * 入会话放行表（后续同键免问；广播后入表——下一次同键
+		 * 调用的 decide 必在其后读到） */
 		pthread_mutex_lock(&a->mu);
-		a->w2_verdict = (idx == 0);
+		a->w2_verdict = (idx == 0 || idx == 2);
 		a->w2_answered = 1;
 		pthread_cond_broadcast(&a->w2_cond);
 		pthread_mutex_unlock(&a->mu);
+		if (idx == 2)
+			occ_w2_ses_allow_add(&g_w2);
 		tui_view_close_overlay(a->view);
 		return 0;
 	}
@@ -4281,6 +4315,9 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	pthread_cond_init(&a.w2_cond, NULL);	/* O-9：W2 应答 */
 	if (!getcwd(a.cwd, sizeof(a.cwd)))
 		a.cwd[0] = '\0';
+	else
+		occ_workdir_resolve(a.cwd, sizeof(a.cwd),
+				    &a.workdir_fb);	/* O-6：拒绝面回退 */
 	snprintf(a.model_toml, sizeof(a.model_toml), "%s", model_toml);
 	snprintf(a.provider_toml, sizeof(a.provider_toml), "%s",
 		 provider_toml);
@@ -4410,6 +4447,16 @@ static int run_interactive(occ_db *db, const char *model_toml,
 							TUI_VIEW_NOTICE,
 							a.cfg_warn, 0,
 							NULL, 0);
+					/* O-6：cwd 命中沙箱拒绝面→workdir 已
+					 * 回退 /var/ai/work（首发 bash 可用） */
+					if (a.workdir_fb)
+						(void)tui_view_post(
+							a.view,
+							TUI_VIEW_NOTICE,
+							"workdir 回退 "
+							"/var/ai/work"
+							"（cwd 不可挂沙箱）",
+							0, NULL, 0);
 					if (a.ctx_fallback) {
 						char nb[320];
 

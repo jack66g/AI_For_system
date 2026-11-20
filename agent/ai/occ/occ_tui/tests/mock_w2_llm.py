@@ -74,7 +74,17 @@ class H(BaseHTTPRequestHandler):
         with open(os.path.join(REQ_DIR, "req_%d.json" % NREQ[0]), "w",
                   encoding="utf-8") as f:
             f.write(req.decode("utf-8", "replace"))
-        if b"tool_call_id" in req:
+        # O-18（W3 S8 两 turn）：分路看**最后一条消息 role**——旧判据
+        # 「请求体含 tool_call_id」在第二轮起必中（历史携带该字段），
+        # 对话请求被误判回投直接收口、第二 toolCall 永不回放
+        last_role = ""
+        try:
+            last_role = json.loads(
+                req.decode("utf-8", "replace"))["messages"][-1].get(
+                    "role", "")
+        except Exception:
+            last_role = ""
+        if last_role == "tool":
             payload = sse_text(REPLY_AFTER_TOOL)
         elif "会话标题".encode("utf-8") in req:
             # B8 同款分路：标题请求（/rename AI）绝不该拿 toolCall

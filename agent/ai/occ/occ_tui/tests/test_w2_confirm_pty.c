@@ -306,6 +306,14 @@ struct scn {
 	int want_exists;		/* 1=须存在 0=须不存在 */
 	int want_ow;			/* 1=须 o+w 0=须无 o+w */
 	const char *want_content;	/* 非空=内容精确断言 */
+	/* ---- 本波扩展（O-6/O-18 新场景驱动面） ---- */
+	const char *cwd_override;	/* O-6：子进程 chdir 目标（NULL=wd） */
+	int no_panel;			/* O-6：1=不等 W2 面板（W1 工具直接跑） */
+	const char *absent_all;	/* 全程输出不得出现的 needle */
+	const char *second_prompt;	/* O-18：非空=两阶段（turn2 再提交） */
+	char second_args[512];	/* turn2 mock ctl ARGS */
+	const char *second_allow;	/* turn2 放行侧新字节证据 */
+	const char *second_absent;	/* turn2 区间不得出现（免问断言） */
 };
 
 static int run_scenario(const struct scn *s, const char *root,
@@ -336,6 +344,19 @@ static int run_scenario(const struct scn *s, const char *root,
 		}
 		chmod(fpath, 0644);
 	}
+	/* O-18 S8：turn2 靶件（免问放行后 o+w 断言用） */
+	{
+		char f2[360];
+		FILE *f;
+
+		snprintf(f2, sizeof(f2), "%s/f2.txt", wd);
+		f = fopen(f2, "w");
+		if (f) {
+			fputs("w52\n", f);
+			fclose(f);
+		}
+		chmod(f2, 0644);
+	}
 	snprintf(dbp, sizeof(dbp), "%s/%s/sessions.db", root, s->tag);
 	snprintf(ctl, sizeof(ctl), "TOOL=%s\nARGS=%s\n", s->tool, s->args);
 	write_ctl(reqdir, ctl);
@@ -364,7 +385,7 @@ static int run_scenario(const struct scn *s, const char *root,
 			_exit(14);
 		if (pt.slave > STDERR_FILENO)
 			close(pt.slave);
-		if (chdir(wd) != 0)
+		if (chdir(s->cwd_override ? s->cwd_override : wd) != 0)
 			_exit(15);
 		setenv("OCC_MODEL_TOML", toml, 1);
 		setenv("OCC_DB", dbp, 1);
@@ -403,13 +424,17 @@ static int run_scenario(const struct scn *s, const char *root,
 		rc = 1;
 		goto done;
 	}
-	if (read_until_contains(pt.master, out, OUT_CAP, &have,
-				"W2 高危操作确认", 15000) != 0) {
+	if (s->no_panel) {
+		/* O-6：W1 工具直接执行——不等面板 */
+		mark = have;
+	} else if (read_until_contains(pt.master, out, OUT_CAP, &have,
+				     "W2 高危操作确认", 15000) != 0) {
 		OK(0, "panel-opens");
 		rc = 1;
 		goto done;
+	} else {
+		OK(1, "panel-opens");
 	}
-	OK(1, "panel-opens");
 	mark = have;
 
 	/* 面板应答（S5 超时场景不发键） */
@@ -431,6 +456,34 @@ static int run_scenario(const struct scn *s, const char *root,
 		OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
 			    s->deny_needle, s->deny_wait_ms) == 0,
 		   "deny-text");
+
+	/* O-18 两阶段：turn1 收口后改写 ctl（mock 逐请求重读
+	 * ctl）→ 再提交一轮→ turn2 证据/免问断言 */
+	if (s->second_prompt) {
+		int mark2 = have;
+
+		snprintf(ctl, sizeof(ctl), "TOOL=%s\nARGS=%s\n",
+			 s->tool, s->second_args);
+		write_ctl(reqdir, ctl);
+		if (write(pt.master, s->second_prompt,
+			   strlen(s->second_prompt)) < 0)
+			OK(0, "second-submit");
+		if (s->second_allow)
+			OK(wait_new(pt.master, out, OUT_CAP, &have, mark2,
+				    s->second_allow, 8000) == 0,
+			   "second-turn-evidence");
+		if (s->second_absent) {
+			const char *seg = out + (mark2 < (int)sizeof(out) ?
+						 mark2 : 0);
+
+			OK(strstr(seg, s->second_absent) == NULL,
+			   "second-no-panel");
+		}
+	}
+
+	/* O-6：全程不得出现的 needle（如非法 rw-path 报错特征） */
+	if (s->absent_all)
+		OK(strstr(out, s->absent_all) == NULL, "absent-all");
 
 	/* 收尾 /exit：面板已关（submit/超时收板）→ /exit 到达输入框 →
 	 * occ 退出（71=注销语义/0 均可）。面板若仍开着，/exit 字符会被
@@ -705,6 +758,50 @@ int main(void)
 		s.deny_wait_ms = 5000;
 		s.probe = out_b;
 		s.want_exists = 0;
+		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
+	}
+
+	/* ---- S7（O-6）：cwd=/root 起 occ→workdir 回退 /var/ai/work，
+	 * ---- 首发 bash pwd 不再非法 rw-path 且输出含回退值（无面板 W1 直接跑） ---- */
+	{
+		struct scn s;
+
+		memset(&s, 0, sizeof(s));
+		s.tag = "S7";
+		s.tool = "bash";
+		snprintf(s.args, sizeof(s.args),
+			 "{\"command\":\"pwd\"}");
+		s.cwd_override = "/root";
+		s.no_panel = 1;
+		s.allow_needle = "/var/ai/work";	/* notice 或 pwd 输出 */
+		s.absent_all = "非法";		/* rw-path 拒绝报错特征 */
+		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
+	}
+
+	/* ---- S8（O-18）：chmod 666→s 本会话同类放行→第二个
+	 * ---- chmod 666 不同路径无面板直接执行（f2.txt o+w 为证） ---- */
+	{
+		struct scn s;
+		char f2[360];
+
+		snprintf(f2, sizeof(f2), "/tmp/btui-w52-%d/S8/f2.txt",
+			 (int)getpid());
+		memset(&s, 0, sizeof(s));
+		s.tag = "S8";
+		s.tool = "bash";
+		snprintf(s.args, sizeof(s.args),
+			 "{\"command\":\"chmod 666 f.txt\"}");
+		s.key = "s";
+		s.key_len = 1;
+		s.allow_needle = "收到工具结果";	/* turn1 收口 */
+		s.second_prompt = "p52\r";
+		snprintf(s.second_args, sizeof(s.second_args),
+			 "{\"command\":\"chmod 666 f2.txt\"}");
+		s.second_allow = "收到工具结果";
+		s.second_absent = "W2 高危操作确认";
+		s.probe = f2;
+		s.want_exists = 1;
+		s.want_ow = 1;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 

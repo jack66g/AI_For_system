@@ -220,6 +220,34 @@ static int sb_prefix(char **v)
 	return 0;
 }
 
+/* ---- O-6：workdir 沙箱拒绝面判定 ---- */
+
+/* aik-sandbox 显式 bind 源拒绝面（--ro-path/--rw-path 共用）的同源
+ * 硬编码副本——occ 不链沙箱源（只读 CLI 契约），两处同步维护：
+ * agent/ai/sandbox/aik-sandbox.c valid_bind_src 的 deny 表。cwd 命中
+ * 任一（含子树）即 --rw-path 挂不进沙箱（140 默认 cwd=/root → 每
+ * 会话首发 bash 全灭）——启动处据此回退 /var/ai/work。 */
+int occ_sandbox_cwd_denied(const char *cwd)
+{
+	static const char *const deny[] = {
+		"/proc", "/sys", "/dev", "/usr", "/bin", "/sbin",
+		"/lib", "/lib64", "/etc", "/root", "/boot",
+		"/var/lib/aikernel", "/var/ai/sandbox-artifacts", NULL,
+	};
+	size_t i;
+
+	if (!cwd || cwd[0] != '/' || !cwd[1])
+		return 0;
+	for (i = 0; deny[i]; i++) {
+		size_t n = strlen(deny[i]);
+
+		if (strncmp(cwd, deny[i], n) == 0 &&
+		    (cwd[n] == '\0' || cwd[n] == '/'))
+			return 1;
+	}
+	return 0;
+}
+
 /* ---- --rw-path 支持探测（一次/进程；沙盒版本不足=不可用） ---- */
 
 static int g_sb_rwpath_cached = -1;

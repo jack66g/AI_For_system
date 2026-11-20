@@ -286,6 +286,47 @@ int main(void)
 		tui_screen_destroy(s);
 	}
 
+	/* ---- O-18：detail 两行折行（rows-3/rows-2）+超两行截尾省略号 ---- */
+	{
+		tui_ov_item t[2];
+		char seg[176];
+
+		memset(t, 0, sizeof(t));
+		memset(seg, 'a', sizeof(seg) - 1);
+		seg[sizeof(seg) - 1] = '\0';
+		/* 例1：HEAD+132a+TAIL=140 列（≤两行 156 列）——
+		 * 首尾都在屏（旧单行实现 TAIL 不可见） */
+		snprintf(t[0].text, sizeof(t[0].text), "OV18A");
+		snprintf(t[0].detail, sizeof(t[0].detail),
+			 "HEAD%.132sTAIL", seg);
+		/* 例2：HEAD+170a+TAIL=178 列（>156）——第二行
+			 * 末列省略号，TAIL 不可见 */
+		snprintf(t[1].text, sizeof(t[1].text), "OV18B");
+		snprintf(t[1].detail, sizeof(t[1].detail),
+			 "HEAD%.170sTAIL", seg);
+		OK(tui_overlay_set_list(ov, 7, "ov18", t, 2, 0, "f") == 0,
+		   "ov18-set-list");
+		s = tui_screen_create(24, 80);
+		OK(s != NULL, "ov18-screen-create");
+		tui_overlay_render(ov, s, &cr, &cc);
+		dump_screen(s, dump, sizeof(dump));
+		OK(strstr(dump, "HEAD") != NULL &&
+		   strstr(dump, "TAIL") != NULL,
+		   "ov18-two-lines-fit");
+		tui_screen_destroy(s);
+		/* 选中第二项再渲染：超宽⼪略号路径 */
+		OK(tui_overlay_nav(ov, 1) == TUI_OVA_HANDLED,
+		   "ov18-move-down");
+		s = tui_screen_create(24, 80);
+		tui_overlay_render(ov, s, &cr, &cc);
+		dump_screen(s, dump, sizeof(dump));
+		OK(strstr(dump, "\xE2\x80\xA6") != NULL,
+		   "ov18-overflow-ellipsis");
+		OK(strstr(dump, "TAIL") == NULL,
+		   "ov18-overflow-tail-cut");
+		tui_screen_destroy(s);
+	}
+
 	/* ---- P-42：NOSEL 不可选行（dim 提示）——初始选择跳过落在首个
 	 * 可选条目、导航/家端跳过、提交拒绝越位；选中行整行反色条
 	 * （首格 attr 含 TUI_ST_INVERSE——fbterm 下确定可见） ---- */

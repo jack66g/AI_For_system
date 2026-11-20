@@ -317,7 +317,9 @@ static int tv_drain(tui_view *v)
 				const char *nl = strchr(e->text, '\n');
 				size_t tl = nl ? (size_t)(nl - e->text) :
 					 strlen(e->text);
-				tui_ov_item it[2];
+				/* O-18：三项——y 执行/n 取消/s 本会话同类放行
+				 * （idx2=verdict 1+理由键入会话放行表，同键免问） */
+				tui_ov_item it[3];
 
 				if (tl >= sizeof(title))
 					tl = sizeof(title) - 1;
@@ -331,9 +333,11 @@ static int tv_drain(tui_view *v)
 					 nl && nl[1] ? nl + 1 : "");
 				snprintf(it[1].text, sizeof(it[1].text),
 					 "n 取消");
+				snprintf(it[2].text, sizeof(it[2].text),
+					 "s 本会话同类放行");
 				(void)tui_overlay_set_list(v->ov, e->rc,
-							       title, it, 2, 0,
-							       "y/Enter 执行 · n/Esc 取消");
+							       title, it, 3, 0,
+							       "y 执行 · s 本会话同类 · n/Esc 取消");
 				v->dirty_needed = 1;
 			}
 			break;
@@ -760,8 +764,11 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 	    tui_overlay_id(v->ov) == TUI_VIEW_OV_W2 &&
 	    !(ev->mods & (TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SUPER)) &&
 	    (ev->ch == 'y' || ev->ch == 'Y' || ev->ch == 'n' ||
-	     ev->ch == 'N')) {
-		int w2idx = (ev->ch == 'y' || ev->ch == 'Y') ? 0 : 1;
+	     ev->ch == 'N' || ev->ch == 's' || ev->ch == 'S')) {
+		/* O-18：s=本会话同类放行（idx 2）——on_overlay_submit
+		 * 侧 verdict=1 且理由键入会话放行表 */
+		int w2idx = (ev->ch == 'y' || ev->ch == 'Y') ? 0 :
+			    (ev->ch == 's' || ev->ch == 'S') ? 2 : 1;
 
 		if (!v->hooks.on_overlay_submit) {
 			tui_overlay_status(v->ov, "无处理器", 1);

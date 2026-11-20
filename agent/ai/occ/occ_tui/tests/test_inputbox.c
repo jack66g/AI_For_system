@@ -190,10 +190,11 @@ int main(void)
 	OK(strcmp(tui_inputbox_text(ib, NULL), "plain") == 0,
 	   "tab-non-slash-noop");
 
-	/* ---- 6. 命令表：16 条（O-12 增 /delete；E8 增 /tasks） ---- */
+	/* ---- 6. 命令表：18 条（O-12 /delete；E8 /tasks；
+	 * W2 O-25 增 /undo /redo——基线断言未同步，本波顺手对齐） ---- */
 	cmds = tui_inputbox_cmds(&ncmds);
-	OK(ncmds == 16 && cmds != NULL, "cmds-16");
-	OK(strcmp(cmds[0], "/models") == 0 && strcmp(cmds[15], "/tasks") == 0,
+	OK(ncmds == 18 && cmds != NULL, "cmds-18");
+	OK(strcmp(cmds[0], "/models") == 0 && strcmp(cmds[17], "/redo") == 0,
 	   "cmds-ends");
 	OK(strcmp(cmds[4], "/delete") == 0, "cmds-delete");
 

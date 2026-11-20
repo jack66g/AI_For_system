@@ -109,7 +109,7 @@ static const char SCHEMA_READ[] =
 static const char SCHEMA_WRITE[] =
 	"{\"type\":\"object\",\"properties\":{"
 	"\"path\":{\"type\":\"string\",\"description\":\"目标文件路径"
-	"（限工作目录子树、/tmp、/var/ai）\"},"
+	"（限工作目录子树、/tmp、/var/ai、$HOME）\"},"
 	"\"content\":{\"type\":\"string\",\"description\":\"完整文件内容"
 	"（整文件覆写）\"}"
 	"},\"required\":[\"path\",\"content\"]}";
@@ -163,7 +163,7 @@ static const char SCHEMA_RM[] =
 	"\"path\":{\"type\":\"string\",\"description\":\"要删除的文件路径"
 	"（相对路径按工作目录解析）。仅普通文件与空目录——非空目录报错"
 	"（请逐个删除，v1 不做递归删）。目标域=工作目录子树∪/tmp∪/var/ai"
-	"（越界须 W2 确认；~/.occ 恒拒）\"}"
+	"∪$HOME（越界须 W2 确认；~/.occ 恒拒）\"}"
 	"},\"required\":[\"path\"]}";
 
 static const char SCHEMA_MV[] =
@@ -173,14 +173,15 @@ static const char SCHEMA_MV[] =
 	"\"dst\":{\"type\":\"string\",\"description\":\"目标路径。已存在则"
 	"报错（v1 不覆盖已有目标——防误覆盖）；跨设备报错（不做 copy+"
 	"unlink，可 read+write 复制后 rm）。两端均须在目标域"
-	"（工作目录子树∪/tmp∪/var/ai；越界须 W2 确认；~/.occ 恒拒）\"}"
+	"（工作目录子树∪/tmp∪/var/ai∪$HOME；越界须 W2 确认；"
+	"~/.occ 恒拒）\"}"
 	"},\"required\":[\"src\",\"dst\"]}";
 
 static const char SCHEMA_MKDIR[] =
 	"{\"type\":\"object\",\"properties\":{"
 	"\"path\":{\"type\":\"string\",\"description\":\"要创建的目录路径"
 	"（-p 语义：父目录递归创建；已存在=幂等成功）。目标域=工作目录"
-	"子树∪/tmp∪/var/ai（越界须 W2 确认；~/.occ 恒拒）\"}"
+	"子树∪/tmp∪/var/ai∪$HOME（越界须 W2 确认；~/.occ 恒拒）\"}"
 	"},\"required\":[\"path\"]}";
 
 /* E3 第七工具（ORCH-DESIGN §3 拍板字段集；仅 OCC_ORCH_TOOLS=1 注册）
@@ -450,6 +451,18 @@ int occ_write_target_ok(const char *abs, const char *cwd)
 	if (occ_path_is_under(abs, "/tmp") ||
 	    occ_path_is_under(abs, "/var/ai"))
 		return 1;
+	/* O-6：$HOME 子树放行（/root 直写/直删——对齐 w2_path_safe 分
+	 * 类面已有口径，消「判 W1 却被守卫拒」假阳；HOME 空/非绝对/
+	 * 超长跳过（不缓存——getenv 直读，单测可桩 HOME）；~/.occ 首
+	 * 步恒拒不豁免） */
+	{
+		const char *h = getenv("HOME");
+
+		if (h && h[0] == '/' && h[1] &&
+		    strlen(h) < 512 &&
+		    occ_path_is_under(abs, h))
+			return 1;
+	}
 	if (cwd && cwd[0] == '/' && occ_path_is_under(abs, cwd))
 		return 1;
 	return 0;
@@ -823,7 +836,8 @@ static int write_guard(const occ_tool_ctx *ctx, const char *abs, occ_obuf *o)
 	    !occ_abs_under_home_occ(abs))
 		return 0;
 	occ_ob_printf(o, "ERROR: 目标 %s 越界：允许域=工作目录子树 ∪ "
-		      "/tmp ∪ /var/ai（W1 惯例；~/.occ 一律拒绝）", abs);
+		      "/tmp ∪ /var/ai ∪ $HOME 子树（W1 惯例；~/.occ 一律"
+		      "拒绝）", abs);
 	return -1;
 }
 
@@ -3681,7 +3695,7 @@ const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
 			if (detail && dcap)
 				snprintf(detail, dcap,
 					 "%s %s出域（允许域=工作目录∪/tmp∪"
-					 "/var/ai）：%.90s", name,
+					 "/var/ai∪$HOME）：%.90s", name,
 					 is_mv ? "源" : "目标", abs);
 			r = "W2";
 		}
@@ -3691,7 +3705,7 @@ const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
 			if (detail && dcap)
 				snprintf(detail, dcap,
 					 "mv 目标出域（允许域=工作目录∪"
-					 "/tmp∪/var/ai）：%.90s", abs);
+					 "/tmp∪/var/ai∪$HOME）：%.90s", abs);
 			r = "W2";
 		}
 	} else if (!strcmp(name, OCC_T_NETCFG)) {
@@ -3711,6 +3725,67 @@ const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
 	return r;
 }
 
+/* O-18：W2 理由键归一——classify 的 detail 人话文本压成稳定短键
+ * （同键=同类风险；「s 本会话同类放行」按键聚合，路径/命令字面差
+ * 不分裂键）。按 detail 特征子串归类（覆盖各 detail 生产点：chmod
+ * 语义面/写目标出安全区/文件管理出域/网络配置/高危表/粘贴形态）；
+ * 未识别=工具名裸键（保守聚合：同工具未知理由同键）。 */
+static void w2_reason_key(char *out, size_t cap, const char *name,
+			  const char *detail)
+{
+	const char *d = detail ? detail : "";
+	const char *base = name ? name : "?";
+
+	if (strstr(d, "chmod"))
+		snprintf(out, cap, "bash-chmod-ow");
+	else if (strstr(d, "写目标出安全区"))
+		snprintf(out, cap, "write-outzone");
+	else if (strstr(d, "网络配置"))
+		snprintf(out, cap, "netcfg-write");
+	else if (strstr(d, "出域"))
+		snprintf(out, cap, "%s-outzone", base);
+	else if (strstr(d, "递归删除"))
+		snprintf(out, cap, "bash-rm-r");
+	else if (strstr(d, "递归改属"))
+		snprintf(out, cap, "bash-chown-R");
+	else if (strstr(d, "systemctl"))
+		snprintf(out, cap, "bash-systemctl");
+	else if (strstr(d, "网络外发") || strstr(d, "落盘"))
+		snprintf(out, cap, "bash-egress");
+	else if (strstr(d, "高危命令"))
+		snprintf(out, cap, "bash-hard");
+	else if (strstr(d, "多行") || strstr(d, "sudo") ||
+		 strstr(d, "管道") || strstr(d, "链式"))
+		snprintf(out, cap, "bash-paste");
+	else
+		snprintf(out, cap, "%s", base);
+}
+
+/* O-18：理由键入会话放行表（TUI 面板 s 应答侧调；去重；满 8 槽
+ * 移位淘汰最老——会话粒度小表够用）。 */
+void occ_w2_ses_allow_add(struct occ_w2_gate *g)
+{
+	int i;
+
+	if (!g || !g->last_key[0])
+		return;
+	for (i = 0; i < g->ses_allow_n; i++)
+		if (!strcmp(g->ses_allow[i], g->last_key))
+			return;			/* 已在表（幂等） */
+	if (g->ses_allow_n < (int)(sizeof(g->ses_allow) /
+				    sizeof(g->ses_allow[0]))) {
+		snprintf(g->ses_allow[g->ses_allow_n],
+			 sizeof(g->ses_allow[0]), "%s", g->last_key);
+		g->ses_allow_n++;
+	} else {
+		memmove(g->ses_allow[0], g->ses_allow[1],
+			sizeof(g->ses_allow) - sizeof(g->ses_allow[0]));
+		snprintf(g->ses_allow[(int)(sizeof(g->ses_allow) /
+				     sizeof(g->ses_allow[0])) - 1],
+			 sizeof(g->ses_allow[0]), "%s", g->last_key);
+	}
+}
+
 /* 三态裁决：allow_w2 > tier 闸 > confirm 交互 > headless 拒。
  * 返回 1=放行（o 不动）；0=拒绝（o 填人话错误，denied++）。 */
 static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
@@ -3727,6 +3802,17 @@ static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
 			      "/etc/aikernel/policy.conf）", name,
 			      why ? why : "?");
 		return 0;
+	}
+	/* O-18：会话放行表命中（本会话同理由键已 s 放行过）→ 直接放行
+	 * 不再问（计数；allow_w2/tier 闸语义零变化；headless 表恒空） */
+	{
+		int i;
+
+		for (i = 0; i < g->ses_allow_n; i++)
+			if (!strcmp(g->ses_allow[i], g->last_key)) {
+				g->ses_allow_hits++;
+				return 1;
+			}
 	}
 	if (g->confirm && g->confirm(g->ud, "W2 高危操作确认",
 				     why ? why : "") == 1)
@@ -3778,6 +3864,10 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	 * 零行为变化；命中→allow_w2/tier/confirm 三态裁决） */
 	if (c.w2 && strcmp(occ_w2_classify(&c, name, args_json,
 					   wd, sizeof(wd)), "W2") == 0) {
+		/* O-18：归一理由键暂存 gate（decide 查会话放行表与 TUI s
+		 * 应答侧入表共用） */
+		w2_reason_key(c.w2->last_key, sizeof(c.w2->last_key),
+			      name, wd);
 		if (!w2_gate_decide(&c, name, wd, &o)) {
 			rc = -1;
 			goto w2_done;

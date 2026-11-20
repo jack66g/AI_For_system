@@ -284,9 +284,34 @@ int main(void)
 		char cwd[256];
 
 		snprintf(cwd, sizeof(cwd), "%s", tmpdir);
+		/* O-6 刀B：$HOME 子树放行三例（HOME=/root 桩——不缓存，
+		 * 故可按例改桩；~/.occ 首步恒拒不豁免） */
+		setenv("HOME", "/root", 1);
+		OK(occ_write_target_ok("/root/f.txt", cwd),
+		   "guard-home-ok");
+		OK(occ_write_target_ok("/root/.occ/x", cwd) == 0,
+		   "guard-home-occ-no");
+		setenv("HOME", "", 1);		/* 空 HOME=安全跳过 */
+		OK(occ_write_target_ok("/root/f.txt", cwd) == 0,
+		   "guard-home-empty-no");
+		unsetenv("HOME");			/* 还原，后续用例不依赖 */
 		OK(occ_write_target_ok("/tmp/x", cwd), "guard-tmp-ok");
 		OK(occ_write_target_ok("/etc/passwd", cwd) == 0,
 		   "guard-etc-no");
+		/* O-6 刀A：aik-sandbox bind 拒绝面判定（workdir 回退依据；
+		 * 表与 agent/ai/sandbox/aik-sandbox.c valid_bind_src 同源） */
+		OK(occ_sandbox_cwd_denied("/root"), "sbdeny-root");
+		OK(occ_sandbox_cwd_denied("/root/sub"), "sbdeny-root-sub");
+		OK(occ_sandbox_cwd_denied("/etc"), "sbdeny-etc");
+		OK(occ_sandbox_cwd_denied("/tmp") == 0, "sbdeny-tmp-ok");
+		OK(occ_sandbox_cwd_denied("/var/ai/work") == 0,
+		   "sbdeny-varaiwork-ok");
+		OK(occ_sandbox_cwd_denied("/var/ai/sandbox-artifacts/x"),
+		   "sbdeny-artifacts");
+		OK(occ_sandbox_cwd_denied(NULL) == 0 &&
+		   occ_sandbox_cwd_denied("rel") == 0 &&
+		   occ_sandbox_cwd_denied("/") == 0,
+		   "sbdeny-bad-input");
 	}
 
 	/* ======== 工具定义（9 件=六件套+O-17 文件管理三件、名字/schema 非空） ======== */

@@ -531,6 +531,33 @@ int tui_overlay_submit_idx(const tui_overlay *ov)
 	return ov->vis[ov->sel];
 }
 
+/* O-18：msg 按显示列切前 ncols 列的原始字节前缀（不切多字节、
+ * 不加省略号——detail 两行折行的首行切点；返回消费字节数）。 */
+static size_t ov_take_cols(const char *s, size_t ncols)
+{
+	size_t i = 0, cols = 0, len = s ? strlen(s) : 0;
+
+	while (i < len) {
+		uint32_t cp;
+		size_t adv;
+		int cw;
+
+		if (tui_utf8_decode((const uint8_t *)s + i, len - i,
+				    &cp, &adv) != TUI_U8_OK || adv == 0) {
+			adv = 1;
+			cp = TUI_REPLACEMENT;
+		}
+		cw = tui_wcwidth(cp);
+		if (cw < 0)
+			cw = 0;
+		if (cols + (size_t)cw > ncols)
+			break;
+		cols += (size_t)cw;
+		i += adv;
+	}
+	return i;
+}
+
 /* ---- 渲染 ---- */
 
 void tui_overlay_render(tui_overlay *ov, tui_screen *s,
@@ -676,6 +703,7 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 	{
 		int body_start = 1;
 		int body_h, detail_row, i;
+		int detail_rows;		/* O-18：detail 区行数（2 或 1） */
 
 		if (ov->searchable) {
 			if (rows > 2) {
@@ -690,7 +718,10 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 			}
 			body_start = 2;
 		}
-		detail_row = rows - 2;
+		/* O-18：detail 两行（rows-3/rows-2）——W2 理由长文可读；
+		 * rows<6 小屏退回单行（body 区不被 detail 区吃光） */
+		detail_rows = (rows >= 6) ? 2 : 1;
+		detail_row = rows - 1 - detail_rows;
 		body_h = detail_row - body_start;
 		if (body_h < 1)
 			body_h = 1;
@@ -769,7 +800,8 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 			}
 		}
 
-		/* detail / status 行（rows-2；busy 态前缀 spinner 帧自走） */
+		/* detail / status 行（O-18：两行 rows-3/rows-2——按显示列
+		 * 折行+截尾省略号；busy 态首行前缀 spinner 帧自走） */
 		if (detail_row > 0 && detail_row < rows) {
 			const char *msg = NULL;
 			tui_attr a = a_muted;
@@ -785,6 +817,12 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 					msg = it->detail;
 			}
 			if (msg) {
+				/* O-18：两行折行——首行按列切原始前缀（不加
+				 * 省略号——尾留第二行），次行 clip 超宽截尾
+				 * 省略号；busy 态首行前缀 spinner 帧 */
+				int col0 = 1;
+				size_t w;
+
 				if (ov->busy) {
 					struct timespec ts;
 					uint64_t now = 0;
@@ -798,13 +836,29 @@ void tui_overlay_render(tui_overlay *ov, tui_screen *s,
 					(void)tui_screen_put(s, detail_row, 1,
 							     sp, strlen(sp),
 							     a);
-					(void)tui_screen_put(s, detail_row, 3,
-							     msg, strlen(msg),
-							     a);
-				} else {
-					(void)tui_screen_put(s, detail_row, 1,
-							     msg, strlen(msg),
-							     a);
+					col0 = 3;
+				}
+				w = (cols > col0 + 1) ?
+				    (size_t)(cols - 1 - col0) : 0;
+				if (w && detail_rows == 2) {
+					size_t c1 = ov_take_cols(msg, w);
+					char l2[TUI_OV_DETAIL_MAX + 8];
+
+					(void)tui_screen_put(s, detail_row, col0,
+							 msg, c1, a);
+					(void)tui_utf8_clip_cols(msg + c1, w, l2,
+							   sizeof(l2));
+					if (l2[0])
+						(void)tui_screen_put(s,
+								 detail_row + 1, col0,
+								 l2, strlen(l2), a);
+				} else if (w) {
+					char l1[TUI_OV_DETAIL_MAX + 8];
+
+					(void)tui_utf8_clip_cols(msg, w, l1,
+							   sizeof(l1));
+					(void)tui_screen_put(s, detail_row, col0,
+							 l1, strlen(l1), a);
 				}
 			}
 		}

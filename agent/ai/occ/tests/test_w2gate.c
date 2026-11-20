@@ -55,6 +55,19 @@ static int stub_no(void *ud, const char *title, const char *detail)
 	return 0;
 }
 
+/* O-18：计数放行桩——会话放行矩阵断言「免问」（不再被调） */
+static int g_confirm_calls;
+
+static int stub_yes_counted(void *ud, const char *title,
+			     const char *detail)
+{
+	(void)ud;
+	(void)title;
+	g_last_detail = detail;
+	g_confirm_calls++;
+	return 1;
+}
+
 /* 一次工具调用（write 探针=区外路径；bash 探针=W2 表命中命令） */
 static void run_tool(const char *tool, const char *args, occ_w2_gate *g,
 		     occ_tool_result *r)
@@ -347,6 +360,71 @@ int main(void)
 		printf("  [mx_bash_confirm_exec] rc=%d %.90s\n", r.rc,
 		       r.text ? r.text : "");
 		occ_tool_result_free(&r);
+	}
+
+	/* ---- 面3（O-18）：会话级放行——s 后同键免问×异键仍问
+	 * ×headless 表恒空不受影响（探针同面2：bash chmod 666=
+	 * bash-chmod-ow 键；write /var/tmp=write-outzone 键） ---- */
+	{
+		occ_w2_gate sg;
+		occ_tool_result r;
+
+		memset(&sg, 0, sizeof(sg));
+		sg.tier = OCC_W2_TIER_PRIVILEGED;
+		sg.confirm = stub_yes_counted;
+		g_confirm_calls = 0;
+		/* 靶件先建（chmod 对不存在文件 exit 1——沙箱面会当命令级失败报错） */
+		(void)close(creat("/tmp/uxo_w2_ses_a.txt", 0644));
+		(void)close(creat("/tmp/uxo_w2_ses_b.txt", 0644));
+		(void)close(creat("/tmp/uxo_w2_ses_d.txt", 0644));
+		/* 1) 首问：chmod 666（同键探针）→ confirm 一次 */
+		run_tool("bash",
+			 B_ARGS("chmod 666 /tmp/uxo_w2_ses_a.txt"), &sg, &r);
+		CK(r.rc == 0 && r.text &&
+		   strstr(r.text, "ERROR: W2") == NULL, "ses_first_ask_pass");
+		occ_tool_result_free(&r);
+		CK(g_confirm_calls == 1, "ses_first_ask_confirm_called");
+		/* 2) 模拟 TUI s 应答：理由键入会话放行表 */
+		CK(strcmp(sg.last_key, "bash-chmod-ow") == 0,
+		   "ses_key_normalized");
+		occ_w2_ses_allow_add(&sg);
+		CK(sg.ses_allow_n == 1 && sg.ses_allow_hits == 0,
+		   "ses_add_one_entry");
+		/* 3) 同键免问：不同路径同 chmod 666 → 直接放行 */
+		run_tool("bash",
+			 B_ARGS("chmod 666 /tmp/uxo_w2_ses_b.txt"), &sg, &r);
+		CK(r.rc == 0 && r.text &&
+		   strstr(r.text, "ERROR: W2") == NULL,
+		   "ses_samekey_pass_no_ask");
+		occ_tool_result_free(&r);
+		CK(g_confirm_calls == 1, "ses_samekey_confirm_not_called");
+		CK(sg.ses_allow_hits == 1, "ses_samekey_hit_counted");
+		/* 4) 异键仍问：write /var/tmp（write-outzone）→ confirm 再调 */
+		run_tool("write",
+			 W_ARGS("/var/tmp/uxo_w2_ses_c.txt"), &sg, &r);
+		CK(r.rc == 0 && r.text &&
+		   strstr(r.text, "ERROR: W2") == NULL,
+		   "ses_diffkey_pass");
+		occ_tool_result_free(&r);
+		CK(g_confirm_calls == 2, "ses_diffkey_confirm_asked");
+		/* 5) headless 回归：新 gate（无面板表恒空）同命令仍拒 */
+		{
+			occ_w2_gate hg;
+			occ_tool_result r2;
+
+			memset(&hg, 0, sizeof(hg));
+			hg.tier = OCC_W2_TIER_PRIVILEGED;
+			run_tool("bash",
+				 B_ARGS("chmod 666 /tmp/uxo_w2_ses_d.txt"),
+				 &hg, &r2);
+			CK(r2.text && strstr(r2.text, "ERROR: W2") != NULL,
+			   "ses_headless_still_denied");
+			occ_tool_result_free(&r2);
+		}
+		unlink("/tmp/uxo_w2_ses_a.txt");
+		unlink("/tmp/uxo_w2_ses_b.txt");
+		unlink("/var/tmp/uxo_w2_ses_c.txt");
+		unlink("/tmp/uxo_w2_ses_d.txt");
 	}
 
 	/* w2=NULL：嵌入/测试面零行为变化（闸不介入；write 自身允许域
