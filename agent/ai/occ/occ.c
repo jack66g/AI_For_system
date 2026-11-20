@@ -514,7 +514,9 @@ enum {
 	OV_W2 = TUI_VIEW_OV_W2,		/* O-9：W2 确认面板（worker 请求开；
 					 * 值=tui_view.h 单源——view 侧 y/n
 					 * 单键应答应答本面板，P-52 病①） */
-	OV_SU = 23			/* O-10：/su 密码输入（mask） */
+	OV_SU = 23,			/* O-10：/su 密码输入（mask） */
+	OV_UNDO_RECALL = 24		/* O-25：/undo 撤回输入回填（输入；
+					 * Enter=重发即确认撤销） */
 };
 
 /* ov_map 值：SIZE_MAX=分组头（不可选）；OV_MAP_CUSTOM=向导自定义项 */
@@ -579,6 +581,9 @@ struct tui_app {
 	char state_path[512];		/* ~/.occ/state.json */
 	occ_provider_config cfg;	/* 向导 reload + /models 切换用 */
 	int cfg_ok;
+	char cfg_warn[256];		/* O-3：首条坏段诊断（进首屏
+					 * notice；空=配置全合法；诊断
+					 * ≤192B+计数十余字余量） */
 	occ_catalog *cat;		/* 惰性一次（ctx 分母 + 向导模型表） */
 	int cat_tried;
 	occ_registry *reg;		/* 惰性一次（/models）；保存后重建 */
@@ -3013,6 +3018,114 @@ static int tui_app_on_command(void *ud, const char *line)
 	return rc;
 }
 
+/* O-25：TUI /undo——CLI 撤销链同源（occ_undo 一步）；结果以系统注记
+ * 行进聊天流（/delete 同款 notice 通道，文案含撤销条数/文件回滚数/
+ * 无快照未回滚数与 /redo 指引），被撤输入回填输入覆盖层（/rename 预
+ * 填同款 API；Enter 重发=「发送新消息即确认撤销」，Esc 关闭保留撤销
+ * 态仍可 /redo）。无可撤 → err 人话原样注记。 */
+static void cmd_tui_undo(struct tui_app *a)
+{
+	occ_undo_result r;
+	char err[512];
+	char nb[400];
+	int live;
+	size_t failed = 0, i;
+
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		tui_view_notice(a->view,
+				"undo: turn 运行中——Esc 中断或收口后再 /undo");
+		return;
+	}
+	if (!a->session_id[0]) {
+		tui_view_notice(a->view,
+				"尚无会话——先发一条消息再 /undo");
+		return;
+	}
+	memset(&r, 0, sizeof(r));
+	err[0] = '\0';			/* 成功路径可能不置 err——防读未初始化 */
+	if (occ_undo(a->db, a->session_id, 1, NULL, &r, err,
+		     sizeof(err))) {
+		/* 无可撤/状态不合法：err 已是人话（occ undo: 前缀） */
+		tui_view_notice(a->view, err[0] ? err : "undo: 失败");
+		return;
+	}
+	for (i = 0; i < r.nfiles; i++)
+		if (r.files[i].failed)
+			failed++;
+	{
+		char fb[64];
+
+		fb[0] = '\0';
+		if (failed)
+			snprintf(fb, sizeof(fb), "，回滚失败 %zu 处",
+				 failed);
+		snprintf(nb, sizeof(nb),
+			 "undo: 已撤销 %zu 条消息 + %zu 文件回滚"
+			 "（无快照未回滚 %zu 处%s）；/redo 可恢复，"
+			 "发送新消息即确认撤销",
+			 r.nmsgs_reverted, r.nfiles, r.nskipped, fb);
+	}
+	tui_view_notice(a->view, nb);
+	if (r.user_text && r.user_text[0]) {
+		/* 回填=输入覆盖层（/rename 预填同款 API；容量 240B——
+		 * 超长不硬截断（截半行汉字），注记说明原文在转写区） */
+		if (strlen(r.user_text) < TUI_OV_INPUT_MAX) {
+			(void)tui_view_open_input(a->view, OV_UNDO_RECALL,
+						  "undo 回填",
+						  "被撤输入（Enter 重发="
+						  "确认撤销；Esc 关闭保留"
+						  "可 /redo）",
+						  r.user_text, 0);
+		} else {
+			tui_view_notice(a->view,
+					"被撤输入超回填上限（240 字节）——"
+					"原文见上方转写区，可手动复制重发");
+		}
+	}
+	occ_undo_result_free(&r);
+}
+
+/* O-25：TUI /redo——对称恢复（occ_redo：消息解隐藏+文件还原+清撤销
+ * 态）；注记行进聊天流，部分失败如实附注（err 已带前缀）。 */
+static void cmd_tui_redo(struct tui_app *a)
+{
+	occ_undo_result r;
+	char err[512];
+	char nb[400];
+	int live;
+
+	pthread_mutex_lock(&a->mu);
+	live = a->worker_live;
+	pthread_mutex_unlock(&a->mu);
+	if (live) {
+		tui_view_notice(a->view,
+				"redo: turn 运行中——Esc 中断或收口后再 /redo");
+		return;
+	}
+	if (!a->session_id[0]) {
+		tui_view_notice(a->view,
+				"尚无会话——先发一条消息再 /redo");
+		return;
+	}
+	memset(&r, 0, sizeof(r));
+	err[0] = '\0';			/* 部分失败才置——防读未初始化 */
+	if (occ_redo(a->db, a->session_id, NULL, &r, err, sizeof(err))) {
+		tui_view_notice(a->view, err[0] ? err : "redo: 失败");
+		return;
+	}
+	snprintf(nb, sizeof(nb),
+		 "redo: 已恢复 %zu 条消息 + %zu 文件还原"
+		 "（/undo 可再撤；此后正常续聊）",
+		 r.nmsgs_reverted, r.nfiles);
+	tui_view_notice(a->view, nb);
+	if (err[0])
+		tui_view_notice(a->view, err);
+	occ_undo_result_free(&r);
+}
+
 static int tui_app_on_command_impl(void *ud, const char *line)
 {
 	struct tui_app *a = ud;
@@ -3360,6 +3473,16 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		tui_view_quit(a->view);
 		return 0;
 	}
+	/* O-25：/undo /redo——TUI 面撤销（此前仅 CLI occ undo/redo，
+	 * unstuck 文案却指引 /undo——本刀补齐闭环） */
+	if (!strcmp(line, "/undo")) {
+		cmd_tui_undo(a);
+		return 0;
+	}
+	if (!strcmp(line, "/redo")) {
+		cmd_tui_redo(a);
+		return 0;
+	}
 	return 1;			/* 未知命令 → view 出提示 */
 }
 
@@ -3670,6 +3793,28 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		tui_view_close_overlay(a->view);
 		tui_view_notice(a->view,
 				"已提权至特权档（/su 0 回落 · /exit 注销同效）");
+		return 0;
+	}
+	if (ov_id == OV_UNDO_RECALL) {
+		/* O-25：回填面板 Enter=重发（「发送新消息即确认撤销」——
+		 * 走 on_submit 同链，occ_revert_commit 由 loop add_user
+		 * 收口）；空回车=只关面板（撤销态保留，可 /redo 或再发
+		 * 任意消息确认）。重发不成（turn 忙）重开面板保文本。 */
+		if (!text || !text[0]) {
+			tui_view_close_overlay(a->view);
+			tui_view_notice(a->view,
+					"未重发——撤销保留（/redo 可恢复；"
+					"再发任意消息即确认撤销）");
+			return 0;
+		}
+		tui_view_close_overlay(a->view);
+		if (tui_app_on_submit(a, text, len) != 0) {
+			tui_view_notice(a->view, "重发未成（turn 运行中）");
+			(void)tui_view_open_input(a->view, OV_UNDO_RECALL,
+						  "undo 回填",
+						  "被撤输入（Enter 重发="
+						  "确认撤销）", text, 0);
+		}
 		return 0;
 	}
 	if (ov_id == OV_RENAME) {
@@ -4161,6 +4306,18 @@ static int run_interactive(occ_db *db, const char *model_toml,
 		return 1;
 	}
 	a.cfg_ok = 1;
+	/* O-3（LT-1 踩坑）：坏段诊断取首条缓存（load_all 已逐条 stderr；
+	 * TUI 进屏后 stderr 不可见，首条须进首屏 notice） */
+	if (a.cfg.nslot_diag > 0) {
+		if (a.cfg.nslot_diag > 1)
+			snprintf(a.cfg_warn, sizeof(a.cfg_warn),
+				 "%s（另有 %zu 段同类告警）",
+				 a.cfg.slot_diag[0],
+				 a.cfg.nslot_diag - 1);
+		else
+			snprintf(a.cfg_warn, sizeof(a.cfg_warn), "%s",
+				 a.cfg.slot_diag[0]);
+	}
 	{
 		const char *slot = NULL;
 		size_t i;
@@ -4243,17 +4400,28 @@ static int run_interactive(occ_db *db, const char *model_toml,
 				/* UXAB：assistant 块头标签=当前模型名
 				 *（/shell 往返重建 view 后也要重设） */
 				tui_view_set_assist_label(a.view, a.p.model);
-				if (first_screen && a.ctx_fallback) {
-					char nb[320];
+				if (first_screen) {
+					/* O-3：坏段诊断首条（model.toml 段
+					 * 缺/错键——LT-1 无声丢弃坑）进
+					 * 首屏 notice；空=全合法零输出 */
+					if (a.cfg_warn[0])
+						(void)tui_view_post(
+							a.view,
+							TUI_VIEW_NOTICE,
+							a.cfg_warn, 0,
+							NULL, 0);
+					if (a.ctx_fallback) {
+						char nb[320];
 
-					/* O-5：侧栏两行降一行短句（保留「兜底 200k*」
-					 * 语义与 meta 的 * 标记） */
-					snprintf(nb, sizeof(nb),
-						 "catalog 未命中/不可读：context 分母兜底 "
-						 "200k*（OCC_CATALOG 可指 models.dev 快照）");
-					(void)tui_view_post(a.view,
-							     TUI_VIEW_NOTICE,
-							     nb, 0, NULL, 0);
+						/* O-5：侧栏两行降一行短句（保留「兜底 200k*」
+						 * 语义与 meta 的 * 标记） */
+						snprintf(nb, sizeof(nb),
+							 "catalog 未命中/不可读：context 分母兜底 "
+							 "200k*（OCC_CATALOG 可指 models.dev 快照）");
+						(void)tui_view_post(a.view,
+								     TUI_VIEW_NOTICE,
+								     nb, 0, NULL, 0);
+					}
 					first_screen = 0;
 				}
 				rc = tui_view_run(a.view);	/* enter → 循环 → shutdown → leave */

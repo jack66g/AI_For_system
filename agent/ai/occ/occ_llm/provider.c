@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>			/* O-3：cfg_diag_add va_list */
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -445,11 +446,26 @@ static int cfg_reserve(void **arr, size_t *cap, size_t need, size_t esz)
 	return 0;
 }
 
+/* O-3：被拒段诊断收集（人话一行；超上限只计 malformed 不丢进程） */
+static void cfg_diag_add(occ_provider_config *cfg, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!cfg || cfg->nslot_diag >= OCC_CFG_DIAG_MAX)
+		return;
+	va_start(ap, fmt);
+	(void)vsnprintf(cfg->slot_diag[cfg->nslot_diag],
+			OCC_CFG_DIAG_LEN, fmt, ap);
+	va_end(ap);
+	cfg->nslot_diag++;
+}
+
 static void parse_model_section(const char *txt, const struct toml_sec *s,
 				occ_provider_config *cfg)
 {
 	occ_model_slot slot;
 	char *v;
+	int had_ptype = 0;			/* O-3：键在但值不识别=错值 */
 
 	memset(&slot, 0, sizeof(slot));
 	snprintf(slot.id, sizeof(slot.id), "%s", s->name + 7);
@@ -461,6 +477,7 @@ static void parse_model_section(const char *txt, const struct toml_sec *s,
 	}
 	v = toml_body_str(txt, s, "provider_type");
 	if (v) {
+		had_ptype = 1;
 		snprintf(slot.provider_type, sizeof(slot.provider_type), "%s", v);
 		slot.proto = occ_protocol_from_type(slot.provider_type);
 		free(v);
@@ -487,7 +504,23 @@ static void parse_model_section(const char *txt, const struct toml_sec *s,
 	}
 	slot.api_key = toml_body_str(txt, s, "api_key");
 	if ((int)slot.proto == -1 && !slot.provider_ref[0]) {
-		/* 无类型无引用 → 坏段（容错跳过计数） */
+		/* 无类型无引用 → 坏段（容错跳过计数）。O-3：不再无声——
+		 * 逐段留诊断（缺键/错值分说；键名拼错如 ptype/model 名错
+		 * 均落此分支），load_all 收尾统一 stderr。 */
+		if (had_ptype)
+			cfg_diag_add(cfg,
+				     "model.toml: [models.%s] provider_type "
+				     "值无法识别（%.32s；期望 "
+				     "provider_type/model_name/base_url/"
+				     "api_key）——该模型未列入",
+				     s->name + 7, slot.provider_type);
+		else
+			cfg_diag_add(cfg,
+				     "model.toml: [models.%s] 缺 "
+				     "provider_type（期望 provider_type/"
+				     "model_name/base_url/api_key）——"
+				     "该模型未列入",
+				     s->name + 7);
 		heap_scrub_free(&slot.api_key);
 		cfg->malformed++;
 		return;
@@ -685,6 +718,11 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 		}
 		/* provider.toml 缺/坏 → 类型表空（不影响模型槽位） */
 	}
+	/* O-3（LT-1 踩坑）：被拒段不再无声——加载完逐条 stderr 人话告警
+	 * （headless/TUI 同源；TUI 侧另取首条进 notice，见 occ.c）。合法
+	 * 段零条零输出（不噪）。 */
+	for (i = 0; i < cfg->nslot_diag; i++)
+		fprintf(stderr, "%s\n", cfg->slot_diag[i]);
 	return 0;
 }
 

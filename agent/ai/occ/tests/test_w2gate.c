@@ -192,6 +192,20 @@ int main(void)
 		 "cls_exfil_xput");
 	cls_case("bash", B_ARGS("curl -s http://127.0.0.1:9/health"), "W1",
 		 "cls_curl_get_ok");
+	/* O-17：rm/mv/mkdir 分类（域=执行面 occ_write_target_ok：
+	 * workdir∪/tmp∪/var/ai——/var/ai 域内=W1，域外=W2；mv 两端任一
+	 * 出域即 W2） */
+	cls_case("rm", "{\"path\":\"/tmp/o17.txt\"}", "W1", "cls_rm_tmp");
+	cls_case("rm", "{\"path\":\"/etc/hosts\"}", "W2", "cls_rm_etc");
+	cls_case("mkdir", "{\"path\":\"/var/ai/sub\"}", "W1",
+		 "cls_mkdir_varai");
+	cls_case("mkdir", "{\"path\":\"/etc/o17\"}", "W2", "cls_mkdir_etc");
+	cls_case("mv", "{\"src\":\"/tmp/a\",\"dst\":\"/tmp/b\"}", "W1",
+		 "cls_mv_tmp2tmp");
+	cls_case("mv", "{\"src\":\"/tmp/a\",\"dst\":\"/etc/b\"}", "W2",
+		 "cls_mv_tmp2etc");
+	cls_case("mv", "{\"src\":\"/etc/a\",\"dst\":\"/tmp/b\"}", "W2",
+		 "cls_mv_etc2tmp");
 
 	/* ---- 面2：三态裁决矩阵 ----
 	 * write 探针=/var/tmp（W2 区外写）；bash 探针=kill -0 1
@@ -272,6 +286,34 @@ int main(void)
 				 home, (int)getpid());
 			CK(stat(args, &st) != 0,
 			   "mx_write_confirm_homeocc_no_file");
+			occ_tool_result_free(&r);
+		}
+	}
+
+	/* O-17：rm ~/.occ 红线——分类 W2 + 特权档确认放行后 write_guard
+	 * 仍恒拒（与 write 同口径：~/.occ 不豁免） */
+	memset(&g, 0, sizeof(g));
+	g.tier = OCC_W2_TIER_PRIVILEGED;
+	g.confirm = stub_yes;
+	{
+		const char *home = getenv("HOME");
+		char args[512], detail[200];
+		occ_tool_ctx c;
+		occ_tool_result r;
+
+		if (home && home[0]) {
+			snprintf(args, sizeof(args),
+				 "{\"path\":\"%s/.occ/o17red_%d/x\"}",
+				 home, (int)getpid());
+			memset(&c, 0, sizeof(c));
+			c.workdir = "/tmp";
+			CK(strcmp(occ_w2_classify(&c, "rm", args, detail,
+						   sizeof(detail)),
+				  "W2") == 0, "cls_rm_homeocc_w2");
+			run_tool("rm", args, &g, &r);
+			CK(r.rc != 0 && r.text &&
+			   strstr(r.text, "ERROR: 目标") != NULL,
+			   "mx_rm_homeocc_still_denied");
 			occ_tool_result_free(&r);
 		}
 	}

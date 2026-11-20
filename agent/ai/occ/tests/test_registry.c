@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>			/* O-3：dup2/open 捕获 stderr */
 #include <sys/stat.h>
 
 #include "occ_llm/occ_registry.h"
@@ -556,6 +557,109 @@ static void test_nonchat(void)
 	occ_registry_free(&reg);
 }
 
+/*
+ * O-3：坏段人话告警（LT-1 踩坑回归）。两例：
+ *   坏段（缺 provider_type + 错值 provider_type）→ stderr 逐条含段名
+ *   与键名（dup2 捕获）+ cfg->slot_diag 计数；
+ *   好段 → stderr 零输出（不噪——合法配置静默）。
+ */
+static void test_malformed_diag(void)
+{
+	char path[128], cap_path[160];
+	occ_provider_config cfg;
+	int saved, cap_fd;
+
+	snprintf(path, sizeof(path), "%s/diag_bad.toml", tmpdir);
+	write_file(path,
+		   "[models.cloud]\n"
+		   "provider_type = \"openai_compatible\"\n"
+		   "model_name = \"ok-model\"\n"
+		   "base_url = \"http://127.0.0.1:9443\"\n"
+		   "api_key = \"sk-fixture\"\n"
+		   "\n"
+		   "[models.notypo]\n"
+		   "model_name = \"orphan\"\n"
+		   "\n"
+		   "[models.badtype]\n"
+		   "provider_type = \"openai_compatibbb\"\n"
+		   "model_name = \"x\"\n");
+	snprintf(cap_path, sizeof(cap_path), "%s/diag_stderr.txt", tmpdir);
+	unlink(cap_path);
+
+	/* ---- 坏段：stderr 捕获（dup2 到临时文件）---- */
+	saved = dup(2);
+	cap_fd = open(cap_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	OK(saved >= 0 && cap_fd >= 0, "diag-capture-setup");
+	if (saved >= 0 && cap_fd >= 0) {
+		(void)dup2(cap_fd, 2);
+		OK(occ_provider_load_all(&cfg, path, NULL) == 0,
+		   "diag-load-ok");
+		(void)fflush(stderr);
+		(void)dup2(saved, 2);
+		close(saved);
+		close(cap_fd);
+		OK(cfg.nslots == 1 && cfg.malformed == 2, "diag-malformed-2");
+		OK(cfg.nslot_diag == 2, "diag-count-2");
+		{
+			char buf[2048];
+			FILE *f = fopen(cap_path, "r");
+			size_t n = 0;
+
+			if (f) {
+				n = fread(buf, 1, sizeof(buf) - 1, f);
+				fclose(f);
+			}
+			buf[n] = '\0';
+			/* 缺键例：段名+缺键名+期望键清单 */
+			OK(strstr(buf, "[models.notypo]") != NULL &&
+			   strstr(buf, "provider_type") != NULL &&
+			   strstr(buf, "model_name") != NULL,
+			   "diag-missing-key-line");
+			/* 错值例：段名+值无法识别 */
+			OK(strstr(buf, "[models.badtype]") != NULL &&
+			   strstr(buf, "无法识别") != NULL,
+			   "diag-bad-value-line");
+		}
+		occ_provider_config_free(&cfg);
+	}
+
+	/* ---- 好段：零输出（合法配置静默——不噪）---- */
+	snprintf(path, sizeof(path), "%s/diag_good.toml", tmpdir);
+	write_file(path,
+		   "[models.cloud]\n"
+		   "provider_type = \"openai_compatible\"\n"
+		   "model_name = \"ok-model\"\n"
+		   "base_url = \"http://127.0.0.1:9443\"\n"
+		   "api_key = \"sk-fixture\"\n");
+	unlink(cap_path);
+	saved = dup(2);
+	cap_fd = open(cap_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (saved >= 0 && cap_fd >= 0) {
+		(void)dup2(cap_fd, 2);
+		OK(occ_provider_load_all(&cfg, path, NULL) == 0,
+		   "diag-good-load");
+		(void)fflush(stderr);
+		(void)dup2(saved, 2);
+		close(saved);
+		close(cap_fd);
+		OK(cfg.nslots == 1 && cfg.malformed == 0 &&
+		   cfg.nslot_diag == 0, "diag-good-silent-cfg");
+		{
+			struct stat st;
+
+			OK(stat(cap_path, &st) == 0 && st.st_size == 0,
+			   "diag-good-silent-stderr");
+		}
+		occ_provider_config_free(&cfg);
+	} else {
+		OK(0, "diag-capture-setup-good");
+		if (saved >= 0)
+			close(saved);
+		if (cap_fd >= 0)
+			close(cap_fd);
+	}
+}
+
 int main(void)
 {
 	snprintf(tmpdir, sizeof(tmpdir), "/tmp/occ-reg-test-XXXXXX");
@@ -569,6 +673,7 @@ int main(void)
 	test_registry_views();
 	test_state_json();
 	test_nonchat();
+	test_malformed_diag();
 	rmtree(tmpdir);
 	if (fails) {
 		printf("test_registry: FAIL(%d)\n", fails);

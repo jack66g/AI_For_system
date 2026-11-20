@@ -4,7 +4,7 @@
  *
  * 环实现见 occ_loop.h 头注。b1 环语义（OPENCODE-PLAN §6）：
  *
- *   轮 A（无未应答调用）：组装上下文（system + 库内窗口全量 + 六件套
+ *   轮 A（无未应答调用）：组装上下文（system + 库内窗口全量 + 九件套
  *       工具定义）→ LLM 流式 → assistant 消息落库（携带 toolCall 时
  *       interim=1：status 保持 running）
  *   轮 B（存在未应答调用——新落库的或崩溃残留的）：逐个执行（occ_tools：
@@ -59,9 +59,12 @@ const char OCC_SYSTEM_PROMPT[] =
 	"3. 你可以直接调用工具完成任务：read 读文件（行窗 offset/limit）、"
 	"write 写整文件、edit 精确字符串替换（oldString 唯一或 replaceAll）、"
 	"glob 找文件、grep 搜文本、bash 在沙箱中执行命令（gcc 编译、运行程"
-	"序等）。多步任务请连续调用工具直到完成，再用中文总结结果；工具报"
-	"错时读取错误信息修正后重试或如实报告。bash 在 aik-sandbox 隔离区"
-	"内执行：工作目录已读写挂入，宿主其余路径不可见。\n"
+	"序等）、rm 删除普通文件/空目录、mv 移动或改名（不覆盖已有目标、"
+	"不跨设备）、mkdir 递归建目录——后三者走宿主面（与 write 同目标"
+	"域），不再用的文件可自行清理。多步任务请连续调用工具直到完成，"
+	"再用中文总结结果；工具报错时读取错误信息修正后重试或如实报告。"
+	"bash 在 aik-sandbox 隔离区内执行：工作目录已读写挂入，宿主其余"
+	"路径不可见。\n"
 	"4. 会话历史完整保留，可引用此前内容与工具结果。";
 
 /*
@@ -1103,7 +1106,7 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 			req.system = sys_prompt;	/* T9d：可含〈记忆〉块 */
 			req.msgs = req_msgs;
 			req.nmsgs = nv;		/* b2：过滤被撤/注记后可见数 */
-			req.tools = tdefs;			/* b1：六件套 */
+			req.tools = tdefs;			/* b1：六件套 + O-17 三件=九件 */
 			req.ntools = ntools;
 		}
 

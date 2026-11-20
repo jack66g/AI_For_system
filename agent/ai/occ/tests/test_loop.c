@@ -387,7 +387,7 @@ int main(void)
 		OK(res.session_id[0] != '\0', "loop1-session-created");
 		OK(msgs_of(res.session_id) == 2, "loop1-two-msgs");
 		OK(status_is(res.session_id, "active"), "loop1-status-active");
-		OK(g_req_ntools == 6, "loop1-req-six-tools");
+		OK(g_req_ntools == 9, "loop1-req-nine-tools");
 		OK(g_req_nmsgs == 1, "loop1-req-nmsgs-1");
 		OK(g_req_system == OCC_SYSTEM_PROMPT,
 		   "loop1-system-prompt-const");

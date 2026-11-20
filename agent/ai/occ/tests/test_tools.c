@@ -289,26 +289,31 @@ int main(void)
 		   "guard-etc-no");
 	}
 
-	/* ======== 工具定义（6 件、名字/schema 非空） ======== */
+	/* ======== 工具定义（9 件=六件套+O-17 文件管理三件、名字/schema 非空） ======== */
 	{
 		size_t n = 0;
 		const occ_tool_def *d = occ_tool_defs(&n);
 		int schema_ok = 1;
 
-		OK(n == 6, "defs-six");
+		OK(n == 9, "defs-nine");
 		OK(!strcmp(d[0].name, "read") &&
 		   !strcmp(d[1].name, "write") &&
 		   !strcmp(d[2].name, "edit") &&
 		   !strcmp(d[3].name, "glob") &&
 		   !strcmp(d[4].name, "grep") &&
-		   !strcmp(d[5].name, "bash"), "defs-names");
+		   !strcmp(d[5].name, "bash") &&
+		   !strcmp(d[6].name, "rm") &&
+		   !strcmp(d[7].name, "mv") &&
+		   !strcmp(d[8].name, "mkdir"), "defs-names");
 		for (size_t i = 0; i < n; i++)
 			if (!d[i].parameters ||
 			    !strstr(d[i].parameters, "required") ||
 			    !d[i].description)
 				schema_ok = 0;
 		OK(schema_ok, "defs-schema");
-		OK(occ_tool_is_known("edit") && !occ_tool_is_known("rm"),
+		/* O-17 前 rm 未知面曾是否定断言——三件入正典后翻正 */
+		OK(occ_tool_is_known("edit") && occ_tool_is_known("rm") &&
+		   occ_tool_is_known("mv") && occ_tool_is_known("mkdir"),
 		   "defs-known");
 	}
 
@@ -603,8 +608,8 @@ int main(void)
 		s = (char *)exec_tool("bash", "{}");
 		OK(exec_rc() != 0 && strstr(s, "缺少参数"), "bash6-noargs");
 
-		/* B7 未知工具 */
-		s = (char *)exec_tool("rm", "{\"path\":\"x\"}");
+		/* B7 未知工具（O-17 起 rm 是真工具——探针换 never_a_tool） */
+		s = (char *)exec_tool("never_a_tool", "{\"path\":\"x\"}");
 		OK(exec_rc() != 0 && strstr(s, "未知工具"), "bash7-unknown");
 
 		/* B8 E10②a 源端净化：stub 透传 printf 坏字节（0xFF）→
@@ -764,31 +769,31 @@ int main(void)
 		size_t n = 0;
 		const occ_tool_def *d;
 
-		/* 默认关：未知+六件（红线——差分/p-smoke 路径零变化） */
-		OK(occ_tool_defs(&n) && n == 6 && !occ_tool_is_known("task"),
+		/* 默认关：未知+九件（O-17 起 base=9；task 面默认关不变） */
+		OK(occ_tool_defs(&n) && n == 9 && !occ_tool_is_known("task"),
 		   "task-default-off");
 		s = (char *)exec_tool("task",
 				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");
 		OK(exec_rc() != 0 && s && strstr(s, "未知工具"),
 		   "task-default-unknown");
-		/* 开关开：第七件(task)+第八件(recall，E6)注册+schema 非空 */
+		/* 开关开：九件+task+recall=11（E6 起 task/recall 旗控尾部追加） */
 		setenv("OCC_ORCH_TOOLS", "1", 1);
 		d = occ_tool_defs(&n);
-		OK(n == 8 && d && !strcmp(d[6].name, "task") &&
-		   d[6].description && strstr(d[6].parameters, "spawn") &&
-		   strstr(d[6].parameters, "fileset") &&
-		   strstr(d[6].parameters, "rework_max"),
-		   "task-on-seven-defs");
+		OK(n == 11 && d && !strcmp(d[9].name, "task") &&
+		   d[9].description && strstr(d[9].parameters, "spawn") &&
+		   strstr(d[9].parameters, "fileset") &&
+		   strstr(d[9].parameters, "rework_max"),
+		   "task-on-eleven-defs");
 		/* E10④⑧：schema 同步——spawn+task_id 再派面 + wait 上限
 		 * 120000（缺省 2000 / minimum 100 不变） */
-		OK(strstr(d[6].parameters, "120000") &&
-		   strstr(d[6].parameters, "缺省 2000") &&
-		   strstr(d[6].parameters, "再派"),
+		OK(strstr(d[9].parameters, "120000") &&
+		   strstr(d[9].parameters, "缺省 2000") &&
+		   strstr(d[9].parameters, "再派"),
 		   "task-schema-wait-respawn");
-		OK(!strcmp(d[7].name, "recall") &&
-		   strstr(d[7].parameters, "layer"), "recall-eighth-def");
+		OK(!strcmp(d[10].name, "recall") &&
+		   strstr(d[10].parameters, "layer"), "recall-tenth-def");
 		OK(occ_tool_is_known("task") && occ_tool_is_known("recall") &&
-		   !occ_tool_is_known("rm"), "task-on-known");
+		   occ_tool_is_known("rm"), "task-on-known");
 		/* 无 orch 运行时 → 结构化人话错误（JSON） */
 		s = (char *)exec_tool("task",
 				      "{\"action\":\"status\",\"task_id\":\"tsk_x\"}");
@@ -858,8 +863,80 @@ int main(void)
 		   "task-return-no-verdict");
 		/* 关回去：零变化 */
 		unsetenv("OCC_ORCH_TOOLS");
-		OK(occ_tool_defs(&n) && n == 6 && !occ_tool_is_known("task"),
+		OK(occ_tool_defs(&n) && n == 9 && !occ_tool_is_known("task"),
 		   "task-off-again");
+	}
+
+	/* ======== O-17：rm/mv/mkdir 端到端（宿主面；w2=NULL 嵌入面——
+	 * 域外由 write_guard 硬拒；W2 分类/确认面见 test_w2gate） ======== */
+	{
+		struct stat st;
+		char p[600], p2[600];
+		char *t;
+
+		snprintf(p, sizeof(p), "%s/o17.txt", tmpdir);
+		/* write 建 → rm 删 → 无 */
+		wfile("o17.txt", "dome");
+		s = (char *)exec_tool("rm", "{\"path\":\"o17.txt\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "已删除"), "o17-rm-file");
+		OK(stat(p, &st) != 0, "o17-rm-file-gone");
+		/* rm 不存在 → 人话报错 */
+		s = (char *)exec_tool("rm", "{\"path\":\"o17.txt\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "不存在"),
+		   "o17-rm-missing");
+		/* mkdir -p 递归 → 有；幂等 */
+		s = (char *)exec_tool("mkdir",
+				      "{\"path\":\"o17sub/deep/dir\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "已创建"), "o17-mkdir-p");
+		snprintf(p, sizeof(p), "%s/o17sub/deep/dir", tmpdir);
+		OK(stat(p, &st) == 0 && S_ISDIR(st.st_mode),
+		   "o17-mkdir-exists");
+		s = (char *)exec_tool("mkdir",
+				      "{\"path\":\"o17sub/deep/dir\"}");
+		OK(exec_rc() == 0, "o17-mkdir-idempotent");
+		/* rm 空目录 → ok；非空目录 → 人话（v1 诚实限制） */
+		s = (char *)exec_tool("rm", "{\"path\":\"o17sub/deep/dir\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "空目录"),
+		   "o17-rm-empty-dir");
+		s = (char *)exec_tool("rm", "{\"path\":\"o17sub\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "非空目录"),
+		   "o17-rm-nonempty-dir");
+		/* mv 改名 → 旧无新有；内容随迁；不覆盖已有目标 */
+		wfile("o17old.txt", "moved");
+		s = (char *)exec_tool("mv",
+				      "{\"src\":\"o17old.txt\","
+				      "\"dst\":\"o17new.txt\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "已移动"), "o17-mv-rename");
+		snprintf(p, sizeof(p), "%s/o17old.txt", tmpdir);
+		snprintf(p2, sizeof(p2), "%s/o17new.txt", tmpdir);
+		OK(stat(p, &st) != 0, "o17-mv-old-gone");
+		t = rfile("o17new.txt");
+		OK(t && strcmp(t, "moved") == 0, "o17-mv-content");
+		free(t);
+		s = (char *)exec_tool("mv",
+				      "{\"src\":\"o17new.txt\","
+				      "\"dst\":\"o17new.txt\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "已存在"),
+		   "o17-mv-no-overwrite");
+		/* 域外（w2=NULL 嵌入面）：write_guard 硬拒（~/.occ 同拒） */
+		s = (char *)exec_tool("rm", "{\"path\":\"/etc/hosts\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "越界"), "o17-rm-etc-no");
+		s = (char *)exec_tool("mkdir", "{\"path\":\"/etc/o17x\"}");
+		OK(exec_rc() != 0 && s && strstr(s, "越界"),
+		   "o17-mkdir-etc-no");
+		{
+			const char *home = getenv("HOME");
+
+			if (home && home[0]) {
+				char args[600];
+
+				snprintf(args, sizeof(args),
+					 "{\"path\":\"%s/.occ/o17db\"}", home);
+				s = (char *)exec_tool("rm", args);
+				OK(exec_rc() != 0 && s && strstr(s, "越界"),
+				   "o17-rm-homeocc-no");
+			}
+		}
 	}
 
 	occ_tool_result_free(&g_res);

@@ -25,6 +25,14 @@
  * 自执行）。LLM 请求的 tools 定义由 occ_tool_defs() 提供（a1 构造器
  * 双协议序列化：openai function.parameters / anthropic input_schema）。
  *
+ * O-17 文件管理三件 rm/mv/mkdir（write 同款宿主面——不经沙箱）：
+ *   write 走宿主、bash 走沙箱两视图——AI 建得了删不掉（演示残留
+ *   dome.txt 无法自清）。守卫与 write_guard 同构（occ_write_target_ok
+ *   域 + w2_confirmed 豁免；mv 两端各查）；v1 诚实限制：rm 仅普通
+ *   文件与空目录（非空报错建议逐个删）、mv 跨设备报错（不做
+ *   copy+unlink）、mv 不覆盖已有目标、mkdir 幂等；均不落撤销快照
+ *   （/undo 不回滚这三件——如实限制，见 W2-CHANGES）。
+ *
  * E3 第七工具 task（ORCH-DESIGN §3/R1——工具层，非运行时直调）：
  *   五动作 spawn/status/wait/read_result/return；OCC_ORCH_TOOLS=1
  *   才注册（默认关——默认路径 LLM 请求字节零变化，差分/p-smoke 红线）；
@@ -55,6 +63,10 @@
 #define OCC_T_GLOB  "glob"
 #define OCC_T_GREP  "grep"
 #define OCC_T_BASH  "bash"
+#define OCC_T_RM    "rm"			/* O-17：文件管理三件（宿主
+						 * 面；write 同款域守卫） */
+#define OCC_T_MV    "mv"
+#define OCC_T_MKDIR "mkdir"
 #define OCC_T_RECALL "recall"			/* E6：第八工具
 					 * （OCC_ORCH_TOOLS=1
 					 * 才注册） */
@@ -75,10 +87,11 @@
 #define OCC_TOOL_TIMEOUT_DEF_MS 60000
 
 /*
- * 六件套 tools 定义（name/description/parameters JSON Schema 文本）。
- * 返回静态数组；*n 恒 6。直接喂 occ_llm_req.tools。
- * E3：OCC_ORCH_TOOLS=1 时返回 7 件（尾部追加 task——判级/派发协议
- * 见 orch.h；默认关，差分红线路径恒 6 件）。
+ * 工具面定义（name/description/parameters JSON Schema 文本）。返回静态
+ * 数组；默认 *n 恒 9（六件套 + O-17 文件管理三件 rm/mv/mkdir）。直接
+ * 喂 occ_llm_req.tools。
+ * E3：OCC_ORCH_TOOLS=1 时返回 11 件（尾部追加 task+recall——判级/派发
+ * 协议见 orch.h）。
  */
 const occ_tool_def *occ_tool_defs(size_t *n);
 int occ_tool_is_known(const char *name);

@@ -76,7 +76,7 @@ int main(void)
 	unsetenv("OCC_ORCH_TOOLS");
 	unsetenv("OCC_NETCFG_TOOLS");
 	defs = occ_tool_defs(&n);
-	CK(n == 6, "defs_default_6");
+	CK(n == 9, "defs_default_9");	/* O-17 起 base=9（六件+rm/mv/mkdir） */
 	CK(!occ_tool_is_known(OCC_T_NETCFG), "known_off_default");
 	{
 		occ_tool_ctx c;
@@ -93,9 +93,9 @@ int main(void)
 	setenv("OCC_NETCFG_TOOLS", "1", 1);
 	setenv("OCC_NETCFG_DIR", SB, 1);
 	defs = occ_tool_defs(&n);
-	CK(n == 7, "defs_flag_on_7");
-	CK(defs && strcmp(defs[6].name, OCC_T_NETCFG) == 0,
-	   "defs_6_is_netcfg");
+	CK(n == 10, "defs_flag_on_10");
+	CK(defs && strcmp(defs[9].name, OCC_T_NETCFG) == 0,
+	   "defs_9_is_netcfg");
 	CK(occ_tool_is_known(OCC_T_NETCFG), "known_on");
 
 	/* ---- 面2：分类器 ---- */

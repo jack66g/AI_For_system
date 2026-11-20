@@ -16,12 +16,12 @@
 
 #include "tui_utf8.h"
 
-/* 16 条内置 slash 命令（OPENCODE-PLAN §5；Tab 补全与 /help 同源；
- * E8 +/tasks 编排任务面板） */
+/* 18 条内置 slash 命令（OPENCODE-PLAN §5；Tab 补全与 /help 同源；
+ * E8 +/tasks 编排任务面板；O-25 +/undo /redo TUI 撤销） */
 static const char *const IB_CMDS[] = {
 	"/models", "/new", "/sessions", "/rename", "/delete", "/clear", "/help",
 	"/exit", "/status", "/tools", "/sandbox", "/trace", "/lease",
-	"/compact", "/shell", "/tasks"
+	"/compact", "/shell", "/tasks", "/undo", "/redo"
 };
 #define IB_NCMDS ((int)(sizeof(IB_CMDS) / sizeof(IB_CMDS[0])))
 

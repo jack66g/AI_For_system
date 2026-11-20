@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * tools.c - occ 工具六件套实现（T9b1；OPENCODE-PLAN §7）
+ * tools.c - occ 工具面实现（T9b1 六件套 + O-17 文件管理三件；
+ * OPENCODE-PLAN §7）
  *
  * read/write/edit/glob/grep 直接实现（朴素、零第三方依赖：fnmatch +
  * 字节子串搜索，不引 PCRE——任务书明示）；bash 经 occ_tools/sandbox.c
- * 的 aik-sandbox 对接（namespace 隔离；不可用即拒）。
+ * 的 aik-sandbox 对接（namespace 隔离；不可用即拒）；O-17 rm/mv/
+ * mkdir 走宿主面（write 同款域守卫——AI 建得了也删得掉）。
  *
  * 每次执行的副作用链（occ_tool_exec 单入口）：
  *   参数解析 → （write/edit）快照 stage → 执行 → trace JSONL →
@@ -153,6 +155,34 @@ static const char SCHEMA_BASH[] =
 	"（缺省 60，上限同全局配置）\",\"minimum\":1}"
 	"},\"required\":[\"command\"]}";
 
+/* O-17 文件管理三件（write 同款宿主面；守卫=occ_write_target_ok 域
+ * + w2_confirmed 豁免——mv 两端各查）。v1 诚实限制内嵌 description：
+ * AI 读 schema 即知边界，不靠试错。 */
+static const char SCHEMA_RM[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"path\":{\"type\":\"string\",\"description\":\"要删除的文件路径"
+	"（相对路径按工作目录解析）。仅普通文件与空目录——非空目录报错"
+	"（请逐个删除，v1 不做递归删）。目标域=工作目录子树∪/tmp∪/var/ai"
+	"（越界须 W2 确认；~/.occ 恒拒）\"}"
+	"},\"required\":[\"path\"]}";
+
+static const char SCHEMA_MV[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"src\":{\"type\":\"string\",\"description\":\"源路径（文件或目录；"
+	"相对路径按工作目录解析）\"},"
+	"\"dst\":{\"type\":\"string\",\"description\":\"目标路径。已存在则"
+	"报错（v1 不覆盖已有目标——防误覆盖）；跨设备报错（不做 copy+"
+	"unlink，可 read+write 复制后 rm）。两端均须在目标域"
+	"（工作目录子树∪/tmp∪/var/ai；越界须 W2 确认；~/.occ 恒拒）\"}"
+	"},\"required\":[\"src\",\"dst\"]}";
+
+static const char SCHEMA_MKDIR[] =
+	"{\"type\":\"object\",\"properties\":{"
+	"\"path\":{\"type\":\"string\",\"description\":\"要创建的目录路径"
+	"（-p 语义：父目录递归创建；已存在=幂等成功）。目标域=工作目录"
+	"子树∪/tmp∪/var/ai（越界须 W2 确认；~/.occ 恒拒）\"}"
+	"},\"required\":[\"path\"]}";
+
 /* E3 第七工具（ORCH-DESIGN §3 拍板字段集；仅 OCC_ORCH_TOOLS=1 注册）
  * E4：return 动作升级走验收环——机械判（§4）先行，verdict/pass=裁判
  * 表态（机械判过才生效）；fail 出整改词（§3 模板）与三路去向。 */
@@ -196,6 +226,9 @@ static const occ_tool_def TOOLS[] = {
 	{ OCC_T_GLOB,  "文件模式匹配（递归，** 跨目录）；返回匹配路径列表。", SCHEMA_GLOB },
 	{ OCC_T_GREP,  "文本搜索（字节子串匹配，含中文；返回 文件:行号:行）。", SCHEMA_GREP },
 	{ OCC_T_BASH,  "在 aik-sandbox 隔离区（mount/pid/uts namespace，能力裁剪）内执行 shell 命令；沙箱不可用时拒绝执行（绝不裸跑）。", SCHEMA_BASH },
+	{ OCC_T_RM,    "删除文件（宿主面，不经沙箱）：仅普通文件与空目录，非空目录报错建议逐个删；越界目标须 W2 确认。", SCHEMA_RM },
+	{ OCC_T_MV,    "移动/改名（宿主面，不经沙箱）：rename 语义，不覆盖已有目标，跨设备报错；两端越界须 W2 确认。", SCHEMA_MV },
+	{ OCC_T_MKDIR, "创建目录（宿主面，不经沙箱）：-p 语义父目录递归创建，已存在幂等成功；越界目标须 W2 确认。", SCHEMA_MKDIR },
 };
 
 /*
@@ -278,11 +311,11 @@ static void def_netcfg_set(occ_tool_def *d)
 }
 
 
-static occ_tool_def TOOLS_ORCH[8];
+static occ_tool_def TOOLS_ORCH[11];
 static int tools_orch_init;
 
-/* C-P2a：netcfg 旗控组装体（6 基础+netcfg；orch 同开时再补 task/recall） */
-static occ_tool_def TOOLS_NET[9];
+/* C-P2a：netcfg 旗控组装体（9 基础+netcfg；orch 同开时再补 task/recall） */
+static occ_tool_def TOOLS_NET[12];
 static int tools_net_init;
 static size_t tools_net_n;
 
@@ -312,8 +345,8 @@ const occ_tool_def *occ_tool_defs(size_t *n)
 
 			for (i = 0; i < sizeof(TOOLS) / sizeof(TOOLS[0]); i++)
 				TOOLS_ORCH[i] = TOOLS[i];
-			def_task_set(&TOOLS_ORCH[6]);
-			def_recall_set(&TOOLS_ORCH[7]);
+			def_task_set(&TOOLS_ORCH[9]);
+			def_recall_set(&TOOLS_ORCH[10]);
 			tools_orch_init = 1;
 		}
 		if (n)
@@ -986,6 +1019,128 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	free(out);
 	occ_ob_printf(o, "已编辑 %s：%zu 处替换（%s），文件 %zu → %zu 字节",
 		      abs, nocc, all ? "replaceAll" : "唯一命中", len, olen);
+	return 0;
+}
+
+/* ---- O-17：文件管理三件 rm/mv/mkdir（write 同款宿主面） ---- */
+
+static int tool_rm(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *path = args_str(a, "path");
+	char abs[4096];
+	struct stat st;
+
+	if (!path) {
+		occ_ob_puts(o, "ERROR: rm 缺少参数 path");
+		return -1;
+	}
+	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
+		occ_ob_printf(o, "ERROR: rm 路径无法解析：%s", path);
+		return -1;
+	}
+	if (write_guard(ctx, abs, o))
+		return -1;
+	if (lstat(abs, &st)) {
+		occ_ob_printf(o, "ERROR: rm %s 不存在：%s", abs,
+			      strerror(errno));
+		return -1;
+	}
+	if (S_ISDIR(st.st_mode)) {
+		/* v1 诚实限制：仅空目录（非空报错建议逐个删——不做递归） */
+		if (rmdir(abs)) {
+			occ_ob_printf(o, "ERROR: rm %s 非空目录"
+				      "（v1 仅删普通文件与空目录——"
+				      "请逐个删除后再删目录）", abs);
+			return -1;
+		}
+		occ_ob_printf(o, "已删除空目录 %s", abs);
+		return 0;
+	}
+	if (!S_ISREG(st.st_mode)) {
+		occ_ob_printf(o, "ERROR: rm %s 非普通文件"
+			      "（符号链接/设备等 v1 不删）", abs);
+		return -1;
+	}
+	if (unlink(abs)) {
+		occ_ob_printf(o, "ERROR: rm %s 删除失败：%s", abs,
+			      strerror(errno));
+		return -1;
+	}
+	occ_ob_printf(o, "已删除 %s", abs);
+	return 0;
+}
+
+static int tool_mv(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *src = args_str(a, "src");
+	const char *dst = args_str(a, "dst");
+	char sabs[4096], dabs[4096];
+	struct stat st;
+
+	if (!src || !dst) {
+		occ_ob_puts(o, "ERROR: mv 缺少参数 src/dst");
+		return -1;
+	}
+	if (resolve_arg_path(ctx, src, sabs, sizeof(sabs))) {
+		occ_ob_printf(o, "ERROR: mv 源路径无法解析：%s", src);
+		return -1;
+	}
+	if (resolve_arg_path(ctx, dst, dabs, sizeof(dabs))) {
+		occ_ob_printf(o, "ERROR: mv 目标路径无法解析：%s", dst);
+		return -1;
+	}
+	/* mv 两端各查（与 write_guard 同构：域 + w2_confirmed 豁免） */
+	if (write_guard(ctx, sabs, o) || write_guard(ctx, dabs, o))
+		return -1;
+	if (lstat(sabs, &st)) {
+		occ_ob_printf(o, "ERROR: mv 源 %s 不存在：%s", sabs,
+			      strerror(errno));
+		return -1;
+	}
+	if (!lstat(dabs, &st)) {
+		/* v1 诚实限制：不覆盖已有目标（防误覆盖——rename(2) 对
+		 * 普通文件会静默覆盖，显式拒绝） */
+		occ_ob_printf(o, "ERROR: mv 目标 %s 已存在"
+			      "（v1 不覆盖——先 rm 再 mv，或换个名字）",
+			      dabs);
+		return -1;
+	}
+	if (rename(sabs, dabs)) {
+		if (errno == EXDEV)
+			occ_ob_printf(o, "ERROR: mv %s → %s 跨设备"
+				      "（v1 不做 copy+unlink——可 read+"
+				      "write 复制后 rm 原件）", sabs, dabs);
+		else
+			occ_ob_printf(o, "ERROR: mv %s → %s 失败：%s",
+				      sabs, dabs, strerror(errno));
+		return -1;
+	}
+	occ_ob_printf(o, "已移动 %s → %s", sabs, dabs);
+	return 0;
+}
+
+static int tool_mkdir(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
+{
+	const char *path = args_str(a, "path");
+	char abs[4096];
+
+	if (!path) {
+		occ_ob_puts(o, "ERROR: mkdir 缺少参数 path");
+		return -1;
+	}
+	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
+		occ_ob_printf(o, "ERROR: mkdir 路径无法解析：%s", path);
+		return -1;
+	}
+	if (write_guard(ctx, abs, o))
+		return -1;
+	/* -p 语义：父目录递归建（mkdirs 幂等——EEXIST 不算错） */
+	if (mkdirs(abs)) {
+		occ_ob_printf(o, "ERROR: mkdir %s 创建失败：%s", abs,
+			      strerror(errno));
+		return -1;
+	}
+	occ_ob_printf(o, "已创建目录 %s（已存在则幂等成功）", abs);
 	return 0;
 }
 
@@ -3504,6 +3659,41 @@ const char *occ_w2_classify(const occ_tool_ctx *ctx, const char *name,
 		r = "W1";	/* 沙箱面兜底；W2=命令级命中（表/粘贴） */
 		if (cmd && cmd[0] && w2_bash_hit(cmd, detail, dcap))
 			r = "W2";
+	} else if (!strcmp(name, OCC_T_RM) || !strcmp(name, OCC_T_MKDIR) ||
+		   !strcmp(name, OCC_T_MV)) {
+		/* O-17：目标域判定——与执行面 write_guard 同域
+		 * （occ_write_target_ok：workdir∪/tmp∪/var/ai，~/.occ 恒
+		 * 拒）。任一端出域即 W2（detail 载目标绝对路径）；域内
+		 * W1。不走 write/edit 的 w2_path_safe（$HOME∪/tmp 面）——
+		 * 新三件执行面就是 occ_write_target_ok，分类/执行同域，
+		 * 免「判 W1 却被守卫拒」的假阳。 */
+		int is_mv = strcmp(name, OCC_T_MV) == 0;
+		const char *src = args_str(&a, is_mv ? "src" : "path");
+		const char *dst = args_str(&a, "dst");
+		char abs[4096];
+		char cwd[4096];
+		const char *cwdp = ctx_cwd(ctx, cwd, sizeof(cwd));
+
+		r = "W1";
+		if (src && src[0] &&
+		    resolve_arg_path(ctx, src, abs, sizeof(abs)) == 0 &&
+		    !occ_write_target_ok(abs, cwdp ? cwdp : "")) {
+			if (detail && dcap)
+				snprintf(detail, dcap,
+					 "%s %s出域（允许域=工作目录∪/tmp∪"
+					 "/var/ai）：%.90s", name,
+					 is_mv ? "源" : "目标", abs);
+			r = "W2";
+		}
+		if (is_mv && dst && dst[0] &&
+		    resolve_arg_path(ctx, dst, abs, sizeof(abs)) == 0 &&
+		    !occ_write_target_ok(abs, cwdp ? cwdp : "")) {
+			if (detail && dcap)
+				snprintf(detail, dcap,
+					 "mv 目标出域（允许域=工作目录∪"
+					 "/tmp∪/var/ai）：%.90s", abs);
+			r = "W2";
+		}
 	} else if (!strcmp(name, OCC_T_NETCFG)) {
 		const char *act = args_str(&a, "action");
 
@@ -3608,11 +3798,19 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		rc = tool_grep(&c, &a, &o);
 	} else if (!strcmp(name, OCC_T_BASH)) {
 		rc = tool_bash(&c, &a, &o);
+	} else if (!strcmp(name, OCC_T_RM)) {
+		/* O-17：文件管理三件（宿主面；无开关恒注册） */
+		rc = tool_rm(&c, &a, &o);
+	} else if (!strcmp(name, OCC_T_MV)) {
+		rc = tool_mv(&c, &a, &o);
+	} else if (!strcmp(name, OCC_T_MKDIR)) {
+		rc = tool_mkdir(&c, &a, &o);
 	} else if (!strcmp(name, OCC_T_NETCFG)) {
 		/* C-P2a：开关关=未知工具面（差分红线：默认清单零变化） */
 		if (!occ_netcfg_tools_enabled()) {
 			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash）",
+				      "read/write/edit/glob/grep/bash/"
+				      "rm/mv/mkdir）",
 				      name);
 			rc = -1;
 		} else {
@@ -3623,7 +3821,8 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		 * 开=五动作（内部再校验 ctx->orch） */
 		if (!occ_orch_tools_enabled()) {
 			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash）", name);
+				      "read/write/edit/glob/grep/bash/"
+				      "rm/mv/mkdir）", name);
 			rc = -1;
 		} else {
 			rc = tool_task(&c, &a, &o);
@@ -3632,7 +3831,8 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		/* E6 第八工具：开关关=未知工具面；开=记忆检索 */
 		if (!occ_orch_tools_enabled()) {
 			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash）",
+				      "read/write/edit/glob/grep/bash/"
+				      "rm/mv/mkdir）",
 				      name);
 			rc = -1;
 		} else {
@@ -3640,7 +3840,8 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		}
 	} else {
 		occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用：read/write/"
-			      "edit/glob/grep/bash%s%s%s）", name,
+			      "edit/glob/grep/bash/rm/mv/mkdir%s%s%s）",
+			      name,
 			      occ_orch_tools_enabled() ? "/task" : "",
 			      occ_orch_tools_enabled() ? "/recall" : "",
 			      occ_netcfg_tools_enabled() ?

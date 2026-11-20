@@ -83,7 +83,13 @@ typedef struct occ_provider_def {
 /*
  * occ_provider_config - 一份 model.toml（+可选 provider.toml 类型表）的
  * 全量解析结果。malformed=被容错跳过的坏段数（不炸进程）。
+ * O-3：slot_diag=被拒段逐条人话诊断（段名+缺/错键名+期望键清单）——
+ * load_all 收尾逐条 stderr；调用方（TUI）可取首条进 notice。合法段
+ * 零条目（不噪）。
  */
+#define OCC_CFG_DIAG_MAX 16		/* 被拒段诊断上限（超出只计数） */
+#define OCC_CFG_DIAG_LEN 192		/* 单条诊断长度上限 */
+
 typedef struct occ_provider_config {
 	occ_model_slot *slots;			/* [models.*] */
 	size_t nslots, slots_cap;
@@ -94,6 +100,9 @@ typedef struct occ_provider_config {
 						 * L1 ~/.aikernel/provider.toml） */
 	size_t navailable;
 	size_t malformed;
+	char slot_diag[OCC_CFG_DIAG_MAX][OCC_CFG_DIAG_LEN];
+	size_t nslot_diag;			/* ≤OCC_CFG_DIAG_MAX；
+						 * malformed 可大于之 */
 	char selector[OCC_TOML_ID_MAX];		/* 活动槽位选择器（LT-BUG-011）：
 						 * [default].model（系统正典）→
 						 * 顶层 model=（兼容）；空=未指定 */
