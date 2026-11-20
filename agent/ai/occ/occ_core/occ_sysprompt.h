@@ -12,4 +12,8 @@
  * 单元各持一份副本，测试的指针等同断言失效 */
 extern const char OCC_SYSTEM_PROMPT[];
 
+/* O-20 A 部：当前档系统提示（en=另写版/zh=OCC_SYSTEM_PROMPT 原文
+ * 恒等）；AC 基线估算等消费方用此取活档 */
+const char *occ_sysprompt_active(void);
+
 #endif /* _OCC_SYSPROMPT_H */

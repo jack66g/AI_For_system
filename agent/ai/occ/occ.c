@@ -63,6 +63,7 @@
 #include "occ_tui/tui_utf8.h"
 #include "occ_tui/tui_view.h"
 #include "occ_tui/tui_gate.h"
+#include "occ_tui/tui_lang.h"
 #include "policy/ai_user_policy.h"	/* O-10（UX-O §3）：uid→档位 */
 #include "occ_tools/occ_tools.h"	/* O-9（UX-O §2）：occ_w2_gate 面 */
 
@@ -195,8 +196,7 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 	if (!slot) {
 		if (cfg.selector[0])
 			snprintf(err, errlen,
-				 "model.toml model = \"%s\" 指向的 "
-				 "[models.%s] 不存在", cfg.selector,
+				 L_("model.toml model = \"%s\" 指向的 [models.%s] 不存在"), cfg.selector,
 				 cfg.selector);
 		else
 			snprintf(err, errlen, "no model slots in %s",
@@ -215,8 +215,7 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 		}
 		if (p->api_key && !p->api_key[0])
 			fprintf(stderr,
-				"occ: 警告：[models.%s] api_key 为空，"
-				"远端可能拒绝（%s）\n", slot, model_toml);
+				L_("occ: 警告：[models.%s] api_key 为空，远端可能拒绝（%s）\n"), slot, model_toml);
 		return 0;
 	}
 }
@@ -264,8 +263,7 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 			occ_workdir_resolve(cwd, sizeof(cwd), &wd_fb);
 			opts.workdir = cwd;
 			if (wd_fb)
-				fprintf(stderr, "occ: workdir 回退 "
-					"/var/ai/work（cwd 不可挂沙箱）\n");
+				fputs(L_("occ: workdir 回退 /var/ai/work（cwd 不可挂沙箱）\n"), stderr);
 		}
 	}
 	opts.w2 = &g_w2;			/* O-9：W2 门（headless 默认拒） */
@@ -276,10 +274,7 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 		if (res.interrupted) {
 			/* b2：安全点停——status=interrupted 已落库 */
 			fputc('\n', stdout);
-			fprintf(stderr, "occ: interrupted (safe point);"
-				" session=%s status=interrupted\n"
-				"occ: 用 `occ retry --session %s` 重发，"
-				"或 `occ --recover %s` 续跑\n",
+			fprintf(stderr, L_("occ: interrupted (safe point); session=%s status=interrupted\nocc: 用 `occ retry --session %s` 重发，或 `occ --recover %s` 续跑\n"),
 				res.session_id, session_id ? session_id :
 				res.session_id, session_id ? session_id :
 				res.session_id);
@@ -400,18 +395,17 @@ static int cmd_undo(occ_db *db, const char *id, int steps)
 	       " un-reverted=%zu\n",
 	       id, steps, r.nmsgs_reverted, r.nfiles, r.nskipped);
 	for (i = 0; i < r.nfiles; i++) {
-		const char *tag = r.files[i].failed ? "[失败] " :
+		const char *tag = r.files[i].failed ? L_("[失败] ") :
 				  r.files[i].action == OCC_UNDO_DELETE ?
-				  "[删除] " : "[还原] ";
+				  L_("[删除] ") : L_("[还原] ");
 
 		if (r.files[i].failed)
 			failed++;
 		printf("  %s%s\n", tag, r.files[i].path);
 	}
 	if (r.user_text && r.user_text[0])
-		printf("被撤输入（回填语义）：\n%s\n", r.user_text);
-	printf("occ: 发送新消息即确认撤销（此后不可 redo）；"
-	       "`occ redo --session %s` 可恢复\n", id);
+		printf(L_("被撤输入（回填语义）：\n%s\n"), r.user_text);
+	printf(L_("occ: 发送新消息即确认撤销（此后不可 redo）；`occ redo --session %s` 可恢复\n"), id);
 	occ_undo_result_free(&r);
 	return failed ? 1 : 0;
 }
@@ -433,7 +427,7 @@ static int cmd_redo(occ_db *db, const char *id)
 	printf("occ: redo session=%s restored=%zu unhidden=%zu\n",
 	       id, r.nfiles, r.nmsgs_reverted);
 	for (i = 0; i < r.nfiles; i++)
-		printf("  %s%s\n", r.files[i].failed ? "[失败] " : "[还原] ",
+		printf("  %s%s\n", r.files[i].failed ? L_("[失败] ") : L_("[还原] "),
 		       r.files[i].path);
 	if (err[0])				/* 部分失败如实列出（err 已带前缀） */
 		fprintf(stderr, "%s\n", err);
@@ -468,13 +462,13 @@ static int cmd_retry(occ_db *db, occ_provider *p, const char *id)
 		return 1;
 	}
 	if (has == 0) {
-		fprintf(stderr, "occ retry: 没有可重发的 user 消息\n");
+		fputs(L_("occ retry: 没有可重发的 user 消息\n"), stderr);
 		return 1;
 	}
 	text = last_user.text ? strdup(last_user.text) : NULL;
 	occ_msg_row_free(&last_user);
 	if (!text) {
-		fprintf(stderr, "occ retry: 最后一条 user 消息为空\n");
+		fputs(L_("occ retry: 最后一条 user 消息为空\n"), stderr);
 		return 1;
 	}
 	hasl = occ_msg_last(db, id, &last, err, sizeof(err));
@@ -503,23 +497,19 @@ static int cmd_unstuck(occ_db *db, const char *id)
 	char err[160];
 
 	if (occ_session_get(db, id, &s, err, sizeof(err)) != 1) {
-		fprintf(stderr, "occ unstuck: 会话 %s 不存在"
-			"（occ sessions 可查全部会话）\n", id);
+		fprintf(stderr, L_("occ unstuck: 会话 %s 不存在（occ sessions 可查全部会话）\n"), id);
 		return 1;
 	}
 	if (strcmp(s.status, OCC_ST_RUNNING)) {
-		printf("occ unstuck: 会话 %s 状态为 %s（非 running），"
-		       "无需解僵\n", id, s.status);
+		printf(L_("occ unstuck: 会话 %s 状态为 %s（非 running），无需解僵\n"), id, s.status);
 		return 0;
 	}
 	if (occ_session_set_status(db, id, OCC_ST_INTERRUPTED,
 				   err, sizeof(err)) != 0) {
-		fprintf(stderr, "occ unstuck: 解僵失败：%s\n", err);
+		fprintf(stderr, L_("occ unstuck: 解僵失败：%s\n"), err);
 		return 1;
 	}
-	printf("occ unstuck: 会话 %s 已解僵（running→interrupted）："
-	       "上下文/token 保留零重放；`occ retry --session %s` 续跑、"
-	       "`/undo` 现在可用\n", id, id);
+	printf(L_("occ unstuck: 会话 %s 已解僵（running→interrupted）：上下文/token 保留零重放；`occ retry --session %s` 续跑、`/undo` 现在可用\n"), id, id);
 	return 0;
 }
 
@@ -740,8 +730,7 @@ static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
 	pthread_mutex_unlock(&a->mu);
 	if (live) {
 		tui_view_notice(a->view,
-				"replay: turn 运行中——历史回放跳过（收口后"
-				"重进 /sessions 可补）");
+				L_("replay: turn 运行中——历史回放跳过（收口后重进 /sessions 可补）"));
 		return -1;
 	}
 	if (budget <= 0)
@@ -755,7 +744,7 @@ static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
 			    &nearlier) != 0) {
 		occ_msg_rows_free(rows, n);
 		occ_tc_rows_free(tcs, ntc);
-		tui_view_notice(a->view, "replay: 规划失败（OOM）");
+		tui_view_notice(a->view, L_("replay: 规划失败（OOM）"));
 		return -1;
 	}
 	if (clear_first)
@@ -769,7 +758,7 @@ static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
 			char sep[96];
 
 			snprintf(sep, sizeof(sep),
-				 "… 更早 %d 条消息未回放（尾部 %d 行挂载）",
+				 L_("… 更早 %d 条消息未回放（尾部 %d 行挂载）"),
 				 it->rc, budget);
 			(void)tui_view_post(a->view, TUI_VIEW_HIST_SEP, sep,
 					    0, NULL, 0);
@@ -805,7 +794,7 @@ static int app_replay_run(struct tui_app *a, const char *sid, int clear_first,
 			/* 回放页脚：如实标「回放」——DB 无时长/tok-s 数据，
 			 * 不伪造 live 页脚的段值 */
 			(void)tui_view_post(a->view, TUI_VIEW_TURN_END,
-					    "OCC · 回放", 0, NULL, 0);
+					    L_("OCC · 回放"), 0, NULL, 0);
 			break;
 		default:
 			break;
@@ -890,8 +879,7 @@ static int tui_app_on_load_more(void *ud)
 		if (!a->load_busy_noticed) {
 			a->load_busy_noticed = 1;
 			tui_view_notice(a->view,
-					"加载更早历史：turn 运行中——收口后"
-					"再按 PgUp");
+					L_("加载更早历史：turn 运行中——收口后再按 PgUp"));
 		}
 		return 0;
 	}
@@ -905,7 +893,7 @@ static int tui_app_on_load_more(void *ud)
 			   a->replay_budget, si.total);
 		if (!a->earliest_noticed) {
 			a->earliest_noticed = 1;
-			tui_view_notice(a->view, "── 已到最早 ──");
+			tui_view_notice(a->view, L_("── 已到最早 ──"));
 		}
 		return 0;
 	}
@@ -925,8 +913,7 @@ static int tui_app_on_load_more(void *ud)
 		if (proj > hard) {
 			a->replay_mem_stop = 1;
 			snprintf(nb, sizeof(nb),
-				 "── 已到内存上限（更早 %zu 条可用 "
-				 "/sessions 查看）──", a->replay_earlier);
+				 L_("── 已到内存上限（更早 %zu 条可用 /sessions 查看）──"), a->replay_earlier);
 			tui_view_notice(a->view, nb);
 			app_t2_dbg("load budget=%d lines_before=%d "
 				   "earlier=%zu result=memcap",
@@ -1004,7 +991,7 @@ static int tui_w2_confirm(void *ud, const char *title, const char *detail)
 
 	(void)title;
 	snprintf(payload, sizeof(payload), "%.63s\n%.199s",
-		 "W2 高危操作确认", detail ? detail : "");
+		 L_("W2 高危操作确认"), detail ? detail : "");
 	pthread_mutex_lock(&a->mu);
 	a->w2_answered = 0;
 	a->w2_verdict = 0;
@@ -1116,9 +1103,7 @@ static void *tui_worker_main(void *arg)
 	if (rc == OCC_LOOP_OK || rc == OCC_LOOP_ETOOLS) {
 		if (res.interrupted) {
 			(void)tui_view_post(a->view, TUI_VIEW_NOTICE,
-					    "interrupted (safe point);"
-					    " status=interrupted — 下一条消息"
-					    "将自动附续传注记", 0, NULL, 0);
+					    L_("interrupted (safe point); status=interrupted — 下一条消息将自动附续传注记"), 0, NULL, 0);
 			snprintf(footer, sizeof(footer), "OCC · interrupted");
 		} else {
 			double secs = (double)(t1 - t0) / 1000.0;
@@ -1417,7 +1402,7 @@ static int cmd_tasks(occ_db *db, const char *session, int as_json)
 					   sizeof(title_clip));
 			printf("%-38s %-24s %-11s %-6s %s%s\n",
 			       rows[i].id, title_clip, rows[i].status, rw,
-			       bud, dim ? "  ·终态" : "");
+			       bud, dim ? L_("  ·终态") : "");
 		}
 		printf("(%zu task%s)\n", n, n == 1 ? "" : "s");
 	}
@@ -1575,26 +1560,26 @@ static void wiz_slot_id(const char *prov, char *out, size_t cap)
 static void wiz_err_human(const char *e, char *out, size_t cap)
 {
 	if (!e || !e[0]) {
-		snprintf(out, cap, "验证失败（无错误文本）");
+		snprintf(out, cap, "%s", L_("验证失败（无错误文本）"));
 		return;
 	}
 	if (strstr(e, "401") || strstr(e, "nauthorized") ||
 	    strstr(e, "Invalid") || strstr(e, "invalid api"))
-		snprintf(out, cap, "key 无效或未授权（401）——请检查 API key");
+		snprintf(out, cap, "%s", L_("key 无效或未授权（401）——请检查 API key"));
 	else if (strstr(e, "402") || strstr(e, "429") ||
 		 strstr(e, "nsufficient") || strstr(e, "quota") ||
 		 strstr(e, "balance") || strstr(e, "余额"))
-		snprintf(out, cap, "额度/余额不足（%.140s）", e);
+		snprintf(out, cap, L_("额度/余额不足（%.140s）"), e);
 	else if (strstr(e, "imeout") || strstr(e, "rc=28") ||
 		 strstr(e, "ETIMEDOUT"))
 		snprintf(out, cap,
-			 "连接超时——检查 base_url/网络（%.140s）", e);
+			 L_("连接超时——检查 base_url/网络（%.140s）"), e);
 	else if (strstr(e, "404") || strstr(e, "Not Found") ||
 		 strstr(e, "not found"))
-		snprintf(out, cap, "端点不存在（404）——检查 base_url");
+		snprintf(out, cap, "%s", L_("端点不存在（404）——检查 base_url"));
 	else if (strstr(e, "400"))
 		snprintf(out, cap,
-			 "请求被拒（400）——模型名/参数不被接受（%.140s）",
+			 L_("请求被拒（400）——模型名/参数不被接受（%.140s）"),
 			 e);
 	else
 		snprintf(out, cap, "%.200s", e);
@@ -1608,15 +1593,14 @@ static void wiz_open_model(struct tui_app *a)
 	app_load_catalog(a);
 	if (!a->cat || a->cat->nmodels == 0) {
 		tui_view_notice(a->view,
-				"models.dev 快照不可读——向导无法选模型"
-				"（OCC_CATALOG 可指路径）");
+				L_("models.dev 快照不可读——向导无法选模型（OCC_CATALOG 可指路径）"));
 		return;
 	}
 	cap = a->cat->nmodels;
 	items = calloc(cap, sizeof(*items));
 	if (!items || app_map_reserve(a, cap) != 0) {
 		free(items);
-		tui_view_notice(a->view, "向导：内存不足");
+		tui_view_notice(a->view, L_("向导：内存不足"));
 		return;
 	}
 	for (i = 0; i < cap; i++) {
@@ -1643,12 +1627,12 @@ static void wiz_open_model(struct tui_app *a)
 	}
 	if (n == 0) {
 		free(items);
-		tui_view_notice(a->view, "目录无可用 chat 模型");
+		tui_view_notice(a->view, L_("目录无可用 chat 模型"));
 		return;
 	}
 	(void)tui_view_open_list(a->view, OV_WIZ_MODEL,
-				 "add key · 1/4 模型", items, (int)n, 1,
-				 "输入过滤 · Enter=选择 · Esc=取消");
+				 L_("add key · 1/4 模型"), items, (int)n, 1,
+				 L_("输入过滤 · Enter=选择 · Esc=取消"));
 	free(items);
 }
 
@@ -1681,17 +1665,17 @@ static void wiz_open_provider(struct tui_app *a)
 			 WIZ_PRESET[p].id);
 		snprintf(items[i].detail, sizeof(items[i].detail), "%s%s",
 			 WIZ_PRESET[p].base,
-			 p == match ? "（模型厂商预设）" : "");
+			 p == match ? L_("（模型厂商预设）") : "");
 		items[i].flags = 0;
 	}
 	/* 自定义项 */
-	snprintf(items[k].text, sizeof(items[k].text), "自定义 base_url…");
+	snprintf(items[k].text, sizeof(items[k].text), "%s", L_("自定义 base_url…"));
 	snprintf(items[k].tag, sizeof(items[k].tag), "custom");
 	snprintf(items[k].detail, sizeof(items[k].detail),
-		 "手动输入端点（协议按 openai 兼容）");
+		 "%s", L_("手动输入端点（协议按 openai 兼容）"));
 	items[k].flags = 0;
 	if (app_map_reserve(a, (size_t)k + 1) != 0) {
-		tui_view_notice(a->view, "向导：内存不足");
+		tui_view_notice(a->view, L_("向导：内存不足"));
 		return;
 	}
 	for (i = 0; i < k; i++)
@@ -1704,7 +1688,7 @@ static void wiz_open_provider(struct tui_app *a)
 			 a->wiz.display[0] ? a->wiz.display : a->wiz.model_id);
 		(void)tui_view_open_list(a->view, OV_WIZ_PROVIDER, title,
 					 items, k + 1, 0,
-					 "Enter=选择 · Esc=取消");
+					 L_("Enter=选择 · Esc=取消"));
 	}
 }
 
@@ -1713,7 +1697,7 @@ static void wiz_open_base(struct tui_app *a)
 	a->wiz.step = 2;
 	(void)tui_view_open_input(a->view, OV_WIZ_BASE,
 				  "add key · 2/4 base_url",
-				  "端点 URL（https://…；协议按 openai 兼容）",
+				  L_("端点 URL（https://…；协议按 openai 兼容）"),
 				  a->wiz.base_url[0] ? a->wiz.base_url : NULL,
 				  0);
 }
@@ -1723,8 +1707,7 @@ static void wiz_open_key(struct tui_app *a)
 	a->wiz.step = 3;
 	(void)tui_view_open_input(a->view, OV_WIZ_KEY,
 				  "add key · 3/4 API key",
-				  "粘贴 key（掩码显示；仅写 model.toml 600，"
-				  "不入日志/报告）", NULL, 1);
+				  L_("粘贴 key（掩码显示；仅写 model.toml 600，不入日志/报告）"), NULL, 1);
 }
 
 static void wiz_verify_cb(const occ_event *ev, void *ud)
@@ -1750,15 +1733,14 @@ static void wiz_save(struct tui_app *a)
 	slot.api_key = a->wiz.key;	/* const 只读消费；不释放（数组） */
 	if (occ_provider_toml_add_slot(a->model_toml, &slot) != 0) {
 		tui_view_overlay_status(a->view,
-					 "写入 model.toml 失败"
-					 "（值含非法字符/路径不可写？）", 1);
+					 L_("写入 model.toml 失败（值含非法字符/路径不可写？）"), 1);
 		return;
 	}
 	/* reload cfg → 重建注册表 → 空闲则立即切换 */
 	occ_provider_config_free(&a->cfg);
 	occ_provider_config_init(&a->cfg);
 	if (occ_provider_load_all(&a->cfg, a->model_toml, a->provider_toml)) {
-		tui_view_overlay_status(a->view, "model.toml 重读失败", 1);
+		tui_view_overlay_status(a->view, L_("model.toml 重读失败"), 1);
 		return;
 	}
 	a->cfg_ok = 1;
@@ -1786,11 +1768,10 @@ static void wiz_save(struct tui_app *a)
 		(void)occ_state_save(a->reg, a->state_path);
 	}
 	snprintf(msg, sizeof(msg),
-		 "已保存 key（model.toml 600）并切换到 %.80s"
-		 "（%s/%s）%s — 1-token 实测通过",
+		 L_("已保存 key（model.toml 600）并切换到 %.80s（%s/%s）%s — 1-token 实测通过"),
 		 a->wiz.display[0] ? a->wiz.display : a->wiz.model_id,
 		 a->wiz.slot, a->wiz.model_id,
-		 a->worker_live ? "；turn 运行中，下轮生效" : "");
+		 a->worker_live ? L_("；turn 运行中，下轮生效") : "");
 	memset(a->wiz.key, 0, sizeof(a->wiz.key));
 	tui_view_close_overlay(a->view);
 	tui_view_notice(a->view, msg);
@@ -1863,13 +1844,13 @@ static void wiz_verify_save(struct tui_app *a)
 	if (live) {
 		tui_view_overlay_status(a->view,
 					a->worker_live ?
-					"turn 运行中——Esc 中断或收口后再验证" :
-					"验证已在进行中（Esc 取消）", 1);
+					L_("turn 运行中——Esc 中断或收口后再验证") :
+					L_("验证已在进行中（Esc 取消）"), 1);
 		return;
 	}
 	c = calloc(1, sizeof(*c));
 	if (!c) {
-		tui_view_overlay_status(a->view, "向导：内存不足", 1);
+		tui_view_overlay_status(a->view, L_("向导：内存不足"), 1);
 		return;
 	}
 	c->a = a;
@@ -1880,7 +1861,7 @@ static void wiz_verify_save(struct tui_app *a)
 	c->vp.api_key = strdup(a->wiz.key[0] ? a->wiz.key : "");
 	if (!c->vp.api_key) {
 		free(c);
-		tui_view_overlay_status(a->view, "向导：内存不足", 1);
+		tui_view_overlay_status(a->view, L_("向导：内存不足"), 1);
 		return;
 	}
 	/* 清上一轮遗留中断旗标（取消路径经 SIGINT 处理器置位；llm_call
@@ -1891,7 +1872,7 @@ static void wiz_verify_save(struct tui_app *a)
 		free(c->vp.api_key);
 		free(c);
 		tui_view_overlay_status(a->view,
-					"验证线程创建失败（稍后重试）", 1);
+					L_("验证线程创建失败（稍后重试）"), 1);
 		return;
 	}
 	pthread_mutex_lock(&a->mu);
@@ -1899,7 +1880,7 @@ static void wiz_verify_save(struct tui_app *a)
 	pthread_mutex_unlock(&a->mu);
 	a->wiz_thread_created = 1;
 	tui_view_overlay_status(a->view,
-				"验证中…（1-token 实测，Esc 取消）", 0);
+				L_("验证中…（1-token 实测，Esc 取消）"), 0);
 	tui_view_set_busy(a->view, 1);	/* spinner 常刷 + Esc 改派 cancel */
 }
 
@@ -2036,7 +2017,7 @@ static void *ren_thread_main(void *arg)
 	}
 	if (!found) {
 		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
-				    "会话无 user 消息（无法生成标题）", 0,
+				    L_("会话无 user 消息（无法生成标题）"), 0,
 				    NULL, 1);
 		goto out;
 	}
@@ -2066,7 +2047,7 @@ static void *ren_thread_main(void *arg)
 		free(err);
 	} else if (ren_sanitize(title, sizeof(title), acc.buf) == 0) {
 		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT,
-				    "模型未返回可用标题（空输出）", 0, NULL, 1);
+				    L_("模型未返回可用标题（空输出）"), 0, NULL, 1);
 	} else {
 		(void)tui_view_post(c->a->view, TUI_VIEW_ASYNC_RESULT, title,
 				    0, NULL, 0);
@@ -2090,19 +2071,19 @@ static void ren_generate(struct tui_app *a)
 	if (live) {
 		tui_view_overlay_status(a->view,
 					a->worker_live ?
-					"turn 运行中——收口后再生成标题" :
-					"另一异步操作进行中（Esc 取消后再试）",
+					L_("turn 运行中——收口后再生成标题") :
+					L_("另一异步操作进行中（Esc 取消后再试）"),
 					1);
 		return;
 	}
 	if (!a->p.model[0]) {
 		tui_view_overlay_status(a->view,
-					"未配置模型——先 /models 或向导添加", 1);
+					L_("未配置模型——先 /models 或向导添加"), 1);
 		return;
 	}
 	c = calloc(1, sizeof(*c));
 	if (!c) {
-		tui_view_overlay_status(a->view, "内存不足", 1);
+		tui_view_overlay_status(a->view, L_("内存不足"), 1);
 		return;
 	}
 	c->a = a;
@@ -2111,7 +2092,7 @@ static void ren_generate(struct tui_app *a)
 	c->vp.api_key = strdup(a->p.api_key ? a->p.api_key : "");
 	if (!c->vp.api_key) {
 		free(c);
-		tui_view_overlay_status(a->view, "内存不足", 1);
+		tui_view_overlay_status(a->view, L_("内存不足"), 1);
 		return;
 	}
 	/* 清上一轮遗留中断旗标（取消路径经 SIGINT 处理器置位——不清则
@@ -2122,14 +2103,14 @@ static void ren_generate(struct tui_app *a)
 		free(c->vp.api_key);
 		free(c);
 		tui_view_overlay_status(a->view,
-					"生成线程创建失败（稍后重试）", 1);
+					L_("生成线程创建失败（稍后重试）"), 1);
 		return;
 	}
 	pthread_mutex_lock(&a->mu);
 	a->ren_thread_live = 1;
 	pthread_mutex_unlock(&a->mu);
 	a->ren_thread_created = 1;
-	tui_view_overlay_status(a->view, "AI 生成标题中…（Esc 取消）", 0);
+	tui_view_overlay_status(a->view, L_("AI 生成标题中…（Esc 取消）"), 0);
 	tui_view_set_busy(a->view, 1);
 }
 
@@ -2167,11 +2148,11 @@ static void tui_app_on_async_result(void *ud, int rc, const char *text)
 		}
 		if (rc == 2) {
 			tui_view_overlay_status(a->view,
-						"已取消——可回车重试或 Esc 关闭", 0);
+						L_("已取消——可回车重试或 Esc 关闭"), 0);
 			return;
 		}
-		snprintf(nb, sizeof(nb), "AI 生成标题失败：%.200s",
-			 text[0] ? text : "未知错误");
+		snprintf(nb, sizeof(nb), L_("AI 生成标题失败：%.200s"),
+			 text[0] ? text : L_("未知错误"));
 		tui_view_overlay_status(a->view, nb, 1);
 		return;
 	}
@@ -2190,7 +2171,7 @@ static void tui_app_on_async_result(void *ud, int rc, const char *text)
 	if (rc == 2) {
 		/* 取消：留步可改 key 重试——与失败路径同语义（面板不关） */
 		tui_view_overlay_status(a->view,
-					"已取消——可修改 key 后回车重试", 0);
+					L_("已取消——可修改 key 后回车重试"), 0);
 		return;
 	}
 	{
@@ -2252,7 +2233,7 @@ static int cmd_models(struct tui_app *a)
 				 "%s%.36s%s", f ? "* " : "", \
 				 (RM)->provider_name[0] ? \
 				 (RM)->provider_name : (RM)->provider, \
-				 (RM)->is_chat == 0 ? " ·非对话" : ""); \
+				 (RM)->is_chat == 0 ? L_(" ·非对话") : ""); \
 		} \
 		{ \
 			char ctx[24]; \
@@ -2265,10 +2246,10 @@ static int cmd_models(struct tui_app *a)
 				 "%.32s/%.80s · ctx %s · %.40s", \
 				 (RM)->provider, (RM)->id, ctx, \
 				 (RM)->source == OCC_REG_SRC_TOML ? \
-				 "配置（可直调）" : \
+				 L_("配置（可直调）") : \
 				 ((RM)->source == OCC_REG_SRC_OLLAMA ? \
-				  "本地 ollama" : \
-				  "目录（需 key：ctrl+a 添加）")); \
+				  L_("本地 ollama") : \
+				  L_("目录（需 key：ctrl+a 添加）"))); \
 		} \
 		items[n].flags = ((RM)->is_deprecated || \
 				  (RM)->is_chat == 0) ? TUI_OV_DIM : 0; \
@@ -2309,10 +2290,9 @@ static int cmd_models(struct tui_app *a)
 	 * 绝不因此退出浮层、绝不阻塞（加载链纯本地，无网络取数） */
 	if (!a->cat || a->cat->nmodels == 0) {
 		if (nmodels == 0)
-			PUSH_NOTE("无模型——model.toml 未配置且 catalog 快照"
-				  "未配置（离线）；先配置 model.toml");
+			PUSH_NOTE(L_("无模型——model.toml 未配置且 catalog 快照未配置（离线）；先配置 model.toml"));
 		else
-			PUSH_NOTE("catalog 快照未配置，仅显示已配置模型");
+			PUSH_NOTE(L_("catalog 快照未配置，仅显示已配置模型"));
 	}
 	if (nfav) {
 		PUSH_HEADER("Favorites");
@@ -2350,17 +2330,15 @@ static int cmd_models(struct tui_app *a)
 	if (n == 0) {
 		/* 全量被非对话过滤掏空：浮层内 dim 说明（P-35：不再
 		 * 静默不开——诚实说明而非谎报 OOM，也不退浮层） */
-		PUSH_NOTE("匹配条目全部为非对话（默认隐藏）——"
-			  "ctrl+t 显示全部");
+		PUSH_NOTE(L_("匹配条目全部为非对话（默认隐藏）——ctrl+t 显示全部"));
 	}
 #undef PUSH_NOTE
 	(void)tui_view_open_list(a->view, OV_MODELS, "models", items,
 				 (int)n, 1,
-				 "Enter=切换/接入 · ctrl+a key · ctrl+f * · "
-				 "ctrl+t 非对话 · 过滤 · Esc=关闭");
+				 L_("Enter=切换/接入 · ctrl+a key · ctrl+f * · ctrl+t 非对话 · 过滤 · Esc=关闭"));
 out:
 	if (rc != 0)
-		tui_view_notice(a->view, "models: 构建列表失败（OOM）");
+		tui_view_notice(a->view, L_("models: 构建列表失败（OOM）"));
 	free(items);
 	free(fav);
 	free(rec);
@@ -2410,7 +2388,7 @@ static int cmd_sessions_overlay(struct tui_app *a)
 	}
 	(void)tui_view_open_list(a->view, OV_SESSIONS, "sessions", items,
 				 (int)n, 1,
-				 "Enter=切换并回放历史 · Esc=关闭");
+				 L_("Enter=切换并回放历史 · Esc=关闭"));
 	free(items);		/* overlay 已深拷贝；行数据留 ov_rows 待提交 */
 	return 0;
 }
@@ -2489,12 +2467,11 @@ static int cmd_tasks_overlay(struct tui_app *a)
 		items[i].flags = term ? TUI_OV_DIM : 0;
 	}
 	if (running > 0)
-		snprintf(title, sizeof(title), "tasks · 跑 %d", running);
+		snprintf(title, sizeof(title), L_("tasks · 跑 %d"), running);
 	else
 		snprintf(title, sizeof(title), "tasks");
 	(void)tui_view_open_list(a->view, OV_TASKS, title, items, (int)n, 1,
-				 "Enter=验收提示(in_review) · Esc=关闭"
-				 " · 面板 1s 自动刷新");
+				 L_("Enter=验收提示(in_review) · Esc=关闭 · 面板 1s 自动刷新"));
 	free(items);		/* overlay 已深拷贝；行数据留 ov_task_rows */
 	return 0;
 }
@@ -2539,9 +2516,7 @@ static int cmd_tools(struct tui_app *a)
 
 	if (tui_data_tools_path(path, sizeof(path)) != 0) {
 		tui_view_notice(a->view,
-				"tools.json 未找到——搜索链 AIKERNEL_TOOLS_JSON"
-				" → ./tools.json → tools/tools.json → exe 目录 →"
-				" /usr/local/share/aikernel/tools.json");
+				L_("tools.json 未找到——搜索链 AIKERNEL_TOOLS_JSON → ./tools.json → tools/tools.json → exe 目录 → /usr/local/share/aikernel/tools.json"));
 		return 0;
 	}
 	if (tui_data_tools_load(path, &items, &n, e, sizeof(e)) != 0) {
@@ -2549,7 +2524,7 @@ static int cmd_tools(struct tui_app *a)
 		return 0;
 	}
 	(void)tui_view_open_list(a->view, OV_TOOLS, "tools", items, n, 1,
-				 "↑↓/PgUp/PgDn 导航 · Enter=详情行 · Esc=关闭");
+				 L_("↑↓/PgUp/PgDn 导航 · Enter=详情行 · Esc=关闭"));
 	tui_data_items_free(items);
 	return 0;
 }
@@ -2562,7 +2537,7 @@ static int cmd_trace(struct tui_app *a)
 	int n = 0;
 
 	if (tui_data_trace_dir(dir, sizeof(dir)) != 0) {
-		tui_view_notice(a->view, "trace: 无 HOME/OCC_TRACE_DIR");
+		tui_view_notice(a->view, L_("trace: 无 HOME/OCC_TRACE_DIR"));
 		return 0;
 	}
 	if (tui_data_trace_load(dir, 200, &items, &n, e, sizeof(e)) != 0) {
@@ -2571,13 +2546,12 @@ static int cmd_trace(struct tui_app *a)
 	}
 	if (n == 0) {
 		tui_view_notice(a->view,
-				"（无 trace 记录——工具执行审计落 ~/.occ/trace）");
+				L_("（无 trace 记录——工具执行审计落 ~/.occ/trace）"));
 		tui_data_items_free(items);
 		return 0;
 	}
-	(void)tui_view_open_list(a->view, OV_TRACE, "trace（最近 200 条，"
-				 "新在前）", items, n, 0,
-				 "Enter=详情（args）· Esc=关闭");
+	(void)tui_view_open_list(a->view, OV_TRACE, L_("trace（最近 200 条，新在前）"), items, n, 0,
+				 L_("Enter=详情（args）· Esc=关闭"));
 	tui_data_items_free(items);
 	return 0;
 }
@@ -2590,7 +2564,7 @@ static int cmd_lease(struct tui_app *a)
 	int n = 0;
 
 	if (tui_data_lease_dir(dir, sizeof(dir)) != 0) {
-		tui_view_notice(a->view, "lease: 路径解析失败");
+		tui_view_notice(a->view, L_("lease: 路径解析失败"));
 		return 0;
 	}
 	if (tui_data_lease_load(dir, &items, &n, e, sizeof(e)) != 0) {
@@ -2601,14 +2575,13 @@ static int cmd_lease(struct tui_app *a)
 		char nb[448];
 
 		snprintf(nb, sizeof(nb),
-			 "（无租约——目录 %.300s 为空/不存在；签发走系统命令，"
-			 "occ 只读展示）", dir);
+			 L_("（无租约——目录 %.300s 为空/不存在；签发走系统命令，occ 只读展示）"), dir);
 		tui_view_notice(a->view, nb);
 		tui_data_items_free(items);
 		return 0;
 	}
 	(void)tui_view_open_list(a->view, OV_LEASE, "lease", items, n, 0,
-				 "Enter=详情（mission/scope）· Esc=关闭");
+				 L_("Enter=详情（mission/scope）· Esc=关闭"));
 	tui_data_items_free(items);
 	return 0;
 }
@@ -2742,17 +2715,12 @@ static int cmd_sandbox(struct tui_app *a)
 	if (found)
 		(void)sb_probe(bin, probe, sizeof(probe), &sup);
 	snprintf(nb, sizeof(nb),
-		 "sandbox: %.200s\n"
-		 "  二进制: %.200s%s\n"
-		 "  --rw-path 探测: %s\n"
-		 "  euid=%d（0=可组装 namespace；非 0=沙箱将拒绝裸跑）\n"
-		 "  写面: cwd 子树 ∪ /tmp ∪ /var/ai（~/.occ 拒绝）· "
-		 "快照: ~/.occ/snapshots",
-		 found ? bin : "(未找到)",
-		 bin, found ? "" : "（不可执行/缺失）",
-		 sup == 1 ? "支持" : sup == 0 ?
-		 "不支持（版本过旧——重建 aik-sandbox）" :
-		 "不可执行",
+		 L_("sandbox: %.200s\n  二进制: %.200s%s\n  --rw-path 探测: %s\n  euid=%d（0=可组装 namespace；非 0=沙箱将拒绝裸跑）\n  写面: cwd 子树 ∪ /tmp ∪ /var/ai（~/.occ 拒绝）· 快照: ~/.occ/snapshots"),
+		 found ? bin : L_("(未找到)"),
+		 bin, found ? "" : L_("（不可执行/缺失）"),
+		 sup == 1 ? L_("支持") : sup == 0 ?
+		 L_("不支持（版本过旧——重建 aik-sandbox）") :
+		 L_("不可执行"),
 		 (int)geteuid());
 	tui_view_notice(a->view, nb);
 	return 0;
@@ -2770,7 +2738,7 @@ static int cmd_rename(struct tui_app *a, const char *args)
 	if (*args) {
 		if (!a->session_id[0]) {
 			tui_view_notice(a->view,
-					"尚无会话——先发一条消息再 /rename");
+					L_("尚无会话——先发一条消息再 /rename"));
 			return 0;
 		}
 		if (occ_session_set_title(a->db, a->session_id, args, e,
@@ -2804,7 +2772,7 @@ static int cmd_rename(struct tui_app *a, const char *args)
 			}
 		}
 		(void)tui_view_open_input(a->view, OV_RENAME, "rename",
-					  "新标题（Enter 提交；空=AI 生成）",
+					  L_("新标题（Enter 提交；空=AI 生成）"),
 					  initial[0] ? initial : NULL, 0);
 	}
 	return 0;
@@ -2836,13 +2804,13 @@ static int cmd_theme(struct tui_app *a, const char *arg)
 	if (!*arg) {
 		if (tui_theme_current_preset(path, name, sizeof(name)) != 0)
 			snprintf(name, sizeof(name), "default");
-		off = snprintf(msg, sizeof(msg), "当前主题：%s。可选：", name);
+		off = snprintf(msg, sizeof(msg), L_("当前主题：%s。可选："), name);
 		for (i = 0; off > 0 && off < (int)sizeof(msg) - 40; i++) {
 			p = tui_theme_preset_at(i);
 			if (!p)
 				break;
 			n = snprintf(msg + off, sizeof(msg) - off, " %s(%s)",
-				     p->name, p->desc);
+				     p->name, L_(p->desc));
 			if (n < 0 || (size_t)(off + n) >= sizeof(msg) - 4)
 				break;
 			off += n;
@@ -2852,16 +2820,16 @@ static int cmd_theme(struct tui_app *a, const char *arg)
 	}
 	p = tui_theme_preset_find(arg);
 	if (!p) {
-		snprintf(msg, sizeof(msg), "未知主题「%s」——/theme 查看可选", arg);
+		snprintf(msg, sizeof(msg), L_("未知主题「%s」——/theme 查看可选"), arg);
 		tui_view_notice(a->view, msg);
 		return 0;
 	}
 	if (tui_theme_write_ini(path, p) != 0) {
-		tui_view_notice(a->view, "写 theme.ini 失败（权限/磁盘）");
+		tui_view_notice(a->view, L_("写 theme.ini 失败（权限/磁盘）"));
 		return 0;
 	}
 	g_t4_theme_req = 1;
-	snprintf(msg, sizeof(msg), "主题已切换：%s——界面重载中…", p->name);
+	snprintf(msg, sizeof(msg), L_("主题已切换：%s——界面重载中…"), p->name);
 	tui_view_notice(a->view, msg);
 	tui_view_quit(a->view);
 	return 0;
@@ -2878,8 +2846,7 @@ static int cmd_zoom(struct tui_app *a, const char *arg)
 
 	if (!fb || !fb[0]) {
 		tui_view_notice(a->view,
-				"当前控制台不支持缩放（需图形控制台 fbterm；"
-				"串口/SSH 不适用）");
+				L_("当前控制台不支持缩放（需图形控制台 fbterm；串口/SSH 不适用）"));
 		return 0;
 	}
 	snprintf(path, sizeof(path), "%s/.fbtermrc",
@@ -2895,7 +2862,7 @@ static int cmd_zoom(struct tui_app *a, const char *arg)
 		arg++;
 	if (!*arg) {
 		snprintf(msg, sizeof(msg),
-			 "当前字号 %dpx。/zoom in|out|reset|<12|16|20|24|28|32|40>",
+			 L_("当前字号 %dpx。/zoom in|out|reset|<12|16|20|24|28|32|40>"),
 			 cur);
 		tui_view_notice(a->view, msg);
 		return 0;
@@ -2911,21 +2878,20 @@ static int cmd_zoom(struct tui_app *a, const char *arg)
 
 		idx = v > 0 ? occ_zoom_index(v) : -1;
 		if (idx < 0) {
-			tui_view_notice(a->view, "无效字号——级表 "
-					"12/16/20/24/28/32/40");
+			tui_view_notice(a->view, L_("无效字号——级表 12/16/20/24/28/32/40"));
 			return 0;
 		}
 	}
 	size = occ_zoom_size(idx);
 	err[0] = '\0';
 	if (occ_zoom_edit_fbtermrc(path, size, err, sizeof(err)) != 0) {
-		snprintf(msg, sizeof(msg), "应用失败：%s",
-			 err[0] ? err : "未知");
+		snprintf(msg, sizeof(msg), L_("应用失败：%s"),
+			 err[0] ? err : L_("未知"));
 		tui_view_notice(a->view, msg);
 		return 0;
 	}
 	g_t4_exit_code = 70;
-	snprintf(msg, sizeof(msg), "应用新字号 %dpx——界面自动重启（会话保留）…",
+	snprintf(msg, sizeof(msg), L_("应用新字号 %dpx——界面自动重启（会话保留）…"),
 		 size);
 	tui_view_notice(a->view, msg);
 	tui_view_quit(a->view);
@@ -3065,12 +3031,12 @@ static void cmd_tui_undo(struct tui_app *a)
 	pthread_mutex_unlock(&a->mu);
 	if (live) {
 		tui_view_notice(a->view,
-				"undo: turn 运行中——Esc 中断或收口后再 /undo");
+				L_("undo: turn 运行中——Esc 中断或收口后再 /undo"));
 		return;
 	}
 	if (!a->session_id[0]) {
 		tui_view_notice(a->view,
-				"尚无会话——先发一条消息再 /undo");
+				L_("尚无会话——先发一条消息再 /undo"));
 		return;
 	}
 	memset(&r, 0, sizeof(r));
@@ -3078,7 +3044,7 @@ static void cmd_tui_undo(struct tui_app *a)
 	if (occ_undo(a->db, a->session_id, 1, NULL, &r, err,
 		     sizeof(err))) {
 		/* 无可撤/状态不合法：err 已是人话（occ undo: 前缀） */
-		tui_view_notice(a->view, err[0] ? err : "undo: 失败");
+		tui_view_notice(a->view, err[0] ? err : L_("undo: 失败"));
 		return;
 	}
 	for (i = 0; i < r.nfiles; i++)
@@ -3089,12 +3055,10 @@ static void cmd_tui_undo(struct tui_app *a)
 
 		fb[0] = '\0';
 		if (failed)
-			snprintf(fb, sizeof(fb), "，回滚失败 %zu 处",
+			snprintf(fb, sizeof(fb), L_("，回滚失败 %zu 处"),
 				 failed);
 		snprintf(nb, sizeof(nb),
-			 "undo: 已撤销 %zu 条消息 + %zu 文件回滚"
-			 "（无快照未回滚 %zu 处%s）；/redo 可恢复，"
-			 "发送新消息即确认撤销",
+			 L_("undo: 已撤销 %zu 条消息 + %zu 文件回滚（无快照未回滚 %zu 处%s）；/redo 可恢复，发送新消息即确认撤销"),
 			 r.nmsgs_reverted, r.nfiles, r.nskipped, fb);
 	}
 	tui_view_notice(a->view, nb);
@@ -3103,15 +3067,12 @@ static void cmd_tui_undo(struct tui_app *a)
 		 * 超长不硬截断（截半行汉字），注记说明原文在转写区） */
 		if (strlen(r.user_text) < TUI_OV_INPUT_MAX) {
 			(void)tui_view_open_input(a->view, OV_UNDO_RECALL,
-						  "undo 回填",
-						  "被撤输入（Enter 重发="
-						  "确认撤销；Esc 关闭保留"
-						  "可 /redo）",
+						  L_("undo 回填"),
+						  L_("被撤输入（Enter 重发=确认撤销；Esc 关闭保留可 /redo）"),
 						  r.user_text, 0);
 		} else {
 			tui_view_notice(a->view,
-					"被撤输入超回填上限（240 字节）——"
-					"原文见上方转写区，可手动复制重发");
+					L_("被撤输入超回填上限（240 字节）——原文见上方转写区，可手动复制重发"));
 		}
 	}
 	occ_undo_result_free(&r);
@@ -3131,23 +3092,22 @@ static void cmd_tui_redo(struct tui_app *a)
 	pthread_mutex_unlock(&a->mu);
 	if (live) {
 		tui_view_notice(a->view,
-				"redo: turn 运行中——Esc 中断或收口后再 /redo");
+				L_("redo: turn 运行中——Esc 中断或收口后再 /redo"));
 		return;
 	}
 	if (!a->session_id[0]) {
 		tui_view_notice(a->view,
-				"尚无会话——先发一条消息再 /redo");
+				L_("尚无会话——先发一条消息再 /redo"));
 		return;
 	}
 	memset(&r, 0, sizeof(r));
 	err[0] = '\0';			/* 部分失败才置——防读未初始化 */
 	if (occ_redo(a->db, a->session_id, NULL, &r, err, sizeof(err))) {
-		tui_view_notice(a->view, err[0] ? err : "redo: 失败");
+		tui_view_notice(a->view, err[0] ? err : L_("redo: 失败"));
 		return;
 	}
 	snprintf(nb, sizeof(nb),
-		 "redo: 已恢复 %zu 条消息 + %zu 文件还原"
-		 "（/undo 可再撤；此后正常续聊）",
+		 L_("redo: 已恢复 %zu 条消息 + %zu 文件还原（/undo 可再撤；此后正常续聊）"),
 		 r.nmsgs_reverted, r.nfiles);
 	tui_view_notice(a->view, nb);
 	if (err[0])
@@ -3199,20 +3159,20 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		pthread_mutex_unlock(&a->mu);
 		if (live) {
 			tui_view_notice(a->view,
-					"clear: turn 运行中——Esc 中断或收口后再 /clear");
+					L_("clear: turn 运行中——Esc 中断或收口后再 /clear"));
 			return 0;
 		}
 		if (!a->session_id[0]) {
 			(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR,
 					    NULL, 0, NULL, 0);
 			tui_view_notice(a->view,
-					"clear: 尚无会话——已清屏");
+					L_("clear: 尚无会话——已清屏"));
 			return 0;
 		}
 		e[0] = '\0';
 		if (occ_session_archive(a->db, a->session_id, e,
 					sizeof(e))) {
-			tui_view_notice(a->view, e[0] ? e : "clear: 归档失败");
+			tui_view_notice(a->view, e[0] ? e : L_("clear: 归档失败"));
 			return 0;
 		}
 		tt[0] = '\0';
@@ -3236,9 +3196,8 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		(void)tui_view_post(a->view, TUI_VIEW_HIST_CLEAR, NULL, 0,
 				    NULL, 0);
 		snprintf(nb, sizeof(nb),
-			 "session 已归档：%s（消息保留，/sessions 可找回续聊）"
-			 "——窗口已换新，下一条消息创建新会话",
-			 tt[0] ? tt : "(无题)");
+			 L_("session 已归档：%s（消息保留，/sessions 可找回续聊）——窗口已换新，下一条消息创建新会话"),
+			 tt[0] ? tt : L_("(无题)"));
 		(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb, 0, NULL, 0);
 		return 0;
 	}
@@ -3259,19 +3218,18 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		pthread_mutex_unlock(&a->mu);
 		if (live) {
 			tui_view_notice(a->view,
-				"delete: turn 运行中——Esc 中断或收口后再删");
+				L_("delete: turn 运行中——Esc 中断或收口后再删"));
 			return 0;
 		}
 		if (!a->session_id[0]) {
 			tui_view_notice(a->view,
-				"尚无会话——先发一条消息再 /delete");
+				L_("尚无会话——先发一条消息再 /delete"));
 			return 0;
 		}
 		if (!(a->delete_arm && now - a->delete_arm <= 10000)) {
 			a->delete_arm = now;
 			tui_view_notice(a->view,
-				"确认：10 秒内再发一次 /delete 将永久删除"
-				"当前会话（不可恢复）");
+				L_("确认：10 秒内再发一次 /delete 将永久删除当前会话（不可恢复）"));
 			return 0;
 		}
 		a->delete_arm = 0;
@@ -3304,8 +3262,7 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 
 			app_clip_title(t, tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "session 已删除：%s（级联清消息/工具/"
-				 "窗口/回滚）——下一条消息创建新会话", tt);
+				 L_("session 已删除：%s（级联清消息/工具/窗口/回滚）——下一条消息创建新会话"), tt);
 			tui_view_notice(a->view, nb);
 		}
 		return 0;
@@ -3318,6 +3275,25 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		return cmd_sessions_overlay(a);
 	if (!strcmp(line, "/tasks"))		/* E8：任务面板（ORCH §7） */
 		return cmd_tasks_overlay(a);
+	/* O-20 A 部：语言档查询/切换（内存态——持久化走 OCC_LANG env）。
+	 * 切换即时生效：渲染层逐帧取 L_()，系统提示下一轮随活档。 */
+	if (!strcmp(line, "/lang")) {
+		tui_view_notice(a->view, tui_lang_is_en() ?
+				L_("语言档=en（/lang zh 切回中文）") :
+				L_("语言档=zh（/lang en 切到英文）"));
+		return 0;
+	}
+	if (!strcmp(line, "/lang en")) {
+		tui_lang_set_en(1);
+		tui_view_notice(a->view, L_("已切英文档（本会话内存态；"
+					    "OCC_LANG=en 可持久）"));
+		return 0;
+	}
+	if (!strcmp(line, "/lang zh")) {
+		tui_lang_set_en(0);
+		tui_view_notice(a->view, L_("已切中文档"));
+		return 0;
+	}
 	/* O-10（UX-O §3）：/su gate 密码提权（/su 0 回落；/exit 注销同效）
 	 * P-45：「已特权」只看会话提权态 su.elevated（唯一事实源；密码
 	 * 验证成功才置 1）——不再掺策略基础档 g_w2.tier：base=privileged
@@ -3327,24 +3303,24 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		long long now = (long long)tui_now_ms();
 
 		if (a->su.elevated) {
-			tui_view_notice(a->view, "已在特权档（/su 0 回落）");
+			tui_view_notice(a->view, L_("已在特权档（/su 0 回落）"));
 			return 0;
 		}
 		if (now < a->su.cooldown_until) {
 			char nb[96];
 
-			snprintf(nb, sizeof(nb), "冷却中（%lld 秒后再试）",
+			snprintf(nb, sizeof(nb), L_("冷却中（%lld 秒后再试）"),
 				 (a->su.cooldown_until - now + 999) / 1000);
 			tui_view_notice(a->view, nb);
 			return 0;
 		}
-		(void)tui_view_open_input(a->view, OV_SU, "/su 提权",
-					  "admin 密码", "", 1);
+		(void)tui_view_open_input(a->view, OV_SU, L_("/su 提权"),
+					  L_("admin 密码"), "", 1);
 		return 0;
 	}
 	if (!strcmp(line, "/su 0")) {
 		if (!a->su.elevated) {
-			tui_view_notice(a->view, "未在提权档");
+			tui_view_notice(a->view, L_("未在提权档"));
 			return 0;
 		}
 		pthread_mutex_lock(&a->mu);
@@ -3358,8 +3334,8 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		tui_view_notice(a->view,
 				(g_w2_ready &&
 				 g_w2_base_tier == OCC_W2_TIER_PRIVILEGED) ?
-				"已回落基础档位（策略基础档=特权）" :
-				"已回落基础档位");
+				L_("已回落基础档位（策略基础档=特权）") :
+				L_("已回落基础档位"));
 		return 0;
 	}
 	if (!strcmp(line, "/status")) {
@@ -3435,12 +3411,12 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		pthread_mutex_unlock(&a->mu);
 		if (live) {
 			tui_view_notice(a->view,
-					"compact: turn 运行中——收口后再 /compact");
+					L_("compact: turn 运行中——收口后再 /compact"));
 			return 0;
 		}
 		if (!a->session_id[0]) {
 			tui_view_notice(a->view,
-					"compact: 尚无会话（先发一条消息）");
+					L_("compact: 尚无会话（先发一条消息）"));
 			return 0;
 		}
 		memset(&t, 0, sizeof(t));
@@ -3454,8 +3430,7 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 			t.tokens = cur.tokens_total;
 		err[0] = '\0';
 		tui_view_notice(a->view,
-				"compact: 触发 autocondense 换窗"
-				"（begin→digest→commit）…");
+				L_("compact: 触发 autocondense 换窗（begin→digest→commit）…"));
 		tui_view_paint(a->view);	/* 阻塞调用前先落帧（同向导验证） */
 		rc = occ_ac_compact_now(&t, err, sizeof(err));
 		if (rc == 0) {
@@ -3473,11 +3448,10 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 				pthread_mutex_unlock(&a->mu);
 			}
 			tui_view_notice(a->view,
-					"compact: 换窗完成——历史已折叠为摘要，"
-					"token 账本重置为新基线（显示 ~ 为估算）");
+					L_("compact: 换窗完成——历史已折叠为摘要，token 账本重置为新基线（显示 ~ 为估算）"));
 		} else {
 			snprintf(nb, sizeof(nb), "compact: %s",
-				 err[0] ? err : "失败（ac 不可达或摘要未过校验）");
+				 err[0] ? err : L_("失败（ac 不可达或摘要未过校验）"));
 			tui_view_notice(a->view, nb);
 		}
 		return 0;
@@ -3495,7 +3469,7 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		pthread_mutex_unlock(&a->mu);
 		if (live) {
 			tui_view_notice(a->view,
-					"shell: turn 运行中——Esc 中断或收口后再 /shell");
+					L_("shell: turn 运行中——Esc 中断或收口后再 /shell"));
 			return 0;
 		}
 		a->shell_req = 1;
@@ -3559,15 +3533,13 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 			pthread_mutex_unlock(&a->mu);
 			if (busy) {
 				tui_view_overlay_status(a->view,
-							 "busy — turn 运行中，"
-							 "稍后再切换模型", 1);
+							 L_("busy — turn 运行中，稍后再切换模型"), 1);
 				return 0;
 			}
 			if (occ_provider_resolve(&a->cfg, rm->slot_id,
 						 &np) != 0) {
 				tui_view_overlay_status(a->view,
-							 "槽位解析失败"
-							 "（model.toml 损坏？）",
+							 L_("槽位解析失败（model.toml 损坏？）"),
 							 1);
 				return 0;
 			}
@@ -3586,7 +3558,7 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 				tui_usage_fmt(a->ctx_limit, ctb,
 					      sizeof(ctb));
 				snprintf(nb, sizeof(nb),
-					 "model → %s/%s（ctx %s%s）",
+					 L_("model → %s/%s（ctx %s%s）"),
 					 rm->provider, rm->id, ctb,
 					 a->ctx_fallback ? "*" : "");
 			}
@@ -3633,7 +3605,7 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 			app_clip_title(r->title[0] ? r->title : "(untitled)",
 				       tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "── switched to %s (%.14s…) ──",
+				 L_("── switched to %s (%.14s…) ──"),
 				 tt, r->id);
 			(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb,
 					    strlen(nb), NULL, 0);
@@ -3643,12 +3615,11 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 			app_clip_title(r->title[0] ? r->title : "(untitled)",
 				       tt, sizeof(tt));
 			snprintf(nb, sizeof(nb),
-				 "── switched to %s (%.14s…) ──",
+				 L_("── switched to %s (%.14s…) ──"),
 				 tt, r->id);
 			tui_view_notice(a->view, nb);
 			tui_view_notice(a->view,
-					"turn 运行中——历史回放待收口（重进"
-					" /sessions 可补）");
+					L_("turn 运行中——历史回放待收口（重进 /sessions 可补）"));
 		}
 		return 0;
 	}
@@ -3703,9 +3674,7 @@ static int tui_app_on_overlay_submit(void *ud, int ov_id, int idx)
 		r = &a->ov_task_rows[idx];
 		if (!strcmp(r->status, OCC_TASK_ST_IN_REVIEW))
 			tui_view_overlay_status(a->view,
-						"验收：对模型用 task 工具"
-						" return 提交裁决"
-						"（面板只读，不代行）", 0);
+						L_("验收：对模型用 task 工具 return 提交裁决（面板只读，不代行）"), 0);
 		else {
 			char bud[64], det[TUI_OV_DETAIL_MAX];
 
@@ -3734,7 +3703,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 	if (ov_id == OV_WIZ_KEY) {
 		if (len == 0 || len >= sizeof(a->wiz.key)) {
 			tui_view_overlay_status(a->view,
-						 "key 不能为空/过长（≤255）",
+						 L_("key 不能为空/过长（≤255）"),
 						 1);
 			return 0;
 		}
@@ -3748,8 +3717,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		    (strncmp(text, "http://", 7) != 0 &&
 		     strncmp(text, "https://", 8) != 0)) {
 			tui_view_overlay_status(a->view,
-						 "base_url 须以 http:// 或 "
-						 "https:// 开头", 1);
+						 L_("base_url 须以 http:// 或 https:// 开头"), 1);
 			return 0;
 		}
 		memcpy(a->wiz.base_url, text, len);
@@ -3779,7 +3747,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 				char nb[96];
 
 				snprintf(nb, sizeof(nb),
-					 "冷却中（%lld 秒）", left);
+					 L_("冷却中（%lld 秒）"), left);
 				tui_view_overlay_status(a->view, nb, 1);
 			}
 			return 0;
@@ -3787,7 +3755,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		if (tui_gate_read(tui_gate_path(), hash, &ts) != 0) {
 			pthread_mutex_unlock(&a->mu);
 			tui_view_overlay_status(a->view,
-						 "凭据未设置（先在 T4 设密向导建 admin 密码）",
+						 L_("凭据未设置（先在 T4 设密向导建 admin 密码）"),
 						 1);
 			return 0;
 		}
@@ -3805,14 +3773,14 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 				pthread_mutex_unlock(&a->mu);
 				tui_view_overlay_clear_input(a->view);
 				tui_view_overlay_status(a->view,
-							 "密码错误×3——10 秒冷却",
+							 L_("密码错误×3——10 秒冷却"),
 							 1);
 				return 0;
 			}
 			pthread_mutex_unlock(&a->mu);
 			/* P-45：清空已拒文本——残留拼接会让重输必错 */
 			tui_view_overlay_clear_input(a->view);
-			tui_view_overlay_status(a->view, "密码错误", 1);
+			tui_view_overlay_status(a->view, L_("密码错误"), 1);
 			return 0;
 		}
 		a->su.fails = 0;
@@ -3826,7 +3794,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 				      "su", "elevate", "ok");
 		tui_view_close_overlay(a->view);
 		tui_view_notice(a->view,
-				"已提权至特权档（/su 0 回落 · /exit 注销同效）");
+				L_("已提权至特权档（/su 0 回落 · /exit 注销同效）"));
 		return 0;
 	}
 	if (ov_id == OV_UNDO_RECALL) {
@@ -3837,17 +3805,15 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		if (!text || !text[0]) {
 			tui_view_close_overlay(a->view);
 			tui_view_notice(a->view,
-					"未重发——撤销保留（/redo 可恢复；"
-					"再发任意消息即确认撤销）");
+					L_("未重发——撤销保留（/redo 可恢复；再发任意消息即确认撤销）"));
 			return 0;
 		}
 		tui_view_close_overlay(a->view);
 		if (tui_app_on_submit(a, text, len) != 0) {
-			tui_view_notice(a->view, "重发未成（turn 运行中）");
+			tui_view_notice(a->view, L_("重发未成（turn 运行中）"));
 			(void)tui_view_open_input(a->view, OV_UNDO_RECALL,
-						  "undo 回填",
-						  "被撤输入（Enter 重发="
-						  "确认撤销）", text, 0);
+						  L_("undo 回填"),
+						  L_("被撤输入（Enter 重发=确认撤销）"), text, 0);
 		}
 		return 0;
 	}
@@ -3860,7 +3826,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 			 * 无会话/无 provider 诚实拒绝（ren_generate 内） */
 			if (!a->session_id[0]) {
 				tui_view_overlay_status(a->view,
-							"尚无会话（先发一条消息）",
+							L_("尚无会话（先发一条消息）"),
 							1);
 				return 0;
 			}
@@ -3869,7 +3835,7 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		}
 		if (!a->session_id[0]) {
 			tui_view_overlay_status(a->view,
-						 "尚无会话（先发一条消息）",
+						 L_("尚无会话（先发一条消息）"),
 						 1);
 			return 0;
 		}
@@ -3920,7 +3886,7 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 		if (rlive) {
 			(void)pthread_kill(a->ren_thread, SIGINT);
 			tui_view_overlay_status(a->view,
-						"取消生成中…（收口后可重试）", 0);
+						L_("取消生成中…（收口后可重试）"), 0);
 			return 0;
 		}
 		pthread_mutex_lock(&a->mu);
@@ -3932,7 +3898,7 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 			return 1;	/* 无在途验证：回落正常关闭 */
 		(void)pthread_kill(a->wiz_thread, SIGINT);
 		tui_view_overlay_status(a->view,
-					 "取消验证中…（收口后可改 key 重试）",
+					 L_("取消验证中…（收口后可改 key 重试）"),
 					 0);
 		return 0;
 	}
@@ -3957,10 +3923,10 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 		(void)cmd_models(a);	/* 重开列表反映过滤态（选择复位） */
 		if (a->show_nonchat)
 			snprintf(st, sizeof(st),
-				 "已显示全部（非对话 %zu 条 dim 标注）", nnon);
+				 L_("已显示全部（非对话 %zu 条 dim 标注）"), nnon);
 		else
 			snprintf(st, sizeof(st),
-				 "非对话 %zu 条已隐藏（默认过滤）", nnon);
+				 L_("非对话 %zu 条已隐藏（默认过滤）"), nnon);
 		tui_view_overlay_status(a->view, st, 0);
 		return 0;
 	}
@@ -3980,7 +3946,7 @@ static int tui_app_on_overlay_key(void *ud, int ov_id, const char *action,
 		(void)occ_state_save(a->reg, a->state_path);
 		(void)cmd_models(a);	/* 重开列表反映 *（选择复位——取舍） */
 		tui_view_overlay_status(a->view,
-					 on ? "* 已收藏" : "已取消收藏", 0);
+					 on ? L_("* 已收藏") : L_("已取消收藏"), 0);
 		return 0;
 	}
 	return 1;
@@ -4107,19 +4073,19 @@ static void tui_app_fill_usage(void *ud, struct tui_footer *out)
 	fb = a->ctx_fallback;
 	pthread_mutex_unlock(&a->mu);
 	{
-		const char *tier_s = "受限";
+		const char *tier_s = L_("受限");
 
 		/* P-45：档标以会话提权态优先（特权*=唯一提权标记；星位
 		 * 独占——ctx fallback 星已挪往水位段，不再拼档标后）；
 		 * g_w2_ready=0（未初始化）安全兜底「受限」而非旧判特权 */
 		if (a->su.elevated)
-			tier_s = "特权*";
+			tier_s = L_("特权*");
 		else if (g_w2_ready &&
 			 g_w2.tier == OCC_W2_TIER_PRIVILEGED)
-			tier_s = "特权";
+			tier_s = L_("特权");
 		else if (g_w2_ready &&
 			 g_w2.tier == OCC_W2_TIER_CONFIRMED)
-			tier_s = "确认";
+			tier_s = L_("确认");
 		snprintf(out->model, sizeof(out->model), "%.44s · %s",
 			 a->p.model, tier_s);
 	}
@@ -4256,7 +4222,7 @@ static void tui_exit_marker(int code)
 		fp = fopen(path, "w");
 	}
 	if (!fp) {
-		fprintf(stderr, "occ: 退出 marker 写失败（%s）\n", path);
+		fprintf(stderr, L_("occ: 退出 marker 写失败（%s）\n"), path);
 		return;
 	}
 	fprintf(fp, "%d\n", code);
@@ -4348,7 +4314,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	if (a.cfg.nslot_diag > 0) {
 		if (a.cfg.nslot_diag > 1)
 			snprintf(a.cfg_warn, sizeof(a.cfg_warn),
-				 "%s（另有 %zu 段同类告警）",
+				 L_("%s（另有 %zu 段同类告警）"),
 				 a.cfg.slot_diag[0],
 				 a.cfg.nslot_diag - 1);
 		else
@@ -4453,9 +4419,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 						(void)tui_view_post(
 							a.view,
 							TUI_VIEW_NOTICE,
-							"workdir 回退 "
-							"/var/ai/work"
-							"（cwd 不可挂沙箱）",
+							L_("workdir 回退 /var/ai/work（cwd 不可挂沙箱）"),
 							0, NULL, 0);
 					if (a.ctx_fallback) {
 						char nb[320];
@@ -4463,8 +4427,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 						/* O-5：侧栏两行降一行短句（保留「兜底 200k*」
 						 * 语义与 meta 的 * 标记） */
 						snprintf(nb, sizeof(nb),
-							 "catalog 未命中/不可读：context 分母兜底 "
-							 "200k*（OCC_CATALOG 可指 models.dev 快照）");
+							 "%s", L_("catalog 未命中/不可读：context 分母兜底 200k*（OCC_CATALOG 可指 models.dev 快照）"));
 						(void)tui_view_post(a.view,
 								     TUI_VIEW_NOTICE,
 								     nb, 0, NULL, 0);
@@ -4574,13 +4537,14 @@ int main(int argc, char **argv)
 	int want_tui = 0;
 
 	memset(&p, 0, sizeof(p));
+	tui_lang_init_env();	/* O-20 A：OCC_LANG=en|zh（缺省 zh）——
+				 * 必须先于一切 L_() 消费点 */
 	if (argc < 2) {
 		/* T9c2 交互入口：tty → 全屏 TUI；非 tty → 人话报错 rc=2 */
 		if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
 			want_tui = 1;
 		} else {
-			fputs("occ: 交互模式需要 TTY（stdout/stdin 非 tty）；"
-			      "headless 请用 occ -p \"<prompt>\"\n", stderr);
+			fputs(L_("occ: 交互模式需要 TTY（stdout/stdin 非 tty）；headless 请用 occ -p \"<prompt>\"\n"), stderr);
 			return 2;
 		}
 	}
@@ -4630,8 +4594,7 @@ int main(int argc, char **argv)
 	if (occ_orch_tools_enabled()) {
 		g_orch = occ_orch_new(db);
 		if (!g_orch)
-			fprintf(stderr, "occ: 警告：编排运行时初始化失败——"
-				"task 工具本次不可用\n");
+			fputs(L_("occ: 警告：编排运行时初始化失败——task 工具本次不可用\n"), stderr);
 	}
 	if (want_tui) {
 		rc = run_interactive(db, model_toml, provider_toml);
@@ -4718,7 +4681,7 @@ int main(int argc, char **argv)
 		goto out;
 	}
 	if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
-		fputs(USAGE, stdout);
+		fputs(L_(USAGE), stdout);
 		rc = 0;
 		goto out;
 	}
@@ -4754,7 +4717,7 @@ int main(int argc, char **argv)
 			    !strcmp(argv[i], "-h")) {
 				/* O-23：子命令 --help=用法帮助（标准惯例 rc=0；
 				 * 旧行为当 unexpected argument 报错 rc=2） */
-				printf("用法：occ %s --session <id>%s\n", cmd,
+				printf(L_("用法：occ %s --session <id>%s\n"), cmd,
 				       !strcmp(cmd, "undo") ? " [--step N]" : "");
 				rc = 0;
 				goto out;
@@ -4780,8 +4743,7 @@ int main(int argc, char **argv)
 				v = strtol(argv[++i], &end, 10);
 				if (end == argv[i] || *end != '\0' ||
 				    v < 1 || v > 100000) {
-					fprintf(stderr, "occ %s: --step 须为"
-						" ≥1 的整数\n", cmd);
+					fprintf(stderr, L_("occ %s: --step 须为 ≥1 的整数\n"), cmd);
 					rc = 2;
 					goto out;
 				}
@@ -4794,7 +4756,7 @@ int main(int argc, char **argv)
 			}
 		}
 		if (!sid) {
-			fprintf(stderr, "occ %s: --session <id> 必需\n", cmd);
+			fprintf(stderr, L_("occ %s: --session <id> 必需\n"), cmd);
 			rc = 2;
 			goto out;
 		}
@@ -4846,8 +4808,7 @@ int main(int argc, char **argv)
 				/* O-23：-- 开头且非已知标志（--allow-w2/--session
 				 * 已在前分支消费）占提示词位——疑似 flag 误当提示词：
 				 * 拒绝（rc=2），不发起模型调用 */
-				fprintf(stderr, "occ -p: `%s' 不是已知标志——疑似 flag "
-					"误当提示词（已知：--allow-w2 / --session <id>）\n",
+				fprintf(stderr, L_("occ -p: `%s' 不是已知标志——疑似 flag 误当提示词（已知：--allow-w2 / --session <id>）\n"),
 					argv[i]);
 				rc = 2;
 				goto out;
@@ -4885,14 +4846,13 @@ int main(int argc, char **argv)
 		g_w2.allow_w2 = allow_w2;	/* O-9：--allow-w2（W2 门） */
 		rc = run_turn(db, &p, session_id, prompt, 0);
 		if (g_w2.denied > 0)
-			fprintf(stderr, "occ: %d 次 W2 高危工具调用被拒"
-				"（-p 默认拒绝；--allow-w2 显式开门）\n",
+			fprintf(stderr, L_("occ: %d 次 W2 高危工具调用被拒（-p 默认拒绝；--allow-w2 显式开门）\n"),
 				g_w2.denied);
 		occ_provider_free(&p);
 		goto out;
 	}
 	fprintf(stderr, "occ: unknown command `%s'\n", argv[1]);
-	fputs(USAGE, stderr);
+	fputs(L_(USAGE), stderr);
 	rc = 2;
 out:
 	occ_orch_free(g_orch);			/* E3：活子收尸+登记表清理 */

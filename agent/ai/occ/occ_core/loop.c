@@ -35,6 +35,7 @@
 
 #include "occ_revert.h"
 #include "occ_sysprompt.h"
+#include "occ_tui/tui_lang.h"		/* O-20 A：语档（en 判级段/提示基底选择） */
 #include "occ_tools/occ_tools.h"
 
 /* E3 主从编排：判级提示段开关 + task 工具执行面（occ_tool_ctx.orch） */
@@ -68,6 +69,36 @@ const char OCC_SYSTEM_PROMPT[] =
 	"4. 会话历史完整保留，可引用此前内容与工具结果。";
 
 /*
+ * O-20 A 部：en 档系统提示（另写非机翻——语义与 zh 版逐条对应；
+ * zh 原文恒等不动=差分/p-smoke 缺省面零变化）。判级段同款成对。
+ */
+static const char OCC_SYSTEM_PROMPT_EN[] =
+	"You are occ, the built-in coding assistant of AIKernel. You run on "
+	"AIKernel (a Linux-like operating system with built-in AI "
+	"capabilities); your job is to help the user with programming, "
+	"system administration and information processing. Answer rules:\n"
+	"1. Reply in English - direct, accurate, actionable; say so plainly "
+	"when unsure, never fabricate.\n"
+	"2. Give key code snippets with the necessary explanation, no long "
+	"preambles.\n"
+	"3. You may call tools directly to get things done: read reads files "
+	"(line window offset/limit), write writes whole files, edit does "
+	"exact string replacement (oldString unique or replaceAll), glob "
+	"finds files, grep searches text, bash runs commands in the sandbox "
+	"(compiling with gcc, running programs, etc.), rm deletes regular "
+	"files and empty directories, mv moves or renames (never overwrites "
+	"an existing target, never cross-device), mkdir creates directories "
+	"recursively - the last three run on the host face (same target "
+	"domain as write); files no longer needed can be cleaned up by "
+	"yourself. For multi-step tasks keep calling tools until done, then "
+	"summarize the result in English; on tool errors read the message, "
+	"fix and retry, or report honestly. bash executes inside the "
+	"aik-sandbox isolation zone: the working directory is mounted "
+	"read-write, the rest of the host filesystem is not visible.\n"
+	"4. Session history is fully retained; you may refer to earlier "
+	"content and tool results.";
+
+/*
  * E3 编排段（ORCH-DESIGN §1/§3——L0/L1/L2 判级提示段 + task 工具
  * 使用规范）。OCC_ORCH_TOOLS=1 时并入系统提示尾部；默认关=系统提示
  * 零变化（差分/p-smoke 红线）。分级依据字段照 §3（brief 字段集）。
@@ -94,10 +125,57 @@ static const char OCC_ORCH_PROMPT[] =
 	"evidence 用 file:/md5:/contains:/exit: 机检令牌）——验收环逐条"
 	"机检，无表或自由文本证据不采信。";
 
-/* E3：编排段取值（开关开=段文本；关=NULL——compose_sys_prompt 消费） */
+/* O-20 A 部：判级段 en 版（与 zh 版语义逐条对应） */
+static const char OCC_ORCH_PROMPT_EN[] =
+	"5. Orchestration - decide with the triage rules whether to do it "
+	"yourself or delegate, then act:\n"
+	"   - L0 (answerable in a sentence or two): no tools, no "
+	"delegation, reply directly.\n"
+	"   - L1 (small, do it yourself): it finishes with reading one or "
+	"two files or running one or two commands - do it yourself with "
+	"the tools above, no delegation.\n"
+	"   - L2 (delegate): all other execution tasks - create a task "
+	"with the task tool and delegate it to a sub-agent; wait for the "
+	"final state, read back the result, and give your verdict.\n"
+	"   Triage rule: estimate dispatch overhead against doing it "
+	"yourself - if brief assembly plus acceptance costs more than "
+	"doing it yourself, downgrade to doing it yourself. Triage is an "
+	"internal convention; never recite the triage process to the "
+	"user.\n"
+	"   task tool five actions: spawn (submit a brief to delegate; "
+	"field set=goal/fileset/forbidden/deliverables/acceptance/"
+	"selfcheck/auth_note/budget/context/rework_max, where goal and a "
+	"non-empty fileset are required and fileset is an exclusive "
+	"claim - concurrent tasks claiming the same file are rejected); "
+	"status queries task state; wait waits for the final state with "
+	"a timeout (if not final at the deadline it honestly reports "
+	"not-final, and you may wait again); read_result reads the "
+	"sub-report and final summary; return states your verdict on the "
+	"result (recorded in task events). After delegating, chase with "
+	"wait+read_result; do not repeatedly spawn the same objective "
+	"(rework goes through spawn+task_id).\n"
+	"   The brief must tell the sub-agent the report format: "
+	"sub-task reports must contain a # VERDICT table "
+	"(criterion|result|evidence|self, one line per acceptance "
+	"criterion, evidence uses file:/md5:/contains:/exit: "
+	"machine-check tokens) - the acceptance loop checks every line "
+	"mechanically; a missing table or free-text evidence is not "
+	"accepted.";
+
+/* E3：编排段取值（开关开=段文本；关=NULL——compose_sys_prompt 消费）。
+ * O-20 A 部：en 档换 en 判级段（zh 缺省面零变化）。 */
 static const char *orch_prompt_segment(void)
 {
-	return occ_orch_tools_enabled() ? OCC_ORCH_PROMPT : NULL;
+	if (!occ_orch_tools_enabled())
+		return NULL;
+	return tui_lang_is_en() ? OCC_ORCH_PROMPT_EN : OCC_ORCH_PROMPT;
+}
+
+/* O-20 A 部：当前档系统提示基底（en=另写版；zh=原文恒等——差分面）。
+ * occ_ac 基线估算同源（occ_sysprompt_active 导出）。 */
+const char *occ_sysprompt_active(void)
+{
+	return tui_lang_is_en() ? OCC_SYSTEM_PROMPT_EN : OCC_SYSTEM_PROMPT;
 }
 
 /*
@@ -109,17 +187,18 @@ static const char *orch_prompt_segment(void)
 static const char *compose_sys_prompt(const char *mem_blk)
 {
 	const char *seg = orch_prompt_segment();
+	const char *base = occ_sysprompt_active();
 	static char *buf;
 
 	if (!seg && !mem_blk)
-		return OCC_SYSTEM_PROMPT;
+		return base;
 	free(buf);
-	buf = malloc(strlen(OCC_SYSTEM_PROMPT) +
+	buf = malloc(strlen(base) +
 		     (seg ? strlen(seg) + 2 : 0) +
 		     (mem_blk ? strlen(mem_blk) + 2 : 0) + 1);
 	if (!buf)
-		return OCC_SYSTEM_PROMPT;
-	strcpy(buf, OCC_SYSTEM_PROMPT);
+		return base;
+	strcpy(buf, base);
 	if (seg) {
 		strcat(buf, "\n\n");
 		strcat(buf, seg);

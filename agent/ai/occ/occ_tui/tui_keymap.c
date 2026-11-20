@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tui_lang.h"
 #include "tui_utf8.h"
 
 #define KM_ACT_NAME_MAX 40
@@ -381,7 +382,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 				continue;
 			eq = strchr(s, '=');
 			if (!eq) {
-				km_set_err(err, errlen, lineno, "缺少 '='",
+				km_set_err(err, errlen, lineno, L_("缺少 '='"),
 					   NULL);
 				rc = -1;
 				break;
@@ -398,7 +399,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 					*--e = '\0';
 			}
 			if (!*key) {
-				km_set_err(err, errlen, lineno, "空动作名", NULL);
+				km_set_err(err, errlen, lineno, L_("空动作名"), NULL);
 				rc = -1;
 				break;
 			}
@@ -409,7 +410,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 							 sizeof(nb)) ||
 				    !strncmp(nb, "<leader>", 8)) {
 					km_set_err(err, errlen, lineno,
-						   "leader 键非法 `", val);
+						   L_("leader 键非法 `"), val);
 					if (err && errlen) {
 						size_t l = strlen(err);
 
@@ -430,8 +431,8 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 				if (end == val || *end != '\0' || v < 100 ||
 				    v > 60000) {
 					km_set_err(err, errlen, lineno,
-						   "leader_timeout 须为 "
-						   "100..60000 ms", NULL);
+						   L_("leader_timeout 须为 "
+						      "100..60000 ms"), NULL);
 					rc = -1;
 					break;
 				}
@@ -439,7 +440,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 				continue;
 			}
 			if (tui_keymap_action_ctx(key) < 0) {
-				km_set_err(err, errlen, lineno, "未知动作 `",
+				km_set_err(err, errlen, lineno, L_("未知动作 `"),
 					   key);
 				rc = -1;
 				break;
@@ -449,7 +450,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 
 				if (!a) {	/* 理论不可达（def 全表有） */
 					km_set_err(err, errlen, lineno,
-						   "动作无表项 `", key);
+						   L_("动作无表项 `"), key);
 					rc = -1;
 					break;
 				}
@@ -462,7 +463,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 
 					if (strlen(val) >= sizeof(buf)) {
 						km_set_err(err, errlen, lineno,
-							   "值过长", NULL);
+							   L_("值过长"), NULL);
 						rc = -1;
 						break;
 					}
@@ -483,7 +484,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 						if (!*q) {
 							km_set_err(err, errlen,
 								   lineno,
-								   "空键项",
+								   L_("空键项"),
 								   NULL);
 							rc = -1;
 							break;
@@ -493,7 +494,7 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 									 sizeof(nb))) {
 							km_set_err(err, errlen,
 								   lineno,
-								   "键非法 `",
+								   L_("键非法 `"),
 								   q);
 							rc = -1;
 							break;
@@ -502,8 +503,8 @@ int tui_keymap_load(tui_keymap *km, const char *path, char *err,
 						    TUI_KM_KEYS_PER_ACT) {
 							km_set_err(err, errlen,
 								   lineno,
-								   "单动作键数"
-								   "超上限",
+								   L_("单动作键数"
+								      "超上限"),
 								   NULL);
 							rc = -1;
 							break;

@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "occ_tui/tui_lang.h"
+
 #include "occ_zoomrc.h"
 
 const int occ_zoom_sizes[] = { 12, 16, 20, 24, 28, 32, 40, -1 };
@@ -77,12 +79,12 @@ int occ_zoom_edit_fbtermrc(const char *path, int size,
 	size_t n;
 
 	if (!path || !path[0] || occ_zoom_index(size) < 0) {
-		set_err(err, errlen, "字号不在级表内");
+		set_err(err, errlen, L_("字号不在级表内"));
 		return -1;
 	}
 	n = strlen(path);
 	if (n + 8 >= sizeof(tmp)) {
-		set_err(err, errlen, "路径过长");
+		set_err(err, errlen, L_("路径过长"));
 		return -1;
 	}
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -92,7 +94,7 @@ int occ_zoom_edit_fbtermrc(const char *path, int size,
 	if (!out) {
 		if (in)
 			fclose(in);
-		set_err(err, errlen, "无法写临时文件");
+		set_err(err, errlen, L_("无法写临时文件"));
 		return -1;
 	}
 	if (!in) {
@@ -122,18 +124,18 @@ int occ_zoom_edit_fbtermrc(const char *path, int size,
 	}
 	if (fflush(out) != 0 || fclose(out) != 0) {
 		unlink(tmp);
-		set_err(err, errlen, "写入失败");
+		set_err(err, errlen, L_("写入失败"));
 		return -1;
 	}
 	if (wlines <= 0) {
 		unlink(tmp);
-		set_err(err, errlen, "空配置");
+		set_err(err, errlen, L_("空配置"));
 		return -1;
 	}
 	chmod(tmp, 0644);
 	if (rename(tmp, path) != 0) {
 		unlink(tmp);
-		set_err(err, errlen, "rename 失败");
+		set_err(err, errlen, L_("rename 失败"));
 		return -1;
 	}
 	return 0;

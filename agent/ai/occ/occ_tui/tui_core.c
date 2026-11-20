@@ -29,6 +29,7 @@
 #include "tui_core.h"
 
 #include "tui_frame.h"
+#include "tui_lang.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1196,9 +1197,8 @@ int tui_term_enter(tui_term *t)
 		return 0;
 	/* 非 TTY：人话报错，拒绝全屏，不动任何状态（rc=2） */
 	if (!isatty(t->fd)) {
-		fprintf(stderr,
-			"occ_tui: 需要真实 TTY（stdout 非 tty），拒绝进入全屏模式；"
-			"headless 场景请用 occ -p\n");
+		fputs(L_("occ_tui: 需要真实 TTY（stdout 非 tty），拒绝进入全屏模式；"
+			     "headless 场景请用 occ -p\n"), stderr);
 		return 2;
 	}
 	if (g_term && g_term->entered && g_term != t)

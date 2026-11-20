@@ -45,6 +45,8 @@
 #include "cloud/http/http_client.h"
 #include "store/store_json.h"
 
+#include "occ_tui/tui_lang.h"
+
 static pthread_mutex_t g_occ_http_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_http_inited;
 
@@ -431,7 +433,7 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 					 c.first_err);
 			else
 				snprintf(reason, sizeof(reason),
-					 "流提前终止（无 finish/终结哨兵）");
+					 "%s", L_("流提前终止（无 finish/终结哨兵）"));
 			cls = occ_llm_retry_class(status,
 						  c.first_err[0] ?
 						  c.first_err : NULL,
@@ -477,9 +479,9 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 				if (ra_ms >= 0) {
 					delay = ra_ms;
 					snprintf(msg, sizeof(msg),
-						 "重试：第 %d/%d 次尝试将在"
-						 " %lldms 后重发（服务端"
-						 " Retry-After：%s；%s）",
+						 L_("重试：第 %d/%d 次尝试将在"
+						   " %lldms 后重发（服务端"
+						   " Retry-After：%s；%s）"),
 						 *cnt + 1, cap, delay, ra,
 						 reason);
 					emit_reset(cb, ud, msg);
@@ -500,8 +502,8 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 			if (delay > rp.cap_ms)
 				delay = rp.cap_ms;
 			snprintf(msg, sizeof(msg),
-				 "重试：第 %d/%d 次尝试将在 %lldms 后重发"
-				 "（%s）", *cnt + 1, cap, delay, reason);
+				 L_("重试：第 %d/%d 次尝试将在 %lldms 后重发"
+				   "（%s）"), *cnt + 1, cap, delay, reason);
 			emit_reset(cb, ud, msg);
 			if (backoff_wait(delay)) {
 				if (err_out)

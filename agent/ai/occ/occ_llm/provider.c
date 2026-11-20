@@ -23,6 +23,8 @@
 
 #include "occ_utf8.h"		/* E10②b：请求体出口 UTF-8 兜底净化 */
 
+#include "occ_tui/tui_lang.h"
+
 const char *occ_protocol_name(occ_protocol p)
 {
 	switch (p) {
@@ -509,17 +511,17 @@ static void parse_model_section(const char *txt, const struct toml_sec *s,
 		 * 均落此分支），load_all 收尾统一 stderr。 */
 		if (had_ptype)
 			cfg_diag_add(cfg,
-				     "model.toml: [models.%s] provider_type "
-				     "值无法识别（%.32s；期望 "
-				     "provider_type/model_name/base_url/"
-				     "api_key）——该模型未列入",
+				     L_("model.toml: [models.%s] provider_type "
+				       "值无法识别（%.32s；期望 "
+				       "provider_type/model_name/base_url/"
+				       "api_key）——该模型未列入"),
 				     s->name + 7, slot.provider_type);
 		else
 			cfg_diag_add(cfg,
-				     "model.toml: [models.%s] 缺 "
-				     "provider_type（期望 provider_type/"
-				     "model_name/base_url/api_key）——"
-				     "该模型未列入",
+				     L_("model.toml: [models.%s] 缺 "
+				       "provider_type（期望 provider_type/"
+				       "model_name/base_url/api_key）——"
+				       "该模型未列入"),
 				     s->name + 7);
 		heap_scrub_free(&slot.api_key);
 		cfg->malformed++;
@@ -760,7 +762,7 @@ int occ_provider_validate_url(const char *url, char *err, size_t errlen)
 		return -1;
 	err[0] = '\0';
 	if (!url || !url[0]) {
-		snprintf(err, errlen, "地址为空");
+		snprintf(err, errlen, "%s", L_("地址为空"));
 		return -1;
 	}
 	if (!strncmp(url, "http://", 7))
@@ -769,12 +771,12 @@ int occ_provider_validate_url(const char *url, char *err, size_t errlen)
 		scheme = "https://";
 	if (!scheme) {
 		snprintf(err, errlen,
-			 "地址必须以 http:// 或 https:// 开头（当前开头 24 字符：%.24s）",
+			 L_("地址必须以 http:// 或 https:// 开头（当前开头 24 字符：%.24s）"),
 			 url);
 		return -1;
 	}
 	if (!url[strlen(scheme)]) {
-		snprintf(err, errlen, "scheme 后为空（缺主机名）：%s", url);
+		snprintf(err, errlen, L_("scheme 后为空（缺主机名）：%s"), url);
 		return -1;
 	}
 	slen = strlen(url);
@@ -783,7 +785,7 @@ int occ_provider_validate_url(const char *url, char *err, size_t errlen)
 
 		if (c < 0x21 || c == 0x7f || c == '"' || c == '\'') {
 			snprintf(err, errlen,
-				 "地址含非法字符（第 %zu 字节，ASCII 0x%02x）",
+				 L_("地址含非法字符（第 %zu 字节，ASCII 0x%02x）"),
 				 i + 1, c);
 			return -1;
 		}
@@ -818,7 +820,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 	}
 	if (!cfg || !slot_id || !out) {
 		if (err)
-			snprintf(err, errlen, "内部错误：参数为空");
+			snprintf(err, errlen, "%s", L_("内部错误：参数为空"));
 		return -1;
 	}
 	for (i = 0; i < cfg->nslots; i++)
@@ -829,7 +831,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 	if (!slot) {
 		if (err)
 			snprintf(err, errlen,
-				 "model.toml 无 [models.%s] 槽位（可用槽位 %zu 个）",
+				 L_("model.toml 无 [models.%s] 槽位（可用槽位 %zu 个）"),
 				 slot_id, cfg->nslots);
 		return -1;
 	}
@@ -843,7 +845,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 		if (!def) {
 			if (err)
 				snprintf(err, errlen,
-					 "[models.%s] 引用的 [provider.%s] 段不存在",
+					 L_("[models.%s] 引用的 [provider.%s] 段不存在"),
 					 slot->id, slot->provider_ref);
 			return -1;	/* 引用目标不存在 */
 		}
@@ -861,7 +863,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 	if (!out->base_url[0]) {
 		if (err)
 			snprintf(err, errlen,
-				 "[models.%s] 无 base_url（直填式缺键，或引用的 [provider.%s] 段也未给）",
+				 L_("[models.%s] 无 base_url（直填式缺键，或引用的 [provider.%s] 段也未给）"),
 				 slot->id, slot->provider_ref[0] ?
 				 slot->provider_ref : "-");
 		return -1;
@@ -869,7 +871,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 	if (occ_provider_validate_url(out->base_url, verr, sizeof(verr))) {
 		if (err)
 			snprintf(err, errlen,
-				 "[models.%s] base_url 非法：%s", slot->id,
+				 L_("[models.%s] base_url 非法：%s"), slot->id,
 				 verr);
 		return -1;
 	}
@@ -887,7 +889,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 				      sizeof(verr))) {
 		if (err)
 			snprintf(err, errlen,
-				 "[models.%s] direct_base_url 非法：%s",
+				 L_("[models.%s] direct_base_url 非法：%s"),
 				 slot->id, verr);
 		out->direct_base_url[0] = '\0';
 		return -1;
@@ -905,7 +907,7 @@ int occ_provider_resolve_ex(const occ_provider_config *cfg, const char *slot_id,
 		out->api_key = calloc(1, 1);
 	if (!out->api_key) {
 		if (err)
-			snprintf(err, errlen, "内存不足（key 拷贝）");
+			snprintf(err, errlen, "%s", L_("内存不足（key 拷贝）"));
 		return -1;
 	}
 	return 0;

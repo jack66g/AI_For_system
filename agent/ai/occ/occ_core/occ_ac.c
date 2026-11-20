@@ -973,7 +973,7 @@ int occ_ac_apply_digest(occ_db *db, const char *session_id,
 	}
 	free(ids_json);
 	/* 3) token 账本重置为新基线（system + 摘要的 len/4 估算） */
-	baseline = occ_tokens_estimate_len(OCC_SYSTEM_PROMPT) +
+	baseline = occ_tokens_estimate_len(occ_sysprompt_active()) +
 		   occ_tokens_estimate_len(text);
 	if (occ_session_set_tokens(db, session_id, baseline, 1, werr,
 				   sizeof(werr))) {

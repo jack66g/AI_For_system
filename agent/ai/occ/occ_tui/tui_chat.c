@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tui_lang.h"
 #include "tui_utf8.h"
 
 /* ---- 内部类型 ---- */
@@ -941,7 +942,8 @@ static void render_reasoning(tui_chat *c, tui_msg *m, int live, llist *ll)
 			/* 回退到 UTF-8 边界（防切多字节） */
 			while (skip < rn && ((uint8_t)rs[skip] & 0xC0) == 0x80)
 				skip++;
-			msg_render_lines("…（前文省略）", strlen("…（前文省略）"),
+			msg_render_lines(L_("…（前文省略）"),
+					 strlen(L_("…（前文省略）")),
 					 c->width, tui_thm_muted(),
 					 TUI_ROLE_NOTICE, ll);
 		}
@@ -1023,7 +1025,7 @@ static void chat_push_msg(tui_chat *c, tui_msg *m)
 					 TUI_ROLE_NOTICE, &ll);
 	} else if (m->role == TUI_ROLE_USER) {
 		/* UXAB/E：块头 ▌你 · HH:MM（accent+bold / dim 时间；▌ 贴紧） */
-		render_block_header(c, "▌你 ", m->ts, &ll);
+		render_block_header(c, L_("▌你 "), m->ts, &ll);
 		if (m->text && m->tlen)
 			msg_render_lines(m->text, m->tlen, c->width,
 					 tui_thm_attr(TUI_THM_FG,

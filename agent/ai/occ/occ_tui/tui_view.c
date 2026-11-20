@@ -28,6 +28,7 @@
 #include "tui_frame.h"
 #include "tui_input.h"
 #include "tui_inputbox.h"
+#include "tui_lang.h"
 #include "tui_usage.h"
 #include "tui_utf8.h"
 
@@ -291,7 +292,7 @@ static int tv_drain(tui_view *v)
 				 * 如实通告（不静默丢定位） */
 				tui_chat_scroll(v->chat, 0x7fffffff);
 				tui_chat_add_notice(v->chat,
-						    "锚点丢失，已跳到加载起点");
+							    L_("锚点丢失，已跳到加载起点"));
 			}
 			v->dirty_needed = 1;
 			break;
@@ -327,17 +328,17 @@ static int tv_drain(tui_view *v)
 				title[tl] = '\0';
 				memset(it, 0, sizeof(it));
 				snprintf(it[0].text, sizeof(it[0].text),
-					 "y 执行");
+					 "%s", L_("y 执行"));
 				snprintf(it[0].detail, sizeof(it[0].detail),
 					 "%.199s",
 					 nl && nl[1] ? nl + 1 : "");
 				snprintf(it[1].text, sizeof(it[1].text),
-					 "n 取消");
+					 "%s", L_("n 取消"));
 				snprintf(it[2].text, sizeof(it[2].text),
-					 "s 本会话同类放行");
+					 "%s", L_("s 本会话同类放行"));
 				(void)tui_overlay_set_list(v->ov, e->rc,
 							       title, it, 3, 0,
-							       "y 执行 · s 本会话同类 · n/Esc 取消");
+							       L_("y 执行 · s 本会话同类 · n/Esc 取消"));
 				v->dirty_needed = 1;
 			}
 			break;
@@ -391,32 +392,32 @@ static void tv_help_text(tui_view *v, char *buf, size_t cap)
 		(void)tui_keymap_binding_str(v->km, "app.exit", exitb,
 					     sizeof(exitb));
 	if (v->mouse_on)
-		snprintf(mline, sizeof(mline),
-			 "滚轮=滚动 · 点击 ○/● thinking/thought 行=展开/收起"
-			 "（SGR 1006）");
+		snprintf(mline, sizeof(mline), "%s",
+			 L_("滚轮=滚动 · 点击 ○/● thinking/thought 行=展开/收起"
+			    "（SGR 1006）"));
 	else
 		snprintf(mline, sizeof(mline),
-			 "off（TERM=%.16s 无鼠标能力——未启用，仅键盘）",
+			 L_("off（TERM=%.16s 无鼠标能力——未启用，仅键盘）"),
 			 term && term[0] ? term : "(unset)");
 	snprintf(buf, cap,
-		 "commands: /exit /clear /help (built-in) · /new /sessions"
-		 " /status /models /rename /tools /sandbox /trace /lease"
-		 " /compact /shell (live) · /tasks 任务面板\n"
-		 "/tasks: 编排任务面板（状态/回炉/预算）\n"
-		 "/compact: 手动 autocondense 换窗（OCC_AC=on）\n"
-		 "/shell: 退到 bash，exit 返回（turn 运行中拒绝）\n"
-		 "三分：/compact=摘要进新窗 · /clear=归档+换窗（可找回）"
-		 " · /new=另起会话 · kind main=用户/child=任务会话\n"
-		 "UI: ▌/◆=消息块头（▌你 / ◆ 模型 · 时间 dim）· ├─=工具树"
-		 "（+ 成功 × 失败）· ○/●=thought 折叠（点击展开/收起）·"
-		 " N%%=上下文水位（70 黄 90 红）· footer ↑输入 ↓输出 c缓存读"
-		 "（色可经 ~/.occ/theme.ini 覆盖）\n"
-		 "keys: Enter=send · ctrl+b=会话侧栏 · ctrl+n=/new ·"
-		 " Tab=complete · Esc=interrupt · PgUp/PgDn=scroll ·"
-		 " Home/End=顶/底 · exit=%s · leader=%s (2s timeout;"
-		 " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
-		 " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
-		 "mouse: %s\n		 档位：/su 提权（W2 门）· /su 0 回落 · /exit=退出并注销",
+		 L_("commands: /exit /clear /help (built-in) · /new /sessions"
+		    " /status /models /rename /tools /sandbox /trace /lease"
+		    " /compact /shell (live) · /tasks 任务面板\n"
+		    "/tasks: 编排任务面板（状态/回炉/预算）\n"
+		    "/compact: 手动 autocondense 换窗（OCC_AC=on）\n"
+		    "/shell: 退到 bash，exit 返回（turn 运行中拒绝）\n"
+		    "三分：/compact=摘要进新窗 · /clear=归档+换窗（可找回）"
+		    " · /new=另起会话 · kind main=用户/child=任务会话\n"
+		    "UI: ▌/◆=消息块头（▌你 / ◆ 模型 · 时间 dim）· ├─=工具树"
+		    "（+ 成功 × 失败）· ○/●=thought 折叠（点击展开/收起）·"
+		    " N%%=上下文水位（70 黄 90 红）· footer ↑输入 ↓输出 c缓存读"
+		    "（色可经 ~/.occ/theme.ini 覆盖）\n"
+		    "keys: Enter=send · ctrl+b=会话侧栏 · ctrl+n=/new ·"
+		    " Tab=complete · Esc=interrupt · PgUp/PgDn=scroll ·"
+		    " Home/End=顶/底 · exit=%s · leader=%s (2s timeout;"
+		    " ~/.occ/keymap 可覆盖) · overlay: ↑↓/PgUp/PgDn/Home/End"
+		    " 导航 · Enter 确认 · Esc 关闭 · 输入即过滤\n"
+		    "mouse: %s\n		 档位：/su 提权（W2 门）· /su 0 回落 · /exit=退出并注销"),
 		 exitb[0] ? exitb : "ctrl+c, ctrl+d",
 		 v->km ? tui_keymap_leader(v->km) : "ctrl+x",
 		 mline);
@@ -690,16 +691,16 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 
 				if (idx < 0) {
 					tui_overlay_status(v->ov,
-							   "无可选项", 1);
+							   L_("无可选项"), 1);
 				} else if (!v->hooks.on_overlay_submit) {
 					tui_overlay_status(v->ov,
-							   "无处理器", 1);
+							   L_("无处理器"), 1);
 				} else if (v->hooks.on_overlay_submit(
-						   v->hooks.ud,
-						   tui_overlay_id(v->ov),
-						   idx) != 0) {
+							   v->hooks.ud,
+							   tui_overlay_id(v->ov),
+							   idx) != 0) {
 					tui_overlay_status(v->ov,
-							   "该条目不可用",
+							   L_("该条目不可用"),
 							   1);
 				} else {
 					tv_pull_sessions(v);
@@ -749,7 +750,7 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 
 			if (rc != 0)
 				tui_overlay_status(v->ov,
-						   "此覆盖层不支持该动作", 1);
+						   L_("此覆盖层不支持该动作"), 1);
 			v->dirty_needed = 1;
 			return;
 		}
@@ -771,11 +772,11 @@ static void tv_dispatch_overlay(tui_view *v, const tui_event *ev,
 			    (ev->ch == 's' || ev->ch == 'S') ? 2 : 1;
 
 		if (!v->hooks.on_overlay_submit) {
-			tui_overlay_status(v->ov, "无处理器", 1);
+			tui_overlay_status(v->ov, L_("无处理器"), 1);
 		} else if (v->hooks.on_overlay_submit(v->hooks.ud,
 						      tui_overlay_id(v->ov),
 						      w2idx) != 0) {
-			tui_overlay_status(v->ov, "该条目不可用", 1);
+			tui_overlay_status(v->ov, L_("该条目不可用"), 1);
 		} else {
 			tv_pull_sessions(v);
 		}
@@ -1037,11 +1038,11 @@ static void footer_degrade(char *fb, size_t cap, int cols)
  * 每行按剩余列宽做显示列安全裁剪（CJK 双宽不溢出）。 */
 static void tv_render_empty(tui_screen *s, int mx, int y0, int mw)
 {
-	static const char *const bodies[] = {
-		"  新对话",
+	const char *bodies[] = {		/* O-20 A：L_ 运行期取文案（空态低频渲染） */
+		L_("  新对话"),
 		"",
-		"  直接输入消息开始",
-		"  /help 指令 · /sessions 历史会话 · /models 模型",
+		L_("  直接输入消息开始"),
+		L_("  /help 指令 · /sessions 历史会话 · /models 模型"),
 	};
 	int x0 = mx + 2;
 	int maxcols = mw - 2;
@@ -1371,7 +1372,7 @@ static int tv_render(tui_view *v, uint64_t now)
 						secs = (now - v->run_start_ms) /
 						       1000u;
 					snprintf(hint, sizeof(hint),
-						 " occ 正在思考… %llus · Esc 中断",
+						 L_(" occ 正在思考… %llus · Esc 中断"),
 						 secs);
 					avail = iw - (col - ix);
 					tui_utf8_clip_cols(hint,
@@ -1384,11 +1385,11 @@ static int tv_render(tui_view *v, uint64_t now)
 							     a_muted);
 				}
 			} else {
-				static const char wm[] =
-					"▌ 输入消息…  / 指令 · Tab 补全";
+				const char *wm =
+					L_("▌ 输入消息…  / 指令 · Tab 补全");
 
 				(void)tui_screen_put(s, input_y, ix, wm,
-						     sizeof(wm) - 1, a_muted);
+						     strlen(wm), a_muted);
 			}
 		}
 	}
@@ -1437,9 +1438,9 @@ static int tv_render(tui_view *v, uint64_t now)
 							     "sidebar.toggle",
 							     kb, sizeof(kb));
 			if (kb[0])
-				snprintf(hint, sizeof(hint), "[%s] 会话", kb);
+				snprintf(hint, sizeof(hint), L_("[%s] 会话"), kb);
 			else
-				snprintf(hint, sizeof(hint), "会话");
+				snprintf(hint, sizeof(hint), "%s", L_("会话"));
 		}
 		/* 段表（顺序=渲染顺序）：hint / model / pct / tokens / cwd */
 		on[0] = 1;
@@ -1591,11 +1592,10 @@ static void tv_sink_fatal_msg(const tui_renderer *ren, int frc)
 {
 	if (frc == -2)
 		fprintf(stderr,
-			"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
+			L_("occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n"),
 			ren->sink.wd_ms);
 	else
-		fprintf(stderr,
-			"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+		fputs(L_("occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n"), stderr);
 }
 
 int tui_view_run(tui_view *v)
@@ -1868,7 +1868,7 @@ tui_view *tui_view_create(const tui_view_hooks *hooks)
 		e[0] = '\0';
 		if (path[0] && tui_thm_load(path, e, sizeof(e)) != 0)
 			snprintf(v->init_notice[0], sizeof(v->init_notice[0]),
-				 "%s — 已回落出厂缺省调色板", e);
+				 L_("%s — 已回落出厂缺省调色板"), e);
 	}
 	{
 		char path[512];
@@ -1884,7 +1884,7 @@ tui_view *tui_view_create(const tui_view_hooks *hooks)
 		e[0] = '\0';
 		if (path[0] && tui_keymap_load(v->km, path, e, sizeof(e)) != 0)
 			snprintf(v->init_notice[1], sizeof(v->init_notice[1]),
-				 "%s — 已回落默认键位表", e);
+				 L_("%s — 已回落默认键位表"), e);
 	}
 	pthread_mutex_init(&v->qm, NULL);
 	pthread_cond_init(&v->qc, NULL);

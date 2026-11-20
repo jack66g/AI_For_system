@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "tui_lang.h"
 #include "tui_utf8.h"
 
 /* 12345 → "12.3k"；≥1e6 → "12.3M" */
@@ -124,7 +125,7 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 		int n;
 
 		n = d->total - show;
-		snprintf(ovf, sizeof(ovf), "… +%d 个（/sessions）", n);
+		snprintf(ovf, sizeof(ovf), L_("… +%d 个（/sessions）"), n);
 		tui_utf8_clip_cols(ovf, (size_t)maxw, clip, sizeof(clip));
 		(void)tui_screen_put(s, first + show, 0, clip, strlen(clip),
 				     a_bottom);
@@ -132,7 +133,7 @@ void tui_sidebar_render(const tui_sb_data *d, tui_screen *s, int rows,
 
 	/* E8：tasks 摘要行（`tasks:N 跑M`；muted；无任务零渲染） */
 	if (task_row >= 0) {
-		snprintf(line, sizeof(line), "tasks:%d 跑%d",
+		snprintf(line, sizeof(line), L_("tasks:%d 跑%d"),
 			 d->tasks_n, d->tasks_running);
 		(void)tui_screen_put(s, task_row, 0, line, strlen(line),
 				     a_bottom);
@@ -229,7 +230,7 @@ void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 		int n;
 
 		n = d->total - show;
-		snprintf(ovf, sizeof(ovf), "… +%d 个（/sessions）", n);
+		snprintf(ovf, sizeof(ovf), L_("… +%d 个（/sessions）"), n);
 		tui_utf8_clip_cols(ovf, (size_t)w, clip, sizeof(clip));
 		(void)tui_screen_put(s, first + show, x, clip, strlen(clip),
 				     a_bottom);
@@ -238,7 +239,7 @@ void tui_sidebar_render_panel(const tui_sb_data *d, tui_screen *s,
 	if (task_row >= 0) {
 		char tl[48];
 
-		snprintf(tl, sizeof(tl), "tasks:%d 跑%d",
+		snprintf(tl, sizeof(tl), L_("tasks:%d 跑%d"),
 			 d->tasks_n, d->tasks_running);
 		(void)tui_screen_put(s, task_row, x, tl, strlen(tl),
 				     a_bottom);

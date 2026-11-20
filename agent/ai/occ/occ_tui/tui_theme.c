@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tui_lang.h"
+
 /* 出厂缺省（= c2 编译期常量；顺序与 enum 槽位一致）。
  * T1-10 质感精修：底色再压一档（235→234，更沉稳）、次级文字随之下探
  * （MUTED 242→241，footer/侧栏层次更收敛）、框线 BORDER 238→237（深底
@@ -115,7 +117,7 @@ int tui_theme_write_ini(const char *path, const struct tui_theme_preset *p)
 	f = fopen(tmp, "w");
 	if (!f)
 		return -1;
-	fprintf(f, "# preset: %s (%s)\n", p->name, p->desc);
+	fprintf(f, "# preset: %s (%s)\n", p->name, L_(p->desc));
 	for (i = 0; i < TUI_THM_COUNT; i++)
 		fprintf(f, "%s = %d\n", TUI_THM_NAMES[i], p->slots[i]);
 	if (fflush(f) != 0 || fclose(f) != 0) {
@@ -254,7 +256,7 @@ int tui_thm_load(const char *path, char *err, size_t errlen)
 		if (!eq) {
 			if (err)
 				snprintf(err, errlen,
-					 "theme: line %d: 缺少 '='", lineno);
+					 L_("theme: line %d: 缺少 '='"), lineno);
 			rc = -1;
 			break;
 		}
@@ -265,7 +267,7 @@ int tui_thm_load(const char *path, char *err, size_t errlen)
 		if (slot < 0) {
 			if (err)
 				snprintf(err, errlen,
-					 "theme: line %d: 未知键 `%.40s'",
+					 L_("theme: line %d: 未知键 `%.40s'"),
 					 lineno, key);
 			rc = -1;
 			break;
@@ -273,7 +275,7 @@ int tui_thm_load(const char *path, char *err, size_t errlen)
 		if (!*val) {
 			if (err)
 				snprintf(err, errlen,
-					 "theme: line %d: 缺值", lineno);
+					 L_("theme: line %d: 缺值"), lineno);
 			rc = -1;
 			break;
 		}
@@ -282,8 +284,8 @@ int tui_thm_load(const char *path, char *err, size_t errlen)
 		if (errno || end == val || *end != '\0' || v < 0 || v > 255) {
 			if (err)
 				snprintf(err, errlen,
-					 "theme: line %d: 值须为 0..255 整数"
-					 "（`%.40s`）", lineno, val);
+					 L_("theme: line %d: 值须为 0..255 整数"
+					    "（`%.40s`）"), lineno, val);
 			rc = -1;
 			break;
 		}

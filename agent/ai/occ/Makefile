@@ -114,7 +114,8 @@ TUI_SRCS := occ_tui/tui_utf8.c occ_tui/tui_core.c occ_tui/tui_input.c \
 	    occ_tui/tui_frame.c occ_tui/tui_chat.c occ_tui/tui_inputbox.c \
 	    occ_tui/tui_sidebar.c occ_tui/tui_view.c occ_tui/tui_theme.c \
 	    occ_tui/tui_usage.c occ_tui/tui_keymap.c occ_tui/tui_overlay.c \
-	    occ_tui/tui_data.c occ_tui/tui_gate.c occ_zoomrc.c
+	    occ_tui/tui_data.c occ_tui/tui_gate.c occ_tui/tui_lang.c \
+	    occ_zoomrc.c
 TUI_OBJS := $(TUI_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 # 纯协议程序（不含传输）：单测 + 构造/回放驱动
@@ -160,7 +161,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout tests/test_lang
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
@@ -170,7 +171,8 @@ test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_c
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
 		  tests/test_orch tests/test_review tests/test_w2gate \
-		  tests/test_netcfg tests/test_cli_rc tests/test_net_timeout; do \
+		  tests/test_netcfg tests/test_cli_rc tests/test_net_timeout \
+		  tests/test_lang; do \
 		./$$t || exit 1; \
 	done
 	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo+p2a): ALL GREEN"
@@ -324,14 +326,14 @@ $(OBJ_DIR)/occ_tui/%.o: occ_tui/%.c
 	$(CC) $(CFLAGS) $(INCLUDES) -D_DEFAULT_SOURCE -c -o $@ $<
 
 # 纯协议链接（无 http_client/mbedtls；aik_json 来自 STORE_LIB）
-tests/test_provider: tests/test_provider.c $(LLM_OBJS) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_provider.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS)
+tests/test_provider: tests/test_provider.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_provider.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
-tests/test_openai_build: tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS)
+tests/test_openai_build: tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
-tests/test_anthropic_build: tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS)
+tests/test_anthropic_build: tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 tests/test_sse_openai: tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
@@ -339,15 +341,15 @@ tests/test_sse_openai: tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OB
 tests/test_sse_anthropic: tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
 
-tests/occ_reqbuild: tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS)
+tests/occ_reqbuild: tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 tests/occ_ssereplay: tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
 
 # 真传输（cloud/http + mbedtls；occ_llm_call 全链）
-tests/occ_smoke: tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTTP_CLIENT_OBJ) $(STORE_LIB) $(MBEDTLS_LIBS)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTTP_CLIENT_OBJ) $(STORE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
+tests/occ_smoke: tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTTP_CLIENT_OBJ) $(STORE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTTP_CLIENT_OBJ) $(STORE_LIB) $(MBEDTLS_LIBS) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # 头注入行为门（T9a2）：本地 mock 断言 ex/旧通道请求字节（明文 http）
 tests/test_http_headers: tests/test_http_headers.c $(HTTP_CLIENT_OBJ)
@@ -357,12 +359,16 @@ tests/test_http_headers: tests/test_http_headers.c $(HTTP_CLIENT_OBJ)
 tests/test_net_timeout: tests/test_net_timeout.c $(HTTP_CLIENT_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_net_timeout.c $(HTTP_CLIENT_OBJ) $(MBEDTLS_LIBS) $(LDLIBS)
 
+# O-20 A 部：语档基建（zh 指针恒等/en 查表降级/OCC_LANG 解析）
+tests/test_lang: tests/test_lang.c $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_lang.c $(OBJ_DIR)/occ_tui/tui_lang.o $(LDLIBS)
+
 # 目录/注册表单测（aik_json only）
 tests/test_catalog: tests/test_catalog.c $(OBJ_DIR)/occ_llm/catalog.o $(STORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_catalog.c $(OBJ_DIR)/occ_llm/catalog.o $(STORE_LIB) $(LDLIBS)
 
-tests/test_registry: tests/test_registry.c $(LLM_OBJS) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_registry.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS)
+tests/test_registry: tests/test_registry.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_registry.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # ---- occ_core 单测（T9a3） ----
 
@@ -431,11 +437,11 @@ tests/test_tokens: tests/test_tokens.c $(OBJ_DIR)/occ_core/tokens.o
 
 # loop：fixture 回放驱动全环（注入伪传输；链真传输符号因默认路径引用）
 # T9d：注入伪传输 = 绑定总闸关闭（occ_bind_active），单测零触网
-tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS)
+tests/test_loop: tests/test_loop.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_loop.c \
 		$(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) \
 		$(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) \
-		$(LDLIBS)
+		$(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # tools（T9b1）：六件套边界 + 快照 + trace + bash 沙箱契约（stub）
 # E3：+ orch.o（task 第七工具开关 occ_orch_tools_enabled 消费）+ 全链
@@ -460,27 +466,27 @@ tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
-tests/test_sink: tests/test_sink.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS)
+tests/test_sink: tests/test_sink.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_sink.c \
 		$(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) \
 		$(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) \
-		$(LDLIBS)
+		$(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # ---- T9d 绑定单测（链集合同 test_sink）----
 # test_sme：§8 检索注入块/写回配额 20/降级 NOTICE/OCC_SME 开关
 # test_ac ：§9 transcript 行流/session-start+check+judge+begin+commit 全链
 #           （本地 mock ac HTTP 服务 + 注入 fill，零真网）/换窗四证
-tests/test_sme: tests/test_sme.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS)
+tests/test_sme: tests/test_sme.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_sme.c \
 		$(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) \
 		$(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) \
-		$(LDLIBS)
+		$(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
-tests/test_ac: tests/test_ac.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS)
+tests/test_ac: tests/test_ac.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_ac.c \
 		$(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) \
 		$(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) \
-		$(LDLIBS)
+		$(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # telemetry（T9d §9.6）：T8 writer 直链（as_parquet+as_snappy，零第三方）
 tests/test_telemetry: tests/test_telemetry.c $(OBJ_DIR)/occ_core/occ_telemetry.o $(PQ_REUSE_OBJS)
@@ -495,8 +501,8 @@ tests/test_telemetry: tests/test_telemetry.c $(OBJ_DIR)/occ_core/occ_telemetry.o
 tests/test_cli_rc: tests/test_cli_rc.c
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_cli_rc.c
 
-tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o
+tests/test_zoomrc: tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_zoomrc.c $(OBJ_DIR)/occ_zoomrc.o $(OBJ_DIR)/occ_tui/tui_lang.o
 
 tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
@@ -531,9 +537,9 @@ tests/test_replay: tests/test_replay.c $(OBJ_DIR)/occ_core/replay.o \
 
 # tui_data（T9c3）：tools.json/trace/lease 读取器夹具对拍（aik_json only）
 tests/test_tui_data: tests/test_tui_data.c $(OBJ_DIR)/occ_tui/tui_data.o \
-		     $(STORE_LIB)
+		     $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_tui_data.c \
-		$(OBJ_DIR)/occ_tui/tui_data.o $(STORE_LIB) $(LDLIBS)
+		$(OBJ_DIR)/occ_tui/tui_data.o $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o $(LDLIBS)
 
 $(STORE_LIB) $(SQLITE_LIB):
 	@echo "缺 $@：请先在 agent/ai/store 构建（本 Makefile 不重建兄弟目录）"; exit 1

@@ -18,6 +18,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "tui_lang.h"
+
 #include "store/store_json.h"
 
 #define TD_TOOLS_MAX (32u * 1024u * 1024u)
@@ -76,25 +78,25 @@ static char *read_file(const char *path, size_t max, size_t *len_out,
 	 * 各自 lstat 过滤），此处只保证「可达的普通文件」。 */
 	if (stat(path, &st) != 0) {
 		if (err)
-			snprintf(err, errlen, "打不开 %.160s: %s", path,
+			snprintf(err, errlen, L_("打不开 %.160s: %s"), path,
 				 strerror(errno));
 		return NULL;
 	}
 	if (!S_ISREG(st.st_mode)) {
 		if (err)
-			snprintf(err, errlen, "非普通文件 %.160s", path);
+			snprintf(err, errlen, L_("非普通文件 %.160s"), path);
 		return NULL;
 	}
 	if ((unsigned long long)st.st_size > (unsigned long long)max) {
 		if (err)
-			snprintf(err, errlen, "文件过大 %.160s (%llu B)",
+			snprintf(err, errlen, L_("文件过大 %.160s (%llu B)"),
 				 path, (unsigned long long)st.st_size);
 		return NULL;
 	}
 	f = fopen(path, "rb");
 	if (!f) {
 		if (err)
-			snprintf(err, errlen, "打不开 %.160s: %s", path,
+			snprintf(err, errlen, L_("打不开 %.160s: %s"), path,
 				 strerror(errno));
 		return NULL;
 	}
@@ -273,7 +275,7 @@ int tui_data_tools_load(const char *path, tui_ov_item **out, int *n,
 	free(buf);
 	if (!root) {
 		if (err)
-			snprintf(err, errlen, "tools.json 解析失败: %.100s",
+			snprintf(err, errlen, L_("tools.json 解析失败: %.100s"),
 				 jerr);
 		return -1;
 	}
@@ -284,8 +286,8 @@ int tui_data_tools_load(const char *path, tui_ov_item **out, int *n,
 	if ((!occ || aik_json_typeof(occ) != AIK_JSON_ARR) &&
 	    (!main || aik_json_typeof(main) != AIK_JSON_ARR)) {
 		if (err)
-			snprintf(err, errlen,
-				 "tools.json 无 tools/occ_tools.tools 数组");
+			snprintf(err, errlen, "%s",
+				 L_("tools.json 无 tools/occ_tools.tools 数组"));
 		aik_json_free(root);
 		return -1;
 	}
@@ -295,14 +297,14 @@ int tui_data_tools_load(const char *path, tui_ov_item **out, int *n,
 		nmain = aik_json_count(main);
 
 	if (nocc) {
-		snprintf(hdr, sizeof(hdr), "occ 六件套（%zu）", nocc);
+		snprintf(hdr, sizeof(hdr), L_("occ 六件套（%zu）"), nocc);
 		if (td_push(&vec, hdr, "", "", TUI_OV_HEADER) != 0)
 			goto oom;
 		if (push_tool_arr(&vec, occ) != 0)
 			goto oom;
 	}
 	if (nmain) {
-		snprintf(hdr, sizeof(hdr), "内核工具注册表（%zu）", nmain);
+		snprintf(hdr, sizeof(hdr), L_("内核工具注册表（%zu）"), nmain);
 		if (td_push(&vec, hdr, "", "", TUI_OV_HEADER) != 0)
 			goto oom;
 		if (push_tool_arr(&vec, main) != 0)
@@ -529,7 +531,7 @@ int tui_data_trace_load(const char *dir, int max_lines, tui_ov_item **out,
 		if (errno == ENOENT)
 			return 0;	/* 无目录=无记录（空） */
 		if (err)
-			snprintf(err, errlen, "trace 目录 %.160s: %s", dir,
+			snprintf(err, errlen, L_("trace 目录 %.160s: %s"), dir,
 				 strerror(errno));
 		return -1;
 	}
@@ -626,7 +628,7 @@ int tui_data_lease_load(const char *dir, tui_ov_item **out, int *n,
 		if (errno == ENOENT)
 			return 0;	/* 未签发过租约 */
 		if (err)
-			snprintf(err, errlen, "lease 目录 %.160s: %s", dir,
+			snprintf(err, errlen, L_("lease 目录 %.160s: %s"), dir,
 				 strerror(errno));
 		return -1;
 	}
@@ -728,23 +730,23 @@ int tui_data_lease_load(const char *dir, tui_ov_item **out, int *n,
 		memset(e, 0, sizeof(*e));
 		if (revoked) {
 			e->rank = 2;
-			snprintf(remain, sizeof(remain), "已撤销");
+			snprintf(remain, sizeof(remain), "%s", L_("已撤销"));
 		} else if (exp > 0 && now >= exp) {
 			e->rank = 1;
-			snprintf(remain, sizeof(remain), "已过期");
+			snprintf(remain, sizeof(remain), "%s", L_("已过期"));
 		} else {
 			long long left = exp > 0 ? exp - now : 0;
 
 			e->rank = 0;
 			if (left >= 86400)
 				snprintf(remain, sizeof(remain),
-					 "剩余%lldd", left / 86400);
+					 L_("剩余%lldd"), left / 86400);
 			else if (left >= 3600)
 				snprintf(remain, sizeof(remain),
-					 "剩余%lldh", left / 3600);
+					 L_("剩余%lldh"), left / 3600);
 			else
 				snprintf(remain, sizeof(remain),
-					 "剩余%lldm", left / 60);
+					 L_("剩余%lldm"), left / 60);
 		}
 		e->expires = exp;
 		set_trunc(e->it.text, sizeof(e->it.text), lid);

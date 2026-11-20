@@ -18,6 +18,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "tui_lang.h"
 #include "tui_utf8.h"
 
 struct tui_overlay {
@@ -507,7 +508,7 @@ int tui_overlay_type(tui_overlay *ov, const char *utf8, size_t len)
 	 * 非首字符 '/'（qlen>0）照常过滤不受影响。 */
 	if (ov->qlen == 0 && len == 1 && utf8[0] == '/') {
 		tui_overlay_status(ov,
-				   "命令被浮层拦住：先 Esc 关浮层再敲", 1);
+				   L_("命令被浮层拦住：先 Esc 关浮层再敲"), 1);
 		return TUI_OVA_HANDLED;
 	}
 	if (ov->qlen + len >= sizeof(ov->query))

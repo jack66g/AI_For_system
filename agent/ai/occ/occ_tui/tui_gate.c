@@ -19,6 +19,7 @@ static struct termios gate_term_orig;
 
 #include "tui_core.h"
 #include "tui_input.h"
+#include "tui_lang.h"
 #include "tui_theme.h"
 #include "tui_utf8.h"
 #include "tui_gate.h"
@@ -309,11 +310,10 @@ static void gate_sink_fatal(tui_renderer *ren, int frc)
 	tui_sink_set_blocking(&ren->sink);
 	if (frc == -2)
 		fprintf(stderr,
-			"occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n",
+			L_("occ-tui: 输出看门狗 %dms 无消费（fbterm 楔死？）——退出重启\n"),
 			ren->sink.wd_ms);
 	else
-		fprintf(stderr,
-			"occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n");
+		fputs(L_("occ-tui: 输出 IO 错误（fbterm/pty 消亡？）——退出重启\n"), stderr);
 	tui_renderer_destroy(ren);
 	/* P-41/P-44d：exit 前击毙楔死的 fbterm 父进程（单点、恰一次；
 	 * 时机取舍同 tui_view_run 收口——人话行已落 stderr 文件） */
@@ -418,11 +418,11 @@ static int gate_run_ui(int mode, int *unlocked)
 		box_frame(s, rows, cols);
 		if (mode == GATE_MODE_SETUP) {
 			draw_center(s, rows / 2 - 4, cols,
-				    "AIKernel 初始化", title_a);
+				    L_("AIKernel 初始化"), title_a);
 			draw_center(s, rows / 2 - 3, cols,
-				    "首次使用：设置 admin 密码（≥6 位）", mut_a);
+				    L_("首次使用：设置 admin 密码（≥6 位）"), mut_a);
 			draw_center(s, rows / 2 - 2, cols,
-				    stage == 0 ? "设置密码：" : "确认密码：",
+				    stage == 0 ? L_("设置密码：") : L_("确认密码："),
 				    txt_a);
 			draw_masked(s, rows / 2 - 1, cols,
 				    stage == 0 ? &f1 : &f2, 1);
@@ -430,15 +430,15 @@ static int gate_run_ui(int mode, int *unlocked)
 			draw_center(s, rows / 2 + 1, cols, status,
 				    status[0] ? err_a : txt_a);
 			draw_center(s, rows / 2 + 3, cols,
-				    "配置云端模型：解锁后 /models", mut_a);
+				    L_("配置云端模型：解锁后 /models"), mut_a);
 			draw_center(s, rows / 2 + 4, cols,
-				    "本地模型：/models 选 ollama", mut_a);
+				    L_("本地模型：/models 选 ollama"), mut_a);
 		} else {
 			draw_center(s, rows / 2 - 4, cols,
 				    "AIKernel · alpha", title_a);
 			draw_center(s, rows / 2 - 3, cols,
-				    "用户：admin", txt_a);
-			draw_center(s, rows / 2 - 2, cols, "密码：", txt_a);
+				    L_("用户：admin"), txt_a);
+			draw_center(s, rows / 2 - 2, cols, L_("密码："), txt_a);
 			draw_masked(s, rows / 2 - 1, cols, &f1, 1);
 			if (login_note[0]) {
 				snprintf(status_buf, sizeof(status_buf), "%s",
@@ -449,7 +449,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			draw_center(s, rows / 2 + 1, cols, status,
 				    status[0] ? err_a : txt_a);
 			draw_center(s, rows / 2 + 3, cols,
-				    "Enter 登录 · Ctrl-C 退出", mut_a);
+				    L_("Enter 登录 · Ctrl-C 退出"), mut_a);
 		}
 		{
 			int frc = tui_renderer_flush(ren, rows / 2 - 1,
@@ -472,23 +472,23 @@ static int gate_run_ui(int mode, int *unlocked)
 				break;
 			}
 			if (done) {
-				if (stage == 0) {
-					if (f1.len < 6) {
-						snprintf(status_buf,
-							 sizeof(status_buf),
-							 "密码至少 6 位，重输");
-						memset(&f1, 0, sizeof(f1));
-					} else {
-						stage = 1;
-						snprintf(status_buf,
-							 sizeof(status_buf),
-							 "再输入一次确认");
-					}
+					if (stage == 0) {
+						if (f1.len < 6) {
+							snprintf(status_buf,
+								 sizeof(status_buf),
+								 "%s", L_("密码至少 6 位，重输"));
+							memset(&f1, 0, sizeof(f1));
+						} else {
+							stage = 1;
+							snprintf(status_buf,
+								 sizeof(status_buf),
+								 "%s", L_("再输入一次确认"));
+						}
 				} else {
 					if (strcmp(f1.buf, f2.buf) != 0) {
 						snprintf(status_buf,
 							 sizeof(status_buf),
-							 "两次不一致，重新设置");
+							 "%s", L_("两次不一致，重新设置"));
 						memset(&f1, 0, sizeof(f1));
 						memset(&f2, 0, sizeof(f2));
 						stage = 0;
@@ -506,7 +506,7 @@ static int gate_run_ui(int mode, int *unlocked)
 						fails = 0;
 						snprintf(login_note,
 							 sizeof(login_note),
-							 "密码已由其他控制台设置，请登录");
+							 "%s", L_("密码已由其他控制台设置，请登录"));
 						continue;
 					} else if (tui_gate_hash(f1.buf,
 								 hash) == 0 &&
@@ -519,7 +519,7 @@ static int gate_run_ui(int mode, int *unlocked)
 					} else {
 						snprintf(status_buf,
 							 sizeof(status_buf),
-							 "写入失败（权限？）");
+							 "%s", L_("写入失败（权限？）"));
 						memset(&f2, 0, sizeof(f2));
 					}
 				}
@@ -542,7 +542,7 @@ static int gate_run_ui(int mode, int *unlocked)
 				int frc;
 
 				snprintf(status_buf, sizeof(status_buf),
-					 "尝试过多，冷却 %d 秒…", left);
+					 L_("尝试过多，冷却 %d 秒…"), left);
 				/* 重绘状态行即可 */
 				draw_center(s, rows / 2 + 1, cols,
 					    status_buf, err_a);
@@ -594,7 +594,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			 * LOGIN 画面前状态就被清空——错误消息从未上过屏。
 			 * 改直接写 status_buf（SETUP 口径）。 */
 			snprintf(status_buf, sizeof(status_buf),
-				 "密码不正确（%d/%d）", fails, GATE_MAX_FAIL);
+				 L_("密码不正确（%d/%d）"), fails, GATE_MAX_FAIL);
 			memset(&f1, 0, sizeof(f1));
 		}
 	}

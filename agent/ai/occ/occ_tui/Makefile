@@ -21,7 +21,7 @@ INCLUDES := -I.
 #（全屏覆盖层）——全 libc。tui_data（aik_json）刻意不入本库（头注不变）。
 LIB_SRCS := tui_utf8.c tui_core.c tui_input.c tui_frame.c tui_chat.c \
 	    tui_inputbox.c tui_sidebar.c tui_view.c tui_theme.c \
-	    tui_usage.c tui_keymap.c tui_overlay.c tui_gate.c
+	    tui_usage.c tui_keymap.c tui_overlay.c tui_gate.c tui_lang.c
 LIB_OBJS := $(LIB_SRCS:%.c=obj/%.o)
 
 # P-41/P-44：test_sinkbuf（缓冲汇+整帧原子刷+wd 单元）/ test_wd
