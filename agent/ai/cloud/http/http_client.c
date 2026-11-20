@@ -134,16 +134,21 @@ static int tcp_connect(const char *host, int port)
 	for (rp = res; rp; rp = rp->ai_next) {
 		sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 		if (sock < 0) continue;
+		{ struct timeval tv;
+		  /* O-27（T-2 B8 真机实证）：超时必须先于 connect() 设——
+		   * Linux 语义 connect() 同受 SO_SNDTIMEO 管。旧版设在
+		   * connect 之后：黑洞地址的阻塞 connect 吃内核 SYN 重试
+		   * ~127s+ 才 ETIMEDOUT，g_connect_timeout 形同虚设
+		   * （headless occ -p 断网三分钟静默的真身）。 */
+		  tv.tv_sec = g_read_timeout; tv.tv_usec = 0;
+		  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		  tv.tv_sec = g_connect_timeout; tv.tv_usec = 0;
+		  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
 		if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) break;
 		close(sock);
 	}
 	freeaddrinfo(res);
 	if (!rp) return -1;
-	{ struct timeval tv;
-	  tv.tv_sec = g_read_timeout; tv.tv_usec = 0;
-	  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	  tv.tv_sec = g_connect_timeout; tv.tv_usec = 0;
-	  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
 	return sock;
 }
 

@@ -125,7 +125,8 @@ PURE_BINS := tests/test_provider tests/test_openai_build \
 
 # 真传输程序（链 http_client + mbedtls）：occ_smoke（差分台架真调用证据）
 # + test_http_headers（本地 mock 断言请求头字节——共享文件增量行为门）
-NET_BINS := tests/occ_smoke tests/test_http_headers
+# + test_net_timeout（O-27：黑洞地址 connect 超时先置的有界失败）
+NET_BINS := tests/occ_smoke tests/test_http_headers tests/test_net_timeout
 
 # occ_core 单测（T9a3）：session（sqlite）+ tokens（纯计算）
 # + loop（fixture 回放全环，链传输因 loop 默认路径引用 occ_llm_call）
@@ -159,7 +160,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
@@ -169,7 +170,7 @@ test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_c
 		  tests/test_tui_data tests/test_sme tests/test_ac \
 		  tests/test_telemetry tests/test_replay tests/test_task \
 		  tests/test_orch tests/test_review tests/test_w2gate \
-		  tests/test_netcfg tests/test_cli_rc; do \
+		  tests/test_netcfg tests/test_cli_rc tests/test_net_timeout; do \
 		./$$t || exit 1; \
 	done
 	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo+p2a): ALL GREEN"
@@ -351,6 +352,10 @@ tests/occ_smoke: tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTT
 # 头注入行为门（T9a2）：本地 mock 断言 ex/旧通道请求字节（明文 http）
 tests/test_http_headers: tests/test_http_headers.c $(HTTP_CLIENT_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_http_headers.c $(HTTP_CLIENT_OBJ) $(MBEDTLS_LIBS) $(LDLIBS)
+
+# O-27：黑洞地址 connect 超时先置的有界失败（TEST-NET-1 不可路由）
+tests/test_net_timeout: tests/test_net_timeout.c $(HTTP_CLIENT_OBJ)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_net_timeout.c $(HTTP_CLIENT_OBJ) $(MBEDTLS_LIBS) $(LDLIBS)
 
 # 目录/注册表单测（aik_json only）
 tests/test_catalog: tests/test_catalog.c $(OBJ_DIR)/occ_llm/catalog.o $(STORE_LIB)

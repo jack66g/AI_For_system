@@ -212,6 +212,24 @@ static int backoff_wait(long long delay_ms)
 	return occ_interrupt_flag ? 1 : 0;
 }
 
+/* O-27：provider 连接超时（秒）——env 覆盖，缺省 10，钳 1..120。
+ * 黑洞断网下超时类重试（OCC_LLM_RETRY_TIMEOUT_MAX 缺省 3）全程
+ * ≈36s 诚实收口；旧 60s 连接超时×3+退避≈3 分钟静默（B8 实证）。 */
+static int llm_connect_timeout_s(void)
+{
+	const char *v = getenv("OCC_LLM_CONNECT_TIMEOUT_S");
+	long x;
+
+	if (!v || !v[0])
+		return 10;
+	x = strtol(v, NULL, 10);
+	if (x < 1)
+		x = 1;
+	if (x > 120)
+		x = 120;
+	return (int)x;
+}
+
 int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 		 occ_event_cb cb, void *ud, char **err_out)
 {
@@ -327,7 +345,9 @@ int occ_llm_call(const occ_provider *p, const occ_llm_req *req,
 			c.err[0] = '\0';
 
 		pthread_mutex_lock(&g_occ_http_lock);
-		https_set_timeout(60, 60);
+		/* O-27：连接超时缺省 60→10s（读超时 60s 不动——流式
+		 * 响应合法长间隔）。 */
+		https_set_timeout(llm_connect_timeout_s(), 60);
 		/* LT-BUG-006：本尝试传输窗口内挂取消钩子（读循环逐块查
 		 * 旗标）；用后即清——静态共享面不留跨尝试残留 */
 		https_set_cancel_cb(occ_cancel_poll, NULL);
