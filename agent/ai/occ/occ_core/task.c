@@ -14,6 +14,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "task.h"
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -172,9 +174,9 @@ static int task_state_fail(int rc, const char *id, const char *what,
 			   char *err, size_t errlen)
 {
 	if (rc == 0)
-		set_err(err, errlen, "%s: 任务 %s 不存在", what, id);
+		set_err(err, errlen, L_("%s: 任务 %s 不存在"), what, id);
 	else
-		set_err(err, errlen, "%s: 读任务态失败", what);
+		set_err(err, errlen, L_("%s: 读任务态失败"), what);
 	return -1;
 }
 
@@ -571,8 +573,8 @@ int occ_task_create(occ_db *db, const char *parent_session,
 	}
 	/* R2：缺省 2；brief 覆写上限 1-3，超界拒绝（不静默钳制） */
 	if (rework_max > OCC_TASK_REWORK_MAX_HI) {
-		set_err(err, errlen, "occ_task_create: rework_max %d 超界"
-			"（覆写上限 1-%d）", rework_max,
+		set_err(err, errlen, L_("occ_task_create: rework_max %d 超界"
+					"（覆写上限 1-%d）"), rework_max,
 			OCC_TASK_REWORK_MAX_HI);
 		return -1;
 	}
@@ -585,7 +587,7 @@ int occ_task_create(occ_db *db, const char *parent_session,
 	sqlite3_bind_text(st, 1, parent_session, -1, SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_ROW) {
 		sqlite3_finalize(st);
-		set_err(err, errlen, "occ_task_create: 主会话 %s 不存在",
+		set_err(err, errlen, L_("occ_task_create: 主会话 %s 不存在"),
 			parent_session);
 		return -1;
 	}
@@ -657,9 +659,9 @@ int occ_task_dispatch(occ_db *db, const char *id, const char *child_session,
 	if (strcmp(cur, OCC_TASK_ST_PENDING) != 0 &&
 	    strcmp(cur, OCC_TASK_ST_REWORK) != 0) {
 		tx_rollback(db);
-		set_err(err, errlen, "occ_task_dispatch: 非法迁移 %s→%s"
-			"（dispatch 仅允许 pending/rework）", cur,
-			OCC_TASK_ST_DISPATCHED);
+		set_err(err, errlen, L_("occ_task_dispatch: 非法迁移 %s→%s"
+					"（dispatch 仅允许 pending/rework）"),
+			cur, OCC_TASK_ST_DISPATCHED);
 		return -1;
 	}
 	if (task_set_status(db, id, OCC_TASK_ST_DISPATCHED)) {
@@ -689,7 +691,7 @@ int occ_task_dispatch(occ_db *db, const char *id, const char *child_session,
 	}
 	if (ev_add(db, id, OCC_TASK_EV_DISPATCH, child_session)) {
 		tx_rollback(db);
-		set_err(err, errlen, "dispatch: 事件落库失败");
+		set_err(err, errlen, "%s", L_("dispatch: 事件落库失败"));
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))
@@ -717,8 +719,8 @@ int occ_task_review(occ_db *db, const char *id, const char *result_json,
 	}
 	if (strcmp(cur, OCC_TASK_ST_DISPATCHED) != 0) {
 		tx_rollback(db);
-		set_err(err, errlen, "occ_task_review: 非法迁移 %s→%s"
-			"（review 仅允许 dispatched）", cur,
+		set_err(err, errlen, L_("occ_task_review: 非法迁移 %s→%s"
+					"（review 仅允许 dispatched）"), cur,
 			OCC_TASK_ST_IN_REVIEW);
 		return -1;
 	}
@@ -760,8 +762,8 @@ int occ_task_verdict(occ_db *db, const char *id, int pass,
 	}
 	if (strcmp(cur, OCC_TASK_ST_IN_REVIEW) != 0) {
 		tx_rollback(db);
-		set_err(err, errlen, "occ_task_verdict: 非法迁移 %s→裁决"
-			"（verdict 仅允许 in_review）", cur);
+		set_err(err, errlen, L_("occ_task_verdict: 非法迁移 %s→裁决"
+					"（verdict 仅允许 in_review）"), cur);
 		return -1;
 	}
 	new_count = pass ? rwc : rwc + 1;
@@ -785,28 +787,28 @@ int occ_task_verdict(occ_db *db, const char *id, int pass,
 	sqlite3_finalize(st);
 	if (ev_add(db, id, OCC_TASK_EV_VERDICT, verdict_json)) {
 		tx_rollback(db);
-		set_err(err, errlen, "verdict: 事件落库失败");
+		set_err(err, errlen, "%s", L_("verdict: 事件落库失败"));
 		return -1;
 	}
 	if (pass) {
 		if (task_set_status(db, id, OCC_TASK_ST_DONE) ||
 		    ev_add(db, id, OCC_TASK_EV_DONE, verdict_json)) {
 			tx_rollback(db);
-			set_err(err, errlen, "verdict: done 落库失败");
+			set_err(err, errlen, "%s", L_("verdict: done 落库失败"));
 			return -1;
 		}
 	} else if (new_count <= rwm) {
 		if (task_set_status(db, id, OCC_TASK_ST_REWORK) ||
 		    ev_add(db, id, OCC_TASK_EV_REWORK, verdict_json)) {
 			tx_rollback(db);
-			set_err(err, errlen, "verdict: rework 落库失败");
+			set_err(err, errlen, "%s", L_("verdict: rework 落库失败"));
 			return -1;
 		}
 	} else {
 		if (task_set_status(db, id, OCC_TASK_ST_ESCALATED) ||
 		    ev_add(db, id, OCC_TASK_EV_ESCALATE, verdict_json)) {
 			tx_rollback(db);
-			set_err(err, errlen, "verdict: escalate 落库失败");
+			set_err(err, errlen, "%s", L_("verdict: escalate 落库失败"));
 			return -1;
 		}
 	}
@@ -837,8 +839,9 @@ int occ_task_escalate(occ_db *db, const char *id, const char *reason_json,
 	    strcmp(cur, OCC_TASK_ST_IN_REVIEW) != 0 &&
 	    strcmp(cur, OCC_TASK_ST_REWORK) != 0) {
 		tx_rollback(db);
-		set_err(err, errlen, "occ_task_escalate: 非法迁移 %s→%s"
-			"（escalate 仅允许 dispatched/in_review/rework）",
+		set_err(err, errlen,
+			L_("occ_task_escalate: 非法迁移 %s→%s"
+			   "（escalate 仅允许 dispatched/in_review/rework）"),
 			cur, OCC_TASK_ST_ESCALATED);
 		return -1;
 	}
@@ -874,14 +877,15 @@ int occ_task_distill(occ_db *db, const char *id, const char *payload_json,
 	}
 	if (strcmp(cur, OCC_TASK_ST_DONE) != 0) {
 		tx_rollback(db);
-		set_err(err, errlen, "occ_task_distill: 非法迁移 %s→distill"
-			"（distill 仅允许 done——未完成/上抛任务无蒸馏）",
+		set_err(err, errlen,
+			L_("occ_task_distill: 非法迁移 %s→distill"
+			   "（distill 仅允许 done——未完成/上抛任务无蒸馏）"),
 			cur);
 		return -1;
 	}
 	if (ev_add(db, id, OCC_TASK_EV_DISTILL, payload_json)) {
 		tx_rollback(db);
-		set_err(err, errlen, "distill: 事件落库失败");
+		set_err(err, errlen, "%s", L_("distill: 事件落库失败"));
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))
@@ -906,9 +910,9 @@ int occ_task_note_kind(occ_db *db, const char *id, const char *kind,
 	}
 	if (strcmp(kind, OCC_TASK_EV_RETURN) &&
 	    strcmp(kind, OCC_TASK_EV_RESULT_FILE)) {
-		set_err(err, errlen,
-			"occ_task_note_kind: kind 白名单外（仅 return/"
-			"result_file——状态机 kind 不经此面）");
+		set_err(err, errlen, "%s",
+			L_("occ_task_note_kind: kind 白名单外（仅 return/"
+			  "result_file——状态机 kind 不经此面）"));
 		return -1;
 	}
 	if (tx_begin(db, err, errlen))
@@ -921,7 +925,7 @@ int occ_task_note_kind(occ_db *db, const char *id, const char *kind,
 	}
 	if (ev_add(db, id, kind, payload_json)) {
 		tx_rollback(db);
-		set_err(err, errlen, "note_kind: 事件落库失败");
+		set_err(err, errlen, "%s", L_("note_kind: 事件落库失败"));
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))
@@ -983,8 +987,8 @@ int occ_task_budget_baseline(occ_db *db, const char *id, long long max_tokens,
 	int rc, rwc, rwm;
 
 	if (!db || !id || !id[0] || max_tokens <= 0) {
-		set_err(err, errlen,
-			"occ_task_budget_baseline: bad args（max_tokens 须正）");
+		set_err(err, errlen, "%s",
+			L_("occ_task_budget_baseline: bad args（max_tokens 须正）"));
 		return -1;
 	}
 	if (tx_begin(db, err, errlen))
@@ -1002,7 +1006,7 @@ int occ_task_budget_baseline(occ_db *db, const char *id, long long max_tokens,
 		 max_tokens, bin, bout);
 	if (ev_add(db, id, OCC_TASK_EV_BUDGET, pj)) {
 		tx_rollback(db);
-		set_err(err, errlen, "budget_baseline: 事件落库失败");
+		set_err(err, errlen, "%s", L_("budget_baseline: 事件落库失败"));
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))
@@ -1073,7 +1077,7 @@ int occ_task_budget_add(occ_db *db, const char *id,
 		 bin, bout);
 	if (ev_add(db, id, OCC_TASK_EV_BUDGET, pj)) {
 		tx_rollback(db);
-		set_err(err, errlen, "budget_add: 事件落库失败");
+		set_err(err, errlen, "%s", L_("budget_add: 事件落库失败"));
 		return -1;
 	}
 	if (tx_commit(db, err, errlen))

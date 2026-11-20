@@ -795,11 +795,11 @@ static size_t exec_pending(occ_db *db, const char *sess_id,
 			  calls[i].arguments ? calls[i].arguments : "{}", 0);
 		sink_emit(opts, OCC_SINK_TOOL_END,
 			  calls[i].tool ? calls[i].tool : "", 0,
-			  "未执行（用户中断）——安全点停止跳过该调用", 1);
+			  L_("未执行（用户中断）——安全点停止跳过该调用"), 1);
 		occ_tool_record(db, sess_id, asst_msg_id,
 				calls[i].tool ? calls[i].tool : "",
 				calls[i].arguments ? calls[i].arguments : "{}",
-				"未执行（用户中断）——安全点停止跳过该调用",
+				L_("未执行（用户中断）——安全点停止跳过该调用"),
 				1, 0, calls[i].id ? calls[i].id : "",
 				NULL, 0, NULL, 0, ebuf, sizeof(ebuf));
 	}
@@ -890,8 +890,8 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 					    dbuf_err, sizeof(dbuf_err))) {
 			char nbuf[224];
 
-			snprintf(nbuf, sizeof(nbuf), "workdir 落库失败（%s）",
-				 dbuf_err);
+			snprintf(nbuf, sizeof(nbuf),
+				 L_("workdir 落库失败（%s）"), dbuf_err);
 			sink_emit(opts, OCC_SINK_NOTICE, nbuf, 0, NULL, 0);
 		}
 	}
@@ -1003,7 +1003,7 @@ int occ_loop_run(occ_db *db, const occ_provider *p, const char *session_id,
 				char nbuf[224];
 
 				snprintf(nbuf, sizeof(nbuf),
-					 "删注记失败（%s）", dbuf_err);
+					 L_("删注记失败（%s）"), dbuf_err);
 				sink_emit(opts, OCC_SINK_NOTICE, nbuf, 0,
 					  NULL, 0);
 			}

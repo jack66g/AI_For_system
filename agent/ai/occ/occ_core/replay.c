@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 #define RP_COLS 72			/* 行估算口径（80 列减转写区留白） */
 
 int occ_replay_est_lines(const occ_msg_row *r)
@@ -210,7 +212,7 @@ int occ_replay_plan(const occ_msg_row *rows, size_t n,
 			out[cnt].kind = OCC_RP_TOOL_END;
 			out[cnt].text = c->tool ? c->tool : "?";
 			out[cnt].arg = summary ? summary :
-					"(结果未落库)";
+					L_("(结果未落库)");
 			out[cnt].rc = rc;
 			cnt++;
 		}

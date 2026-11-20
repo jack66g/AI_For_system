@@ -17,6 +17,8 @@
 #define _GNU_SOURCE
 #include "occ_tools.h"
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -98,8 +100,7 @@ static void fmt_ts(char *buf, size_t buflen)
 static void trace_warn_once(const char *path, const char *why)
 {
 	if (!g_warned) {
-		fprintf(stderr, "occ-trace: %s: %s（trace 丢弃，不阻断）\n",
-			path, why);
+		fprintf(stderr, L_("occ-trace: %s: %s（trace 丢弃，不阻断）\n"), path, why);
 		g_warned = 1;
 	}
 }

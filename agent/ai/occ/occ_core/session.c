@@ -889,8 +889,8 @@ int occ_session_create_kind(occ_db *db, const char *model, const char *kind,
 		kind = OCC_SK_MAIN;
 	if (strcmp(kind, OCC_SK_MAIN) != 0 &&
 	    strcmp(kind, OCC_SK_CHILD) != 0) {
-		set_err(err, errlen, ("occ_session_create: kind 非法（%s）"
-				       "——仅 main/child"), kind);
+		set_err(err, errlen, L_("occ_session_create: kind 非法（%s）"
+					"——仅 main/child"), kind);
 		return -1;
 	}
 	if (gen_id(id, sizeof(id), "ses_")) {
@@ -1170,7 +1170,7 @@ int occ_session_archive(occ_db *db, const char *id, char *err, size_t errlen)
 	sqlite3_bind_text(st, 2, id, -1, SQLITE_TRANSIENT);
 	if (sqlite3_step(st) != SQLITE_DONE ||
 	    sqlite3_changes(db->h) == 0) {
-		set_err(err, errlen, ("会话 %s 不存在"), id);
+		set_err(err, errlen, L_("会话 %s 不存在"), id);
 		sqlite3_finalize(st);
 		tx_rollback(db);
 		return -1;
@@ -1296,7 +1296,7 @@ int occ_session_delete(occ_db *db, const char *session_id, char *err,
 	n = o12_count_session(db, session_id);
 	if (n == 0) {
 		tx_rollback(db);
-		set_err(err, errlen, ("会话 %s 不存在"), session_id);
+		set_err(err, errlen, L_("会话 %s 不存在"), session_id);
 		return -1;
 	}
 	if (n < 0) {

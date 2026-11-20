@@ -49,6 +49,8 @@
 				 * （bash 工具结果源端净化与 occ_llm
 				 * 请求体出口兜底同一实现） */
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 /* ---- 结果缓冲（occ_tools_priv.h 契约实现） ---- */
 
 void occ_ob_put(occ_obuf *o, const char *s, size_t n)
@@ -756,27 +758,24 @@ static int tool_read(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	size_t lineno = 0, shown = 0;
 
 	if (!path) {
-		occ_ob_puts(o, "ERROR: read 缺少参数 path");
+		occ_ob_puts(o, L_("ERROR: read 缺少参数 path"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-		occ_ob_printf(o, "ERROR: read 路径无法解析：%s", path);
+		occ_ob_printf(o, L_("ERROR: read 路径无法解析：%s"), path);
 		return -1;
 	}
 	if (read_whole(abs, 4 * 1024 * 1024, &data, &len)) {
 		if (errno == EFBIG) {
-			occ_ob_printf(o, "ERROR: read %s 过大"
-				      "（上限 4MB）", abs);
+			occ_ob_printf(o, L_("ERROR: read %s 过大（上限 4MB）"), abs);
 		} else {
-			occ_ob_printf(o, "ERROR: read %s 失败：%s", abs,
-				      strerror(errno));
+			occ_ob_printf(o, L_("ERROR: read %s 失败：%s"), abs, strerror(errno));
 		}
 		return -1;
 	}
 	if (is_binary(data, len)) {
 		free(data);
-		occ_ob_printf(o, "ERROR: read %s 拒绝读取二进制文件"
-			      "（%zu 字节，含 NUL）", abs, len);
+		occ_ob_printf(o, L_("ERROR: read %s 拒绝读取二进制文件（%zu 字节，含 NUL）"), abs, len);
 		return -1;
 	}
 	if (offset < 1)
@@ -807,13 +806,11 @@ static int tool_read(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	}
 	free(data);
 	if (!shown && lineno)
-		occ_ob_printf(o, "（%s 共 %zu 行，offset=%lld 超出范围）",
-			      abs, lineno, offset);
+		occ_ob_printf(o, L_("（%s 共 %zu 行，offset=%lld 超出范围）"), abs, lineno, offset);
 	else if (!shown)
-		occ_ob_printf(o, "（%s 为空文件）", abs);
+		occ_ob_printf(o, L_("（%s 为空文件）"), abs);
 	else
-		occ_ob_printf(o, "（%s 第 %lld-%zu 行，共 %zu 行）",
-			      abs, offset, offset + shown - 1, lineno);
+		occ_ob_printf(o, L_("（%s 第 %lld-%zu 行，共 %zu 行）"), abs, offset, offset + shown - 1, lineno);
 	return 0;
 }
 
@@ -835,9 +832,7 @@ static int write_guard(const occ_tool_ctx *ctx, const char *abs, occ_obuf *o)
 	    ctx->w2->tier == OCC_W2_TIER_PRIVILEGED &&
 	    !occ_abs_under_home_occ(abs))
 		return 0;
-	occ_ob_printf(o, "ERROR: 目标 %s 越界：允许域=工作目录子树 ∪ "
-		      "/tmp ∪ /var/ai ∪ $HOME 子树（W1 惯例；~/.occ 一律"
-		      "拒绝）", abs);
+	occ_ob_printf(o, L_("ERROR: 目标 %s 越界：允许域=工作目录子树 ∪ /tmp ∪ /var/ai ∪ $HOME 子树（W1 惯例；~/.occ 一律拒绝）"), abs);
 	return -1;
 }
 
@@ -851,15 +846,15 @@ static int tool_write(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	size_t clen;
 
 	if (!path || !content) {
-		occ_ob_puts(o, "ERROR: write 缺少参数 path/content");
+		occ_ob_puts(o, L_("ERROR: write 缺少参数 path/content"));
 		return -1;
 	}
 	if (strlen(content) > 512 * 1024) {
-		occ_ob_puts(o, "ERROR: write content 过大（上限 512KB）");
+		occ_ob_puts(o, L_("ERROR: write content 过大（上限 512KB）"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-		occ_ob_printf(o, "ERROR: write 路径无法解析：%s", path);
+		occ_ob_printf(o, L_("ERROR: write 路径无法解析：%s"), path);
 		return -1;
 	}
 	if (write_guard(ctx, abs, o))
@@ -878,32 +873,27 @@ static int tool_write(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			memcpy(parent, abs, pl);
 			parent[pl] = '\0';
 			if (mkdirs(parent)) {
-				occ_ob_printf(o, "ERROR: write 建父目录 %s "
-					      "失败：%s", parent,
-					      strerror(errno));
+				occ_ob_printf(o, L_("ERROR: write 建父目录 %s 失败：%s"), parent, strerror(errno));
 				return -1;
 			}
 		}
 	}
 	f = fopen(abs, "wb");
 	if (!f) {
-		occ_ob_printf(o, "ERROR: write 打开 %s 失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: write 打开 %s 失败：%s"), abs, strerror(errno));
 		return -1;
 	}
 	clen = strlen(content);
 	if (clen && fwrite(content, 1, clen, f) != clen) {
 		fclose(f);
-		occ_ob_printf(o, "ERROR: write %s 写入失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: write %s 写入失败：%s"), abs, strerror(errno));
 		return -1;
 	}
 	if (fclose(f)) {
-		occ_ob_printf(o, "ERROR: write %s 关闭失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: write %s 关闭失败：%s"), abs, strerror(errno));
 		return -1;
 	}
-	occ_ob_printf(o, "已写入 %s（%zu 字节）", abs, clen);
+	occ_ob_printf(o, L_("已写入 %s（%zu 字节）"), abs, clen);
 	return 0;
 }
 
@@ -922,35 +912,30 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	FILE *f;
 
 	if (!path || !olds || !news) {
-		occ_ob_puts(o, "ERROR: edit 缺少参数"
-			    " path/oldString/newString");
+		occ_ob_puts(o, L_("ERROR: edit 缺少参数 path/oldString/newString"));
 		return -1;
 	}
 	if (!olds[0]) {
-		occ_ob_puts(o, "ERROR: edit oldString 为空串"
-			    "（必须给出非空精确文本）");
+		occ_ob_puts(o, L_("ERROR: edit oldString 为空串（必须给出非空精确文本）"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-		occ_ob_printf(o, "ERROR: edit 路径无法解析：%s", path);
+		occ_ob_printf(o, L_("ERROR: edit 路径无法解析：%s"), path);
 		return -1;
 	}
 	if (write_guard(ctx, abs, o))
 		return -1;
 	if (read_whole(abs, 8 * 1024 * 1024, &data, &len)) {
 		if (errno == EFBIG) {
-			occ_ob_printf(o, "ERROR: edit %s 过大（上限 8MB）",
-				      abs);
+			occ_ob_printf(o, L_("ERROR: edit %s 过大（上限 8MB）"), abs);
 		} else {
-			occ_ob_printf(o, "ERROR: edit 读 %s 失败：%s", abs,
-				      strerror(errno));
+			occ_ob_printf(o, L_("ERROR: edit 读 %s 失败：%s"), abs, strerror(errno));
 		}
 		return -1;
 	}
 	if (is_binary(data, len)) {
 		free(data);
-		occ_ob_printf(o, "ERROR: edit %s 拒绝编辑二进制文件"
-			      "（含 NUL 字节）", abs);
+		occ_ob_printf(o, L_("ERROR: edit %s 拒绝编辑二进制文件（含 NUL 字节）"), abs);
 		return -1;
 	}
 	nold = strlen(olds);
@@ -958,15 +943,12 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	nocc = count_occurrences(data, len, olds, nold);
 	if (!nocc) {
 		free(data);
-		occ_ob_printf(o, "ERROR: edit %s 未找到 oldString"
-			      "（%zu 字节精确文本，0 次命中）", abs, nold);
+		occ_ob_printf(o, L_("ERROR: edit %s 未找到 oldString（%zu 字节精确文本，0 次命中）"), abs, nold);
 		return -1;
 	}
 	if (nocc > 1 && !all) {
 		free(data);
-		occ_ob_printf(o, "ERROR: edit %s oldString 命中 %zu 处"
-			      "——需改到唯一片段，或 replaceAll=true",
-			      abs, nocc);
+		occ_ob_printf(o, L_("ERROR: edit %s oldString 命中 %zu 处——需改到唯一片段，或 replaceAll=true"), abs, nocc);
 		return -1;
 	}
 	/* 快照 stage（原文件必然存在——上面 read_whole 已证） */
@@ -976,7 +958,7 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	out = malloc(len + (nnew > nold ? (nnew - nold) * nocc : 0) + 1);
 	if (!out) {
 		free(data);
-		occ_ob_puts(o, "ERROR: edit 内存不足");
+		occ_ob_puts(o, L_("ERROR: edit 内存不足"));
 		return -1;
 	}
 	{
@@ -1010,29 +992,25 @@ static int tool_edit(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	if (!f) {
 		free(data);
 		free(out);
-		occ_ob_printf(o, "ERROR: edit 打开 %s 失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: edit 打开 %s 失败：%s"), abs, strerror(errno));
 		return -1;
 	}
 	if (olen && fwrite(out, 1, olen, f) != olen) {
 		fclose(f);
 		free(data);
 		free(out);
-		occ_ob_printf(o, "ERROR: edit %s 写入失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: edit %s 写入失败：%s"), abs, strerror(errno));
 		return -1;
 	}
 	if (fclose(f)) {
 		free(data);
 		free(out);
-		occ_ob_printf(o, "ERROR: edit %s 关闭失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: edit %s 关闭失败：%s"), abs, strerror(errno));
 		return -1;
 	}
 	free(data);
 	free(out);
-	occ_ob_printf(o, "已编辑 %s：%zu 处替换（%s），文件 %zu → %zu 字节",
-		      abs, nocc, all ? "replaceAll" : "唯一命中", len, olen);
+	occ_ob_printf(o, L_("已编辑 %s：%zu 处替换（%s），文件 %zu → %zu 字节"), abs, nocc, all ? "replaceAll" : L_("唯一命中"), len, olen);
 	return 0;
 }
 
@@ -1045,42 +1023,37 @@ static int tool_rm(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	struct stat st;
 
 	if (!path) {
-		occ_ob_puts(o, "ERROR: rm 缺少参数 path");
+		occ_ob_puts(o, L_("ERROR: rm 缺少参数 path"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-		occ_ob_printf(o, "ERROR: rm 路径无法解析：%s", path);
+		occ_ob_printf(o, L_("ERROR: rm 路径无法解析：%s"), path);
 		return -1;
 	}
 	if (write_guard(ctx, abs, o))
 		return -1;
 	if (lstat(abs, &st)) {
-		occ_ob_printf(o, "ERROR: rm %s 不存在：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: rm %s 不存在：%s"), abs, strerror(errno));
 		return -1;
 	}
 	if (S_ISDIR(st.st_mode)) {
 		/* v1 诚实限制：仅空目录（非空报错建议逐个删——不做递归） */
 		if (rmdir(abs)) {
-			occ_ob_printf(o, "ERROR: rm %s 非空目录"
-				      "（v1 仅删普通文件与空目录——"
-				      "请逐个删除后再删目录）", abs);
+			occ_ob_printf(o, L_("ERROR: rm %s 非空目录（v1 仅删普通文件与空目录——请逐个删除后再删目录）"), abs);
 			return -1;
 		}
-		occ_ob_printf(o, "已删除空目录 %s", abs);
+		occ_ob_printf(o, L_("已删除空目录 %s"), abs);
 		return 0;
 	}
 	if (!S_ISREG(st.st_mode)) {
-		occ_ob_printf(o, "ERROR: rm %s 非普通文件"
-			      "（符号链接/设备等 v1 不删）", abs);
+		occ_ob_printf(o, L_("ERROR: rm %s 非普通文件（符号链接/设备等 v1 不删）"), abs);
 		return -1;
 	}
 	if (unlink(abs)) {
-		occ_ob_printf(o, "ERROR: rm %s 删除失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: rm %s 删除失败：%s"), abs, strerror(errno));
 		return -1;
 	}
-	occ_ob_printf(o, "已删除 %s", abs);
+	occ_ob_printf(o, L_("已删除 %s"), abs);
 	return 0;
 }
 
@@ -1092,44 +1065,38 @@ static int tool_mv(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	struct stat st;
 
 	if (!src || !dst) {
-		occ_ob_puts(o, "ERROR: mv 缺少参数 src/dst");
+		occ_ob_puts(o, L_("ERROR: mv 缺少参数 src/dst"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, src, sabs, sizeof(sabs))) {
-		occ_ob_printf(o, "ERROR: mv 源路径无法解析：%s", src);
+		occ_ob_printf(o, L_("ERROR: mv 源路径无法解析：%s"), src);
 		return -1;
 	}
 	if (resolve_arg_path(ctx, dst, dabs, sizeof(dabs))) {
-		occ_ob_printf(o, "ERROR: mv 目标路径无法解析：%s", dst);
+		occ_ob_printf(o, L_("ERROR: mv 目标路径无法解析：%s"), dst);
 		return -1;
 	}
 	/* mv 两端各查（与 write_guard 同构：域 + w2_confirmed 豁免） */
 	if (write_guard(ctx, sabs, o) || write_guard(ctx, dabs, o))
 		return -1;
 	if (lstat(sabs, &st)) {
-		occ_ob_printf(o, "ERROR: mv 源 %s 不存在：%s", sabs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: mv 源 %s 不存在：%s"), sabs, strerror(errno));
 		return -1;
 	}
 	if (!lstat(dabs, &st)) {
 		/* v1 诚实限制：不覆盖已有目标（防误覆盖——rename(2) 对
 		 * 普通文件会静默覆盖，显式拒绝） */
-		occ_ob_printf(o, "ERROR: mv 目标 %s 已存在"
-			      "（v1 不覆盖——先 rm 再 mv，或换个名字）",
-			      dabs);
+		occ_ob_printf(o, L_("ERROR: mv 目标 %s 已存在（v1 不覆盖——先 rm 再 mv，或换个名字）"), dabs);
 		return -1;
 	}
 	if (rename(sabs, dabs)) {
 		if (errno == EXDEV)
-			occ_ob_printf(o, "ERROR: mv %s → %s 跨设备"
-				      "（v1 不做 copy+unlink——可 read+"
-				      "write 复制后 rm 原件）", sabs, dabs);
+			occ_ob_printf(o, L_("ERROR: mv %s → %s 跨设备（v1 不做 copy+unlink——可 read+write 复制后 rm 原件）"), sabs, dabs);
 		else
-			occ_ob_printf(o, "ERROR: mv %s → %s 失败：%s",
-				      sabs, dabs, strerror(errno));
+			occ_ob_printf(o, L_("ERROR: mv %s → %s 失败：%s"), sabs, dabs, strerror(errno));
 		return -1;
 	}
-	occ_ob_printf(o, "已移动 %s → %s", sabs, dabs);
+	occ_ob_printf(o, L_("已移动 %s → %s"), sabs, dabs);
 	return 0;
 }
 
@@ -1139,22 +1106,21 @@ static int tool_mkdir(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	char abs[4096];
 
 	if (!path) {
-		occ_ob_puts(o, "ERROR: mkdir 缺少参数 path");
+		occ_ob_puts(o, L_("ERROR: mkdir 缺少参数 path"));
 		return -1;
 	}
 	if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-		occ_ob_printf(o, "ERROR: mkdir 路径无法解析：%s", path);
+		occ_ob_printf(o, L_("ERROR: mkdir 路径无法解析：%s"), path);
 		return -1;
 	}
 	if (write_guard(ctx, abs, o))
 		return -1;
 	/* -p 语义：父目录递归建（mkdirs 幂等——EEXIST 不算错） */
 	if (mkdirs(abs)) {
-		occ_ob_printf(o, "ERROR: mkdir %s 创建失败：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: mkdir %s 创建失败：%s"), abs, strerror(errno));
 		return -1;
 	}
-	occ_ob_printf(o, "已创建目录 %s（已存在则幂等成功）", abs);
+	occ_ob_printf(o, L_("已创建目录 %s（已存在则幂等成功）"), abs);
 	return 0;
 }
 
@@ -1247,24 +1213,23 @@ static int tool_glob(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	size_t i;
 
 	if (!pattern || !pattern[0]) {
-		occ_ob_puts(o, "ERROR: glob 缺少参数 pattern");
+		occ_ob_puts(o, L_("ERROR: glob 缺少参数 pattern"));
 		return -1;
 	}
 	if (path && path[0]) {
 		if (resolve_arg_path(ctx, path, root, sizeof(root))) {
-			occ_ob_printf(o, "ERROR: glob 根目录无法解析：%s",
-				      path);
+			occ_ob_printf(o, L_("ERROR: glob 根目录无法解析：%s"), path);
 			return -1;
 		}
 	} else if (!ctx_cwd(ctx, root, sizeof(root))) {
-		occ_ob_puts(o, "ERROR: glob 无法确定工作目录");
+		occ_ob_puts(o, L_("ERROR: glob 无法确定工作目录"));
 		return -1;
 	}
 	memset(&g, 0, sizeof(g));
 	memset(parts, 0, sizeof(parts));
 	pbuf = strdup(pattern);
 	if (!pbuf) {
-		occ_ob_puts(o, "ERROR: glob 内存不足");
+		occ_ob_puts(o, L_("ERROR: glob 内存不足"));
 		return -1;
 	}
 	for (char *tok = strtok_r(pbuf, "/", &save); tok;
@@ -1326,8 +1291,7 @@ static int tool_glob(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			} else {
 				/* 字面前缀不存在/非目录（且非全字面文件）：
 				 * 必然无匹配——快路空结果 */
-				occ_ob_printf(o, "（%s 下无匹配 %s 的路径）",
-					      root, pattern);
+				occ_ob_printf(o, L_("（%s 下无匹配 %s 的路径）"), root, pattern);
 				for (i = 0; i < g.ncomps; i++)
 					free(g.comps[i]);
 				free(pbuf);
@@ -1346,11 +1310,9 @@ static int tool_glob(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		free(g.comps[i]);
 	free(pbuf);
 	if (!g.nresults)
-		occ_ob_printf(o, "（%s 下无匹配 %s 的路径）", root,
-			      pattern);
+		occ_ob_printf(o, L_("（%s 下无匹配 %s 的路径）"), root, pattern);
 	else
-		occ_ob_printf(o, "（%zu 项%s）", g.nresults,
-			      g.overflow ? "，超 200 上限截断" : "");
+		occ_ob_printf(o, L_("（%zu 项%s）"), g.nresults, g.overflow ? L_("，超 200 上限截断") : "");
 	return 0;
 }
 
@@ -1432,22 +1394,20 @@ static int tool_grep(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	struct stat st;
 
 	if (!pattern || !pattern[0]) {
-		occ_ob_puts(o, "ERROR: grep 缺少参数 pattern");
+		occ_ob_puts(o, L_("ERROR: grep 缺少参数 pattern"));
 		return -1;
 	}
 	if (path && path[0]) {
 		if (resolve_arg_path(ctx, path, abs, sizeof(abs))) {
-			occ_ob_printf(o, "ERROR: grep 路径无法解析：%s",
-				      path);
+			occ_ob_printf(o, L_("ERROR: grep 路径无法解析：%s"), path);
 			return -1;
 		}
 	} else if (!ctx_cwd(ctx, abs, sizeof(abs))) {
-		occ_ob_puts(o, "ERROR: grep 无法确定工作目录");
+		occ_ob_puts(o, L_("ERROR: grep 无法确定工作目录"));
 		return -1;
 	}
 	if (stat(abs, &st)) {
-		occ_ob_printf(o, "ERROR: grep %s 不存在：%s", abs,
-			      strerror(errno));
+		occ_ob_printf(o, L_("ERROR: grep %s 不存在：%s"), abs, strerror(errno));
 		return -1;
 	}
 	if (S_ISREG(st.st_mode)) {
@@ -1455,15 +1415,13 @@ static int tool_grep(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	} else if (S_ISDIR(st.st_mode)) {
 		grep_walk(abs, pattern, globf, o, &hits, 0);
 	} else {
-		occ_ob_printf(o, "ERROR: grep %s 非普通文件/目录", abs);
+		occ_ob_printf(o, L_("ERROR: grep %s 非普通文件/目录"), abs);
 		return -1;
 	}
 	if (!hits)
-		occ_ob_printf(o, "（%s 下未匹配到「%s」）", abs, pattern);
+		occ_ob_printf(o, L_("（%s 下未匹配到「%s」）"), abs, pattern);
 	else
-		occ_ob_printf(o, "（%zu 行命中%s）", hits,
-			      hits >= GREP_MAX_LINES ?
-			      "，达 100 行上限截断" : "");
+		occ_ob_printf(o, L_("（%zu 行命中%s）"), hits, hits >= GREP_MAX_LINES ? L_("，达 100 行上限截断") : "");
 	return 0;
 }
 
@@ -1483,7 +1441,7 @@ static int tool_bash(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	int rc;
 
 	if (!command || !command[0]) {
-		occ_ob_puts(o, "ERROR: bash 缺少参数 command");
+		occ_ob_puts(o, L_("ERROR: bash 缺少参数 command"));
 		return -1;
 	}
 	memset(&raw, 0, sizeof(raw));
@@ -1609,7 +1567,7 @@ static int jout(occ_obuf *o, aik_json *obj)
 
 	if (rc != 0 || !txt) {
 		free(txt);
-		occ_ob_puts(o, "ERROR: task 结果 JSON 序列化失败（oom）");
+		occ_ob_puts(o, L_("ERROR: task 结果 JSON 序列化失败（oom）"));
 		return -1;
 	}
 	occ_ob_put(o, txt, tl);
@@ -1762,13 +1720,13 @@ static int jerr(occ_obuf *o, const char *code, const char *fmt, ...)
 	    aik_json_obj_put(obj, "error", s)) {
 		aik_json_free(obj);
 		aik_json_free(s);
-		occ_ob_printf(o, "ERROR: task %s", msg);
+		occ_ob_printf(o, L_("ERROR: task %s"), msg);
 		return -1;
 	}
 	if (code && code[0] &&
 	    aik_json_obj_put(obj, "code", aik_json_new_str(code))) {
 		aik_json_free(obj);
-		occ_ob_printf(o, "ERROR: task %s", msg);
+		occ_ob_printf(o, L_("ERROR: task %s"), msg);
 		return -1;
 	}
 	(void)jout(o, obj);
@@ -1831,24 +1789,24 @@ static int brief_list(const aik_json *brief, const char *key, char ***out,
 	if (!arr)
 		return 0;			/* 缺省=无该清单 */
 	if (aik_json_typeof(arr) != AIK_JSON_ARR)
-		return jerr(o, NULL, "brief.%s 须为字符串数组", label);
+		return jerr(o, NULL, L_("brief.%s 须为字符串数组"), label);
 	cnt = 0;
 	while (aik_json_at(arr, cnt))
 		cnt++;
 	vec = calloc(cnt ? cnt : 1, sizeof(*vec));
 	if (!vec)
-		return jerr(o, NULL, "内存不足（brief.%s 解析）", label);
+		return jerr(o, NULL, L_("内存不足（brief.%s 解析）"), label);
 	for (i = 0; i < cnt; i++) {
 		const char *s = aik_json_str(aik_json_at(arr, i));
 
 		if (!s) {
 			str_arr_free(vec, i);
-			return jerr(o, NULL, "brief.%s 元素须为字符串", label);
+			return jerr(o, NULL, L_("brief.%s 元素须为字符串"), label);
 		}
 		vec[i] = strdup(s);
 		if (!vec[i]) {
 			str_arr_free(vec, i);
-			return jerr(o, NULL, "内存不足（brief.%s 解析）", label);
+			return jerr(o, NULL, L_("内存不足（brief.%s 解析）"), label);
 		}
 	}
 	*out = vec;
@@ -1907,21 +1865,16 @@ static int task_respawn(const occ_tool_ctx *ctx, occ_args *a,
 	int rc;
 
 	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1)
-		return jerr(o, NULL, "再派任务 %s 不存在（任务库无此 id）",
-			    tid);
+		return jerr(o, NULL, L_("再派任务 %s 不存在（任务库无此 id）"), tid);
 	snprintf(stbuf, sizeof(stbuf), "%s", trow.status);
 	if (strcmp(trow.status, OCC_TASK_ST_REWORK)) {
 		occ_task_row_free(&trow);
-		return jerr(o, NULL, "spawn+task_id 仅对 rework（验收不通过"
-			    "待回炉）态任务再派——任务 %s 当前态 %s：新建任务"
-			    "请不带 task_id，终局任务用 read_result/return",
-			    tid, stbuf);
+		return jerr(o, NULL, L_("spawn+task_id 仅对 rework（验收不通过待回炉）态任务再派——任务 %s 当前态 %s：新建任务请不带 task_id，终局任务用 read_result/return"), tid, stbuf);
 	}
 	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
 	if (brief && aik_json_typeof(brief) != AIK_JSON_OBJ) {
 		occ_task_row_free(&trow);
-		return jerr(o, NULL, "再派参数 brief 须为对象（本轮补充"
-			    "要求；可省略=按原任务书重派）");
+		return jerr(o, NULL, L_("再派参数 brief 须为对象（本轮补充要求；可省略=按原任务书重派）"));
 	}
 	if (brief && aik_json_dump(brief, &brief_txt, &bl) != 0)
 		brief_txt = NULL;
@@ -1934,7 +1887,7 @@ static int task_respawn(const occ_tool_ctx *ctx, occ_args *a,
 	if (prompt.oom) {
 		sb_free(&prompt);
 		free(brief_txt);
-		return jerr(o, NULL, "task spawn 再派任务书组装失败（oom）");
+		return jerr(o, NULL, L_("task spawn 再派任务书组装失败（oom）"));
 	}
 	memset(&so, 0, sizeof(so));
 	so.prompt = prompt.buf;
@@ -1970,8 +1923,7 @@ static int task_respawn(const occ_tool_ctx *ctx, occ_args *a,
 		int r2 = okk ? jout(o, robj) : -1;
 
 		if (!okk)
-			occ_ob_puts(o, "ERROR: task spawn 再派结果组装失败"
-				    "（oom）");
+			occ_ob_puts(o, L_("ERROR: task spawn 再派结果组装失败（oom）"));
 		aik_json_free(robj);
 		return okk ? r2 : -1;
 	}
@@ -1999,44 +1951,33 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	 * 路零变化）；未带 task_id 走下方原路 */
 	if (rtid && rtid[0]) {
 		if (!ctx->session_id || !ctx->session_id[0])
-			return jerr(o, NULL, "task spawn 需要会话上下文"
-				    "（任务要挂在主会话名下——当前工具执行"
-				    "无 session）");
+			return jerr(o, NULL, L_("task spawn 需要会话上下文（任务要挂在主会话名下——当前工具执行无 session）"));
 		if (!ctx->orch)
-			return jerr(o, NULL, "编排未启用（occ_tool_ctx.orch"
-				    " 为空或 OCC_ORCH_TOOLS 未开）——task "
-				    "工具不可用");
+			return jerr(o, NULL, L_("编排未启用（occ_tool_ctx.orch 为空或 OCC_ORCH_TOOLS 未开）——task 工具不可用"));
 		if (!ctx->db)
-			return jerr(o, NULL, "编排未启用（库缺失）——task "
-				    "工具不可用");
+			return jerr(o, NULL, L_("编排未启用（库缺失）——task 工具不可用"));
 		return task_respawn(ctx, a, rtid, o);
 	}
 	brief = a->root ? aik_json_get(a->root, "brief") : NULL;
 	if (!brief || aik_json_typeof(brief) != AIK_JSON_OBJ)
-		return jerr(o, NULL, "spawn 缺少参数 brief（任务书对象——"
-			    "字段集：goal/fileset/forbidden/deliverables/"
-			    "acceptance/selfcheck/auth_note/budget/context/"
-			    "rework_max）");
+		return jerr(o, NULL, L_("spawn 缺少参数 brief（任务书对象——字段集：goal/fileset/forbidden/deliverables/acceptance/selfcheck/auth_note/budget/context/rework_max）"));
 	goal = aik_json_str(aik_json_get(brief, "goal"));
 	if (!goal || !goal[0])
-		return jerr(o, NULL, "brief.goal 必填（目标一句话）");
+		return jerr(o, NULL, L_("brief.goal 必填（目标一句话）"));
 	fsj = aik_json_get(brief, "fileset");
 	if (!fsj || aik_json_typeof(fsj) != AIK_JSON_ARR)
-		return jerr(o, NULL, "brief.fileset 必填（授权文件集数组——"
-			    "独占声明，互斥依据）");
+		return jerr(o, NULL, L_("brief.fileset 必填（授权文件集数组——独占声明，互斥依据）"));
 	while (aik_json_at(fsj, nfs))
 		nfs++;
 	if (!nfs)
-		return jerr(o, NULL, "brief.fileset 不能为空数组"
-			    "（独占声明至少一个文件）");
+		return jerr(o, NULL, L_("brief.fileset 不能为空数组（独占声明至少一个文件）"));
 	auth_note = aik_json_str(aik_json_get(brief, "auth_note"));
 	context = aik_json_str(aik_json_get(brief, "context"));
 	rework_max = aik_json_int(aik_json_get(brief, "rework_max"));
 	if (rework_max == 0)
 		rework_max = OCC_TASK_REWORK_MAX_DEF;	/* R2 缺省 2 */
 	if (rework_max < 1 || rework_max > OCC_TASK_REWORK_MAX_HI)
-		return jerr(o, NULL, "brief.rework_max 越界（1-%d；缺省 %d）",
-			    OCC_TASK_REWORK_MAX_HI, OCC_TASK_REWORK_MAX_DEF);
+		return jerr(o, NULL, L_("brief.rework_max 越界（1-%d；缺省 %d）"), OCC_TASK_REWORK_MAX_HI, OCC_TASK_REWORK_MAX_DEF);
 	budget = aik_json_get(brief, "budget");
 	if (budget) {
 		if (aik_json_typeof(budget) == AIK_JSON_OBJ) {
@@ -2075,21 +2016,19 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	if (!ctx->session_id || !ctx->session_id[0]) {
 		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
 			      selfc, nselfc, NULL, 0, budget_txt, NULL);
-		return jerr(o, NULL, "task spawn 需要会话上下文"
-			    "（任务要挂在主会话名下——当前工具执行无 session）");
+		return jerr(o, NULL, L_("task spawn 需要会话上下文（任务要挂在主会话名下——当前工具执行无 session）"));
 	}
 	if (!ctx->orch) {
 		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
 			      selfc, nselfc, NULL, 0, budget_txt, NULL);
-		return jerr(o, NULL, "编排未启用（occ_tool_ctx.orch 为空或"
-			    " OCC_ORCH_TOOLS 未开）——task 工具不可用");
+		return jerr(o, NULL, L_("编排未启用（occ_tool_ctx.orch 为空或 OCC_ORCH_TOOLS 未开）——task 工具不可用"));
 	}
 	/* fileset 归一化（相对路径按工作目录→绝对；互斥登记按归一键） */
 	fs_abs = calloc(nfs, sizeof(*fs_abs));
 	if (!fs_abs) {
 		spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
 			      selfc, nselfc, NULL, 0, budget_txt, NULL);
-		return jerr(o, NULL, "内存不足（fileset 解析）");
+		return jerr(o, NULL, L_("内存不足（fileset 解析）"));
 	}
 	for (i = 0; i < nfs; i++) {
 		s = aik_json_str(aik_json_at(fsj, i));
@@ -2098,15 +2037,14 @@ static int task_spawn(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
 				      selfc, nselfc, fs_abs, i, budget_txt,
 				      NULL);
-			return jerr(o, NULL, "brief.fileset[%zu] 路径无法解析"
-				    "：%.120s", i, s ? s : "(空)");
+			return jerr(o, NULL, L_("brief.fileset[%zu] 路径无法解析：%.120s"), i, s ? s : L_("(空)"));
 		}
 		fs_abs[i] = strdup(abs);
 		if (!fs_abs[i]) {
 			spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc,
 				      selfc, nselfc, fs_abs, i, budget_txt,
 				      NULL);
-			return jerr(o, NULL, "内存不足（fileset 拷贝）");
+			return jerr(o, NULL, L_("内存不足（fileset 拷贝）"));
 		}
 	}
 
@@ -2272,7 +2210,7 @@ oom:
 oom_soft:
 	spawn_cleanup(forb, nforb, deliv, ndeliv, acc, nacc, selfc, nselfc,
 		      fs_abs, nfs, budget_txt, brief_txt);
-	return jerr(o, NULL, "task spawn 组装失败（oom）");
+	return jerr(o, NULL, L_("task spawn 组装失败（oom）"));
 }
 
 static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
@@ -2284,10 +2222,9 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	aik_json *obj;
 
 	if (!tid || !tid[0])
-		return jerr(o, NULL, "status 缺少参数 task_id");
+		return jerr(o, NULL, L_("status 缺少参数 task_id"));
 	if (!ctx->orch || !ctx->db)
-		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
-			    "——task 工具不可用");
+		return jerr(o, NULL, L_("编排未启用（orch 运行时/库缺失）——task 工具不可用"));
 	c = occ_orch_find_task((occ_orch *)ctx->orch, tid);
 	if (c) {
 		obj = aik_json_new_obj();
@@ -2303,7 +2240,7 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		    aik_json_obj_put(obj, "session_id",
 				     aik_json_new_str(occ_orch_child_session(c)))) {
 			aik_json_free(obj);
-			return jerr(o, NULL, "status 结果组装失败（oom）");
+			return jerr(o, NULL, L_("status 结果组装失败（oom）"));
 		}
 		/* E7：budget 段（活表路也带账面——在跑期间为最近落账值） */
 		if (occ_task_get(ctx->db, tid, &trow, NULL, 0) == 1) {
@@ -2321,8 +2258,7 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		int g = occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf));
 
 		if (g != 1) {
-			return jerr(o, NULL, "任务 %s 不存在（活表与任务库均无）",
-				    tid);
+			return jerr(o, NULL, L_("任务 %s 不存在（活表与任务库均无）"), tid);
 		}
 		obj = aik_json_new_obj();
 		if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
@@ -2339,7 +2275,7 @@ static int task_status(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				     aik_json_new_int(trow.rework_max))) {
 			occ_task_row_free(&trow);
 			aik_json_free(obj);
-			return jerr(o, NULL, "status 结果组装失败（oom）");
+			return jerr(o, NULL, L_("status 结果组装失败（oom）"));
 		}
 		budget_put(obj, ctx->db, &trow);	/* E7：budget 段 */
 		{
@@ -2364,14 +2300,13 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	aik_json *obj;
 
 	if (!tid || !tid[0])
-		return jerr(o, NULL, "wait 缺少参数 task_id");
+		return jerr(o, NULL, L_("wait 缺少参数 task_id"));
 	if (tmo < 100)
 		tmo = 100;
 	if (tmo > OCC_TASK_WAIT_MAX_MS)
 		tmo = OCC_TASK_WAIT_MAX_MS;	/* 主进程不死等 */
 	if (!ctx->orch || !ctx->db)
-		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
-			    "——task 工具不可用");
+		return jerr(o, NULL, L_("编排未启用（orch 运行时/库缺失）——task 工具不可用"));
 	c = occ_orch_find_task((occ_orch *)ctx->orch, tid);
 	if (c) {
 		int done = 0;
@@ -2405,7 +2340,7 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			    aik_json_obj_put(obj, "waited_ms",
 					     aik_json_new_int(elapsed))) {
 				aik_json_free(obj);
-				return jerr(o, NULL, "wait 结果组装失败（oom）");
+				return jerr(o, NULL, L_("wait 结果组装失败（oom）"));
 			}
 			{
 				int rr = jout(o, obj);
@@ -2448,7 +2383,7 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 					     aik_json_new_str(ts))) {
 				aik_json_free(obj);
 				occ_orch_result_free(&r);
-				return jerr(o, NULL, "wait 结果组装失败（oom）");
+				return jerr(o, NULL, L_("wait 结果组装失败（oom）"));
 			}
 			{
 				int rr = jout(o, obj);
@@ -2464,8 +2399,7 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		int g = occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf));
 
 		if (g != 1)
-			return jerr(o, NULL, "任务 %s 不存在（活表与任务库均无）",
-				    tid);
+			return jerr(o, NULL, L_("任务 %s 不存在（活表与任务库均无）"), tid);
 		obj = aik_json_new_obj();
 		if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
 		    aik_json_obj_put(obj, "action",
@@ -2476,7 +2410,7 @@ static int task_wait(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				     aik_json_new_str(trow.status))) {
 			occ_task_row_free(&trow);
 			aik_json_free(obj);
-			return jerr(o, NULL, "wait 结果组装失败（oom）");
+			return jerr(o, NULL, L_("wait 结果组装失败（oom）"));
 		}
 		{
 			int rr = jout(o, obj);
@@ -2544,12 +2478,11 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 	aik_json *obj;
 
 	if (!tid || !tid[0])
-		return jerr(o, NULL, "read_result 缺少参数 task_id");
+		return jerr(o, NULL, L_("read_result 缺少参数 task_id"));
 	if (!ctx->orch || !ctx->db)
-		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
-			    "——task 工具不可用");
+		return jerr(o, NULL, L_("编排未启用（orch 运行时/库缺失）——task 工具不可用"));
 	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1)
-		return jerr(o, NULL, "任务 %s 不存在", tid);
+		return jerr(o, NULL, L_("任务 %s 不存在"), tid);
 	/* 结果文件：运行时注册表 → E10③ 事件流兜底（派发进程死后
 	 * 跨进程恢复——任务仍可 read_result/return 验收） */
 	rbuf[0] = '\0';
@@ -2594,7 +2527,7 @@ static int task_read_result(const occ_tool_ctx *ctx, occ_args *a,
 		occ_task_event_rows_free(evs, nevs);
 		aik_json_free(obj);
 		free(report);
-		return jerr(o, NULL, "read_result 结果组装失败（oom）");
+		return jerr(o, NULL, L_("read_result 结果组装失败（oom）"));
 	}
 	budget_put(obj, ctx->db, &trow);	/* E7：budget 段（显示参考） */
 	{
@@ -2628,15 +2561,13 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	aik_json *pj, *obj;
 
 	if (!tid || !tid[0])
-		return jerr(o, NULL, "return 缺少参数 task_id");
+		return jerr(o, NULL, L_("return 缺少参数 task_id"));
 	if (!verdict || !verdict[0])
-		return jerr(o, NULL, "return 缺少参数 verdict"
-			    "（对结果的表态：通过与否/差距/依据）");
+		return jerr(o, NULL, L_("return 缺少参数 verdict（对结果的表态：通过与否/差距/依据）"));
 	if (!ctx->orch || !ctx->db)
-		return jerr(o, NULL, "编排未启用（orch 运行时/库缺失）"
-			    "——task 工具不可用");
+		return jerr(o, NULL, L_("编排未启用（orch 运行时/库缺失）——task 工具不可用"));
 	if (occ_task_get(ctx->db, tid, &trow, dbuf, sizeof(dbuf)) != 1) {
-		return jerr(o, NULL, "任务 %s 不存在", tid);
+		return jerr(o, NULL, L_("任务 %s 不存在"), tid);
 	}
 	snprintf(stbuf, sizeof(stbuf), "%s", trow.status);
 	if (!strcmp(trow.status, OCC_TASK_ST_IN_REVIEW)) {
@@ -2651,9 +2582,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		passj = a->root ? aik_json_get(a->root, "pass") : NULL;
 		if (passj) {
 			if (aik_json_typeof(passj) != AIK_JSON_BOOL)
-				return jerr(o, NULL, "return 参数 pass 须为"
-					    "布尔（表态位：机械判通过后"
-					    "生效）");
+				return jerr(o, NULL, L_("return 参数 pass 须为布尔（表态位：机械判通过后生效）"));
 			jpass = aik_json_bool(passj);
 		} else if (strstr(verdict, "不通过") ||
 			   strstr(verdict, "不认可") ||
@@ -2675,8 +2604,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		if (occ_review_run(ctx->db, tid, &ro, &rv, brief,
 				   sizeof(brief), state, sizeof(state),
 				   dbuf, sizeof(dbuf)) != 0)
-			return jerr(o, NULL, "return 验收环失败：%s",
-				    dbuf[0] ? dbuf : "库错");
+			return jerr(o, NULL, L_("return 验收环失败：%s"), dbuf[0] ? dbuf : L_("库错"));
 		/* E5 闸1+蒸馏：验收通过 → 子会话蒸馏归档 + 主会话请求
 		 * 回合收口压缩（defer；force 语义=任务完成触发闸） */
 		distill_txt = !strcmp(state, OCC_TASK_ST_DONE) ?
@@ -2707,7 +2635,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 						aik_json_new_null())) {
 			aik_json_free(obj);
 			free(distill_txt);
-			return jerr(o, NULL, "return 结果组装失败（oom）");
+			return jerr(o, NULL, L_("return 结果组装失败（oom）"));
 		}
 		if (distill_txt) {
 			/* 蒸馏实体清单随工具结果进主上下文（两级蒸馏第二级） */
@@ -2718,8 +2646,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 			if (pr) {
 				aik_json_free(obj);
 				free(distill_txt);
-				return jerr(o, NULL,
-					    "return 结果组装失败（oom）");
+				return jerr(o, NULL, L_("return 结果组装失败（oom）"));
 			}
 		}
 		free(distill_txt);
@@ -2737,7 +2664,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 				    aik_json_new_str("return")) ||
 	    aik_json_obj_put(pj, "verdict", aik_json_new_str(verdict))) {
 		aik_json_free(pj);
-		return jerr(o, NULL, "return 事件组装失败（oom）");
+		return jerr(o, NULL, L_("return 事件组装失败（oom）"));
 	}
 	{
 		char *txt = NULL;
@@ -2746,14 +2673,13 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 
 		if (aik_json_dump(pj, &txt, &tl) != 0 || !txt) {
 			aik_json_free(pj);
-			return jerr(o, NULL, "return 事件组装失败（oom）");
+			return jerr(o, NULL, L_("return 事件组装失败（oom）"));
 		}
 		aik_json_free(pj);
 		rc = occ_task_note(ctx->db, tid, txt, dbuf, sizeof(dbuf));
 		free(txt);
 		if (rc != 0)
-			return jerr(o, NULL, "return 记录失败：%s",
-				    dbuf[0] ? dbuf : "任务不存在或库错");
+			return jerr(o, NULL, L_("return 记录失败：%s"), dbuf[0] ? dbuf : L_("任务不存在或库错"));
 	}
 	obj = aik_json_new_obj();
 	if (!obj || aik_json_obj_put(obj, "ok", aik_json_new_bool(1)) ||
@@ -2765,7 +2691,7 @@ static int task_return(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	    aik_json_obj_put(obj, "state",
 			     aik_json_new_str(stbuf))) {
 		aik_json_free(obj);
-		return jerr(o, NULL, "return 结果组装失败（oom）");
+		return jerr(o, NULL, L_("return 结果组装失败（oom）"));
 	}
 	{
 		int r = jout(o, obj);
@@ -2785,14 +2711,14 @@ static int tool_recall(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 
 	(void)ctx;
 	if (!query || !query[0])
-		return jerr(o, NULL, "recall 缺少参数 query");
+		return jerr(o, NULL, L_("recall 缺少参数 query"));
 	if (layer && layer[0])
 		snprintf(lay, sizeof(lay), "%.150s", layer);
 	else
 		lay[0] = '\0';
 	blk = occ_sme_lookup_ex(query, lay[0] ? lay : NULL);
 	if (!blk)
-		return jerr(o, NULL, "recall：无命中（或记忆服务不可达）");
+		return jerr(o, NULL, L_("recall：无命中（或记忆服务不可达）"));
 	occ_ob_printf(o, "%s", blk);
 	free(blk);
 	return 0;
@@ -2803,12 +2729,10 @@ static int tool_task(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	const char *action;
 
 	if (a->bad)
-		return jerr(o, NULL, "task 参数不是合法 JSON"
-			    "（拒绝执行——请给出合法 JSON 参数）");
+		return jerr(o, NULL, L_("task 参数不是合法 JSON（拒绝执行——请给出合法 JSON 参数）"));
 	action = args_str(a, "action");
 	if (!action || !action[0])
-		return jerr(o, NULL, "task 缺少参数 action"
-			    "（spawn/status/wait/read_result/return）");
+		return jerr(o, NULL, L_("task 缺少参数 action（spawn/status/wait/read_result/return）"));
 	if (!strcmp(action, "spawn"))
 		return task_spawn(ctx, a, o);
 	if (!strcmp(action, "status"))
@@ -2819,8 +2743,7 @@ static int tool_task(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		return task_read_result(ctx, a, o);
 	if (!strcmp(action, "return"))
 		return task_return(ctx, a, o);
-	return jerr(o, NULL, "未知 action「%s」"
-		    "（可用：spawn/status/wait/read_result/return）", action);
+	return jerr(o, NULL, L_("未知 action「%s」（可用：spawn/status/wait/read_result/return）"), action);
 }
 
 /* ---- 快照 stage ---- */
@@ -3018,8 +2941,7 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 	const char *dir = netcfg_dir();
 
 	if (!action || !action[0]) {
-		occ_ob_puts(o, "ERROR: config_write_network 缺少 action"
-			      "（write/remove/show）");
+		occ_ob_puts(o, L_("ERROR: config_write_network 缺少 action（write/remove/show）"));
 		return -1;
 	}
 	if (!strcmp(action, "show")) {
@@ -3028,11 +2950,10 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		int found = 0;
 
 		if (!d) {
-			occ_ob_printf(o, "ERROR: 打开 %s 失败：%s", dir,
-				      strerror(errno));
+			occ_ob_printf(o, L_("ERROR: 打开 %s 失败：%s"), dir, strerror(errno));
 			return -1;
 		}
-		occ_ob_printf(o, "== %s 现存 .network 配置 ==", dir);
+		occ_ob_printf(o, L_("== %s 现存 .network 配置 =="), dir);
 		while ((de = readdir(d)) != NULL) {
 			char fp[600];
 			char *buf;
@@ -3079,13 +3000,12 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		}
 		closedir(d);
 		if (!found)
-			occ_ob_puts(o, "（无匹配 .network 文件）");
+			occ_ob_puts(o, L_("（无匹配 .network 文件）"));
 		return 0;
 	}
 	/* write/remove：iface 必填且严格校验（进文件名——拒绝路径花样） */
 	if (!iface || !iface_valid(iface)) {
-		occ_ob_puts(o, "ERROR: iface 非法（[A-Za-z0-9] 开头，"
-			      "[A-Za-z0-9._-]{1,15}，如 eth0/enp0s3）");
+		occ_ob_puts(o, L_("ERROR: iface 非法（[A-Za-z0-9] 开头，[A-Za-z0-9._-]{1,15}，如 eth0/enp0s3）"));
 		return -1;
 	}
 	{
@@ -3097,24 +3017,17 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 		if (!strcmp(action, "remove")) {
 			if (unlink(path) != 0) {
 				if (errno == ENOENT) {
-					occ_ob_printf(o, "%s 不存在"
-						      "（本就无静态配置）",
-						      path);
+					occ_ob_printf(o, L_("%s 不存在（本就无静态配置）"), path);
 					return 0;
 				}
-				occ_ob_printf(o, "ERROR: 删除 %s 失败：%s",
-					      path, strerror(errno));
+				occ_ob_printf(o, L_("ERROR: 删除 %s 失败：%s"), path, strerror(errno));
 				return -1;
 			}
-			occ_ob_printf(o, "已删除 %s。回 DHCP 生效两步："
-				      "networkctl reload && "
-				      "networkctl reconfigure %s",
-				      path, iface);
+			occ_ob_printf(o, L_("已删除 %s。回 DHCP 生效两步：networkctl reload && networkctl reconfigure %s"), path, iface);
 			return 0;
 		}
 		if (strcmp(action, "write")) {
-			occ_ob_printf(o, "ERROR: 未知 action「%s」"
-				      "（write/remove/show）", action);
+			occ_ob_printf(o, L_("ERROR: 未知 action「%s」（write/remove/show）"), action);
 			return -1;
 		}
 		{
@@ -3129,20 +3042,15 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 
 			if (!addr || !cidr_valid(addr, ip, sizeof(ip),
 						 &pfx)) {
-				occ_ob_puts(o, "ERROR: address 非法"
-					      "（需 CIDR 如 192.168.1.10/24，"
-					      "掩码段 0-32）");
+				occ_ob_puts(o, L_("ERROR: address 非法（需 CIDR 如 192.168.1.10/24，掩码段 0-32）"));
 				return -1;
 			}
 			if (gw && gw[0] && !ip4_valid(gw)) {
-				occ_ob_puts(o, "ERROR: gateway 非法"
-					      "（IPv4 点分十进制）");
+				occ_ob_puts(o, L_("ERROR: gateway 非法（IPv4 点分十进制）"));
 				return -1;
 			}
 			if (dns && dns[0] && !dns_valid(dns)) {
-				occ_ob_puts(o, "ERROR: dns 非法"
-					      "（逗号分隔 IPv4，"
-					      "如 223.5.5.5,1.1.1.1）");
+				occ_ob_puts(o, L_("ERROR: dns 非法（逗号分隔 IPv4，如 223.5.5.5,1.1.1.1）"));
 				return -1;
 			}
 			/* 快照 stage（undo 地基；与 write 工具同口径） */
@@ -3151,8 +3059,7 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 					   snapbuf, sizeof(snapbuf));
 			f = fopen(path, "wb");
 			if (!f) {
-				occ_ob_printf(o, "ERROR: 打开 %s 失败：%s",
-					      path, strerror(errno));
+				occ_ob_printf(o, L_("ERROR: 打开 %s 失败：%s"), path, strerror(errno));
 				return -1;
 			}
 			fprintf(f, "# AIKernel 静态网络（config_write_network"
@@ -3168,16 +3075,10 @@ static int tool_netcfg(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 					fprintf(f, "DNS=%s\n", tok);
 			}
 			if (fclose(f) != 0) {
-				occ_ob_printf(o, "ERROR: 关闭 %s 失败：%s",
-					      path, strerror(errno));
+				occ_ob_printf(o, L_("ERROR: 关闭 %s 失败：%s"), path, strerror(errno));
 				return -1;
 			}
-			occ_ob_printf(o, "已写入 %s。生效两步（经 bash 执行）："
-				      "networkctl reload && "
-				      "networkctl reconfigure %s；"
-				      "查看 networkctl status %s；"
-				      "撤销=action remove", path, iface,
-				      iface);
+			occ_ob_printf(o, L_("已写入 %s。生效两步（经 bash 执行）：networkctl reload && networkctl reconfigure %s；查看 networkctl status %s；撤销=action remove"), path, iface, iface);
 		}
 	}
 	return 0;
@@ -3259,8 +3160,7 @@ int occ_snapshot_stage(occ_db *db, const char *snaproot,
 					fprintf(sf, "%s\n", hex);
 					fclose(sf);
 				} else {
-					fprintf(stderr, "occ-snap: sidecar 写失败"
-						"（退化为无校验）：%s\n", sp);
+					fprintf(stderr, L_("occ-snap: sidecar 写失败（退化为无校验）：%s\n"), sp);
 				}
 				/* P-50：墓碑 manifest 落库（DB 外部锚——
 				 * undo 消费侧对账；落库失败=退化为 legacy
@@ -3271,14 +3171,9 @@ int occ_snapshot_stage(occ_db *db, const char *snaproot,
 					if (occ_snap_put(db, msg_id, abs_path,
 							 "absent", hex, merr,
 							 sizeof(merr)))
-						fprintf(stderr, "occ-snap: "
-							"manifest 落库失败"
-							"（退化为 legacy 校验）"
-							"：%s\n", merr);
+						fprintf(stderr, L_("occ-snap: manifest 落库失败（退化为 legacy 校验）：%s\n"), merr);
 				} else {
-					fprintf(stderr, "occ-snap: manifest "
-						"落库失败（退化为 legacy 校验）"
-						"：无 DB 句柄\n");
+					fputs(L_("occ-snap: manifest 落库失败（退化为 legacy 校验）：无 DB 句柄\n"), stderr);
 				}
 			}
 		}
@@ -3312,8 +3207,7 @@ int occ_snapshot_stage(occ_db *db, const char *snaproot,
 				fprintf(sf, "%s\n", hex);
 				fclose(sf);
 			} else {
-				fprintf(stderr, "occ-snap: sidecar 写失败"
-					"（退化为无校验）：%s\n", sp);
+				fprintf(stderr, L_("occ-snap: sidecar 写失败（退化为无校验）：%s\n"), sp);
 			}
 			/* P-50：内容快照 manifest 落库（同墓碑分支——sidecar
 			 * 与快照同目录=自证，DB 行才是对快照树无写权可用的
@@ -3323,12 +3217,9 @@ int occ_snapshot_stage(occ_db *db, const char *snaproot,
 
 				if (occ_snap_put(db, msg_id, abs_path, "snap",
 						 hex, merr, sizeof(merr)))
-					fprintf(stderr, "occ-snap: manifest "
-						"落库失败（退化为 legacy 校验）"
-						"：%s\n", merr);
+					fprintf(stderr, L_("occ-snap: manifest 落库失败（退化为 legacy 校验）：%s\n"), merr);
 			} else {
-				fprintf(stderr, "occ-snap: manifest 落库失败"
-					"（退化为 legacy 校验）：无 DB 句柄\n");
+				fputs(L_("occ-snap: manifest 落库失败（退化为 legacy 校验）：无 DB 句柄\n"), stderr);
 			}
 		}
 	}
@@ -3797,10 +3688,7 @@ static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
 		return 1;	/* 显式开门（headless --allow-w2） */
 	if (g->tier != OCC_W2_TIER_PRIVILEGED) {
 		g->denied++;
-		occ_ob_printf(o, "ERROR: W2 拒绝（%s：%s）——当前档位不允许"
-			      "高危写；/su 提权后重试（policy 见 "
-			      "/etc/aikernel/policy.conf）", name,
-			      why ? why : "?");
+		occ_ob_printf(o, L_("ERROR: W2 拒绝（%s：%s）——当前档位不允许高危写；/su 提权后重试（policy 见 /etc/aikernel/policy.conf）"), name, why ? why : "?");
 		return 0;
 	}
 	/* O-18：会话放行表命中（本会话同理由键已 s 放行过）→ 直接放行
@@ -3814,14 +3702,10 @@ static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
 				return 1;
 			}
 	}
-	if (g->confirm && g->confirm(g->ud, "W2 高危操作确认",
-				     why ? why : "") == 1)
+	if (g->confirm && g->confirm(g->ud, L_("W2 高危操作确认"), why ? why : "") == 1)
 		return 1;
 	g->denied++;
-	occ_ob_printf(o, "ERROR: W2 拒绝（%s：%s）——%s", name,
-		      why ? why : "?",
-		      g->confirm ? "已按您的选择取消" :
-		      "headless 默认拒绝（occ -p 需 --allow-w2 显式开门）");
+	occ_ob_printf(o, L_("ERROR: W2 拒绝（%s：%s）——%s"), name, why ? why : "?", g->confirm ? L_("已按您的选择取消") : L_("headless 默认拒绝（occ -p 需 --allow-w2 显式开门）"));
 	return 0;
 }
 
@@ -3898,10 +3782,7 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	} else if (!strcmp(name, OCC_T_NETCFG)) {
 		/* C-P2a：开关关=未知工具面（差分红线：默认清单零变化） */
 		if (!occ_netcfg_tools_enabled()) {
-			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash/"
-				      "rm/mv/mkdir）",
-				      name);
+			occ_ob_printf(&o, L_("ERROR: 未知工具「%s」（可用：read/write/edit/glob/grep/bash/rm/mv/mkdir）"), name);
 			rc = -1;
 		} else {
 			rc = tool_netcfg(&c, &a, &o);
@@ -3910,9 +3791,7 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		/* E3 第七工具：开关关=未知工具面（清单不含 task）；
 		 * 开=五动作（内部再校验 ctx->orch） */
 		if (!occ_orch_tools_enabled()) {
-			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash/"
-				      "rm/mv/mkdir）", name);
+			occ_ob_printf(&o, L_("ERROR: 未知工具「%s」（可用：read/write/edit/glob/grep/bash/rm/mv/mkdir）"), name);
 			rc = -1;
 		} else {
 			rc = tool_task(&c, &a, &o);
@@ -3920,18 +3799,13 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 	} else if (!strcmp(name, OCC_T_RECALL)) {
 		/* E6 第八工具：开关关=未知工具面；开=记忆检索 */
 		if (!occ_orch_tools_enabled()) {
-			occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用："
-				      "read/write/edit/glob/grep/bash/"
-				      "rm/mv/mkdir）",
-				      name);
+			occ_ob_printf(&o, L_("ERROR: 未知工具「%s」（可用：read/write/edit/glob/grep/bash/rm/mv/mkdir）"), name);
 			rc = -1;
 		} else {
 			rc = tool_recall(&c, &a, &o);
 		}
 	} else {
-		occ_ob_printf(&o, "ERROR: 未知工具「%s」（可用：read/write/"
-			      "edit/glob/grep/bash/rm/mv/mkdir%s%s%s）",
-			      name,
+		occ_ob_printf(&o, L_("ERROR: 未知工具「%s」（可用：read/write/edit/glob/grep/bash/rm/mv/mkdir%s%s%s）"), name,
 			      occ_orch_tools_enabled() ? "/task" : "",
 			      occ_orch_tools_enabled() ? "/recall" : "",
 			      occ_netcfg_tools_enabled() ?
@@ -3946,9 +3820,7 @@ w2_done:
 		/* 截断注记：缓冲已满，直接落尾部 slack（buf 容量
 		 * MAX+256，len≤MAX，note≤96——必然放得下） */
 		char note[96];
-		size_t nl = (size_t)snprintf(note, sizeof(note),
-					     "\n…[truncated %zu B]",
-					     o.total - o.len);
+		size_t nl = (size_t)snprintf(note, sizeof(note), L_("\n…[truncated %zu B]"), o.total - o.len);
 
 		if (o.len + nl + 1 <= sizeof(o.buf)) {
 			memcpy(o.buf + o.len, note, nl + 1);
@@ -3956,8 +3828,8 @@ w2_done:
 		}
 	}
 	if (!o.len)
-		occ_ob_puts(&o, "（无输出）");
-	out->text = strdup(o.buf[0] ? o.buf : "（无输出）");
+		occ_ob_puts(&o, L_("（无输出）"));
+	out->text = strdup(o.buf[0] ? o.buf : L_("（无输出）"));
 	out->rc = rc ? 1 : 0;
 	out->dur_ms = t1 - t0;
 	out->out_bytes = o.total;
@@ -3978,8 +3850,7 @@ w2_done:
 				    out->toolcall_id,
 				    sizeof(out->toolcall_id),
 				    err, sizeof(err)))
-			fprintf(stderr, "occ-tool: durable record 失败："
-				"%s\n", err);
+			fprintf(stderr, L_("occ-tool: durable record 失败：%s\n"), err);
 	}
 	return out->rc;
 }

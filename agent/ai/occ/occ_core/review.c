@@ -61,6 +61,8 @@
 
 #include "store/store_json.h"
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 /* ============ MD5（RFC 1321；R-MD5「md5sum 对照」底座，零第三方） ============ */
 
 static const uint32_t MD5_K[64] = {
@@ -339,13 +341,13 @@ static void check_exit(const char *result_event_json, occ_review_verdict *v)
 	long long code = 0;
 
 	if (!result_event_json || !result_event_json[0]) {
-		hit(v, OCC_RV_R_EXIT, "无终局 result 事件——退出码不可机检");
+		hit(v, OCC_RV_R_EXIT, "%s", L_("无终局 result 事件——退出码不可机检"));
 		return;
 	}
 	j = aik_json_parse(result_event_json, strlen(result_event_json),
 			   perr, sizeof(perr));
 	if (!j) {
-		hit(v, OCC_RV_R_EXIT, "终局 result 事件不是合法 JSON");
+		hit(v, OCC_RV_R_EXIT, "%s", L_("终局 result 事件不是合法 JSON"));
 		return;
 	}
 	endv = aik_json_get(j, "end");
@@ -363,12 +365,13 @@ static void check_exit(const char *result_event_json, occ_review_verdict *v)
 	}
 	aik_json_free(j);
 	if (!end[0] || strcmp(end, "exit") != 0)
-		hit(v, OCC_RV_R_EXIT, "终局非正常退出（end=%s）——崩溃/取消"
-		    "/超时的交付不采信", end[0] ? end : "(缺)");
+		hit(v, OCC_RV_R_EXIT,
+		    L_("终局非正常退出（end=%s）——崩溃/取消/超时的交付不采信"),
+		    end[0] ? end : L_("(缺)"));
 	else if (!have_code)
-		hit(v, OCC_RV_R_EXIT, "终局事件缺 exit_code——退出码不可机检");
+		hit(v, OCC_RV_R_EXIT, "%s", L_("终局事件缺 exit_code——退出码不可机检"));
 	else if (code != 0)
-		hit(v, OCC_RV_R_EXIT, "退出码 %lld≠0", code);
+		hit(v, OCC_RV_R_EXIT, L_("退出码 %lld≠0"), code);
 }
 
 /* 证据路径归一（相对 → base_dir 下；越界路径原样交 stat 裁决） */
@@ -406,12 +409,12 @@ static int check_evidence(const char *ev, const char *base_dir,
 	struct stat st;
 
 	if (!ev || !ev[0]) {
-		snprintf(detail, dlen, "证据列为空");
+		snprintf(detail, dlen, "%s", L_("证据列为空"));
 		return 1;
 	}
 	if (!strncmp(ev, "exit:", 5)) {
 		if (atoi(ev + 5) != 0) {
-			snprintf(detail, dlen, "exit:%s 自证非零退出", ev + 5);
+			snprintf(detail, dlen, L_("exit:%s 自证非零退出"), ev + 5);
 			return 1;
 		}
 		return 0;	/* 全局退出码另由 R-EXIT 把关 */
@@ -419,7 +422,7 @@ static int check_evidence(const char *ev, const char *base_dir,
 	if (!strncmp(ev, "file:", 5)) {
 		resolve_ev_path(ev + 5, base_dir, path, sizeof(path));
 		if (!file_exists(path)) {
-			snprintf(detail, dlen, "文件不存在：%.80s", path);
+			snprintf(detail, dlen, L_("文件不存在：%.80s"), path);
 			return 1;
 		}
 		return 0;
@@ -430,30 +433,31 @@ static int check_evidence(const char *ev, const char *base_dir,
 		p = ev + 4;
 		eq = strchr(p, '=');
 		if (!eq || eq == p || eq - p >= (int)sizeof(tmp)) {
-			snprintf(detail, dlen, "md5 令牌格式应为 "
-				 "md5:<path>=<32hex>");
+			snprintf(detail, dlen, "%s",
+				 L_("md5 令牌格式应为 md5:<path>=<32hex>"));
 			return 1;
 		}
 		memcpy(tmp, p, (size_t)(eq - p));
 		tmp[eq - p] = '\0';
 		snprintf(want, sizeof(want), "%s", eq + 1);
 		if (strlen(want) != 32) {
-			snprintf(detail, dlen, "md5 期望值非 32 位十六进制");
+			snprintf(detail, dlen, "%s", L_("md5 期望值非 32 位十六进制"));
 			return 2;
 		}
 		resolve_ev_path(tmp, base_dir, path, sizeof(path));
 		if (stat(path, &st) != 0) {
-			snprintf(detail, dlen, "md5 目标文件不存在：%.80s",
+			snprintf(detail, dlen, L_("md5 目标文件不存在：%.80s"),
 				 path);
 			return 1;
 		}
 		if (occ_review_md5_file(path, hex, sizeof(hex)) != 0) {
-			snprintf(detail, dlen, "md5 现算失败：%.80s", path);
+			snprintf(detail, dlen, L_("md5 现算失败：%.80s"), path);
 			return 1;
 		}
 		if (strcasecmp(hex, want) != 0) {
-			snprintf(detail, dlen, "md5 不符：%.48s 现算=%s"
-				 " 声称=%.32s", path, hex, want);
+			snprintf(detail, dlen,
+				 L_("md5 不符：%.48s 现算=%s 声称=%.32s"),
+				 path, hex, want);
 			return 2;
 		}
 		return 0;
@@ -464,15 +468,16 @@ static int check_evidence(const char *ev, const char *base_dir,
 		p = ev + 9;
 		colon = strchr(p, ':');
 		if (!colon || colon == p || colon - p >= (int)sizeof(tmp)) {
-			snprintf(detail, dlen, "contains 令牌格式应为 "
-				 "contains:<path>:<断言子串>");
+			snprintf(detail, dlen, "%s",
+				 L_("contains 令牌格式应为 "
+				    "contains:<path>:<断言子串>"));
 			return 1;
 		}
 		memcpy(tmp, p, (size_t)(colon - p));
 		tmp[colon - p] = '\0';
 		resolve_ev_path(tmp, base_dir, path, sizeof(path));
 		if (!file_exists(path)) {
-			snprintf(detail, dlen, "断言目标文件不存在：%.80s",
+			snprintf(detail, dlen, L_("断言目标文件不存在：%.80s"),
 				 path);
 			return 1;
 		}
@@ -480,14 +485,14 @@ static int check_evidence(const char *ev, const char *base_dir,
 			char *body = read_file_cap(path, 1 << 20);
 
 			if (!body) {
-				snprintf(detail, dlen, "断言目标不可读："
-					 "%.80s", path);
+				snprintf(detail, dlen,
+					 L_("断言目标不可读：%.80s"), path);
 				return 1;
 			}
 			if (!strstr(body, colon + 1)) {
-				snprintf(detail, dlen, "断言子串未命中："
-					 "%.48s 中无「%.32s」", path,
-					 colon + 1);
+				snprintf(detail, dlen,
+					 L_("断言子串未命中：%.48s 中无「%.32s」"),
+					 path, colon + 1);
 				free(body);
 				return 3;
 			}
@@ -497,13 +502,14 @@ static int check_evidence(const char *ev, const char *base_dir,
 	}
 	if (ev[0] == '/') {	/* 裸绝对路径=存在性证据 */
 		if (!file_exists(ev)) {
-			snprintf(detail, dlen, "文件不存在：%.80s", ev);
+			snprintf(detail, dlen, L_("文件不存在：%.80s"), ev);
 			return 1;
 		}
 		return 0;
 	}
-	snprintf(detail, dlen, "证据不可机检（须 exit:/file:/md5:/"
-		 "contains:/绝对路径令牌）：%.60s", ev);
+	snprintf(detail, dlen,
+		 L_("证据不可机检（须 exit:/file:/md5:/contains:/绝对路径令牌）：%.60s"),
+		 ev);
 	return 1;
 }
 
@@ -560,8 +566,8 @@ void occ_review_parse(const char *report, const char *result_event_json,
 
 	/* R-REPORT：交付在场（§4「子智能体交付」） */
 	if (!report || !report[0])
-		hit(out, OCC_RV_R_REPORT, "结果文件缺失或为空——无可判卷"
-		    " 交付");
+		hit(out, OCC_RV_R_REPORT, "%s",
+		    L_("结果文件缺失或为空——无可判卷 交付"));
 
 	/* 扫行：# VERDICT 标记 + 表头 + 数据行（判卷只看表格机检面；
 	 * 叙述文本与自评列永不参与 pass 判定——R-NOSELF 防转述） */
@@ -637,13 +643,15 @@ void occ_review_parse(const char *report, const char *result_event_json,
 
 	/* R-HEADER：固定表头（§4「固定表头」） */
 	if (!have_marker || !have_header)
-		hit(out, OCC_RV_R_HEADER, "缺 # VERDICT 标记或固定表头行"
-		    "（| criterion | result | evidence | self |）");
+		hit(out, OCC_RV_R_HEADER, "%s",
+		    L_("缺 # VERDICT 标记或固定表头行"
+		       "（| criterion | result | evidence | self |）"));
 
 	/* R-NOSELF：零机检证据行恒拒（§4「不接受自报数字」） */
 	if (have_header && have_marker && n_rows == 0)
-		hit(out, OCC_RV_R_NOSELF, "VERDICT 表零数据行——仅自称完成"
-		    "（叙述/自评）不构成 pass 依据");
+		hit(out, OCC_RV_R_NOSELF, "%s",
+		    L_("VERDICT 表零数据行——仅自称完成"
+		       "（叙述/自评）不构成 pass 依据"));
 
 	/* R-COVERAGE：验收标准逐条有行（§4「逐行状态」） */
 	if (acceptance) {
@@ -658,8 +666,9 @@ void occ_review_parse(const char *report, const char *result_event_json,
 			for (k = 0; k < n_rows && !found; k++)
 				found = !strcmp(rows[k].crit, e);
 			if (!found)
-				hit(out, OCC_RV_R_COVERAGE, "验收标准[%zu]"
-				    "「%.100s」无对应 VERDICT 行", i, e);
+				hit(out, OCC_RV_R_COVERAGE,
+				    L_("验收标准[%zu]「%.100s」无对应 VERDICT 行"),
+				    i, e);
 		}
 	}
 
@@ -667,9 +676,10 @@ void occ_review_parse(const char *report, const char *result_event_json,
 	 * 进主会话复核位」「文件存在」「md5sum 对照」） */
 	for (k = 0; k < n_rows; k++) {
 		if (strcasecmp(rows[k].res, "pass") != 0) {
-			hit(out, OCC_RV_R_ROWPASS, "行「%.100s」自报 "
-			    "result=%s（非 pass）", rows[k].crit,
-			    rows[k].res[0] ? rows[k].res : "(空)");
+			hit(out, OCC_RV_R_ROWPASS,
+			    L_("行「%.100s」自报 result=%s（非 pass）"),
+			    rows[k].crit,
+			    rows[k].res[0] ? rows[k].res : L_("(空)"));
 			continue;	/* 自报 fail 的行无需再核证据 */
 		}
 		{
@@ -677,14 +687,16 @@ void occ_review_parse(const char *report, const char *result_event_json,
 						sizeof(detail));
 
 			if (rc == 1)
-				hit(out, OCC_RV_R_EVIDENCE, "行「%.100s」："
-				    "%s", rows[k].crit, detail);
+				hit(out, OCC_RV_R_EVIDENCE,
+				    L_("行「%.100s」：%s"), rows[k].crit,
+				    detail);
 			else if (rc == 2)
-				hit(out, OCC_RV_R_MD5, "行「%.100s」：%s",
+				hit(out, OCC_RV_R_MD5, L_("行「%.100s」：%s"),
 				    rows[k].crit, detail);
 			else if (rc == 3)
-				hit(out, OCC_RV_R_CONTAINS, "行「%.100s」："
-				    "%s", rows[k].crit, detail);
+				hit(out, OCC_RV_R_CONTAINS,
+				    L_("行「%.100s」：%s"), rows[k].crit,
+				    detail);
 		}
 	}
 }
@@ -705,49 +717,54 @@ static size_t render_std_block(const occ_review_verdict *v,
 	rules[0] = '\0';
 	gaps[0] = '\0';
 	for (i = 0; i < (size_t)v->n_hit && i < 8; i++)
-		ro = snp_cat(rules, sizeof(rules), ro, "%s%s", i ? "、" : "",
-			     v->rule[i]);
+		ro = snp_cat(rules, sizeof(rules), ro, "%s%s",
+			     i ? L_("、") : "", v->rule[i]);
 	for (i = 0; i < (size_t)v->n_hit && i < 6; i++)
 		go = snp_cat(gaps, sizeof(gaps), go, "%zu. %s\n", i + 1,
 			     v->detail[i]);
 
 	if (escalate)
-		n = snp_cat(buf, buflen, n, "【验收超限上抛（回炉 %d/%d 次"
-			    "已用尽）】\n", attempt, max);
+		n = snp_cat(buf, buflen, n,
+			    L_("【验收超限上抛（回炉 %d/%d 次已用尽）】\n"),
+			    attempt, max);
 	else
-		n = snp_cat(buf, buflen, n, "【验收不通过 第 %d/%d 次】\n",
+		n = snp_cat(buf, buflen, n, L_("【验收不通过 第 %d/%d 次】\n"),
 			    attempt, max);
 	if (judge_rejected) {
-		n = snp_cat(buf, buflen, n, "未达标准：机械判全过；裁判抽查"
-			    "否决（§4 抽查亲跑强制）\n");
-		n = snp_cat(buf, buflen, n, "差距：%.400s\n",
+		n = snp_cat(buf, buflen, n, "%s", L_("未达标准：机械判全过；裁判抽查"
+			    "否决（§4 抽查亲跑强制）\n"));
+		n = snp_cat(buf, buflen, n, L_("差距：%.400s\n"),
 			    judge_note && judge_note[0] ? judge_note :
-			    "（裁判未给表态原文）");
-		n = snp_cat(buf, buflen, n, "证据：机械判规则未命中失败；"
-			    "裁判亲跑证据不采信——见表态原文\n");
-		n = snp_cat(buf, buflen, n, "整改要求：按裁判表态逐项整改后"
-			    "重新交付（# VERDICT 表与机检令牌保持齐全）\n");
+			    L_("（裁判未给表态原文）"));
+		n = snp_cat(buf, buflen, n, "%s", L_("证据：机械判规则未命中失败；"
+			    "裁判亲跑证据不采信——见表态原文\n"));
+		n = snp_cat(buf, buflen, n, "%s", L_("整改要求：按裁判表态逐项整改后"
+			    "重新交付（# VERDICT 表与机检令牌保持齐全）\n"));
 	} else {
-		n = snp_cat(buf, buflen, n, "未达标准：机械判未过——命中规"
-			    "则：%s\n", rules[0] ? rules : "(无)");
-		n = snp_cat(buf, buflen, n, "差距：\n%s", gaps[0] ? gaps :
-			    "（详见判卷明细）\n");
-		n = snp_cat(buf, buflen, n, "证据：叙述性「自称完成」按 §4 "
-			    "不采信——未提供可机检证据（VERDICT 固定表头/"
-			    "文件在场/md5 对照/断言行至少其一）\n");
-		n = snp_cat(buf, buflen, n, "整改要求：按未达标准逐条补齐："
-			    "交付 # VERDICT 表（表头 | criterion | result | "
-			    "evidence | self |），每条验收标准一行、"
-			    "result=pass、evidence 给 exit:/file:/md5:/"
-			    "contains: 机检令牌且证据文件真实在场\n");
+		n = snp_cat(buf, buflen, n,
+			    L_("未达标准：机械判未过——命中规则：%s\n"),
+			    rules[0] ? rules : L_("(无)"));
+		n = snp_cat(buf, buflen, n, L_("差距：\n%s"), gaps[0] ? gaps :
+			    L_("（详见判卷明细）\n"));
+		n = snp_cat(buf, buflen, n, "%s",
+			    L_("证据：叙述性「自称完成」按 §4 不采信——未提供"
+			      "可机检证据（VERDICT 固定表头/文件在场/md5 对照/"
+			      "断言行至少其一）\n"));
+		n = snp_cat(buf, buflen, n, "%s",
+			    L_("整改要求：按未达标准逐条补齐：交付 # VERDICT 表"
+			      "（表头 | criterion | result | evidence | self |），"
+			      "每条验收标准一行、result=pass、evidence 给 "
+			      "exit:/file:/md5:/contains: 机检令牌且证据文件"
+			      "真实在场\n"));
 	}
 	if (escalate)
-		n = snp_cat(buf, buflen, n, "处置：升级人工三选一——换智能体"
-			    "重派 / 拆解任务 / 上抛用户（子智能体永不直接"
-			    "对话用户，§4）\n");
+		n = snp_cat(buf, buflen, n, "%s",
+			    L_("处置：升级人工三选一——换智能体重派 / 拆解任务 / "
+			      "上抛用户（子智能体永不直接对话用户，§4）\n"));
 	else
-		n = snp_cat(buf, buflen, n, "剩余机会：%d 次，超限将 换智能体"
-			    "/拆任务/上抛用户\n", max - attempt);
+		n = snp_cat(buf, buflen, n,
+			    L_("剩余机会：%d 次，超限将 换智能体/拆任务/上抛用户\n"),
+			    max - attempt);
 	return n;
 }
 
@@ -977,13 +994,14 @@ int occ_review_run(occ_db *db, const char *task_id,
 		return -1;
 	}
 	if (occ_task_get(db, task_id, &row, err, errlen) != 1) {
-		set_rv_err(err, errlen, "任务 %s 不存在或库错", task_id);
+		set_rv_err(err, errlen, L_("任务 %s 不存在或库错"), task_id);
 		return -1;
 	}
 	if (strcmp(row.status, OCC_TASK_ST_IN_REVIEW) != 0) {
-		set_rv_err(err, errlen, "任务 %s 当前 %s——验收环仅 "
-			   "in_review 可裁决（先 wait 终局）", task_id,
-			   row.status);
+		set_rv_err(err, errlen,
+			   L_("任务 %s 当前 %s——验收环仅 in_review 可裁决"
+			     "（先 wait 终局）"),
+			   task_id, row.status);
 		occ_task_row_free(&row);
 		return -1;
 	}
@@ -1031,7 +1049,7 @@ int occ_review_run(occ_db *db, const char *task_id,
 	/* 回读终态 → 渲染对应文案（三路：done=终止/结项、rework=回炉、
 	 * escalated=升级人工） */
 	if (occ_task_get(db, task_id, &row2, err, errlen) != 1) {
-		set_rv_err(err, errlen, "裁决已落但任务 %s 读回失败", task_id);
+		set_rv_err(err, errlen, L_("裁决已落但任务 %s 读回失败"), task_id);
 		acc_free(acc, n_acc);
 		free(report);
 		return -1;

@@ -32,6 +32,8 @@
 #include "occ_tools.h"
 #include "occ_tools_priv.h"
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -336,27 +338,17 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 
 	/* 0) 可用性门（红线：不可用即拒，绝不裸跑） */
 	if (access(bin, X_OK)) {
-		occ_ob_puts(o, "ERROR: bash 工具不可用：aik-sandbox（路径"
-			   "解析顺序 OCC_SANDBOX_BIN → AIKERNEL_SANDBOX_BIN"
-			   " → /usr/local/bin/aik-sandbox）不存在或不可执行"
-			   "（当前：");
+		occ_ob_puts(o, L_("ERROR: bash 工具不可用：aik-sandbox（路径解析顺序 OCC_SANDBOX_BIN → AIKERNEL_SANDBOX_BIN → /usr/local/bin/aik-sandbox）不存在或不可执行（当前："));
 		occ_ob_puts(o, bin);
-		occ_ob_puts(o, "）。occ 的 bash 一律在沙箱内执行，沙箱"
-			   "不可用时拒绝执行（不降级裸跑）。");
+		occ_ob_puts(o, L_("）。occ 的 bash 一律在沙箱内执行，沙箱不可用时拒绝执行（不降级裸跑）。"));
 		return -1;
 	}
 	if (!sb_supports_rwpath()) {
-		occ_ob_puts(o, "ERROR: bash 工具不可用：aik-sandbox 版本"
-			   "过旧（不识别 --rw-path，无法把工作目录挂入"
-			   "沙箱）。请升级 aik-sandbox 或用 OCC_SANDBOX_BIN"
-			   " 指向当前版本（agent/ai/sandbox/aik-sandbox.c"
-			   " 构建）。拒绝执行（不降级裸跑）。");
+		occ_ob_puts(o, L_("ERROR: bash 工具不可用：aik-sandbox 版本过旧（不识别 --rw-path，无法把工作目录挂入沙箱）。请升级 aik-sandbox 或用 OCC_SANDBOX_BIN 指向当前版本（agent/ai/sandbox/aik-sandbox.c 构建）。拒绝执行（不降级裸跑）。"));
 		return -1;
 	}
 	if (!sudo_ok()) {
-		occ_ob_puts(o, "ERROR: bash 工具不可用：当前非 root 且 "
-			   "sudo -n 不可用——组装 namespace 需要特权。"
-			   "拒绝执行（不降级裸跑）。");
+		occ_ob_puts(o, L_("ERROR: bash 工具不可用：当前非 root 且 sudo -n 不可用——组装 namespace 需要特权。拒绝执行（不降级裸跑）。"));
 		return -1;
 	}
 
@@ -370,14 +362,12 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 			char cwd[4096];
 
 			if (!getcwd(cwd, sizeof(cwd))) {
-				occ_ob_puts(o, "ERROR: bash 无法确定当前"
-					    "目录");
+				occ_ob_puts(o, L_("ERROR: bash 无法确定当前目录"));
 				return -1;
 			}
 			if (strlen(cwd) + strlen(workdir_arg) + 2 >
 			    sizeof(trial)) {
-				occ_ob_puts(o, "ERROR: bash workdir 路径"
-					    "过长");
+				occ_ob_puts(o, L_("ERROR: bash workdir 路径过长"));
 				return -1;
 			}
 			snprintf(trial, sizeof(trial), "%s/%s", cwd,
@@ -385,8 +375,7 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 		}
 		if (!realpath(trial, workdir) ||
 		    stat(workdir, &st) || !S_ISDIR(st.st_mode)) {
-			occ_ob_puts(o, "ERROR: bash workdir 不存在或不是"
-				    "目录：");
+			occ_ob_puts(o, L_("ERROR: bash workdir 不存在或不是目录："));
 			occ_ob_puts(o, workdir_arg);
 			return -1;
 		}
@@ -395,11 +384,11 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 			snprintf(workdir, sizeof(workdir), "%s",
 				 ctx->workdir);
 		else if (!getcwd(workdir, sizeof(workdir))) {
-			occ_ob_puts(o, "ERROR: bash 无法确定工作目录");
+			occ_ob_puts(o, L_("ERROR: bash 无法确定工作目录"));
 			return -1;
 		}
 		if (stat(workdir, &st) || !S_ISDIR(st.st_mode)) {
-			occ_ob_puts(o, "ERROR: bash 工作目录不可访问：");
+			occ_ob_puts(o, L_("ERROR: bash 工作目录不可访问："));
 			occ_ob_puts(o, workdir);
 			return -1;
 		}
@@ -429,17 +418,14 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 		argv[i++] = (char *)zone;
 		argv[i] = NULL;
 		if (sb_run_capture(argv, 15000, &rr)) {
-			occ_ob_puts(o, "ERROR: bash 工具不可用：无法启动 "
-				   "aik-sandbox create。拒绝执行"
-				   "（不降级裸跑）。");
+			occ_ob_puts(o, L_("ERROR: bash 工具不可用：无法启动 aik-sandbox create。拒绝执行（不降级裸跑）。"));
 			return -1;
 		}
 		if (rr.exit_code != 0) {
-			occ_ob_puts(o, "ERROR: bash 工具不可用：aik-sandbox"
-				    " create 失败");
-			ob_num(o, "（exit=", rr.exit_code, "）：");
+			occ_ob_puts(o, L_("ERROR: bash 工具不可用：aik-sandbox create 失败"));
+			ob_num(o, L_("（exit="), rr.exit_code, L_("）："));
 			occ_ob_puts(o, rr.out ? rr.out : "");
-			occ_ob_puts(o, "。拒绝执行（不降级裸跑）。");
+			occ_ob_puts(o, L_("。拒绝执行（不降级裸跑）。"));
 			sb_run_free(&rr);
 			return -1;
 		}
@@ -463,9 +449,7 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 		argv[i++] = (char *)shcmd;
 		argv[i] = NULL;
 		if (sb_run_capture(argv, timeout_ms, &rr)) {
-			occ_ob_puts(o, "ERROR: bash 工具不可用：无法启动 "
-				   "aik-sandbox run。拒绝执行"
-				   "（不降级裸跑）。");
+			occ_ob_puts(o, L_("ERROR: bash 工具不可用：无法启动 aik-sandbox run。拒绝执行（不降级裸跑）。"));
 			sb_run_free(&rr);
 			rr.out = NULL;
 			rc = -1;
@@ -474,15 +458,13 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 	if (rr.out || rr.timed_out) {
 		if (rr.timed_out) {
 			occ_ob_puts(o, rr.out ? rr.out : "");
-			occ_ob_puts(o, "\nERROR: 命令超时");
-			ob_num(o, "（上限 ", timeout_ms, "ms），已 SIGKILL"
-				" 全进程组（沙箱随 destroy 回收）。");
+			occ_ob_puts(o, L_("\nERROR: 命令超时"));
+			ob_num(o, L_("（上限 "), timeout_ms, L_("ms），已 SIGKILL 全进程组（沙箱随 destroy 回收）。"));
 			rc = -1;
 		} else if (rr.exit_code == 1 || rr.exit_code == 2) {
 			/* 1=用法/2=组装失败：沙箱面故障，人话报错 */
-			occ_ob_puts(o, "ERROR: bash 沙箱执行失败"
-				    "（aik-sandbox");
-			ob_num(o, " exit=", rr.exit_code, "）：");
+			occ_ob_puts(o, L_("ERROR: bash 沙箱执行失败（aik-sandbox"));
+			ob_num(o, " exit=", rr.exit_code, L_("）："));
 			occ_ob_puts(o, rr.out ? rr.out : "");
 			rc = -1;
 		} else {

@@ -285,7 +285,7 @@ tests/test_w2gate: tests/test_w2gate.c $(TOOLS_OBJS) \
 		  $(OBJ_DIR)/occ_llm/catalog.o \
 		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		  $(STORE_LIB) $(SQLITE_LIB)
+		  $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_w2gate.c \
 		  $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
@@ -293,7 +293,7 @@ tests/test_w2gate: tests/test_w2gate.c $(TOOLS_OBJS) \
 		  $(OBJ_DIR)/occ_llm/catalog.o \
 		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # C-P2a：netcfg 工具单测（与 w2gate 同链接面——走 occ_tool_exec 真链）
 tests/test_netcfg: tests/test_netcfg.c $(TOOLS_OBJS) \
@@ -303,7 +303,7 @@ tests/test_netcfg: tests/test_netcfg.c $(TOOLS_OBJS) \
 		  $(OBJ_DIR)/occ_llm/catalog.o \
 		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		  $(STORE_LIB) $(SQLITE_LIB)
+		  $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_netcfg.c \
 		  $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
@@ -311,7 +311,7 @@ tests/test_netcfg: tests/test_netcfg.c $(TOOLS_OBJS) \
 		  $(OBJ_DIR)/occ_llm/catalog.o \
 		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # ---- occ 主程序（T9a3+b1+c2+d1）：headless 一次对话 + 工具环 + 交互 TUI ----
 $(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)
@@ -375,17 +375,17 @@ tests/test_registry: tests/test_registry.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/o
 # session：CRUD + 崩溃安全事务 + 回滚注入（sqlite 只读复用 T2 库）
 # E1：session.c 开库迁移调 task.c DDL——链接面成对（task.o 同链）
 tests/test_session: tests/test_session.c $(OBJ_DIR)/occ_core/session.o \
-		    $(OBJ_DIR)/occ_core/task.o $(STORE_LIB) $(SQLITE_LIB)
+		    $(OBJ_DIR)/occ_core/task.o $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_session.c \
 		$(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # task（E1）：状态机全路径 + schema v2→v3 迁移 + /clear 归档库面
 tests/test_task: tests/test_task.c $(OBJ_DIR)/occ_core/task.o \
-		 $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB)
+		 $(OBJ_DIR)/occ_core/session.o $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_task.c \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/session.o \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # orch（E2）：子智能体运行时——并发闸/退避/取消两段/超时/收尸/结果
 # 分类 + B2 并发写库两腿压测（自 exec 多进程 worker；报告落
@@ -400,7 +400,7 @@ tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		 $(OBJ_DIR)/occ_core/review.o \
 		 $(OBJ_DIR)/occ_llm/catalog.o \
 		 $(OBJ_DIR)/occ_core/tokens.o \
-		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
+		 $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_orch.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/session.o \
@@ -408,7 +408,7 @@ tests/test_orch: tests/test_orch.c $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_llm/catalog.o \
 		$(OBJ_DIR)/occ_core/tokens.o \
 		$(TOOLS_OBJS) \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # review（E4）：验收环——verdict 机械判判据表/整改词渲染/回炉回路
 # 「一拒一改一过」+超限升级+防转述用例（fixture 纯逻辑，不起子进程）
@@ -420,7 +420,7 @@ tests/test_review: tests/test_review.c $(OBJ_DIR)/occ_core/review.o \
 		   $(OBJ_DIR)/occ_core/task.o \
 		   $(OBJ_DIR)/occ_llm/catalog.o \
 		   $(OBJ_DIR)/occ_core/tokens.o \
-		   $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB)
+		   $(TOOLS_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_review.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/review.o $(OBJ_DIR)/occ_core/orch.o \
@@ -428,7 +428,7 @@ tests/test_review: tests/test_review.c $(OBJ_DIR)/occ_core/review.o \
 		$(OBJ_DIR)/occ_llm/catalog.o \
 		$(OBJ_DIR)/occ_core/tokens.o \
 		$(TOOLS_OBJS) \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # tokens：五项账本 + len/4 估算（纯计算，无外部依赖）
 tests/test_tokens: tests/test_tokens.c $(OBJ_DIR)/occ_core/tokens.o
@@ -455,7 +455,7 @@ tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o
 		  $(OBJ_DIR)/occ_llm/catalog.o \
 		  $(OBJ_DIR)/occ_core/tokens.o \
 		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		  $(STORE_LIB) $(SQLITE_LIB)
+		  $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_tools.c \
 		$(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
@@ -463,7 +463,7 @@ tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o
 		$(OBJ_DIR)/occ_llm/catalog.o \
 		$(OBJ_DIR)/occ_core/tokens.o \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # sink（T9c2）：输出 sink 双路对拍（链集合同 test_loop——伪传输驱动全环）
 tests/test_sink: tests/test_sink.c $(CORE_OBJS) $(TOOLS_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
@@ -510,7 +510,7 @@ tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		   $(OBJ_DIR)/occ_core/review.o \
 		   $(OBJ_DIR)/occ_llm/catalog.o \
 		   $(OBJ_DIR)/occ_core/tokens.o \
-		   $(STORE_LIB) $(SQLITE_LIB)
+		   $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_revert.c \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(OBJ_DIR)/occ_core/revert.o $(TOOLS_OBJS) \
@@ -518,7 +518,7 @@ tests/test_revert: tests/test_revert.c $(OBJ_DIR)/occ_core/revert.o \
 		$(OBJ_DIR)/occ_core/orch.o $(OBJ_DIR)/occ_core/review.o \
 		$(OBJ_DIR)/occ_llm/catalog.o \
 		$(OBJ_DIR)/occ_core/tokens.o \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # retry（T9b2）：重试分级矩阵 + 参数族（旋钮/env/缺省）+ 退避曲线
 # （retry.c 纯计算，无传输依赖）
@@ -529,11 +529,11 @@ tests/test_retry: tests/test_retry.c $(OBJ_DIR)/occ_llm/retry.o
 # replay（OCC-DEBT）：回放规划器——纯规划 + mock db 夹具（链 session）
 tests/test_replay: tests/test_replay.c $(OBJ_DIR)/occ_core/replay.o \
 		   $(OBJ_DIR)/occ_core/session.o $(OBJ_DIR)/occ_core/task.o \
-		   $(STORE_LIB) $(SQLITE_LIB)
+		   $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_replay.c \
 		$(OBJ_DIR)/occ_core/replay.o $(OBJ_DIR)/occ_core/session.o \
 		$(OBJ_DIR)/occ_core/task.o \
-		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS)
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # tui_data（T9c3）：tools.json/trace/lease 读取器夹具对拍（aik_json only）
 tests/test_tui_data: tests/test_tui_data.c $(OBJ_DIR)/occ_tui/tui_data.o \

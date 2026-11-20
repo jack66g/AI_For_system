@@ -49,6 +49,8 @@
 #include "occ_tools/sha256.h"		/* S-FINDING-01：快照校验 */
 #include "store/store_json.h"
 
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
+
 static void set_err(char *err, size_t errlen, const char *fmt, ...)
 {
 	va_list ap;
@@ -498,21 +500,21 @@ static void redo_capture(const char *root, const char *ses,
 
 		data = rv_read(e->path, &len);
 		if (!data) {
-			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
+			fprintf(stderr, L_("occ-undo: redo 捕获失败 %s\n"),
 				e->path);
 			return;
 		}
 		if (occ_sha256_hex(data, len, sha_out)) {
 			free(data);
 			sha_out[0] = '\0';
-			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
+			fprintf(stderr, L_("occ-undo: redo 捕获失败 %s\n"),
 				e->path);
 			return;
 		}
 		if (write_whole(dst, data, len)) {
 			free(data);
 			sha_out[0] = '\0';
-			fprintf(stderr, "occ-undo: redo 捕获失败 %s\n",
+			fprintf(stderr, L_("occ-undo: redo 捕获失败 %s\n"),
 				e->path);
 			return;
 		}
@@ -702,17 +704,17 @@ static int apply_restore(const char *root, const char *ses,
 				return -1;
 			if (strcmp(hex, e->want_sha) &&
 			    !tomb_canonical(src)) {
-				fprintf(stderr, "occ-undo: 快照校验失败"
+				fprintf(stderr, L_("occ-undo: 快照校验失败"
 					"（与 DB manifest 不符，被篡改？"
-					"sha256=%s 期望 %s）：%s\n",
+					"sha256=%s 期望 %s）：%s\n"),
 					hex, e->want_sha, e->path);
 				return -1;
 			}
 		} else if (absent_verify(src, hex)) {
 			/* P-49：墓碑投毒 → 拒绝按墓碑行事（不删目标，
 			 * 与内容快照篡改拒收同款语义，fail closed） */
-			fprintf(stderr, "occ-undo: 快照校验失败（ABSENT 墓碑"
-				"被篡改？sha256=%s）：%s\n", hex, e->path);
+			fprintf(stderr, L_("occ-undo: 快照校验失败（ABSENT 墓碑"
+				"被篡改？sha256=%s）：%s\n"), hex, e->path);
 			return -1;
 		}
 		if (unlink(e->path) && errno != ENOENT)
@@ -727,16 +729,16 @@ static int apply_restore(const char *root, const char *ses,
 	if (e->anchored) {
 		/* P-50：DB 锚——比内容字节摘要，sidecar 免读（重造无效） */
 		if (file_sha(src, hex) || strcmp(hex, e->want_sha)) {
-			fprintf(stderr, "occ-undo: 快照校验失败"
+			fprintf(stderr, L_("occ-undo: 快照校验失败"
 				"（与 DB manifest 不符，被篡改？sha256=%s"
-				" 期望 %s）：%s\n",
-				hex[0] ? hex : "(读失败)", e->want_sha,
+				" 期望 %s）：%s\n"),
+				hex[0] ? hex : L_("(读失败)"), e->want_sha,
 				e->path);
 			return -1;
 		}
 	} else if (snap_verify(src)) {
 		/* S-FINDING-01：篡改/形损快照拒绝恢复（fail closed） */
-		fprintf(stderr, "occ-undo: 快照校验失败（被篡改？）：%s\n",
+		fprintf(stderr, L_("occ-undo: 快照校验失败（被篡改？）：%s\n"),
 			e->path);
 		return -1;
 	}
@@ -771,20 +773,20 @@ static int redo_anchor_verify(const snap_ent *e, const char *src,
 	const char *want = is_tomb ? "absent" : "snap";
 
 	if (strcmp(e->want_kind, want)) {
-		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
-			"不符，被篡改？类型 %s 期望 %s）：%s\n",
+		fprintf(stderr, L_("occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？类型 %s 期望 %s）：%s\n"),
 			want, e->want_kind, e->path);
 		return -1;
 	}
 	if (file_sha(src, hex)) {
-		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
-			"不符，被篡改？sha256=(读失败) 期望 %s）：%s\n",
+		fprintf(stderr, L_("occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？sha256=(读失败) 期望 %s）：%s\n"),
 			e->want_sha, e->path);
 		return -1;
 	}
 	if (strcmp(hex, e->want_sha) && !(is_tomb && tomb_canonical(src))) {
-		fprintf(stderr, "occ-redo: 快照校验失败（与 DB manifest "
-			"不符，被篡改？sha256=%s 期望 %s）：%s\n",
+		fprintf(stderr, L_("occ-redo: 快照校验失败（与 DB manifest "
+			"不符，被篡改？sha256=%s 期望 %s）：%s\n"),
 			hex, e->want_sha, e->path);
 		return -1;
 	}
@@ -815,8 +817,8 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 			}
 		} else if (absent_verify(src, hex)) {
 			/* P-49：_redo 墓碑同口径校验（投毒拒绝删行） */
-			fprintf(stderr, "occ-redo: 快照校验失败（ABSENT 墓碑"
-				"被篡改？sha256=%s）：%s\n", hex, e->path);
+			fprintf(stderr, L_("occ-redo: 快照校验失败（ABSENT 墓碑"
+				"被篡改？sha256=%s）：%s\n"), hex, e->path);
 			*failed = 1;
 			return -1;
 		}
@@ -839,7 +841,7 @@ static int apply_redo(const char *root, const char *ses, const snap_ent *e,
 		}
 	} else if (snap_verify(src)) {
 		/* S-FINDING-01：_redo 同口径校验（篡改拒绝还原） */
-		fprintf(stderr, "occ-redo: 快照校验失败（被篡改？）：%s\n",
+		fprintf(stderr, L_("occ-redo: 快照校验失败（被篡改？）：%s\n"),
 			e->path);
 		*failed = 1;
 		return -1;
@@ -962,8 +964,8 @@ static void redo_anchor_get(const char *redo_json, const char *path,
 	arr = aik_json_parse(redo_json, strlen(redo_json), perr, sizeof(perr));
 	if (!arr || aik_json_typeof(arr) != AIK_JSON_ARR) {
 		aik_json_free(arr);
-		fprintf(stderr, "occ-redo: redo 锚 JSON 损坏（退化为 legacy "
-			"sidecar 校验）\n");
+		fputs(L_("occ-redo: redo 锚 JSON 损坏（退化为 legacy "
+			 "sidecar 校验）\n"), stderr);
 		return;
 	}
 	n = aik_json_count(arr);
@@ -1060,26 +1062,26 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	if (out)
 		memset(out, 0, sizeof(*out));
 	if (!db || !session_id || steps < 1) {
-		set_err(err, errlen, "occ_undo: bad args（steps 须 ≥1）");
+		set_err(err, errlen, "%s", L_("occ_undo: bad args（steps 须 ≥1）"));
 		return -1;
 	}
 	if (occ_session_get(db, session_id, &s, err, errlen) != 1) {
-		set_err(err, errlen, "occ undo: 会话 %s 不存在", session_id);
+		set_err(err, errlen, L_("occ undo: 会话 %s 不存在"), session_id);
 		return -1;
 	}
 	if (!strcmp(s.status, OCC_ST_RUNNING)) {
 		/* P-48：真在跑等本轮收口即可；楔死/强杀残留的 running 挡
 		 * 路——给 unstuck 指引（轻量归位，不像 recover 全重放） */
 		set_err(err, errlen,
-			"occ undo: 会话正在执行（status=running），"
-			"请等本轮结束或先中断，或 `occ unstuck --session %s`"
-			" 轻量解僵（不重放）", session_id);
+			L_("occ undo: 会话正在执行（status=running），"
+			  "请等本轮结束或先中断，或 `occ unstuck --session %s`"
+			  " 轻量解僵（不重放）"), session_id);
 		return -1;
 	}
 	if (occ_msg_list(db, session_id, &rows, &n, err, errlen))
 		return -1;
 	if (!n) {
-		set_err(err, errlen, "occ undo: 会话没有消息，无可撤销");
+		set_err(err, errlen, "%s", L_("occ undo: 会话没有消息，无可撤销"));
 		goto out;
 	}
 	/* 边界 = 非 reverted 的 user 中倒数第 steps 条（叠加 undo 时已
@@ -1093,12 +1095,12 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		if (!strcmp(rows[i].role, "user") && !rows[i].reverted)
 			users[nusers++] = i;
 	if (!nusers) {
-		set_err(err, errlen, "occ undo: 没有可撤销的用户消息");
+		set_err(err, errlen, "%s", L_("occ undo: 没有可撤销的用户消息"));
 		goto out;
 	}
 	if ((size_t)steps > nusers) {
 		set_err(err, errlen,
-			"occ undo: 只有 %zu 步可撤（请求 %d 步）", nusers,
+			L_("occ undo: 只有 %zu 步可撤（请求 %d 步）"), nusers,
 			steps);
 		goto out;
 	}
@@ -1107,7 +1109,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 
 	root = resolve_root(snaproot, rootbuf, sizeof(rootbuf));
 	if (!root) {
-		set_err(err, errlen, "occ undo: 无法解析快照根（无 HOME）");
+		set_err(err, errlen, "%s", L_("occ undo: 无法解析快照根（无 HOME）"));
 		goto out;
 	}
 
@@ -1187,7 +1189,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		/* DB 是信任根——读不动的库上不做任何文件动作（fail closed） */
 		if (occ_snap_rows_for_msgs(db, mids, nmids, &mrows, &nmrows,
 					   terr, sizeof(terr))) {
-			set_err(err, errlen, "occ undo: manifest 读失败：%s",
+			set_err(err, errlen, L_("occ undo: manifest 读失败：%s"),
 				terr);
 			goto out;
 		}
@@ -1215,8 +1217,8 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 			}
 		if (dup)
 			continue;
-		fprintf(stderr, "occ-undo: DB manifest 有记录但快照缺失"
-			"（被删除？）：%s——该文件未回滚\n", mrows[i].path);
+		fprintf(stderr, L_("occ-undo: DB manifest 有记录但快照缺失"
+			"（被删除？）：%s——该文件未回滚\n"), mrows[i].path);
 		if (nsynth >= OCC_UNDO_MAX_FILES)
 			continue;		/* result 满额：stderr 已报 */
 		synth[nsynth].path = strdup(mrows[i].path);
@@ -1228,9 +1230,9 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		}
 	}
 	if (!ev.n && !nsynth) {
-		set_err(err, errlen,
-			"occ undo: 被撤范围没有文件快照（纯对话轮或快照"
-			"缺失）——不改库、不隐藏消息");
+		set_err(err, errlen, "%s",
+			L_("occ undo: 被撤范围没有文件快照（纯对话轮或快照"
+			  "缺失）——不改库、不隐藏消息"));
 		goto out;
 	}
 	/* ①② anchored 匹配：对每个 ev 条目查 manifest (msg,path)——
@@ -1260,14 +1262,14 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 			if ((!strcmp(e->want_kind, "absent")) !=
 			    (e->action == OCC_UNDO_DELETE)) {
 				e->failed_before = 1;
-				fprintf(stderr, "occ-undo: 快照类型与 DB "
-					"manifest 不符（被篡改？）：%s\n",
+				fprintf(stderr, L_("occ-undo: 快照类型与 DB "
+					"manifest 不符（被篡改？）：%s\n"),
 					e->path);
 			}
 		} else if (other_msg) {
 			e->failed_before = 1;
-			fprintf(stderr, "occ-undo: 快照出现位置与 DB "
-				"manifest 不符（被搬动？）：%s\n", e->path);
+			fprintf(stderr, L_("occ-undo: 快照出现位置与 DB "
+				"manifest 不符（被搬动？）：%s\n"), e->path);
 		}
 	}
 
@@ -1297,7 +1299,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		}
 		if (apply_restore(root, session_id, &ev.v[i])) {
 			ev.v[i].failed = 1;
-			fprintf(stderr, "occ-undo: 回滚失败 %s\n",
+			fprintf(stderr, L_("occ-undo: 回滚失败 %s\n"),
 				ev.v[i].path);
 		}
 	}
@@ -1329,7 +1331,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	if (have_old == 1 &&
 	    json_to_str_array(oldstage.hidden_json, &old_hidden,
 			      &nold_hidden) < 0) {
-		set_err(err, errlen, "occ undo: 旧 stage hidden_json 损坏");
+		set_err(err, errlen, "%s", L_("occ undo: 旧 stage hidden_json 损坏"));
 		goto out;
 	}
 	hidden_json = merge_ids_json(have_old == 1 ? oldstage.hidden_json :
@@ -1369,7 +1371,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	for (i = 0; i < ev.n && strlen(filelist) + 80 <
 	     sizeof(filelist); i++) {
 		if (i)
-			strncat(filelist, "、", sizeof(filelist) -
+			strncat(filelist, L_("、"), sizeof(filelist) -
 				strlen(filelist) - 1);
 		strncat(filelist, ev.v[i].path, sizeof(filelist) -
 			strlen(filelist) - 1);
@@ -1377,11 +1379,11 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	if (ev.n && strlen(filelist) + 4 < sizeof(filelist))
 		strncat(filelist, "…", sizeof(filelist) - strlen(filelist) - 1);
 	snprintf(note, sizeof(note),
-		 "[occ 注记] 已撤销最近 %d 步：%zu 条消息不再进上下文，"
-		 "%zu 个文件回滚到改动前（%s）。无快照不回滚项 %zu 处"
-		 "（bash 改动等）。发送新消息即确认撤销（此后不可 redo），"
-		 "或执行 occ redo 恢复。",
-		 steps, nhidden, ev.n, filelist[0] ? filelist : "见回滚列表",
+		 L_("[occ 注记] 已撤销最近 %d 步：%zu 条消息不再进上下文，"
+		   "%zu 个文件回滚到改动前（%s）。无快照不回滚项 %zu 处"
+		   "（bash 改动等）。发送新消息即确认撤销（此后不可 redo），"
+		   "或执行 occ redo 恢复。"),
+		 steps, nhidden, ev.n, filelist[0] ? filelist : L_("见回滚列表"),
 		 nskipped);
 	if (occ_msg_add_note(db, session_id, note, note_id, sizeof(note_id),
 			     err, errlen))
@@ -1398,7 +1400,7 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	if (have_old == 1 && oldstage.note_msg[0]) {
 		if (occ_msg_delete(db, oldstage.note_msg, terr,
 				   sizeof(terr)))
-			fprintf(stderr, "occ-undo: 撤旧注记失败（%s）\n",
+			fprintf(stderr, L_("occ-undo: 撤旧注记失败（%s）\n"),
 				terr);
 	}
 
@@ -1485,7 +1487,7 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 		occ_session_row s;
 
 		if (occ_session_get(db, session_id, &s, err, errlen) != 1) {
-			set_err(err, errlen, "occ redo: 会话 %s 不存在",
+			set_err(err, errlen, L_("occ redo: 会话 %s 不存在"),
 				session_id);
 			return -1;
 		}
@@ -1496,18 +1498,18 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 		if (g < 0)
 			return -1;
 		if (g == 0) {
-			set_err(err, errlen,
-				"occ redo: 没有待恢复的撤销（无 stage 态）");
+			set_err(err, errlen, "%s",
+				L_("occ redo: 没有待恢复的撤销（无 stage 态）"));
 			return -1;
 		}
 	}
 	root = resolve_root(snaproot, rootbuf, sizeof(rootbuf));
 	if (!root) {
-		set_err(err, errlen, "occ redo: 无法解析快照根（无 HOME）");
+		set_err(err, errlen, "%s", L_("occ redo: 无法解析快照根（无 HOME）"));
 		goto out;
 	}
 	if (json_to_str_array(st.files_json, &files, &nfiles) < 0) {
-		set_err(err, errlen, "occ redo: files_json 损坏");
+		set_err(err, errlen, "%s", L_("occ redo: files_json 损坏"));
 		goto out;
 	}
 	/* 1) 文件还原（_redo 段 → 目标）。P-50：stage.redo_json 锚命中
@@ -1523,7 +1525,7 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 		apply_redo(root, session_id, &e, &failed);
 		if (failed) {
 			nfailed++;
-			fprintf(stderr, "occ-redo: 还原失败 %s\n", files[i]);
+			fprintf(stderr, L_("occ-redo: 还原失败 %s\n"), files[i]);
 		}
 		if (out && out->nfiles < OCC_UNDO_MAX_FILES)
 			result_push_file(out, files[i], OCC_UNDO_RESTORE,
@@ -1531,7 +1533,7 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 	}
 	/* 2) 精确解隐藏（只解本 stage 的；早期已 commit 的保持隐藏） */
 	if (json_to_str_array(st.hidden_json, &hidden, &nhidden) < 0) {
-		set_err(err, errlen, "occ redo: hidden_json 损坏");
+		set_err(err, errlen, "%s", L_("occ redo: hidden_json 损坏"));
 		goto out;
 	}
 	{
@@ -1550,7 +1552,7 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 	/* 3) 删注记 + stage 行 */
 	if (st.note_msg[0] &&
 	    occ_msg_delete(db, st.note_msg, terr, sizeof(terr)))
-		fprintf(stderr, "occ-redo: 删注记失败（%s）\n", terr);
+		fprintf(stderr, L_("occ-redo: 删注记失败（%s）\n"), terr);
 	if (occ_revert_clear(db, session_id, err, errlen))
 		goto out;
 	/* 4) 清 _redo 段 */
@@ -1566,7 +1568,7 @@ int occ_redo(occ_db *db, const char *session_id, const char *snaproot,
 	rc = 0;
 	if (nfailed)
 		set_err(err, errlen,
-			"occ redo: 完成，但 %zu 个文件还原失败（见 stderr）",
+			L_("occ redo: 完成，但 %zu 个文件还原失败（见 stderr）"),
 			nfailed);
 out:
 	occ_revert_row_free(&st);
@@ -1597,7 +1599,7 @@ void occ_revert_commit(occ_db *db, const char *session_id,
 	}
 	occ_revert_row_free(&st);
 	if (occ_revert_clear(db, session_id, terr, sizeof(terr)))
-		fprintf(stderr, "occ-commit: 清 stage 失败（%s）\n", terr);
+		fprintf(stderr, L_("occ-commit: 清 stage 失败（%s）\n"), terr);
 	root = resolve_root(snaproot, rootbuf, sizeof(rootbuf));
 	if (root) {
 		char dir[768];

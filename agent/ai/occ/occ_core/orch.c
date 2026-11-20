@@ -47,6 +47,7 @@
 #include "orch.h"
 #include "review.h"			/* E4：终局机械预判挂点 */
 #include "occ_tokens.h"			/* E7：估算兜底 len/4 */
+#include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
 
 #include <sqlite3.h>			/* E7：子会话 usage 汇总直查 */
 
@@ -734,8 +735,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 
 	rpath[0] = '\0';
 	if (!o || !opts || !opts->prompt || !opts->prompt[0] || !out) {
-		set_err(err, errlen,
-			"occ_orch_spawn: 参数不合法（prompt 必填）");
+		set_err(err, errlen, "%s",
+			L_("occ_orch_spawn: 参数不合法（prompt 必填）"));
 		return OCC_ORCH_EARGS;
 	}
 	*out = NULL;
@@ -746,8 +747,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		long long rem = backoff_remaining(o, now);
 
 		if (rem > 0) {
-			set_err(err, errlen, "并发退避窗内（剩 %lld ms）——"
-				"撞限后须等满 %lld ms 再重试该路",
+			set_err(err, errlen, L_("并发退避窗内（剩 %lld ms）——"
+				"撞限后须等满 %lld ms 再重试该路"),
 				rem, o->backoff_ms);
 			return OCC_ORCH_EBACKOFF;
 		}
@@ -759,8 +760,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 			o->rejects = 0;
 		}
 		o->rejects++;
-		set_err(err, errlen, "并发上限 %d 已满（活子 %d，立即拒绝"
-			"；本窗第 %d 次拒绝）——退避 %lld ms 后重试",
+		set_err(err, errlen, L_("并发上限 %d 已满（活子 %d，立即拒绝"
+			"；本窗第 %d 次拒绝）——退避 %lld ms 后重试"),
 			OCC_ORCH_MAX_CHILDREN, o->n_live, o->rejects,
 			o->backoff_ms);
 		return OCC_ORCH_ELIMIT;
@@ -774,8 +775,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 					      opts->nfileset, owner,
 					      sizeof(owner))) {
 			set_err(err, errlen,
-				"文件集互斥冲突：已由在跑任务 %s 独占声明"
-				"（并发任务不得写同一文件——等其终局或换文件集）",
+				L_("文件集互斥冲突：已由在跑任务 %s 独占声明"
+				  "（并发任务不得写同一文件——等其终局或换文件集）"),
 				owner);
 			return OCC_ORCH_EFILESET;
 		}
@@ -792,8 +793,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 					    opts->model ? opts->model : "",
 					    OCC_SK_CHILD, &srow, e2,
 					    sizeof(e2)) != 0) {
-			set_err(err, errlen, "occ_orch_spawn: 建子会话失败"
-				"：%s", e2);
+			set_err(err, errlen, L_("occ_orch_spawn: 建子会话失败"
+						"：%s"), e2);
 			return OCC_ORCH_EDB;
 		}
 		snprintf(sid, sizeof(sid), "%s", srow.id);
@@ -815,8 +816,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		if (occ_task_create(o->db, opts->parent_session, title,
 				    opts->prompt, opts->rework_max, &trow,
 				    e2, sizeof(e2)) != 0) {
-			set_err(err, errlen, "occ_orch_spawn: 建任务失败"
-				"：%s", e2);
+			set_err(err, errlen, L_("occ_orch_spawn: 建任务失败"
+						"：%s"), e2);
 			return OCC_ORCH_EDB;
 		}
 		snprintf(tid, sizeof(tid), "%s", trow.id);
@@ -850,18 +851,20 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 						 opts->max_tokens, used);
 					(void)occ_task_escalate(o->db, tid,
 								rj, NULL, 0);
-					set_err(err, errlen, "预算熔断：任务"
-						" %s 累计 %lld tokens 已超"
-						"上限 %lld——拒绝再派（已记"
-						" escalate 审计）", tid, used,
+					set_err(err, errlen,
+						L_("预算熔断：任务 %s 累计 "
+						  "%lld tokens 已超上限 "
+						  "%lld——拒绝再派（已记 "
+						  "escalate 审计）"),
+						tid, used,
 						opts->max_tokens);
 					return OCC_ORCH_EBUDGET;
 				}
 			}
 		}
 		if (occ_task_dispatch(o->db, tid, sid, e2, sizeof(e2)) != 0) {
-			set_err(err, errlen, "occ_orch_spawn: 派发失败"
-				"：%s", e2);
+			set_err(err, errlen, L_("occ_orch_spawn: 派发失败"
+						"：%s"), e2);
 			return OCC_ORCH_EDB;	/* 任务留 pending，干净 */
 		}
 		dispatched = 1;
@@ -873,8 +876,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		if (opts->max_tokens > 0 &&
 		    occ_task_budget_baseline(o->db, tid, opts->max_tokens, e2,
 					     sizeof(e2)) != 0) {
-			set_err(err, errlen, "occ_orch_spawn: 预算基线落库"
-				"失败：%s", e2);
+			set_err(err, errlen, L_("occ_orch_spawn: 预算基线落库"
+						"失败：%s"), e2);
 			spawn_fail_cleanup(o, tid, "", 0, "budget baseline");
 			return OCC_ORCH_EDB;
 		}
@@ -898,8 +901,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		snprintf(rpath, sizeof(rpath), "%s", opts->result_path);
 	} else if (tid[0]) {
 		if (temp_path(rpath, sizeof(rpath), "res")) {
-			set_err(err, errlen, "occ_orch_spawn: 结果文件临时"
-				"生成失败：%s", strerror(errno));
+			set_err(err, errlen, L_("occ_orch_spawn: 结果文件临时"
+						"生成失败：%s"), strerror(errno));
 			if (dispatched)
 				spawn_fail_cleanup(o, tid, "", 0,
 						   "result tempfile");
@@ -909,8 +912,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	}
 	if (tid[0] && opts->fileset && opts->nfileset) {
 		if (fsx_add(o, tid, opts->fileset, opts->nfileset)) {
-			set_err(err, errlen, "occ_orch_spawn: 文件集登记失败"
-				"（oom）");
+			set_err(err, errlen, L_("occ_orch_spawn: 文件集登记失败"
+						"（oom）"));
 			if (dispatched)
 				spawn_fail_cleanup(o, tid, rpath, own_result,
 						   "fsx oom");
@@ -920,7 +923,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		}
 	}
 	if (tid[0] && trec_add(o, tid, rpath[0] ? rpath : NULL, own_result)) {
-		set_err(err, errlen, "occ_orch_spawn: 任务注册失败（oom）");
+		set_err(err, errlen, "%s", L_("occ_orch_spawn: 任务注册失败（oom）"));
 		if (dispatched) {
 			spawn_fail_cleanup(o, tid, "", 0, "trec oom");
 		} else {
@@ -944,23 +947,23 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		snprintf(pj, sizeof(pj), "{\"path\":\"%.256s\"}", rpath);
 		if (occ_task_note_kind(o->db, tid, OCC_TASK_EV_RESULT_FILE,
 				       pj, e2, sizeof(e2)) != 0)
-			fprintf(stderr, "occ-orch: result_file 事件落库失败"
-				"（task %s）：%s\n", tid, e2);
+			fprintf(stderr, L_("occ-orch: result_file 事件落库失败"
+				"（task %s）：%s\n"), tid, e2);
 	}
 
 	/* ---- 可执行 + 输出文件 + env ---- */
 	if (opts->occ_bin && opts->occ_bin[0]) {
 		if (resolve_bin(opts->occ_bin, bin, sizeof(bin))) {
-			set_err(err, errlen, "occ_orch_spawn: 可执行不可用"
-				" `%.200s'", opts->occ_bin);
+			set_err(err, errlen, L_("occ_orch_spawn: 可执行不可用"
+						" `%.200s'"), opts->occ_bin);
 			if (dispatched)
 				spawn_fail_cleanup(o, tid, rpath, own_result,
 						   "occ_bin resolve");
 			return OCC_ORCH_ESPAWN;
 		}
 	} else if (default_bin(bin, sizeof(bin))) {
-		set_err(err, errlen, "occ_orch_spawn: occ 可执行未找到"
-			"（OCC_ORCH_BIN/proc/self/exe 同目录与 PATH 均无）");
+		set_err(err, errlen, "%s", L_("occ_orch_spawn: occ 可执行未找到"
+			"（OCC_ORCH_BIN/proc/self/exe 同目录与 PATH 均无）"));
 		if (dispatched)
 			spawn_fail_cleanup(o, tid, rpath, own_result,
 					   "occ bin not found");
@@ -969,8 +972,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	if (opts->stdout_path && opts->stdout_path[0]) {
 		snprintf(sop, sizeof(sop), "%s", opts->stdout_path);
 	} else if (temp_path(sop, sizeof(sop), "out")) {
-		set_err(err, errlen, "occ_orch_spawn: stdout 临时文件失败"
-			"：%s", strerror(errno));
+		set_err(err, errlen, L_("occ_orch_spawn: stdout 临时文件失败"
+					"：%s"), strerror(errno));
 		if (dispatched)
 			spawn_fail_cleanup(o, tid, rpath, own_result,
 					   "stdout tempfile");
@@ -980,8 +983,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		snprintf(sep, sizeof(sep), "%s", opts->stderr_path);
 	} else if (temp_path(sep, sizeof(sep), "err")) {
 		unlink(sop);
-		set_err(err, errlen, "occ_orch_spawn: stderr 临时文件失败"
-			"：%s", strerror(errno));
+		set_err(err, errlen, L_("occ_orch_spawn: stderr 临时文件失败"
+					"：%s"), strerror(errno));
 		if (dispatched)
 			spawn_fail_cleanup(o, tid, rpath, own_result,
 					   "stderr tempfile");
@@ -994,7 +997,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 	if (!envp) {
 		unlink(sop);
 		unlink(sep);
-		set_err(err, errlen, "occ_orch_spawn: env 构建失败（oom）");
+		set_err(err, errlen, "%s", L_("occ_orch_spawn: env 构建失败（oom）"));
 		if (dispatched)
 			spawn_fail_cleanup(o, tid, rpath, own_result,
 					   "env oom");
@@ -1012,8 +1015,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 			env_free(envp);
 			unlink(sop);
 			unlink(sep);
-			set_err(err, errlen, "occ_orch_spawn: OCC_TASK_ID env"
-				" 注入失败（oom）");
+			set_err(err, errlen, "%s", L_("occ_orch_spawn: OCC_TASK_ID env"
+				" 注入失败（oom）"));
 			if (dispatched)
 				spawn_fail_cleanup(o, tid, rpath, own_result,
 						   "taskid env");
@@ -1029,8 +1032,8 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 			env_free(envp);
 			unlink(sop);
 			unlink(sep);
-			set_err(err, errlen, "occ_orch_spawn: 结果文件 env"
-				" 注入失败（oom）");
+			set_err(err, errlen, "%s", L_("occ_orch_spawn: 结果文件 env"
+				" 注入失败（oom）"));
 			if (dispatched)
 				spawn_fail_cleanup(o, tid, rpath, own_result,
 						   "result env oom");
@@ -1079,12 +1082,12 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		if (pfull) {
 			snprintf(pfull,
 				 strlen(opts->prompt) + sizeof(rpath) + 128,
-				 "%s\n结果报告写此文件：%.192s"
-				 "（报告=任务书要求+# VERDICT 表）\n",
+				 L_("%s\n结果报告写此文件：%.192s"
+				   "（报告=任务书要求+# VERDICT 表）\n"),
 				 opts->prompt, rpath);
 		} else {
-			fprintf(stderr, "occ-orch: 结果文件 prompt 通道"
-				" 追加失败（oom）——env 通道兜底\n");
+			fputs(L_("occ-orch: 结果文件 prompt 通道"
+				 " 追加失败（oom）——env 通道兜底\n"), stderr);
 		}
 	}
 	argv[0] = bin;
@@ -1105,7 +1108,7 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 		free(c);
 		unlink(sop);
 		unlink(sep);
-		set_err(err, errlen, "occ_orch_spawn: fork 失败：%s",
+		set_err(err, errlen, L_("occ_orch_spawn: fork 失败：%s"),
 			strerror(e));
 		if (dispatched)
 			spawn_fail_cleanup(o, tid, rpath, own_result,
@@ -1415,8 +1418,8 @@ int occ_orch_wait(occ_orch_child *c, occ_orch_result *res,
 		  char *err, size_t errlen)
 {
 	if (!c) {
-		set_err(err, errlen, "occ_orch_wait: child 已终局（句柄"
-			"在终局回收时失效）");
+		set_err(err, errlen, "%s",
+			L_("occ_orch_wait: child 已终局（句柄在终局回收时失效）"));
 		return -1;
 	}
 	if (res)
@@ -1427,8 +1430,8 @@ int occ_orch_wait(occ_orch_child *c, occ_orch_result *res,
 		if (rc == 1)
 			return OCC_ORCH_OK;
 		if (rc < 0) {
-			set_err(err, errlen, "occ_orch_wait: waitpid 异常"
-				"：%s", strerror(errno));
+			set_err(err, errlen, L_("occ_orch_wait: waitpid 异常"
+						"：%s"), strerror(errno));
 			return -1;
 		}
 		{
@@ -1443,8 +1446,8 @@ int occ_orch_cancel(occ_orch_child *c, occ_orch_result *res,
 		    char *err, size_t errlen)
 {
 	if (!c) {
-		set_err(err, errlen, "occ_orch_cancel: child 已终局（句柄"
-			"在终局回收时失效）");
+		set_err(err, errlen, "%s",
+			L_("occ_orch_cancel: child 已终局（句柄在终局回收时失效）"));
 		return -1;
 	}
 	term_group(c, 0);
@@ -1556,9 +1559,9 @@ char *occ_orch_distill(occ_db *db, const char *task_id)
 			gbuf[gl] = '\0';
 		}
 		o += (size_t)snprintf(out + o, 2048 - o,
-				      "【任务蒸馏 %s】\n目标：%s\n"
-				      "关键实体：\n", row.id,
-				      gbuf[0] ? gbuf : "(brief 缺 goal)");
+				      L_("【任务蒸馏 %s】\n目标：%s\n"
+					"关键实体：\n"), row.id,
+				      gbuf[0] ? gbuf : L_("(brief 缺 goal)"));
 	}
 	/* brief_json 引号串实体扫描（acceptance/fileset 路径与 md5——
 	 * 简扫描不处理转义：实体为路径/hex/断言串，工程上无内嵌引号） */
@@ -1587,7 +1590,7 @@ char *occ_orch_distill(occ_db *db, const char *task_id)
 		}
 	}
 	o += (size_t)snprintf(out + o, 2048 - o,
-			      "（子会话 %s 已归档；完整报告走 read_result）\n",
+			      L_("（子会话 %s 已归档；完整报告走 read_result）\n"),
 			      row.child_session[0] ? row.child_session : "-");
 	(void)occ_task_distill(db, task_id, out, err, sizeof(err));
 	if (row.child_session[0])
