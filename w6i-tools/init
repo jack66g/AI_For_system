@@ -1,7 +1,7 @@
 #!/bin/sh
 # ============================================================
 # AIKernel 0.1.0-alpha 安装器 /init (busybox ash, PID1)
-# 流程: 挂载ISO -> 扫描目标盘 -> 一次y/N确认
+# 流程: 挂载ISO -> 扫描目标盘 -> 一次Y/n确认(默认Y)
 #       -> sfdisk 双分区(ESP FAT32 512M + ext4根)
 #       -> mkfs.vfat/mkfs.ext4 -> 解出厂rootfs -> 2G swapfile
 #       -> 装内核 -> API token 生成 -> fstab(UUID)
@@ -26,6 +26,13 @@
 #     grub-install x86_64-efi 报 "doesn't look like an EFI partition");
 #     b) reboot/poweroff 改走 PATH(busybox applet 在 /bin, 原 /sbin/绝对
 #     路径不存在 -> PID1 exit 127 -> 重启期 kernel panic)
+# v5(P-36): ①确认问句 [y/N] 默认N 改 [Y/n] 默认Y——旧语义回车=取消=
+#     cancel() 重启, 而 ISO 仍是首启设备 => 回车即回安装器循环(真机
+#     发现⑤); 现回车=继续安装, 仅显式 n 取消。②用户可见串全部改
+#     ASCII 英文——initramfs 阶段无 CJK 字体(内核内建字体 512 字形
+#     上限, build-initramfs.sh 亦不打包字体/setfont), 中文在 tty0 渲染
+#     为方块(真机发现⑥); 串口侧 UTF-8 锚点随之 ASCII 化(连动
+#     w17j_boot.py: y/N→Y/n, 按回车→Press ENTER)。代码注释保留中文。
 # ============================================================
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export LD_LIBRARY_PATH=/lib:/usr/lib
@@ -41,26 +48,26 @@ AUTOREBOOT=0
 case "$(cat /proc/cmdline)" in *aiinstall.autoreboot=1*) AUTOREBOOT=1;; esac
 
 die() {
-  printf '\n[!] 安装失败: %s\n' "$*"
-  printf '[!] 目标盘可能处于中间状态，重跑安装器可修复(幂等)。\n'
+  printf '\n[!] Install failed: %s\n' "$*"
+  printf '[!] Target disk may be in an intermediate state; re-running the installer repairs it (idempotent).\n'
   if [ "$AUTOREBOOT" = 1 ]; then sleep 3; poweroff -f; fi
-  printf '按回车重启... '
+  printf 'Press ENTER to reboot... '
   read x
   reboot -f
 }
 
 cancel() {
-  printf '\n已取消，未做任何更改。\n'
+  printf '\nCancelled, no changes were made.\n'
   if [ "$AUTOREBOOT" = 1 ]; then sleep 2; poweroff -f; fi
-  printf '按回车重启... '
+  printf 'Press ENTER to reboot... '
   read x
   reboot -f
 }
 
 printf '\n'
 printf '==================================================\n'
-printf '   AIKernel 0.1.0-alpha 安装器\n'
-printf '   AIKernel Installer (busybox initramfs, BIOS+EFI)\n'
+printf '   AIKernel Installer 0.1.0-alpha\n'
+printf '   (busybox initramfs, BIOS+EFI)\n'
 printf '==================================================\n'
 cat /proc/version
 printf '\n'
@@ -81,8 +88,8 @@ while [ -z "$MEDIA" ] && [ $round -lt 3 ]; do
   done
   [ -n "$MEDIA" ] || sleep 2
 done
-[ -n "$MEDIA" ] || die "找不到安装介质(含 rootfs-factory.tar 的 ISO)"
-printf '安装介质: %s\n' "$MEDIA"
+[ -n "$MEDIA" ] || die "installation media not found (ISO with rootfs-factory.tar)"
+printf 'Install media: %s\n' "$MEDIA"
 printf '  - /media/boot/bzImage        OK (%s bytes)\n' "$(stat -c %s /media/boot/bzImage)"
 printf '  - /media/rootfs-factory.tar  OK (%s bytes)\n' "$(stat -c %s /media/rootfs-factory.tar)"
 
@@ -102,11 +109,11 @@ for sysd in /sys/block/*; do
 done
 set -- $CANDS
 N=$#
-if [ "$N" -eq 0 ]; then die "未找到可安装的硬盘(要求 >= 6GiB)"; fi
+if [ "$N" -eq 0 ]; then die "no installable hard disk found (need >= 6GiB)"; fi
 if [ "$N" -eq 1 ]; then
   TARGET="/dev/$1"
 else
-  printf '\n检测到多块硬盘:\n'
+  printf '\nMultiple hard disks detected:\n'
   i=1
   for d in $CANDS; do
     model=$(cat /sys/block/$d/device/model 2>/dev/null | tr -s ' ')
@@ -114,10 +121,10 @@ else
     printf '  %d) /dev/%-10s %-20s %d GiB\n' $i "$d" "${model:-?}" $(( sz * 512 / 1073741824 ))
     i=$(( i + 1 ))
   done
-  printf '选择安装目标盘序号 [1-%d]: ' "$N"
+  printf 'Select target disk number [1-%d]: ' "$N"
   read sel
-  case "$sel" in ''|*[!0-9]*) die "无效选择: $sel";; esac
-  if [ "$sel" -lt 1 ] || [ "$sel" -gt "$N" ]; then die "无效选择: $sel"; fi
+  case "$sel" in ''|*[!0-9]*) die "invalid selection: $sel";; esac
+  if [ "$sel" -lt 1 ] || [ "$sel" -gt "$N" ]; then die "invalid selection: $sel"; fi
   i=1
   for d in $CANDS; do
     [ "$i" = "$sel" ] && TARGET="/dev/$d"
@@ -129,93 +136,93 @@ case "${TARGET#/dev/}" in
   *)             PART1="${TARGET}1";  PART2="${TARGET}2" ;;
 esac
 
-# ---- 3. 一次 y/N 确认(默认 N 防手滑) ----
+# ---- 3. 一次 Y/n 确认(P-36: 默认 Y、回车=继续; 显式 n 才取消) ----
 model=$(cat /sys/block/${TARGET#/dev/}/device/model 2>/dev/null | tr -s ' ')
 [ -n "$model" ] || case "${TARGET#/dev/}" in
   vd*)    model="VirtIO Block Device" ;;
   nvme*)  model="NVMe Device" ;;
   sd*)    model="SCSI Disk" ;;
-  *)      model="未知型号" ;;
+  *)      model="Unknown model" ;;
 esac
 sz=$(cat /sys/block/${TARGET#/dev/}/size)
 gib=$(( sz * 512 / 1073741824 ))
 printf '\n--------------------------------------------------\n'
-printf '目标盘   : %s (%s, %d GiB)\n' "$TARGET" "${model:-未知型号}" "$gib"
-printf '分区方案 : ESP(FAT32 512M) + ext4根 + 2G swapfile\n'
-printf '           GRUB 双装(BIOS MBR + UEFI ESP)\n'
-printf '警告     : 目标盘全部数据将被擦除!\n'
+printf 'Target    : %s (%s, %d GiB)\n' "$TARGET" "${model:-Unknown model}" "$gib"
+printf 'Layout    : ESP(FAT32 512M) + ext4 root + 2G swapfile\n'
+printf '            GRUB dual install (BIOS MBR + UEFI ESP)\n'
+printf 'WARNING   : ALL DATA ON THE TARGET DISK WILL BE ERASED!\n'
 printf '--------------------------------------------------\n'
-printf '确认安装到 %s? [y/N] ' "$TARGET"
+printf 'Install to %s? [Y/n] ' "$TARGET"
 read ANS
 case "$ANS" in
-  y|Y) ;;
-  *) cancel ;;
+  n|N) cancel ;;
+  *) ;;
 esac
 
 # ---- 4. 分区: dos 布局, p1=ESP(type ef, 512MiB, bootable) p2=Linux ----
-printf '\n[1/8] 分区 sfdisk %s (MBR: p1=ESP 512MiB type-ef bootable, p2=Linux 其余)...\n' "$TARGET"
+printf '\n[1/8] Partitioning %s (MBR: p1=ESP 512MiB type-ef bootable, p2=Linux rest)...\n' "$TARGET"
 sfdisk "$TARGET" >/dev/null <<EOF
 label: dos
 start=2048, size=1048576, type=ef, bootable
 type=83
 EOF
-[ $? -eq 0 ] || die "sfdisk 分区失败"
+[ $? -eq 0 ] || die "sfdisk partitioning failed"
 i=0
 while { [ ! -b "$PART1" ] || [ ! -b "$PART2" ]; } && [ $i -lt 20 ]; do sleep 1; mdev -s 2>/dev/null; i=$(( i + 1 )); done
-[ -b "$PART1" ] || die "分区节点 $PART1 未出现"
-[ -b "$PART2" ] || die "分区节点 $PART2 未出现"
+[ -b "$PART1" ] || die "partition node $PART1 did not appear"
+[ -b "$PART2" ] || die "partition node $PART2 did not appear"
 
 # ---- 5. 格式化 ----
-printf '[2/8] 格式化 ESP %s (mkfs.vfat -F32, label=AIK-EFI)...\n' "$PART1"
+printf '[2/8] Formatting ESP %s (mkfs.vfat -F32, label=AIK-EFI)...\n' "$PART1"
 /sbin/mkfs.vfat -F 32 -n AIK-EFI "$PART1" >/dev/null 2>&1
-[ $? -eq 0 ] || die "mkfs.vfat 失败"
-printf '      格式化 ext4 %s (label=aikernel-root)...\n' "$PART2"
+[ $? -eq 0 ] || die "mkfs.vfat failed"
+printf '      Formatting ext4 %s (label=aikernel-root)...\n' "$PART2"
 mkfs.ext4 -F -L aikernel-root "$PART2" >/dev/null 2>&1
-[ $? -eq 0 ] || die "mkfs.ext4 失败"
+[ $? -eq 0 ] || die "mkfs.ext4 failed"
 
 # ---- 6. 解压出厂 rootfs ----
 mkdir -p /mnt/newroot
-mount -t ext4 "$PART2" /mnt/newroot || die "挂载 $PART2 失败"
-printf '[3/8] 解压出厂 rootfs (约2GB, TCG下需数分钟, 请耐心等待)...\n'
+mount -t ext4 "$PART2" /mnt/newroot || die "mount $PART2 failed"
+printf '[3/8] Extracting factory rootfs (~2GB, may take minutes under TCG, please wait)...\n'
 tar -xpf /media/rootfs-factory.tar -C /mnt/newroot
-[ $? -eq 0 ] || die "rootfs 解压失败"
+[ $? -eq 0 ] || die "rootfs extraction failed"
 # 注意: /sbin/init 是绝对符号链接链(→/lib/systemd/systemd), 挂载点视角会逃逸出树;
 # 检查树内真实二进制
-[ -x /mnt/newroot/usr/lib/systemd/systemd ] || die "rootfs 解压后缺少 /usr/lib/systemd/systemd"
-printf '      解压完成: %s 文件\n' "$(find /mnt/newroot -mindepth 1 | wc -l)"
+[ -x /mnt/newroot/usr/lib/systemd/systemd ] || die "missing /usr/lib/systemd/systemd after extraction"
+printf '      Extract done: %s files\n' "$(find /mnt/newroot -mindepth 1 | wc -l)"
 
 # ---- 7. swapfile ----
-printf '[4/8] 创建 2G swapfile...\n'
+printf '[4/8] Creating 2G swapfile...\n'
 dd if=/dev/zero of=/mnt/newroot/swapfile bs=1M count=2048 2>/dev/null
 chmod 600 /mnt/newroot/swapfile
-mkswap /mnt/newroot/swapfile >/dev/null 2>&1 || die "mkswap 失败"
+mkswap /mnt/newroot/swapfile >/dev/null 2>&1 || die "mkswap failed"
 
 # ---- 8. 内核 ----
-printf '[5/8] 安装内核 -> /boot/vmlinuz-aikernel...\n'
+printf '[5/8] Installing kernel -> /boot/vmlinuz-aikernel...\n'
 mkdir -p /mnt/newroot/boot
-cp /media/boot/bzImage /mnt/newroot/boot/vmlinuz-aikernel || die "内核复制失败"
+cp /media/boot/bzImage /mnt/newroot/boot/vmlinuz-aikernel || die "kernel copy failed"
 
 # ---- 9. API token(随机 32 hex, 600) ----
-printf '      生成 /etc/aikernel/api-token (远程AI接口鉴权)...\n'
+printf '      Generating /etc/aikernel/api-token (remote AI API auth)...\n'
 TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
 [ ${#TOKEN} -eq 32 ] || TOKEN=$(hexdump -n 16 -v -e '/1 "%02x"' /dev/urandom 2>/dev/null | tr -d ' \n')
-[ ${#TOKEN} -eq 32 ] || die "api-token 生成失败"
+[ ${#TOKEN} -eq 32 ] || die "api-token generation failed"
 mkdir -p /mnt/newroot/etc/aikernel
 printf '%s\n' "$TOKEN" > /mnt/newroot/etc/aikernel/api-token
 chmod 600 /mnt/newroot/etc/aikernel/api-token
 
 # ---- 10. fstab(UUID) ----
 UUID=$(blkid -s UUID -o value "$PART2" 2>/dev/null)
-[ -n "$UUID" ] || die "blkid 未取得根分区 UUID"
+[ -n "$UUID" ] || die "blkid got no UUID for root partition"
 PARTUUID=$(blkid -s PARTUUID -o value "$PART2" 2>/dev/null)
-[ -n "$PARTUUID" ] || die "blkid 未取得根分区 PARTUUID"
+[ -n "$PARTUUID" ] || die "blkid got no PARTUUID for root partition"
 ESPUUID=$(blkid -s UUID -o value "$PART1" 2>/dev/null)
-[ -n "$ESPUUID" ] || die "blkid 未取得 ESP UUID"
+[ -n "$ESPUUID" ] || die "blkid got no UUID for ESP"
 # 内核无 initramfs 引导: root=UUID= 需读 fs(仅 initramfs 期可做), 必须用
 # 内核原生可解析的 PARTUUID(MBR: <diskid>-02)
-printf '[6/8] 写 /etc/fstab (root UUID=%s, ESP UUID=%s, cmdline PARTUUID=%s)...\n' "$UUID" "$ESPUUID" "$PARTUUID"
+printf '[6/8] Writing /etc/fstab (root UUID=%s, ESP UUID=%s, cmdline PARTUUID=%s)...\n' "$UUID" "$ESPUUID" "$PARTUUID"
 mkdir -p /mnt/newroot/boot/efi
-mount -t vfat "$PART1" /mnt/newroot/boot/efi || die "挂载 ESP $PART1 失败"
+mount -t vfat "$PART1" /mnt/newroot/boot/efi || die "mount ESP $PART1 failed"
 cat > /mnt/newroot/etc/fstab <<EOF
 UUID=$UUID / ext4 defaults 1 1
 UUID=$ESPUUID /boot/efi vfat umask=0077 0 2
@@ -223,7 +230,7 @@ UUID=$ESPUUID /boot/efi vfat umask=0077 0 2
 EOF
 
 # ---- 11. GRUB 双装: i386-pc -> MBR + x86_64-efi -> ESP (各自 try/catch) ----
-printf '[7/8] 安装 GRUB...\n'
+printf '[7/8] Installing GRUB...\n'
 mkdir -p /mnt/newroot/boot/grub
 GRUB_BIOS_RC=1
 GRUB_EFI_RC=1
@@ -234,7 +241,7 @@ GRUB_BIOS_RC=$?
 if [ $GRUB_BIOS_RC -eq 0 ]; then
   printf '      [BIOS] OK\n'
 else
-  printf '      [BIOS] 失败(rc=%d, 不阻塞 EFI 路径), 日志尾部:\n' "$GRUB_BIOS_RC"
+  printf '      [BIOS] FAILED (rc=%d, EFI path not blocked), log tail:\n' "$GRUB_BIOS_RC"
   tail -5 /tmp/grub-bios.log | sed 's/^/        /'
 fi
 
@@ -246,17 +253,17 @@ GRUB_EFI_RC=$?
 if [ $GRUB_EFI_RC -eq 0 ]; then
   printf '      [UEFI] OK\n'
 else
-  printf '      [UEFI] 失败(rc=%d, 不阻塞 BIOS 路径), 日志尾部:\n' "$GRUB_EFI_RC"
+  printf '      [UEFI] FAILED (rc=%d, BIOS path not blocked), log tail:\n' "$GRUB_EFI_RC"
   tail -5 /tmp/grub-efi.log | sed 's/^/        /'
 fi
-[ $GRUB_BIOS_RC -eq 0 ] || [ $GRUB_EFI_RC -eq 0 ] || die "grub-install 双路径均失败 (bios rc=$GRUB_BIOS_RC, efi rc=$GRUB_EFI_RC)"
+[ $GRUB_BIOS_RC -eq 0 ] || [ $GRUB_EFI_RC -eq 0 ] || die "grub-install both paths failed (bios rc=$GRUB_BIOS_RC, efi rc=$GRUB_EFI_RC)"
 
 # ---- 12. ESP fallback: \EFI\BOOT\BOOTX64.EFI (无NVRAM时 OVMF 兜底路径) ----
 if [ $GRUB_EFI_RC -eq 0 ]; then
-  printf '      [UEFI] 放置 fallback \\EFI\\BOOT\\BOOTX64.EFI...\n'
+  printf '      [UEFI] Placing fallback \\EFI\\BOOT\\BOOTX64.EFI...\n'
   mkdir -p /mnt/newroot/boot/efi/EFI/BOOT
   cp /mnt/newroot/boot/efi/EFI/aikernel/grubx64.efi /mnt/newroot/boot/efi/EFI/BOOT/BOOTX64.EFI \
-    || die "ESP fallback BOOTX64.EFI 拷贝失败"
+    || die "ESP fallback BOOTX64.EFI copy failed"
 fi
 
 cat > /mnt/newroot/boot/grub/grub.cfg <<EOF
@@ -281,22 +288,22 @@ sync
 
 # ---- 13. 完成 ----
 printf '\n==================================================\n'
-printf '   AIKernel 安装完成!\n'
-printf '   目标盘: %s (%s, %d GiB)\n' "$TARGET" "${model:-disk}" "$gib"
-printf '   ESP   : %s FAT32 UUID=%s -> /boot/efi\n' "$PART1" "$ESPUUID"
-printf '   根分区: %s  UUID=%s\n' "$PART2" "$UUID"
-printf '   引导  : BIOS(MBR)=%s  UEFI(ESP)=%s\n' \
+printf '   AIKernel installation complete!\n'
+printf '   Target : %s (%s, %d GiB)\n' "$TARGET" "${model:-disk}" "$gib"
+printf '   ESP    : %s FAT32 UUID=%s -> /boot/efi\n' "$PART1" "$ESPUUID"
+printf '   Root   : %s  UUID=%s\n' "$PART2" "$UUID"
+printf '   Boot   : BIOS(MBR)=%s  UEFI(ESP)=%s\n' \
   "$([ $GRUB_BIOS_RC -eq 0 ] && echo OK || echo FAIL)" \
   "$([ $GRUB_EFI_RC -eq 0 ] && echo OK || echo FAIL)"
-printf '   看门狗: softdog 模块+开机自启已装 (RuntimeWatchdogSec=15s)\n'
+printf '   Watchdog: softdog module + autostart installed (RuntimeWatchdogSec=15s)\n'
 printf '\n'
-printf '   重启进入 AIKernel，首次开机 AI 将引导你完成初始化。\n'
+printf '   Reboot into AIKernel; on first boot the AI guides you through setup.\n'
 printf '==================================================\n'
 if [ "$AUTOREBOOT" = 1 ]; then
   sleep 3
   poweroff -f
 else
-  printf '按回车重启... '
+  printf 'Press ENTER to reboot... '
   read x
   reboot -f
 fi

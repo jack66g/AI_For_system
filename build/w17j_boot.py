@@ -110,12 +110,13 @@ def install_round():
             ser.send(b"\x1b[B")
             time.sleep(0.4)
         ser.send(b"\r")
-        ser.wait(b"y/N", 900)
+        ser.wait(b"Y/n", 900)
         time.sleep(0.5)
         mark = len(ser.buf)
         ser.send(b"y\r")
         # E10 尾巴：安装器末次「按回车重启」真等——补 \r 兑现
-        ser.wait(b"\xe6\x8c\x89\xe5\x9b\x9e\xe8\xbd\xa6", 3000)
+        # P-36：安装器用户串 ASCII 化后锚点改「Press ENTER」（原 UTF-8 按回车）
+        ser.wait(b"Press ENTER", 3000)
         time.sleep(1)
         ser.send(b"\r")
         wait_after(ser, mark, b"Power down", 300)
