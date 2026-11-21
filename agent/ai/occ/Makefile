@@ -161,7 +161,7 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout tests/test_lang
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout tests/test_lang tests/test_lang_tools
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
@@ -172,7 +172,7 @@ test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_c
 		  tests/test_telemetry tests/test_replay tests/test_task \
 		  tests/test_orch tests/test_review tests/test_w2gate \
 		  tests/test_netcfg tests/test_cli_rc tests/test_net_timeout \
-		  tests/test_lang; do \
+		  tests/test_lang tests/test_lang_tools; do \
 		./$$t || exit 1; \
 	done
 	@echo "occ unit tests (a1+a2+a3+b1+b2+c2+c3+d1+debt+e1+e2+e4+uxo+p2a): ALL GREEN"
@@ -335,17 +335,17 @@ tests/test_openai_build: tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(OB
 tests/test_anthropic_build: tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_anthropic_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
-tests/test_sse_openai: tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
+tests/test_sse_openai: tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_openai.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o $(LDLIBS)
 
-tests/test_sse_anthropic: tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
+tests/test_sse_anthropic: tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_sse_anthropic.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o $(LDLIBS)
 
 tests/occ_reqbuild: tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_reqbuild.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
-tests/occ_ssereplay: tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(LDLIBS)
+tests/occ_ssereplay: tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/occ_ssereplay.c $(OBJ_DIR)/occ_llm/occ_sse.o $(OBJ_DIR)/occ_llm/openai.o $(OBJ_DIR)/occ_llm/anthropic.o $(NORM_SRC) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o $(LDLIBS)
 
 # 真传输（cloud/http + mbedtls；occ_llm_call 全链）
 tests/occ_smoke: tests/occ_smoke.c $(LLM_OBJS) $(LLM_CALL_OBJ) $(NORM_SRC) $(HTTP_CLIENT_OBJ) $(STORE_LIB) $(MBEDTLS_LIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
@@ -461,6 +461,22 @@ tests/test_tools: tests/test_tools.c $(TOOLS_OBJS) $(OBJ_DIR)/occ_core/session.o
 		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
 		$(OBJ_DIR)/occ_core/review.o \
 		$(OBJ_DIR)/occ_llm/catalog.o \
+		$(OBJ_DIR)/occ_core/tokens.o \
+		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
+
+# O-20 A3：工具定义面语档单测（真实 12 件 defs 全档切 + openai/anthropic
+# 请求体铁证；闭包同 test_tools——orch/task/review/occ_sme/catalog 在链上）
+tests/test_lang_tools: tests/test_lang_tools.c $(TOOLS_OBJS) $(LLM_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		  $(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		  $(OBJ_DIR)/occ_core/review.o \
+		  $(OBJ_DIR)/occ_core/tokens.o \
+		  $(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
+		  $(STORE_LIB) $(SQLITE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ tests/test_lang_tools.c \
+		$(TOOLS_OBJS) $(LLM_OBJS) $(OBJ_DIR)/occ_core/session.o \
+		$(OBJ_DIR)/occ_core/task.o $(OBJ_DIR)/occ_core/orch.o \
+		$(OBJ_DIR)/occ_core/review.o \
 		$(OBJ_DIR)/occ_core/tokens.o \
 		$(OBJ_DIR)/occ_core/occ_sme.o $(SME_REUSE_OBJS) \
 		$(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o

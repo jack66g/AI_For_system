@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "store/store_json.h"
+#include "occ_tui/tui_lang.h"	/* O-20 A3：工具定义面随档 */
 
 #define ANT_DEFAULT_MAX_TOKENS 32000
 #define ANT_ID_BUF 160
@@ -336,7 +337,7 @@ char *occ_build_request_anthropic(const occ_llm_req *req, size_t *outlen)
 
 			if (!t)
 				goto out;
-			schema = parse_json_text(req->tools[i].parameters);
+			schema = parse_json_text(L_(req->tools[i].parameters));
 			if (!schema) {
 				aik_json_free(t);
 				goto out;
@@ -346,7 +347,7 @@ char *occ_build_request_anthropic(const occ_llm_req *req, size_t *outlen)
 				goto out;
 			if (req->tools[i].description && *req->tools[i].description &&
 			    aik_json_obj_put(t, "description",
-					aik_json_new_str(req->tools[i].description)))
+					aik_json_new_str(L_(req->tools[i].description))))
 				goto out;
 			if (aik_json_obj_put(t, "input_schema", schema)) {
 				aik_json_free(schema);

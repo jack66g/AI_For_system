@@ -20,6 +20,7 @@
 
 #include "local/local_http.h"
 #include "store/store_json.h"
+#include "occ_tui/tui_lang.h"	/* O-20 A3：err 人话随档（协议/AI 面零字节） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -542,7 +543,7 @@ static int ac_judge(occ_ac_turn *t, const char *context, char *err,
 		 material[0] ? material : "（无）",
 		 context ? context : "（无）");
 	if (fill_prompt(t, OCC_AC_JUDGE_SYSTEM, prompt, &raw) != 0 || !raw) {
-		snprintf(err, errlen, "judge: 生成判定失败");
+		snprintf(err, errlen, "%s", L_("judge: 生成判定失败"));
 		return -1;
 	}
 	json = extract_json_obj(raw);
@@ -556,7 +557,7 @@ static int ac_judge(occ_ac_turn *t, const char *context, char *err,
 	root = aik_json_parse(json, strlen(json), NULL, 0);
 	free(json);
 	if (!root) {
-		snprintf(err, errlen, "judge: 判定 JSON 非法");
+		snprintf(err, errlen, "%s", L_("judge: 判定 JSON 非法"));
 		return -1;
 	}
 	body = NULL;
@@ -607,14 +608,14 @@ static int ac_judge(occ_ac_turn *t, const char *context, char *err,
 		free(dump);
 	}
 	if (rc != 0) {
-		snprintf(err, errlen, "judge: ac 不可达或拒绝（HTTP 非 2xx）");
+		snprintf(err, errlen, "%s", L_("judge: ac 不可达或拒绝（HTTP 非 2xx）"));
 		g_ac_state = 0;
 		return -1;
 	}
 	root = aik_json_parse(resp, strlen(resp), NULL, 0);
 	free(resp);
 	if (!root) {
-		snprintf(err, errlen, "judge: 响应非法");
+		snprintf(err, errlen, "%s", L_("judge: 响应非法"));
 		return -1;
 	}
 	dec = aik_json_get(root, "decision");
@@ -689,23 +690,23 @@ int occ_ac_snapshot_verify(const char *path, const char *digest,
 		errlen = sizeof(nullerr);
 	}
 	if (!path || !path[0]) {
-		snprintf(err, errlen, "快照路径缺失");
+		snprintf(err, errlen, "%s", L_("快照路径缺失"));
 		return -1;
 	}
 	f = fopen(path, "rb");
 	if (!f) {
-		snprintf(err, errlen, "快照 %s 不可读", path);
+		snprintf(err, errlen, L_("快照 %s 不可读"), path);
 		return -1;
 	}
 	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
 		fclose(f);
-		snprintf(err, errlen, "快照 %s 定位失败", path);
+		snprintf(err, errlen, L_("快照 %s 定位失败"), path);
 		return -1;
 	}
 	rewind(f);
 	if (sz < 64) {
 		fclose(f);
-		snprintf(err, errlen, "快照 %s 体量异常（%ldB）", path, sz);
+		snprintf(err, errlen, L_("快照 %s 体量异常（%ldB）"), path, sz);
 		return -1;
 	}
 	buf = malloc((size_t)sz + 1);
@@ -734,7 +735,7 @@ int occ_ac_snapshot_verify(const char *path, const char *digest,
 			if (!strstr(buf, needle)) {
 				free(buf);
 				snprintf(err, errlen,
-					 "快照 %s 摘要首行不符", path);
+					 L_("快照 %s 摘要首行不符"), path);
 				return -1;
 			}
 		}
@@ -779,8 +780,7 @@ static int ac_commit(occ_ac_turn *t, const char *digest, char *err,
 	if (rc != 0) {
 		ac_err_line(resp, err, errlen);
 		if (!err[0])
-			snprintf(err, errlen,
-				 "commit: ac 不可达或摘要校验未通过");
+			snprintf(err, errlen, "%s", L_("commit: ac 不可达或摘要校验未通过"));
 		free(resp);
 		return -1;
 	}
@@ -804,10 +804,9 @@ static int ac_commit(occ_ac_turn *t, const char *digest, char *err,
 		free(resp);
 		if (vrc != 0) {
 			snprintf(err, errlen,
-				 "commit: 快照读回校验失败（%s%s%s）"
-				 "——本轮不换窗",
-				 pathbuf[0] ? pathbuf : "响应缺 snapshot_path",
-				 verr[0] ? "：" : "", verr);
+				 L_("commit: 快照读回校验失败（%s%s%s）——本轮不换窗"),
+				 pathbuf[0] ? pathbuf : L_("响应缺 snapshot_path"),
+				 verr[0] ? L_("：") : "", verr);
 			return -1;
 		}
 	}
@@ -846,14 +845,14 @@ static int ac_begin_and_digest(occ_ac_turn *t, char *err,
 	rc = ac_post("/begin", dump, OCC_AC_T_MS, &resp);
 	free(dump);
 	if (rc != 0) {
-		snprintf(err, errlen, "begin: ac 不可达或拒绝");
+		snprintf(err, errlen, "%s", L_("begin: ac 不可达或拒绝"));
 		g_ac_state = 0;
 		return -1;
 	}
 	root = aik_json_parse(resp, strlen(resp), NULL, 0);
 	free(resp);
 	if (!root) {
-		snprintf(err, errlen, "begin: 响应非法");
+		snprintf(err, errlen, "%s", L_("begin: 响应非法"));
 		return -1;
 	}
 	tpl = aik_json_get(root, "template");
@@ -893,7 +892,7 @@ static int ac_begin_and_digest(occ_ac_turn *t, char *err,
 	(void)secs;
 
 	if (fill_prompt(t, NULL, prompt, &digest) != 0 || !digest) {
-		snprintf(err, errlen, "digest: 摘要生成失败");
+		snprintf(err, errlen, "%s", L_("digest: 摘要生成失败"));
 		return -1;
 	}
 	*digest_out = digest;
@@ -978,7 +977,7 @@ int occ_ac_apply_digest(occ_db *db, const char *session_id,
 	if (occ_session_set_tokens(db, session_id, baseline, 1, werr,
 				   sizeof(werr))) {
 		if (err && errlen)
-			snprintf(err, errlen, "apply_digest: 账本重置失败（%s）",
+			snprintf(err, errlen, L_("apply_digest: 账本重置失败（%s）"),
 				 werr);
 		free(text);
 		return -1;
@@ -987,7 +986,7 @@ int occ_ac_apply_digest(occ_db *db, const char *session_id,
 	if (occ_session_set_window_digest(db, session_id, note_id, werr,
 					  sizeof(werr))) {
 		if (err && errlen)
-			snprintf(err, errlen, "apply_digest: 窗口标记失败（%s）",
+			snprintf(err, errlen, L_("apply_digest: 窗口标记失败（%s）"),
 				 werr);
 		free(text);
 		return -1;
@@ -1011,7 +1010,7 @@ static int ac_run_chain(occ_ac_turn *t, int *compacted, char *err,
 	}
 	if (strlen(digest) < OCC_AC_MIN_DIGEST) {
 		snprintf(err, errlen,
-			 "digest: 摘要过短（%zu < %d 字符），本轮不换窗",
+			 L_("digest: 摘要过短（%zu < %d 字符），本轮不换窗"),
 			 strlen(digest), OCC_AC_MIN_DIGEST);
 		free(digest);
 		g_ac_state = 1;
@@ -1150,7 +1149,7 @@ int occ_ac_compact_now(occ_ac_turn *t, char *err, size_t errlen)
 	if (!occ_ac_enabled())
 		return 0;
 	if (occ_ac_report(tmp.session_id, tmp.cwd, tmp.tokens) != 0) {
-		snprintf(err, errlen, "compact: ac 不可达（@ac:off）");
+		snprintf(err, errlen, "%s", L_("compact: ac 不可达（@ac:off）"));
 		return -1;
 	}
 	return ac_run_chain(&tmp, &compacted, err, errlen);

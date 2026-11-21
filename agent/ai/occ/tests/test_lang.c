@@ -61,6 +61,20 @@ int main(void)
 	tui_lang_init_env();
 	CHECK(tui_lang_is_en() == 0, "OCC_LANG unset -> zh");
 
+	/* 5) O-20 A3 键面抽检：工具定义面+occ_ac err 表命中（en） */
+	tui_lang_set_en(1);
+	CHECK(strcmp(L_("读取文件内容（带行号，支持行窗 offset/limit）。"
+			"二进制文件拒绝。"),
+		     "Read file contents (with line numbers; supports "
+		     "offset/limit window). Binary files are rejected.") == 0,
+	      "A3 tool description en");
+	CHECK(strcmp(L_("快照 %s 不可读"), "snapshot %s unreadable") == 0,
+	      "A3 ac err fmt en");
+	CHECK(strcmp(L_("compact: ac 不可达（@ac:off）"),
+		     "compact: ac unreachable (@ac:off)") == 0,
+	      "A3 compact err en");
+	tui_lang_set_en(0);
+
 	printf("test_lang: %d checks, %d failures\n", checks, fails);
 	return fails ? 1 : 0;
 }

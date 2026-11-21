@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "store/store_json.h"
+#include "occ_tui/tui_lang.h"	/* O-20 A3：工具定义面随档 */
 
 /* ================= 请求构造 ================= */
 
@@ -158,13 +159,13 @@ static aik_json *build_tool_def(const occ_tool_def *t)
 
 	if (!o || !fn)
 		goto fail;
-	params = parse_json_text(t->parameters, "parameters");
+	params = parse_json_text(L_(t->parameters), "parameters");
 	if (!params)
 		goto fail;
 	if (aik_json_obj_put(fn, "name", aik_json_new_str(t->name)))
 		goto fail;
 	if (t->description && *t->description &&
-	    aik_json_obj_put(fn, "description", aik_json_new_str(t->description)))
+	    aik_json_obj_put(fn, "description", aik_json_new_str(L_(t->description))))
 		goto fail;
 	if (aik_json_obj_put(fn, "parameters", params)) {
 		aik_json_free(params);
