@@ -640,6 +640,8 @@ static const struct {
 	{ "occ undo: 文件回滚失败（%s 起，详见 stderr）；已回滚的 %zu 个文件已恢复撤销前原状。消息未隐藏、未建撤销档，可重试 /undo", "occ undo: file rollback failed (starting at %s, see stderr); the %zu rolled-back file(s) were restored to pre-undo state. Messages not hidden, no undo stage, retry /undo" },
 	{ "occ undo: 文件回滚失败（%s 起，详见 stderr）；已回滚的 %zu 个文件已恢复撤销前原状，%zu 个补偿失败需手工检查。消息未隐藏、未建撤销档，可重试 /undo", "occ undo: file rollback failed (starting at %s, see stderr); the %zu rolled-back file(s) were restored to pre-undo state, %zu compensation failure(s) need manual inspection. Messages not hidden, no undo stage, retry /undo" },
 	{ "occ-undo: 补偿恢复失败 %s（文件停留在回滚后状态，请手工检查）\n", "occ-undo: compensation restore failed for %s (file left in rolled-back state, inspect manually)\n" },
+	{ "shell 退出码 %d·cwd=%s", "shell exit code %d·cwd=%s" },
+	{ "occ: 已退至 shell——exit 返回 occ", "occ: dropped to shell -- exit returns to occ" },
 };
 
 #endif /* _TUI_LANG_TAB_H */

@@ -37,7 +37,7 @@ TEST_SRCS := tests/test_utf8.c tests/test_glyphwidth.c \
      tests/test_models_offline.c tests/test_su_pty.c \
      tests/test_sinkbuf.c tests/test_wd.c tests/test_exitmarker.c \
      tests/test_w2_confirm_pty.c tests/test_cmd_tailws.c \
-     tests/test_undo_cmd.c
+     tests/test_undo_cmd.c tests/test_shell_pty.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 .PHONY: all test clean
@@ -67,6 +67,10 @@ obj/%.o: %.c
 # O-25 test_undo_cmd 同样 exec 真 ../occ + tests/mock_w2_llm.py——
 # TUI /undo /redo 端到端（write 落盘→/undo 注记+文件回滚+回填面板→
 # Esc→/redo 文件恢复；S2 无会话 /undo 注记）；未构建时诚实 skip
+# O-2 test_shell_pty 同样 exec 真 ../occ（死端口 fixture）——/shell
+# 往返端到端（退屏提示行→$SHELL 子壳→exit 7→回屏全量重绘锚+
+# 「退出码 N·cwd=…」注记；带参 /shell <cmd> 形态+提示行恰一次+
+# 收尾 rc=71）；未构建时诚实 skip
 # T4 登录门纯逻辑测试（tui_gate.o 需 -lcrypt）
 tests/test_gate: tests/test_gate.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_gate.c $(LIB_OBJS) -lpthread -lcrypt

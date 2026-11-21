@@ -575,7 +575,11 @@ struct tui_app {
 	pthread_t worker;
 	int worker_live;		/* 双线程：worker 写（尾部），主线程读 */
 	int worker_created;		/* 仅主线程（create/join 配对） */
-	int shell_req;			/* T9e /shell：退屏跑 bash 后重建 view */
+	int shell_req;			/* T9e /shell：退屏跑子壳后重建 view */
+	char shell_cmd[2048];		/* O-2：/shell <cmd> 单条形态（空=交互） */
+	int shell_ret_pending;		/* O-2：子壳收口→回屏一行注记（待发） */
+	int shell_ret_code;		/* O-2：子壳退出码（128+N=信号死） */
+	char shell_ret_cwd[4096];	/* O-2：注记用 cwd（收口时 getcwd 快照） */
 	uint64_t delete_arm;		/* O-12：/delete 双发确认窗（ms；10s 内再发生效） */
 	char *prompt;			/* 本轮输入（主线程分配，worker 用） */
 	char session_id[OCC_ID_LEN];	/* 当前会话；空=下条提交建新会话 */
@@ -974,6 +978,18 @@ static void tui_app_on_entered(void *ud)
 	 * 首次进屏无会话——保持「首条提交建新会话」（c2 语义不变）。 */
 	if (a->session_id[0])
 		app_replay_session(a, a->session_id, 0);
+	/* O-2：/shell 子壳收口→回屏一行注记（退出码+cwd）。挂在回放
+	 * 之后=时间序在尾部（回放先行、注记殿后）；首次进屏
+	 * shell_ret_pending=0 零输出（语义只属 /shell 往返）。 */
+	if (a->shell_ret_pending) {
+		char nb[4352];
+
+		a->shell_ret_pending = 0;
+		snprintf(nb, sizeof(nb), L_("shell 退出码 %d·cwd=%s"),
+			 a->shell_ret_code, a->shell_ret_cwd);
+		(void)tui_view_post(a->view, TUI_VIEW_NOTICE, nb, 0,
+				    NULL, 0);
+	}
 }
 
 /* sink 回调（worker 线程）→ view 事件环（拷贝后返回） */
@@ -3473,13 +3489,17 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		}
 		return 0;
 	}
-	if (!strcmp(line, "/shell")) {
-		/* T9e：bash 逃逸（plan §1.9 /shell → bash，exit 回 occ）。
+	if (!strncmp(line, "/shell", 6) &&
+	    (line[6] == '\0' || line[6] == ' ')) {
+		/* T9e：shell 逃逸（plan §1.9 /shell → shell，exit 回 occ）。
 		 * 机制：置 shell_req + 退屏（tui_view_quit）→ run_interactive
-		 * 在 view 销毁、worker join 后 fork/exec 交互 bash（继承 tty），
-		 * bash 退出 → 重建 view 续跑。转写区按 c2 裁定 12 从空开始。
-		 * worker 运行中拒绝（不打断 turn；Esc 中断后再进）。 */
+		 * 在 view 销毁、worker join 后 fork/exec 子壳（继承 tty），
+		 * 子壳退出 → 重建 view 续跑。转写区按 c2 裁定 12 从空开始。
+		 * worker 运行中拒绝（不打断 turn；Esc 中断后再进）。
+		 * O-2：无参=交互子壳（$SHELL，缺省 /bin/sh）；带参=单条
+		 * 命令（$SHELL -c …）——两形共用同一条退屏/回屏路。 */
 		int live;
+		const char *args = line + 6;
 
 		pthread_mutex_lock(&a->mu);
 		live = a->worker_live;
@@ -3489,6 +3509,9 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 					L_("shell: turn 运行中——Esc 中断或收口后再 /shell"));
 			return 0;
 		}
+		while (*args == ' ')
+			args++;
+		snprintf(a->shell_cmd, sizeof(a->shell_cmd), "%s", args);
 		a->shell_req = 1;
 		tui_view_quit(a->view);
 		return 0;
@@ -4493,26 +4516,66 @@ static int run_interactive(occ_db *db, const char *model_toml,
 					g_t4_theme_req = 0;
 					continue;
 				}
-				/* /shell：fork 交互 bash（继承 tty；bash 自管 termios），
-				 * exit 后回到循环重建 view——plan §1.9 /shell→bash→occ */
+				/* /shell：fork 子壳（$SHELL，缺省 /bin/sh；继承
+				 * tty，子壳自管 termios），收口→重建 view 续跑
+				 * ——plan §1.9 /shell→shell→occ。O-2：①argv[0]
+				 * 用 shell 基名（各壳保持本形交互面）；②收口
+				 * 抓退出码（信号死=128+N）+cwd 快照 → 回屏注记
+				 * （tui_app_on_entered 在回放后发，时间序在尾） */
 				a.shell_req = 0;
 				{
-					pid_t pid = fork();
+					const char *sh = getenv("SHELL");
+					const char *base;
+					pid_t pid;
 
+					if (!sh || !sh[0])
+						sh = "/bin/sh";
+					base = strrchr(sh, '/');
+					base = base ? base + 1 : sh;
+					if (!a.shell_cmd[0]) {
+						/* 交互形态：退屏提示一行
+						 *（带参形态命令输出即反馈，
+						 * 不加噪） */
+						printf("%s\n", L_(
+							"occ: 已退至 shell——exit 返回 occ"));
+						fflush(stdout);
+					}
+					pid = fork();
 					if (pid == 0) {
-						execl("/bin/bash", "bash",
+						if (a.shell_cmd[0])
+							execl(sh, base, "-c",
+							      a.shell_cmd,
+							      (char *)NULL);
+						execl(sh, base,
 						      (char *)NULL);
 						execl("/bin/sh", "sh",
 						      (char *)NULL);
 						_exit(127);
 					}
+					a.shell_cmd[0] = '\0';
 					if (pid > 0) {
 						int st;
 
 						while (waitpid(pid, &st, 0) <
 						       0 && errno == EINTR)
 							;
+						if (WIFEXITED(st))
+							a.shell_ret_code =
+								WEXITSTATUS(st);
+						else if (WIFSIGNALED(st))
+							a.shell_ret_code =
+								128 + WTERMSIG(st);
+						else
+							a.shell_ret_code = -1;
+					} else {
+						a.shell_ret_code = -1;
 					}
+					if (!getcwd(a.shell_ret_cwd,
+						    sizeof(a.shell_ret_cwd)))
+						snprintf(a.shell_ret_cwd,
+							 sizeof(a.shell_ret_cwd),
+							 "?");
+					a.shell_ret_pending = 1;
 				}
 			}
 		}
