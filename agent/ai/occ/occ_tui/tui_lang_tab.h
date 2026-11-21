@@ -634,6 +634,12 @@ static const struct {
 	{ "occ: 步数帽 %d 截断（rounds=%d，工具链未收口）——`occ retry --session %s` 重发，或 `occ --recover %s` 续跑收口\n", "occ: step limit %d reached (rounds=%d, tool chain not wrapped up) — resend with `occ retry --session %s`, or resume with `occ --recover %s` to wrap up\n" },
 	{ "步数帽 %d 截断（rounds=%d）——工具链未收口；续发消息可直接收口", "step limit %d reached (rounds=%d) — tool chain not wrapped up; send a follow-up message to wrap up" },
 	{ "occ_orch_spawn: OCC_TASK_FILESET env 注入失败（oom）", "occ_orch_spawn: OCC_TASK_FILESET env injection failed (oom)" },
+	{ "occ undo: 当前窗口没有可撤销的用户消息（旧窗口已被压缩换窗，换窗前的消息不可撤销）", "occ undo: no user message to undo in the current window (the old window was compacted away; messages before compaction cannot be undone)" },
+	{ "occ undo: 只有 %zu 步可撤（请求 %d 步；旧窗口已被压缩换窗，换窗前不可撤销）", "occ undo: only %zu step(s) undoable (requested %d; the old window was compacted away, nothing before compaction is undoable)" },
+	{ "occ undo: %zu 个文件快照校验未过，已整体拒绝撤销（未改文件、消息未隐藏、未建撤销档）——逐条原因见 stderr，修复后可重试 /undo", "occ undo: %zu file(s) failed snapshot verification, undo refused as a whole (files untouched, messages not hidden, no undo stage) — per-file reasons on stderr; fix and retry /undo" },
+	{ "occ undo: 文件回滚失败（%s 起，详见 stderr）；已回滚的 %zu 个文件已恢复撤销前原状。消息未隐藏、未建撤销档，可重试 /undo", "occ undo: file rollback failed (starting at %s, see stderr); the %zu rolled-back file(s) were restored to pre-undo state. Messages not hidden, no undo stage, retry /undo" },
+	{ "occ undo: 文件回滚失败（%s 起，详见 stderr）；已回滚的 %zu 个文件已恢复撤销前原状，%zu 个补偿失败需手工检查。消息未隐藏、未建撤销档，可重试 /undo", "occ undo: file rollback failed (starting at %s, see stderr); the %zu rolled-back file(s) were restored to pre-undo state, %zu compensation failure(s) need manual inspection. Messages not hidden, no undo stage, retry /undo" },
+	{ "occ-undo: 补偿恢复失败 %s（文件停留在回滚后状态，请手工检查）\n", "occ-undo: compensation restore failed for %s (file left in rolled-back state, inspect manually)\n" },
 };
 
 #endif /* _TUI_LANG_TAB_H */

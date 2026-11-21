@@ -21,10 +21,17 @@
  *      + P-49：ABSENT 墓碑投毒拒收（I10/I11）、legacy/空墓碑照常
  *      工作（I10b/I10c）
  *   J) P-50 manifest 对账（DB 外部锚）：I12 换内容+重造 sidecar 拒收、
- *      I13 墓碑字节/kind 篡改拒收、I14 搬目录拒收、I15 删标记合成
- *      failed 条目、I16 manifest 清空回 legacy（I9/I10b 语义不变）、
- *      I17 redo 锚（投毒拒收 + 空 redo_json legacy 正路）、I18 E2E
- *      （manifest 行直查+undo/redo 全绿）+ v3→v4 迁移
+ *      I13 墓碑字节/kind 篡改拒收、I14 搬目录拒收、I15 删标记拒、
+ *      I16 manifest 清空回 legacy（I9/I10b 语义不变）、I17 redo 锚
+ *      （投毒拒收 + 空 redo_json legacy 正路）、I18 E2E（manifest 行
+ *      直查+undo/redo 全绿）+ v3→v4 迁移
+ *   O) O-24 状态一致性 fail-closed：篡改/搬目录/删标记类校验失败
+ *      = undo 整体拒绝（rc=-1、不改文件、不隐藏消息、不建 stage，
+ *      人话含「校验未过/未隐藏/可重试」）——I7/I10/I12-I16 断言随新
+ *      语义翻转；O24a 一条消息多文件+单快照被外部改动致整体拒绝+
+ *      修复后重试成功+redo 可用；O24b 换窗（digest）会话 /undo 人话
+ *      提示（无可撤与步数不足两面，native 对照不带）；O24c 回滚
+ *      IO 失败→已回滚条目补偿回撤销前现状+整体拒绝
  *
  * 夹具全在 /tmp/occ_rev_t_*（授权范围）；快照根/trace 经 OCC_SNAPROOT/
  * OCC_TRACE_DIR 重定向；write走真工具链（真快照+真 durable 落库）。
@@ -822,11 +829,21 @@ int main(void)
 		OK(!access(side, F_OK), "i7-sidecar-written");
 		wfile(snap, "POISON7");
 		memset(&r, 0, sizeof(r));
-		OK(occ_undo(db, sid7, 1, NULL, &r, err, sizeof(err)) == 0,
-		   "i7-undo-rc0");
-		OK(r.nfiles == 1 && r.files[0].failed == 1,
-		   "i7-tamper-refused");
+		/* O-24：预检 fail-closed——整体拒绝（原 rc=0 部分失败语义
+		 * 翻转：任一文件校验未过=不回滚、不隐藏、不建 stage） */
+		OK(occ_undo(db, sid7, 1, NULL, &r, err, sizeof(err)) == -1 &&
+		   strstr(err, "校验未过") && strstr(err, "未隐藏") &&
+		   strstr(err, "可重试"), "i7-undo-refused");
 		OK(!strcmp(rfile(f7), "T7"), "i7-target-kept-current");
+		OK(occ_revert_get(db, sid7, &st, err, sizeof(err)) == 0,
+		   "i7-no-stage");
+		{
+			occ_msg_row last;
+
+			OK(occ_msg_last(db, sid7, &last, err, sizeof(err)) == 1 &&
+			   !last.reverted, "i7-not-hidden");
+			occ_msg_row_free(&last);
+		}
 		occ_undo_result_free(&r);
 
 		/* I8：legacy 快照（无 sidecar 且无 DB manifest 行——P-50 起
@@ -936,12 +953,12 @@ int main(void)
 			}
 		}
 		memset(&r, 0, sizeof(r));
-		OK(occ_undo(db, sid10, 1, NULL, &r, err, sizeof(err)) == 0,
-		   "i10-undo-rc0");
-		OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
-		   r.files[0].failed == 1, "i10-tamper-refused");
+		OK(occ_undo(db, sid10, 1, NULL, &r, err, sizeof(err)) == -1 &&
+		   strstr(err, "校验未过"), "i10-undo-refused");
 		OK(fexists(f10) && !strcmp(rfile(f10), "NEW10"),
 		   "i10-target-kept-current");
+		OK(occ_revert_get(db, sid10, &st, err, sizeof(err)) == 0,
+		   "i10-no-stage");
 		occ_undo_result_free(&r);
 
 		/* I10b：legacy 墓碑（无 sidecar、内容规范 "absent\n"）照常
@@ -1080,11 +1097,11 @@ int main(void)
 			snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
 			wfile(side, sbuf);		/* sidecar 一并重造 */
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid12, 1, NULL, &r, err, sizeof(err)) == 0,
-			   "i12-undo-rc0");
-			OK(r.nfiles == 1 && r.files[0].failed == 1,
-			   "i12-anchor-refused");
+			OK(occ_undo(db, sid12, 1, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i12-undo-refused");
 			OK(!strcmp(rfile(f12), "T12"), "i12-target-kept-current");
+			OK(occ_revert_get(db, sid12, &st, err, sizeof(err)) == 0,
+			   "i12-no-stage");
 			occ_undo_result_free(&r);
 
 			/* I13a：anchored 墓碑字节篡改 + sidecar 重造 → 拒 */
@@ -1114,12 +1131,12 @@ int main(void)
 				wfile(side, sbuf);
 			}
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid13, 1, NULL, &r, err, sizeof(err)) == 0,
-			   "i13a-undo-rc0");
-			OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
-			   r.files[0].failed == 1, "i13a-tomb-tamper-refused");
+			OK(occ_undo(db, sid13, 1, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i13a-undo-refused");
 			OK(fexists(f13) && !strcmp(rfile(f13), "NEW13"),
 			   "i13a-target-kept-current");
+			OK(occ_revert_get(db, sid13, &st, err, sizeof(err)) == 0,
+			   "i13a-no-stage");
 			occ_undo_result_free(&r);
 
 			/* I13b：内容快照被换成规范墓碑（kind 不符）→ 拒 */
@@ -1145,10 +1162,8 @@ int main(void)
 			snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
 			wfile(side, sbuf);
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid13b, 1, NULL, &r, err, sizeof(err)) == 0,
-			   "i13b-undo-rc0");
-			OK(r.nfiles == 1 && r.files[0].failed == 1,
-			   "i13b-kind-mismatch-refused");
+			OK(occ_undo(db, sid13b, 1, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i13b-undo-refused");
 			OK(!strcmp(rfile(f13b), "T13B"),
 			   "i13b-target-kept-current");
 			occ_undo_result_free(&r);
@@ -1199,20 +1214,14 @@ int main(void)
 				OK(rename(snapA, dst) == 0, "i14-moved");
 			}
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid14, 2, NULL, &r, err, sizeof(err)) == 0,
-			   "i14-undo-rc0");
-			{
-				int ia = result_find(&r, f14a);
-				int ib = result_find(&r, f14b);
-
-				OK(r.nfiles == 2, "i14-two-files");
-				OK(ia >= 0 && r.files[ia].failed == 1,
-				   "i14-moved-refused");
-				OK(ib >= 0 && !r.files[ib].failed,
-				   "i14-unmoved-restored");
-			}
+			/* O-24：搬目录条目预检拒 → 整体拒绝：f14b 不再部分
+			 * 回滚（消息不隐藏=redo/重试能力保住） */
+			OK(occ_undo(db, sid14, 2, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i14-undo-refused");
 			OK(!strcmp(rfile(f14a), "A2"), "i14-f14a-kept-current");
-			OK(!strcmp(rfile(f14b), "B1"), "i14-f14b-restored");
+			OK(!strcmp(rfile(f14b), "B2"), "i14-f14b-also-kept");
+			OK(occ_revert_get(db, sid14, &st, err, sizeof(err)) == 0,
+			   "i14-no-stage");
 			occ_undo_result_free(&r);
 
 			/* I15：删标记——墓碑+sidecar 全删 → 合成 failed 条目
@@ -1232,12 +1241,20 @@ int main(void)
 			OK(unlink(snap) == 0 && unlink(side) == 0,
 			   "i15-marker-deleted");
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid15, 1, NULL, &r, err, sizeof(err)) == 0,
-			   "i15-undo-rc0");
-			OK(r.nfiles == 1 && r.files[0].action == OCC_UNDO_DELETE &&
-			   r.files[0].failed == 1, "i15-synth-failed-entry");
+			/* O-24：删标记=快照缺失，预检整体拒绝（原「合成
+			 * failed 条目+rc=0+隐藏照常」语义翻转） */
+			OK(occ_undo(db, sid15, 1, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i15-undo-refused");
 			OK(fexists(f15) && !strcmp(rfile(f15), "NEW15"),
 			   "i15-target-kept");
+			{
+				occ_msg_row last;
+
+				OK(occ_msg_last(db, sid15, &last, err,
+						sizeof(err)) == 1 &&
+				   !last.reverted, "i15-not-hidden");
+				occ_msg_row_free(&last);
+			}
 			occ_undo_result_free(&r);
 
 			/* I16：manifest 清空（DELETE FROM occ_snap）→ 回纯
@@ -1258,10 +1275,8 @@ int main(void)
 			OK(sql_exec(dbpath_of("sessions.db"),
 				    "DELETE FROM occ_snap;") == 0, "i16a-manifest-cleared");
 			memset(&r, 0, sizeof(r));
-			OK(occ_undo(db, sid16, 1, NULL, &r, err, sizeof(err)) == 0,
-			   "i16a-undo-rc0");
-			OK(r.nfiles == 1 && r.files[0].failed == 1,
-			   "i16a-legacy-poison-refused");
+			OK(occ_undo(db, sid16, 1, NULL, &r, err, sizeof(err)) == -1 &&
+			   strstr(err, "校验未过"), "i16a-undo-refused");
 			OK(!strcmp(rfile(f16), "T16"), "i16a-target-kept");
 			occ_undo_result_free(&r);
 
@@ -1485,6 +1500,325 @@ int main(void)
 					occ_db_close(dv);
 				}
 			}
+		}
+
+		/* ---- O) O-24：状态一致性 fail-closed ---- */
+		{
+			char s24a[OCC_ID_LEN], s24b[OCC_ID_LEN];
+			char s24c[OCC_ID_LEN];
+			char f24a[192], f24b[192], f24c[192], f24d[192];
+			char snap[900], side[960], hex[OCC_SHA256_HEX + 1];
+
+			/* O24a：一条消息多文件快照+其中一份被外部改动致
+			 * 回滚校验拒 → 整体拒绝（分歧窗口关闭）：全部文件
+			 * 保持现状、消息未隐藏、无 stage；修复快照后重试
+			 * 成功 + redo 可用（拒绝不吞回滚能力） */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "o24a-create");
+			snprintf(s24a, sizeof(s24a), "%s", s.id);
+			occ_session_set_workdir(db, s24a, workdir, err,
+						sizeof(err));
+			snprintf(f24a, sizeof(f24a), "%s/f24a.txt", workdir);
+			snprintf(f24b, sizeof(f24b), "%s/f24b.txt", workdir);
+			wfile(f24a, "O24A");
+			wfile(f24b, "O24B");
+			{
+				/* 单回合两 write（一条消息多文件快照） */
+				char uid[OCC_ID_LEN], a1[OCC_ID_LEN];
+				char a2[OCC_ID_LEN];
+				char args1[512], args2[512];
+				occ_tool_call calls[2];
+				occ_tool_ctx tc;
+				occ_tool_result tr;
+
+				OK(occ_msg_add_user(db, s24a, "改两个文件",
+						    uid, sizeof(uid), err,
+						    sizeof(err)) == 0,
+				   "o24a-user");
+				memset(calls, 0, sizeof(calls));
+				snprintf(args1, sizeof(args1),
+					 "{\"path\":\"%s\",\"content\":\"W24A\"}",
+					 f24a);
+				snprintf(args2, sizeof(args2),
+					 "{\"path\":\"%s\",\"content\":\"W24B\"}",
+					 f24b);
+				calls[0].id = "call_w24a";
+				calls[0].name = "write";
+				calls[0].arguments = args1;
+				calls[1].id = "call_w24b";
+				calls[1].name = "write";
+				calls[1].arguments = args2;
+				OK(occ_msg_add_assistant_ex(db, s24a, "", NULL,
+							     calls, 2, NULL, 0,
+							     "tool_calls", 1,
+							     a1, sizeof(a1),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24a-asst-calls");
+				memset(&tc, 0, sizeof(tc));
+				tc.db = db;
+				tc.session_id = s24a;
+				tc.msg_id = a1;
+				tc.workdir = workdir;
+				tc.trace_dir = tmpdir;
+				OK(occ_tool_exec(&tc, "write", "call_w24a",
+						 args1, &tr) == 0 &&
+				   tr.rc == 0, "o24a-exec-a");
+				occ_tool_result_free(&tr);
+				OK(occ_tool_exec(&tc, "write", "call_w24b",
+						 args2, &tr) == 0 &&
+				   tr.rc == 0, "o24a-exec-b");
+				occ_tool_result_free(&tr);
+				OK(occ_msg_add_assistant_ex(db, s24a, "完成",
+							     NULL, NULL, 0,
+							     NULL, 0, "stop",
+							     0, a2,
+							     sizeof(a2),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24a-close");
+			}
+			OK(!strcmp(rfile(f24a), "W24A") &&
+			   !strcmp(rfile(f24b), "W24B"), "o24a-written");
+			/* 外部改动 f24b 的快照（append 毒字节——sidecar
+			 * 不动，S-FINDING-01 手法） */
+			OK(find_snap_of(dbpath_of("snapshots"), s24a, f24b,
+					snap, sizeof(snap)) == 0,
+			   "o24a-snap-found");
+			{
+				FILE *fp = fopen(snap, "ab");
+
+				OK(fp != NULL, "o24a-poison-open");
+				if (fp) {
+					fputs("POISON24\n", fp);
+					fclose(fp);
+				}
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, s24a, 1, NULL, &r, err,
+				    sizeof(err)) == -1 &&
+			   strstr(err, "校验未过") &&
+			   strstr(err, "未隐藏") && strstr(err, "可重试"),
+			   "o24a-refused");
+			OK(!strcmp(rfile(f24a), "W24A"), "o24a-fa-kept");
+			OK(!strcmp(rfile(f24b), "W24B"), "o24a-fb-kept");
+			OK(occ_revert_get(db, s24a, &st, err, sizeof(err)) == 0,
+			   "o24a-no-stage");
+			{
+				occ_msg_row last;
+
+				OK(occ_msg_last(db, s24a, &last, err,
+						sizeof(err)) == 1 &&
+				   !last.reverted &&
+				   !strcmp(last.role, "assistant"),
+				   "o24a-not-hidden");
+				occ_msg_row_free(&last);
+			}
+			occ_undo_result_free(&r);
+			/* 修复快照（写回原内容+sidecar 重造——DB 锚
+			 * want_sha=sha("O24B")）→ 重试成功 */
+			wfile(snap, "O24B");
+			OK(occ_sha256_hex("O24B", 4, hex) == 0, "o24a-fix-sha");
+			snprintf(side, sizeof(side), "%s.sha256", snap);
+			{
+				char sbuf[128];
+
+				snprintf(sbuf, sizeof(sbuf), "%s\n", hex);
+				wfile(side, sbuf);
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, s24a, 1, NULL, &r, err,
+				    sizeof(err)) == 0, "o24a-retry-ok");
+			OK(!strcmp(rfile(f24a), "O24A") &&
+			   !strcmp(rfile(f24b), "O24B"),
+			   "o24a-retry-restored");
+			{
+				int ia = result_find(&r, f24a);
+				int ib = result_find(&r, f24b);
+
+				OK(r.nfiles == 2 && ia >= 0 && ib >= 0 &&
+				   !r.files[ia].failed &&
+				   !r.files[ib].failed, "o24a-retry-green");
+			}
+			occ_undo_result_free(&r);
+			/* redo 可用（_redo 捕获=撤销前现状——被拒的
+			 * 第一次 undo 未吞掉回滚能力） */
+			memset(&r, 0, sizeof(r));
+			OK(occ_redo(db, s24a, NULL, &r, err, sizeof(err)) == 0 &&
+			   !strcmp(rfile(f24a), "W24A") &&
+			   !strcmp(rfile(f24b), "W24B"), "o24a-redo-green");
+			occ_undo_result_free(&r);
+
+			/* O24b：换窗（digest）会话 /undo 人话提示——
+			 * 旧窗口消息被压缩折叠（reverted=1）不可撤销 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "o24b-create");
+			snprintf(s24b, sizeof(s24b), "%s", s.id);
+			occ_session_set_workdir(db, s24b, workdir, err,
+						sizeof(err));
+			OK(occ_msg_add_user(db, s24b, "旧窗口消息", NULL, 0,
+					    err, sizeof(err)) == 0,
+			   "o24b-old-user");
+			{
+				char mid[OCC_ID_LEN];
+
+				OK(occ_msg_add_assistant_ex(db, s24b,
+							     "旧窗口回答",
+							     NULL, NULL, 0,
+							     NULL, 0, "stop",
+							     0, mid,
+							     sizeof(mid),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24b-old-asst");
+			}
+			{
+				/* 换窗落库效果：摘要前全部消息置 reverted=1
+				 * （occ_ac_apply_digest 同款）+ occ_window
+				 * digest 标记 */
+				char sql[600];
+
+				snprintf(sql, sizeof(sql),
+					 "UPDATE occ_message SET reverted=1"
+					 " WHERE session_id='%s';", s24b);
+				OK(sql_exec(dbpath_of("sessions.db"), sql) == 0,
+				   "o24b-folded");
+				snprintf(sql, sizeof(sql),
+					 "UPDATE occ_window SET"
+					 " base_kind='digest' WHERE"
+					 " session_id='%s';", s24b);
+				OK(sql_exec(dbpath_of("sessions.db"), sql) == 0,
+				   "o24b-window-digest");
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, s24b, 1, NULL, &r, err,
+				    sizeof(err)) == -1 &&
+			   strstr(err, "换窗"), "o24b-hint-on-empty");
+			occ_undo_result_free(&r);
+			/* 换窗后新窗口 1 步、请求 3 步 → 步数不足文案
+			 * 也带换窗说明 */
+			OK(occ_msg_add_user(db, s24b, "新窗口消息", NULL, 0,
+					    err, sizeof(err)) == 0,
+			   "o24b-new-user");
+			{
+				char mid[OCC_ID_LEN];
+
+				OK(occ_msg_add_assistant_ex(db, s24b,
+							     "新窗口回答",
+							     NULL, NULL, 0,
+							     NULL, 0, "stop",
+							     0, mid,
+							     sizeof(mid),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24b-new-asst");
+			}
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, s24b, 3, NULL, &r, err,
+				    sizeof(err)) == -1 &&
+			   strstr(err, "步可撤") && strstr(err, "换窗"),
+			   "o24b-hint-on-steps");
+			occ_undo_result_free(&r);
+			/* native 会话对照：步数不足不带换窗字样 */
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, sid5, 5, NULL, &r, err,
+				    sizeof(err)) == -1 &&
+			   strstr(err, "步可撤") && !strstr(err, "换窗"),
+			   "o24b-native-no-hint");
+			occ_undo_result_free(&r);
+
+			/* O24c：回滚 IO 失败（目标位置被换成同名目录——
+			 * 预检过、copy_file 打不开）→ 已回滚条目补偿回
+			 * 撤销前现状 + 整体拒绝 */
+			OK(occ_session_create(db, "m", &s, err, sizeof(err)) == 0,
+			   "o24c-create");
+			snprintf(s24c, sizeof(s24c), "%s", s.id);
+			occ_session_set_workdir(db, s24c, workdir, err,
+						sizeof(err));
+			snprintf(f24c, sizeof(f24c), "%s/f24c.txt", workdir);
+			snprintf(f24d, sizeof(f24d), "%s/f24d.txt", workdir);
+			wfile(f24c, "O24C");
+			wfile(f24d, "O24D");
+			{
+				char uid[OCC_ID_LEN], a1[OCC_ID_LEN];
+				char a2[OCC_ID_LEN];
+				char args1[512], args2[512];
+				occ_tool_call calls[2];
+				occ_tool_ctx tc;
+				occ_tool_result tr;
+
+				OK(occ_msg_add_user(db, s24c, "再改两个文件",
+						    uid, sizeof(uid), err,
+						    sizeof(err)) == 0,
+				   "o24c-user");
+				memset(calls, 0, sizeof(calls));
+				snprintf(args1, sizeof(args1),
+					 "{\"path\":\"%s\",\"content\":\"W24C\"}",
+					 f24c);
+				snprintf(args2, sizeof(args2),
+					 "{\"path\":\"%s\",\"content\":\"W24D\"}",
+					 f24d);
+				calls[0].id = "call_w24c";
+				calls[0].name = "write";
+				calls[0].arguments = args1;
+				calls[1].id = "call_w24d";
+				calls[1].name = "write";
+				calls[1].arguments = args2;
+				OK(occ_msg_add_assistant_ex(db, s24c, "", NULL,
+							     calls, 2, NULL, 0,
+							     "tool_calls", 1,
+							     a1, sizeof(a1),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24c-asst-calls");
+				memset(&tc, 0, sizeof(tc));
+				tc.db = db;
+				tc.session_id = s24c;
+				tc.msg_id = a1;
+				tc.workdir = workdir;
+				tc.trace_dir = tmpdir;
+				OK(occ_tool_exec(&tc, "write", "call_w24c",
+						 args1, &tr) == 0 &&
+				   tr.rc == 0, "o24c-exec-c");
+				occ_tool_result_free(&tr);
+				OK(occ_tool_exec(&tc, "write", "call_w24d",
+						 args2, &tr) == 0 &&
+				   tr.rc == 0, "o24c-exec-d");
+				occ_tool_result_free(&tr);
+				OK(occ_msg_add_assistant_ex(db, s24c, "完成",
+							     NULL, NULL, 0,
+							     NULL, 0, "stop",
+							     0, a2,
+							     sizeof(a2),
+							     err,
+							     sizeof(err)) == 0,
+				   "o24c-close");
+			}
+			OK(!strcmp(rfile(f24c), "W24C") &&
+			   !strcmp(rfile(f24d), "W24D"), "o24c-written");
+			/* 外部把 f24c 目标位置换成同名目录 */
+			OK(unlink(f24c) == 0 && mkdir(f24c, 0755) == 0,
+			   "o24c-target-dir");
+			memset(&r, 0, sizeof(r));
+			OK(occ_undo(db, s24c, 1, NULL, &r, err,
+				    sizeof(err)) == -1 &&
+			   strstr(err, "回滚失败") &&
+			   strstr(err, "未隐藏") && strstr(err, "可重试"),
+			   "o24c-refused");
+			/* 已回滚条目补偿回撤销前现状（readdir 序不定：
+			 * f24d 或未轮到或已补偿——两序同断言） */
+			OK(!strcmp(rfile(f24d), "W24D"), "o24c-fd-compensated");
+			OK(occ_revert_get(db, s24c, &st, err, sizeof(err)) == 0,
+			   "o24c-no-stage");
+			{
+				occ_msg_row last;
+
+				OK(occ_msg_last(db, s24c, &last, err,
+						sizeof(err)) == 1 &&
+				   !last.reverted, "o24c-not-hidden");
+				occ_msg_row_free(&last);
+			}
+			occ_undo_result_free(&r);
 		}
 
 	occ_db_close(db);

@@ -18,16 +18,24 @@
  *
  * 边界与状态约束：status==running（环在跑）拒绝 undo；active/error/
  * interrupted 可撤。被撤范围无任何文件快照（纯对话轮/快照缺失）→ 人话
- * 报错不改库（先收集后提交，部分失败如实列出）。
+ * 报错不改库（先收集后提交）。换窗会话（occ_window digest）旧窗口
+ * 消息已被压缩折叠不可撤销——/undo 报错带人话提示（O-24）。
  *
  * bash 修改的文件无快照（b1 只对 write/edit 快照）→ 不在恢复集内，
  * 报告如实列出（不谎称全量回滚）。
  *
- * P-49/P-50 完整性：快照/墓碑篡改逐条 fail-closed（该条 failed=1、
- * 目标保持现状、undo 整体 rc=0、其余条目照常）。P-50 加 DB manifest
- * 锚（occ_snap 表 + stage.redo_json）：换内容/换墓碑字节/删标记/搬
- * 目录四类攻击在对账阶段即判死——sidecar 与快照同目录=自证，DB 行
- * 才是对快照树无写权可用的真锚；DB 无行=legacy 走 P-49 sidecar 校验。
+ * P-49/P-50 完整性：快照/墓碑篡改 fail-closed 拒恢复。P-50 加 DB
+ * manifest 锚（occ_snap 表 + stage.redo_json）：换内容/换墓碑字节/
+ * 删标记/搬目录四类攻击在对账阶段即判死——sidecar 与快照同目录=自证，
+ * DB 行才是对快照树无写权可用的真锚；DB 无行=legacy 走 P-49 sidecar
+ * 校验。
+ *
+ * O-24（状态一致性 fail-closed）：文件回滚未全部成功的场合消息隐藏
+ * 不得先行生效——回滚前只读预检全部条目，任一不过=整体拒绝（未改
+ * 文件、未隐藏消息、不建 stage，rc=-1 人话可重试）；执行中 IO 失败=
+ * 已回滚条目用 _redo 捕获补偿回撤销前现状后同样整体拒绝；全部成功→
+ * 隐藏/注记/stage 才落地。保证「确认撤销」（commit 清 _redo）永远
+ * 不吞掉回滚能力。
  */
 #ifndef _OCC_REVERT_H
 #define _OCC_REVERT_H
@@ -43,7 +51,9 @@
 typedef struct occ_undo_file {
 	char *path;			/* 绝对路径（heap） */
 	int action;			/* OCC_UNDO_RESTORE / _DELETE */
-	int failed;			/* 1=回滚失败（err 见失败时 stderr） */
+	int failed;			/* 1=还原失败（redo 侧用；undo 成功
+					 * 路径恒 0——O-24 预检 fail-closed
+					 * 下部分失败不再出现在 undo 结果） */
 } occ_undo_file;
 
 typedef struct occ_undo_result {

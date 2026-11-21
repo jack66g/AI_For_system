@@ -1135,6 +1135,41 @@ int occ_session_set_window_digest(occ_db *db, const char *id,
 	return run_s1(db, sql, digest_id, err, errlen);
 }
 
+/* O-24：occ_window.base_kind 读回（undo 报错面区分换窗会话） */
+int occ_session_window_kind(occ_db *db, const char *id, char *kind,
+			    size_t kindlen, char *err, size_t errlen)
+{
+	static const char *sql =
+		"SELECT base_kind FROM occ_window WHERE session_id=?1";
+	sqlite3_stmt *st = NULL;
+	int rc;
+
+	if (!db || !id || !kind || !kindlen) {
+		set_err(err, errlen, "occ_session_window_kind: bad args");
+		return -1;
+	}
+	kind[0] = '\0';
+	if (sqlite3_prepare_v2(db->h, sql, -1, &st, NULL) != SQLITE_OK) {
+		set_err(err, errlen, "prepare: %s", sqlite3_errmsg(db->h));
+		return -1;
+	}
+	sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+	rc = sqlite3_step(st);
+	if (rc == SQLITE_ROW) {
+		const unsigned char *v = sqlite3_column_text(st, 0);
+
+		snprintf(kind, kindlen, "%s", v ? (const char *)v : "");
+		rc = 1;
+	} else if (rc == SQLITE_DONE) {
+		rc = 0;				/* 无行：视作 native（老库） */
+	} else {
+		set_err(err, errlen, "step: %s", sqlite3_errmsg(db->h));
+		rc = -1;
+	}
+	sqlite3_finalize(st);
+	return rc;
+}
+
 /*
  * E1（ORCH §2 拍板 6）：/clear 的库面半件——归档+换窗，单事务：
  *   ① occ_session.status→'archived'（会话与消息原地保留——/sessions

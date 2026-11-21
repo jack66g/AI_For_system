@@ -197,6 +197,12 @@ int occ_session_set_window_digest(occ_db *db, const char *id,
 				  const char *digest_id, char *err,
 				  size_t errlen);
 
+/* O-24：occ_window.base_kind 读回（'native'|'digest'）。undo 报错面
+ * 据此区分「旧窗口已被压缩换窗、不可撤销」。返回 1=有行（kind 回填，
+ * 截断保底 NUL）；0=无行；-1=DB 错（调用方降级不加换窗提示，不阻断）。 */
+int occ_session_window_kind(occ_db *db, const char *id, char *kind,
+			    size_t kindlen, char *err, size_t errlen);
+
 /*
  * E1（ORCH §2 拍板 6）：/clear 的库面半件——归档+换窗，单事务：
  * status→'archived'（会话+消息原地保留可找回）+ occ_window 回 native

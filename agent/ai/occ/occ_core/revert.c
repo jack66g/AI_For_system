@@ -30,8 +30,17 @@
  *      msg 行）→ 该条判死；
  *   ④ redo 对称锚：undo 捕获 _redo 时把在盘文件 {path,kind,sha256}
  *      落 stage.redo_json，redo 消费前比对。
- * db 无行=全 legacy（P-49 sidecar 校验原路）；逐条 fail-closed 语义
- * 与 P-49 一致：该条 failed=1、目标保持现状、undo 整体 rc=0。
+ * db 无行=全 legacy（P-49 sidecar 校验原路）。
+ *
+ * O-24（状态一致性 fail-closed）：P-49/P-50 的「逐条拒文件、undo 整体
+ * rc=0」留下状态分歧窗口——部分文件未回滚而消息隐藏照常生效，用户
+ * 一确认撤销（occ_revert_commit 清 stage+删 _redo）回滚能力即被永久
+ * 吞掉（T-5 11-19 投毒案实锤）。新序：回滚文件前先只读预检全部条目
+ * （anchored/sidecar/墓碑/快照在盘，含对账判死与删标记），任一不过=
+ * 整体拒绝——未改任何文件、未隐藏任何消息、不建 stage（rc=-1 人话
+ * 可重试）；预检过→执行回滚，IO 类失败=已回滚条目用 _redo 捕获补偿
+ * 回撤销前现状后同样整体拒绝；全部成功→隐藏/注记/stage 才落地（消息
+ * 隐藏永不先于文件回滚全部成功生效）。
  */
 #define _POSIX_C_SOURCE 200809L
 #include "occ_revert.h"
@@ -675,15 +684,17 @@ static int tomb_canonical(const char *path)
 }
 
 /*
- * 还原单文件（快照 → 目标；DELETE=墓碑→删除）。0 成功。
- * P-50：e->anchored=1（DB manifest 命中）时跳过 sidecar/规范形态校验
- * （sidecar 与快照同目录=自证——重造也无法通过 DB 锚），改比内容字节
- * 摘要与 manifest 期望。墓碑口径：规范形态（空/"absent\n"）直通——
- * 墓碑语义是常量「目标写前不存在」，规范形态即合法表达，与 DB 锚
- * 结论一致；非规范形态须字节摘要恰等（append 毒字节必拒）。
+ * O-24：还原单文件的只读预检——apply_restore 全部校验分支抽此（校验
+ * 单一来源，预检循环与动作循环共用）。P-50：e->anchored=1（DB manifest
+ * 命中）时跳过 sidecar/规范形态校验（sidecar 与快照同目录=自证——
+ * 重造也无法通过 DB 锚），改比内容字节摘要与 manifest 期望。墓碑口径：
+ * 规范形态（空/"absent\n"）直通——墓碑语义是常量「目标写前不存在」，
+ * 规范形态即合法表达，与 DB 锚结论一致；非规范形态须字节摘要恰等
+ * （append 毒字节必拒）。返回 0=可回滚；-1=拒（stderr 已说人话，
+ * 未碰任何目标文件——「先回滚全部成功→再隐藏」的顺序前提）。
  */
-static int apply_restore(const char *root, const char *ses,
-			 const snap_ent *e)
+static int verify_restore(const char *root, const char *ses,
+			  const snap_ent *e)
 {
 	char dir[768], src[9216], mangled[8200];
 	char hex[OCC_SHA256_HEX + 1];
@@ -717,8 +728,6 @@ static int apply_restore(const char *root, const char *ses,
 				"被篡改？sha256=%s）：%s\n"), hex, e->path);
 			return -1;
 		}
-		if (unlink(e->path) && errno != ENOENT)
-			return -1;
 		return 0;
 	}
 	if (snprintf(src, sizeof(src), "%s/%s", dir, mangled) >=
@@ -742,6 +751,36 @@ static int apply_restore(const char *root, const char *ses,
 			e->path);
 		return -1;
 	}
+	return 0;
+}
+
+/*
+ * 还原单文件（快照 → 目标；DELETE=墓碑→删除）。0 成功。
+ * O-24：动作前再过一遍 verify_restore（预检循环与动作循环之间的
+ * TOCTOU 窗口内被换毒快照仍拒——sha 重读一遍，快照 ≤64MB 可承受）。
+ */
+static int apply_restore(const char *root, const char *ses,
+			 const snap_ent *e)
+{
+	char dir[768], src[9216], mangled[8200];
+
+	if (verify_restore(root, ses, e))
+		return -1;
+	if (snprintf(dir, sizeof(dir), "%s/%s/%s", root, ses, e->msg) >=
+	    (int)sizeof(dir))
+		return -1;
+	occ_snap_mangle(e->path, mangled, sizeof(mangled));
+	if (e->action == OCC_UNDO_DELETE) {
+		if (snprintf(src, sizeof(src), "%s/%s.ABSENT", dir,
+			     mangled) >= (int)sizeof(src))
+			return -1;
+		if (unlink(e->path) && errno != ENOENT)
+			return -1;
+		return 0;
+	}
+	if (snprintf(src, sizeof(src), "%s/%s", dir, mangled) >=
+	    (int)sizeof(src))
+		return -1;
 	{
 		/* 目标父目录可能已被删（write 递归建过）——尽力重建 */
 		char parent[4096];
@@ -1095,13 +1134,37 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 		if (!strcmp(rows[i].role, "user") && !rows[i].reverted)
 			users[nusers++] = i;
 	if (!nusers) {
-		set_err(err, errlen, "%s", L_("occ undo: 没有可撤销的用户消息"));
+		/* O-24：换窗会话（occ_window digest）旧窗口消息已被压缩
+		 * 折叠（reverted=1）不可撤销——无提示是 UX 盲区；读窗
+		 * 失败降级原文案，不阻断 undo 报错本身 */
+		char wkind[16] = "";
+
+		if (occ_session_window_kind(db, session_id, wkind,
+					    sizeof(wkind), NULL, 0) == 1 &&
+		    !strcmp(wkind, "digest"))
+			set_err(err, errlen, "%s",
+				L_("occ undo: 当前窗口没有可撤销的用户消息"
+				  "（旧窗口已被压缩换窗，换窗前的消息不可"
+				  "撤销）"));
+		else
+			set_err(err, errlen, "%s",
+				L_("occ undo: 没有可撤销的用户消息"));
 		goto out;
 	}
 	if ((size_t)steps > nusers) {
-		set_err(err, errlen,
-			L_("occ undo: 只有 %zu 步可撤（请求 %d 步）"), nusers,
-			steps);
+		char wkind[16] = "";
+
+		if (occ_session_window_kind(db, session_id, wkind,
+					    sizeof(wkind), NULL, 0) == 1 &&
+		    !strcmp(wkind, "digest"))
+			set_err(err, errlen,
+				L_("occ undo: 只有 %zu 步可撤（请求 %d 步；"
+				  "旧窗口已被压缩换窗，换窗前不可撤销）"),
+				nusers, steps);
+		else
+			set_err(err, errlen,
+				L_("occ undo: 只有 %zu 步可撤（请求 %d 步）"),
+				nusers, steps);
 		goto out;
 	}
 	bidx = users[nusers - (size_t)steps];
@@ -1289,18 +1352,81 @@ int occ_undo(occ_db *db, const char *session_id, int steps,
 	 * 由 redo_capture 读现盘回填）；构建失败=空锚，redo 全 legacy */
 	redo_json = redo_json_build(ev.v, ev.n, rshas, rkinds);
 
-	/* ---- 回滚文件（单个失败标记，不中止——部分失败如实列出） ---- */
-	for (i = 0; i < ev.n; i++) {
-		if (ev.v[i].failed_before) {
-			/* P-50：对账阶段已判死（stderr 已说原因）——不碰
-			 * 目标文件，如实标 failed */
-			ev.v[i].failed = 1;
-			continue;
+	/* ---- O-24：回滚文件——先只读预检全部条目，任一不过=整体拒绝 ----
+	 * 旧序「逐条回滚（单条失败仅标 failed）→ 隐藏/注记/stage 照常」
+	 * 存在状态分歧窗口：部分文件未回滚而消息已隐藏，用户一确认撤销
+	 * （occ_revert_commit 清 stage+删 _redo 段）回滚能力即被永久吞掉
+	 * （T-5 11-19 投毒案实锤）。新序三段：
+	 *   ① 预检（含对账判死与删标记合成条目）——rc=-1 人话拒绝：
+	 *      未改任何文件、未隐藏任何消息、不建 stage，可重试；
+	 *   ② 执行回滚——IO 类失败=对已回滚条目用 _redo 捕获补偿回
+	 *      撤销前现状，同样整体拒绝（补偿失败如实报，指路手工检查）；
+	 *   ③ 全部成功→隐藏/注记/stage 才落地（隐藏永不先于回滚成功）。 */
+	{
+		size_t nrefuse = 0;
+
+		for (i = 0; i < ev.n; i++) {
+			if (ev.v[i].failed_before) {
+				/* P-50：对账阶段已判死（stderr 已说原因） */
+				nrefuse++;
+				continue;
+			}
+			if (verify_restore(root, session_id, &ev.v[i]))
+				nrefuse++;
 		}
+		nrefuse += nsynth;		/* 删标记=快照缺失同罪 */
+		if (nrefuse) {
+			set_err(err, errlen,
+				L_("occ undo: %zu 个文件快照校验未过，已整体"
+				  "拒绝撤销（未改文件、消息未隐藏、未建撤销"
+				  "档）——逐条原因见 stderr，修复后可重试"
+				  " /undo"),
+				nrefuse);
+			goto out;
+		}
+	}
+	for (i = 0; i < ev.n; i++) {
 		if (apply_restore(root, session_id, &ev.v[i])) {
-			ev.v[i].failed = 1;
+			/* O-24：IO 类失败——已回滚条目补偿回撤销前现状
+			 * （_redo 捕获；legacy 口径——锚期望是快照 sha，
+			 * 与 _redo 副本对不上，勿复用 anchored 位） */
+			size_t j, ncomp = 0, ncompfail = 0;
+
+			for (j = 0; j < i; j++) {
+				snap_ent rb;
+				int f2 = 0;
+
+				memcpy(&rb, &ev.v[j], sizeof(rb));
+				rb.anchored = 0;
+				apply_redo(root, session_id, &rb, &f2);
+				if (f2) {
+					ncompfail++;
+					fprintf(stderr, L_("occ-undo: 补偿恢复"
+						"失败 %s（文件停留在回滚后"
+						"状态，请手工检查）\n"),
+						ev.v[j].path);
+				} else {
+					ncomp++;
+				}
+			}
 			fprintf(stderr, L_("occ-undo: 回滚失败 %s\n"),
 				ev.v[i].path);
+			if (ncompfail)
+				set_err(err, errlen,
+					L_("occ undo: 文件回滚失败（%s 起，"
+					  "详见 stderr）；已回滚的 %zu 个文件"
+					  "已恢复撤销前原状，%zu 个补偿失败"
+					  "需手工检查。消息未隐藏、未建撤销"
+					  "档，可重试 /undo"),
+					ev.v[i].path, ncomp, ncompfail);
+			else
+				set_err(err, errlen,
+					L_("occ undo: 文件回滚失败（%s 起，"
+					  "详见 stderr）；已回滚的 %zu 个文件"
+					  "已恢复撤销前原状。消息未隐藏、"
+					  "未建撤销档，可重试 /undo"),
+					ev.v[i].path, ncomp);
+			goto out;
 		}
 	}
 
