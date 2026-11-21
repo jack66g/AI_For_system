@@ -298,11 +298,6 @@ struct pq_coldef {
 	 * （见 col_minmax）。pq_write_table 签名因此不变。 */
 };
 
-struct pq_ba {
-	const uint8_t *p;
-	size_t n;
-};
-
 /* ConvertedType：UTF8=0 INT_8=15 INT_16=16 INT_32=17 INT_64=18 */
 static int conv_type(enum pq_lg lg)
 {
@@ -776,6 +771,58 @@ out:
 			unlink(tmp);
 	}
 	return rc;
+}
+
+/*
+ * as_pq_write_columns - P-27e 泛化单表写（规格见 as_parquet.h）：外部
+ * 列名/类型 → pq_coldef 后走同一条 pq_write_table（写面零分叉——
+ * aik-pqdump --write 产物与 aistreamd 落盘件同格式，自家读者闭环）。
+ */
+int as_pq_write_columns(const char *path, int ncols,
+			const char *const *names,
+			const enum as_pq_coltype *types,
+			int64_t nrows,
+			int64_t *const *ints,
+			const struct pq_ba *const *bas)
+{
+	struct pq_coldef cols[PQ_MAXCOL];
+
+	if (ncols < 1 || ncols > PQ_MAXCOL || nrows < 0)
+		return -1;
+	for (int i = 0; i < ncols; i++) {
+		if (!names[i] || !names[i][0])
+			return -1;
+		cols[i].name = names[i];
+		switch (types[i]) {
+		case AS_PQ_I8:
+			cols[i].ph = PQ_INT32;
+			cols[i].lg = PQ_LG_I8;
+			break;
+		case AS_PQ_I16:
+			cols[i].ph = PQ_INT32;
+			cols[i].lg = PQ_LG_I16;
+			break;
+		case AS_PQ_I32:
+			cols[i].ph = PQ_INT32;
+			cols[i].lg = PQ_LG_I32;
+			break;
+		case AS_PQ_I64:
+			cols[i].ph = PQ_INT64;
+			cols[i].lg = PQ_LG_I64;
+			break;
+		case AS_PQ_DOUBLE:
+			cols[i].ph = PQ_DOUBLE;
+			cols[i].lg = PQ_LG_NONE;
+			break;
+		case AS_PQ_STR:
+			cols[i].ph = PQ_BYTE_ARRAY;
+			cols[i].lg = PQ_LG_STR;
+			break;
+		default:
+			return -1;
+		}
+	}
+	return pq_write_table(path, cols, ncols, nrows, ints, bas);
 }
 
 /* ================= 4. 日期 / btime / 目录 / 序号 ================= */

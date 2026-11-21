@@ -48,8 +48,8 @@
   module ledger                   L5 ⑤ 账本行链校验（xxh64）+四类事件计数
   dataset list --layer raw|curated [--root R]
                                  读 index.parquet 汇总行数/日期域/体量
-                                 （L1 棒③；pyarrow 可选依赖，缺席=人话
-                                 +指路 pip install pyarrow，rc=1）
+                                 （L1 棒③；P-27 读侧双后端：aik-pqdump
+                                 优先/pyarrow 回退，都缺=人话+指路）
   dataset export --layer curated|corpus --since --until --out P
                                  [--format parquet|jsonl] [--redact soft|
                                  strict|off] curated 拼包导出，导出门内建
@@ -2334,8 +2334,9 @@ def cmd_module_ledger(_args):
 
 # ============================================================== dataset ----
 # L1 棒③（DATA-L1-DESIGN §3）：数据三层用户面（list/export/delete）。
-# pyarrow 为可选依赖——缺席=人话+指路 pip install pyarrow、rc=1；
-# aikctl 其余子族纯 stdlib 保持（_require_pyarrow 只在 dataset 路径调用）。
+# pyarrow 为可选依赖（P-27/P-27e：dataset 子族读写双侧双后端——
+# aik-pqdump（C，出厂件）优先，缺席回退 pyarrow（开发机）；两者都缺
+# =人话+指路，rc=1。aikctl 其余子族纯 stdlib 保持。
 #
 # 布局契约（对齐 aistreamd 既有事实，只读不重造）：
 #   raw     <root>/telemetry/YYYY-MM-DD/cat_*.parquet +
@@ -2352,20 +2353,6 @@ CORPUS_KEY_REF = 'keyfile:corpus.key'     # 设计 §0：key_ref 入包格式
 DATASET_TEL_COLS = ('timestamp_ns', 'pid', 'tgid', 'cpu', 'category',
                     'event_type', 'severity', 'data_len', 'data',
                     'trace_hi', 'trace_lo')
-
-
-def _require_pyarrow():
-    """dataset 子族的 pyarrow 门：缺席=人话+指路，rc=1（不静默降级）。"""
-    try:
-        import pyarrow
-        import pyarrow.parquet
-        return pyarrow, pyarrow.parquet
-    except ImportError as e:
-        print('aikctl: dataset 子族需要可选依赖 pyarrow（import 失败：%s）'
-              % e, file=sys.stderr)
-        print('指路：pip install pyarrow 后重试；aikctl 其余子族纯 '
-              'stdlib 不受影响', file=sys.stderr)
-        sys.exit(1)
 
 
 def _find_pqdump():
@@ -2565,13 +2552,17 @@ def _pq_read(path, what='读取'):
     c = _find_pqdump()
     cerr = None
     if c:
-        r = subprocess.run([c, '--bycol', path], capture_output=True)
-        if r.returncode == 0:
+        try:
+            r = subprocess.run([c, '--bycol', path], capture_output=True)
+        except OSError as e:
+            r = None
+            cerr = 'C 后端执行失败: %s' % e
+        if r is not None and r.returncode == 0:
             try:
                 return json.loads(r.stdout)
             except Exception as e:
                 cerr = 'C 后端输出异常: %s' % e
-        else:
+        elif r is not None:
             cerr = r.stderr.decode('utf-8', 'replace').strip()
             # 损坏（非超面）时 pyarrow 也救不了——但开发机 oracle
             # 对照语义保留：一律下探 pyarrow，最终错误择实报
@@ -2600,10 +2591,60 @@ def _pq_read(path, what='读取'):
         raise SystemExit("aikctl: parquet %s失败（损坏文件？）%s: %s%s"
                          % (what, path, e, hint))
 
-def _collect_rows(pq, root, since_d, until_d, layer='curated'):
-    """窗口内 curated 天目录 cat 文件逐行读出（pyarrow），行级
-    timestamp_ns 过滤（天目录为主筛、行级为诚实复核；时基归一见
-    _ts_wall_ns）。"""
+
+# P-27e：写侧类型面——aik-pqdump --write 的 --schema 串（C 后端）与
+# pyarrow 类型名（回退后端）同词双用。
+_PQ_TY = {
+    'INT8': 'int8', 'INT16': 'int16', 'INT32': 'int32',
+    'INT64': 'int64', 'DOUBLE': 'float64', 'STRING': 'string',
+}
+
+
+def _pq_write(out, jsonl, schema):
+    """P-27e 双后端写（aikctl export 写侧 C 化）：aik-pqdump --write
+    （C，出厂件，与 aistreamd as_parquet.c 同一写入器）优先；缺席/失败
+    回退 pyarrow（开发机保底）。jsonl=行式 JSON 字节串（_rows_jsonl_bytes
+    同构）；schema=[(列名, 'INT8'|...|'STRING')]。两后端产物 pyarrow 读回
+    逐列逐值一致（oracle 级，tests/test_pqwrite.py 对拍）。"""
+    c = _find_pqdump()
+    cerr = None
+    if c:
+        spec = ','.join('%s:%s' % (n, ty) for n, ty in schema)
+        try:
+            r = subprocess.run(
+                [c, '--write', '--out', out, '--schema', spec],
+                input=jsonl, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+        except OSError as e:
+            r = None
+            cerr = 'C 后端执行失败: %s' % e
+        if r is not None and r.returncode == 0:
+            return
+        if r is not None:
+            cerr = r.stderr.decode('utf-8', 'replace').strip()
+    # pyarrow 回退（C 缺席/失败；缺席且 C 有错=报 C 的错）
+    try:
+        import pyarrow
+        import pyarrow.parquet
+    except ImportError as e:
+        if cerr is not None:
+            raise SystemExit("aikctl: parquet 写失败 %s: %s" % (out, cerr))
+        raise SystemExit(
+            'aikctl: dataset 子族写侧无可用后端（aik-pqdump 缺席且 '
+            'pyarrow 导入失败：%s）；出厂面装 aik-pqdump（W-7 通道）'
+            '或开发机 pip install pyarrow' % e)
+    rows = [json.loads(ln) for ln in jsonl.splitlines() if ln.strip()]
+    cols = {n: [r.get(n) for r in rows] for n, _ty in schema}
+    paschema = pyarrow.schema(
+        [(n, getattr(pyarrow, _PQ_TY[ty])()) for n, ty in schema])
+    pyarrow.parquet.write_table(
+        pyarrow.Table.from_pydict(cols, schema=paschema), out)
+
+
+def _collect_rows(root, since_d, until_d, layer='curated'):
+    """窗口内 curated 天目录 cat 文件逐行读出（P-27 读侧双后端
+    _pq_read），行级 timestamp_ns 过滤（天目录为主筛、行级为诚实
+    复核；时基归一见 _ts_wall_ns）。"""
     lo, hi = _day_bounds_ns(since_d, until_d)
     rows = []
     for _day, ddir in _day_dirs(root, layer, since_d, until_d):
@@ -2635,17 +2676,20 @@ def _rows_jsonl_bytes(rows):
     return ('\n'.join(out) + ('\n' if out else '')).encode('utf-8')
 
 
-def _write_parquet(pa, pq, rows, out):
-    schema = pa.schema([
-        ('timestamp_ns', pa.int64()), ('pid', pa.int32()),
-        ('tgid', pa.int32()), ('cpu', pa.int16()),
-        ('category', pa.int8()), ('event_type', pa.int8()),
-        ('severity', pa.int8()), ('data_len', pa.int16()),
-        ('data', pa.string()), ('trace_hi', pa.int64()),
-        ('trace_lo', pa.int64()),
-    ])
-    cols = {c: [r[c] for r in rows] for c in DATASET_TEL_COLS}
-    pq.write_table(pa.Table.from_pydict(cols, schema=schema), out)
+# curated 导出 parquet schema（P-27e：C 写侧 --schema 串=pyarrow 类型面
+# 同词双用；列序=DATASET_TEL_COLS）
+EXPORT_SCHEMA = (
+    ('timestamp_ns', 'INT64'), ('pid', 'INT32'), ('tgid', 'INT32'),
+    ('cpu', 'INT16'), ('category', 'INT8'), ('event_type', 'INT8'),
+    ('severity', 'INT8'), ('data_len', 'INT16'), ('data', 'STRING'),
+    ('trace_hi', 'INT64'), ('trace_lo', 'INT64'),
+)
+
+
+def _write_parquet(rows, out):
+    """curated 导出落盘——P-27e 写侧双后端（_pq_write：C 优先/pyarrow
+    回退）。行内容与 _rows_jsonl_bytes 同源（DATASET_TEL_COLS 序）。"""
+    _pq_write(out, _rows_jsonl_bytes(rows), EXPORT_SCHEMA)
 
 
 def _find_gcm_bin():
@@ -2819,7 +2863,8 @@ def cmd_dataset_replay(args):
 
 
 def cmd_dataset_export(args):
-    pa, pq = _require_pyarrow()
+    # P-27e：读写双侧均双后端（_pq_read/_pq_write）——pyarrow 不再是
+    # export 硬门（出厂面 aik-pqdump 独立闭环；jsonl/corpus 格式全 python）
     if args.redact == 'off':
         print('aikctl: 风险提示：--redact off 已显式关闭脱敏——导出物将'
               '包含行文本原文（SENSE off 数据源=原文，设计 §3 探勘风险'
@@ -2831,7 +2876,7 @@ def cmd_dataset_export(args):
                                                       args.until),
               file=sys.stderr)
         return 1
-    rows = _collect_rows(pq, args.root, since_d, until_d)
+    rows = _collect_rows(args.root, since_d, until_d)
     for r in rows:
         r['data'] = redact_line(r['data'] or '', args.redact)
         for c in ('pid', 'tgid'):
@@ -2844,7 +2889,7 @@ def cmd_dataset_export(args):
             with open(args.out, 'wb') as f:
                 f.write(data)
         else:
-            _write_parquet(pa, pq, rows, args.out)
+            _write_parquet(rows, args.out)
         _write_card(args.out, rows, args, extra={'format': args.format})
         print('DATASET_EXPORT layer=curated format=%s redact=%s rows=%d '
               'out=%s' % (args.format, args.redact, len(rows), args.out))
@@ -2939,12 +2984,19 @@ def _sme_delete(sme_url, mid, timeout=5):
     return True
 
 
-def _rebuild_curated_index(pa, pq, root):
+# curated index schema（P-27e 写侧双后端；对齐 as_parquet.c idx_cols 面）
+IDX_SCHEMA = (
+    ('file', 'STRING'), ('date', 'STRING'), ('category', 'INT8'),
+    ('records', 'INT64'), ('start_ts', 'INT64'), ('end_ts', 'INT64'),
+)
+
+
+def _rebuild_curated_index(root):
     """删除后从剩余 cat 文件重建 curated/index.parquet（行来源逐文件
-    重读——索引陈旧即失效，重建为准；同 as_pq_sink index 重建精神）。"""
+    重读——索引陈旧即失效，重建为准；同 as_pq_sink index 重建精神；
+    P-27e 落盘走 _pq_write 双后端）。"""
     base = _layer_dir(root, 'curated')
-    rows = {'file': [], 'date': [], 'category': [], 'records': [],
-            'start_ts': [], 'end_ts': []}
+    rows = []
     for day in sorted(os.listdir(base)):
         ddir = os.path.join(base, day)
         if not (re.fullmatch(r'\d{4}-\d{2}-\d{2}', day)
@@ -2955,19 +3007,13 @@ def _rebuild_curated_index(pa, pq, root):
             ts = cols.get('timestamp_ns') or []
             if not ts:
                 continue
-            rows['file'].append(os.path.basename(path))
-            rows['date'].append(day)
-            rows['category'].append(cols['category'][0])
-            rows['records'].append(len(ts))
-            rows['start_ts'].append(min(ts))
-            rows['end_ts'].append(max(ts))
-    schema = pa.schema([
-        ('file', pa.string()), ('date', pa.string()),
-        ('category', pa.int8()), ('records', pa.int64()),
-        ('start_ts', pa.int64()), ('end_ts', pa.int64()),
-    ])
-    pq.write_table(pa.Table.from_pydict(rows, schema=schema),
-                   os.path.join(base, 'index.parquet'))
+            rows.append({'file': os.path.basename(path), 'date': day,
+                         'category': cols['category'][0],
+                         'records': len(ts), 'start_ts': min(ts),
+                         'end_ts': max(ts)})
+    jsonl = ''.join(json.dumps(r, ensure_ascii=False) + '\n'
+                    for r in rows).encode('utf-8')
+    _pq_write(os.path.join(base, 'index.parquet'), jsonl, IDX_SCHEMA)
 
 
 def cmd_dataset_delete(args):
@@ -2977,7 +3023,7 @@ def cmd_dataset_delete(args):
               '删除会破坏保留环语义；要收缩 raw 请调 aistreamd.conf 的 '
               'PARQUET_MAX_GB / RETENTION_DAYS 配置。', file=sys.stderr)
         return 1
-    pa, pq = _require_pyarrow()
+    # P-27e：读/重建均双后端（_pq_read/_pq_write）——pyarrow 不再是硬门
     since_d = _parse_date(args.since, '--since')
     until_d = _parse_date(args.until, '--until')
     if since_d > until_d:
@@ -3089,7 +3135,7 @@ def cmd_dataset_delete(args):
         except OSError:
             pass
     try:
-        _rebuild_curated_index(pa, pq, args.root)
+        _rebuild_curated_index(args.root)
     except Exception as e:            # noqa: BLE001 —— 汇总报告不中断
         print('aikctl: curated index 重建失败（%s）——list 可能陈旧，'
               '重跑一次删除或手工触发重建' % e, file=sys.stderr)
@@ -3803,7 +3849,8 @@ def main(argv=None):
 
     # L1 棒③（DATA-L1-DESIGN §3）：dataset 子族
     p_ds = sub.add_parser('dataset', help='数据三层用户面（L1 棒③：'
-                          'list/export/delete；pyarrow 可选依赖）')
+                          'list/export/delete；P-27e 读写双后端：'
+                          'aik-pqdump/pyarrow）')
     dsub = p_ds.add_subparsers(dest='dataset_cmd', required=True)
 
     d_ls = dsub.add_parser('list', help='读 index.parquet 汇总'

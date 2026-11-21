@@ -179,6 +179,38 @@ int as_pq_update_index(const char *root, long *skipped);
  */
 int as_pq_update_index_curated(const char *root, long *skipped);
 
+/* ---- P-27e：写侧泛化入口（aik-pqdump --write；aikctl export C 化） ---- */
+
+/* 字符串列值视图（BYTE_ARRAY；p 可 NULL 当 n=0） */
+struct pq_ba {
+	const uint8_t *p;
+	size_t n;
+};
+
+/* 列类型（自家写面：整型按宽度 + DOUBLE + STRING；无 BOOLEAN/嵌套） */
+enum as_pq_coltype {
+	AS_PQ_I8,
+	AS_PQ_I16,
+	AS_PQ_I32,
+	AS_PQ_I64,
+	AS_PQ_DOUBLE,
+	AS_PQ_STR,
+};
+
+/*
+ * as_pq_write_columns - 泛化单表写：names/types 给 ncols 列、nrows 行。
+ * 数值列值按声明顺序经 ints[] 供给（int64；DOUBLE 列按 IEEE754 位型
+ * memcpy 进 int64——同 pq_coldef 约定）；字符串列按声明顺序经 bas[]。
+ * 落盘契约同内部写函数（<path>.tmp → fsync → rename 原子替换，存在即
+ * 覆盖）。返回 0/-1。
+ */
+int as_pq_write_columns(const char *path, int ncols,
+			const char *const *names,
+			const enum as_pq_coltype *types,
+			int64_t nrows,
+			int64_t *const *ints,
+			const struct pq_ba *const *bas);
+
 /* ---- footer 统计读取（index 重建专用；不做数据页读取） ---- */
 
 struct pq_file_stats {

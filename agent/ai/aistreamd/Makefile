@@ -11,6 +11,9 @@
 #                      #          + SENSE 脱敏 test_sense_redact
 #                      #          + T8 遗留 test_decisions + LT-BUG 双证
 #                      #          + L1 棒① test_value）
+#                      # + python 面：P-27 test_pqdump（读者）+ P-27e
+#                      #          test_pqwrite（写侧 oracle/读写闭环/
+#                      #          aikctl export e2e）
 #   make asan-leak    # LT-BUG-008 update_index 泄漏钻证（ASan/LSan）
 #   make clean
 #
@@ -45,15 +48,21 @@ REUSE_OBJS := $(REUSE_DIR)/sme_client.o $(REUSE_DIR)/local_http.o \
 BIN := aistreamd
 INJECT := ai_inject
 PQ_DUMP := pq_dump		# T8 差分向量驱动（仅链 snappy/parquet 库）
-PQDUMP := aik-pqdump		# P-27 C 版 parquet 读者（出厂件/W-7 通道）
+PQDUMP := aik-pqdump		# P-27 C 版 parquet IO（读 + P-27e 写；
+				# 出厂件/W-7 通道——写侧与读侧同一件，
+				# aikctl export 出厂闭环不另加件）
 
 .PHONY: all test clean asan-leak
 
 all: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(PQDUMP)
 
-$(PQDUMP): aik_pqdump.c as_snappy.c \
-		../include/aistreamd/as_snappy.h
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ aik_pqdump.c as_snappy.c
+# P-27e：--write 模式链写入器（as_parquet+as_value——pq_dump 驱动同款
+# 零 aistreamd 依赖组合；读面不因加写面变——仅二进制体积）
+$(PQDUMP): aik_pqdump.c as_snappy.c as_parquet.c as_value.c \
+		../include/aistreamd/as_snappy.h \
+		../include/aistreamd/as_parquet.h as_value.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ aik_pqdump.c as_snappy.c \
+		as_parquet.c as_value.c
 
 $(BIN): $(OWN_OBJS) $(REUSE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -98,7 +107,7 @@ TESTS := test_quota test_ring test_conf test_event test_sme test_shutdown \
 	 test_decisions test_update_index_leak test_pq_atomic test_value
 TEST_LIBS := $(filter-out $(OBJ_DIR)/aistreamd.o,$(OWN_OBJS)) $(REUSE_OBJS)
 
-test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
+test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(PQDUMP) $(TESTS:%=tests/%)
 	@set -e; fail=0; \
 	for t in $(TESTS); do \
 		if timeout 300 ./tests/$$t > /tmp/as-$$t.log 2>&1; then \
@@ -112,6 +121,13 @@ test: $(BIN) tests/$(INJECT) tests/$(PQ_DUMP) $(TESTS:%=tests/%)
 		echo "PASS test_pqdump"; \
 	else \
 		echo "FAIL test_pqdump (see /tmp/as-test_pqdump.log)"; \
+		fail=1; \
+	fi; \
+	if timeout 300 python3 tests/test_pqwrite.py \
+			> /tmp/as-test_pqwrite.log 2>&1; then \
+		echo "PASS test_pqwrite"; \
+	else \
+		echo "FAIL test_pqwrite (see /tmp/as-test_pqwrite.log)"; \
 		fail=1; \
 	fi; \
 	exit $$fail
