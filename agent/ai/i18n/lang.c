@@ -187,8 +187,12 @@ static const char *const t_zh[TR__COUNT] = {
 					  "https://api.deepseek.com/v1，"
 					  "或内部 OpenAI 兼容端点）:\n> ",
 	[TR_OB_URL_EMPTY]		= "onboarding: base_url 不能为空。\n",
-	[TR_OB_CLOUD_ASK_KEY]		= "请输入 API Key（输入不落盘、"
+	[TR_OB_CLOUD_ASK_KEY]		= "请输入 API Key（只输一行，通常以 "
+					  "sk- 开头；输入不落盘、"
 					  "不进模型上下文；无则回车跳过）:\n> ",
+	[TR_OB_KEY_ONE_LINE]		= "onboarding: API Key 应为一行"
+					  "（检测到空白字符，可能多行粘贴；"
+					  "请只粘贴 sk- 开头的那一行重输）。\n",
 	[TR_OB_CLOUD_ASK_MODEL]		= "请输入模型名（如 deepseek-chat / "
 					  "qwen2.5-7b-instruct）:\n> ",
 	[TR_OB_MODEL_EMPTY]		= "onboarding: 模型名不能为空。\n",
@@ -897,9 +901,14 @@ static const char *const t_en[TR__COUNT] = {
 					  " https://api.deepseek.com/v1, or an"
 					  " internal OpenAI-compatible endpoint):\n> ",
 	[TR_OB_URL_EMPTY]		= "onboarding: base_url must not be empty.\n",
-	[TR_OB_CLOUD_ASK_KEY]		= "Enter the API Key (never stored to disk,"
-					  " never sent to the model context;"
-					  " press Enter to skip):\n> ",
+	[TR_OB_CLOUD_ASK_KEY]		= "Enter the API Key (one line only,"
+					  " usually starts with sk-; never stored"
+					  " to disk, never sent to the model"
+					  " context; press Enter to skip):\n> ",
+	[TR_OB_KEY_ONE_LINE]		= "onboarding: the API Key must be one"
+					  " line (whitespace detected, possibly a"
+					  " multi-line paste; re-enter keeping"
+					  " only the sk- line).\n",
 	[TR_OB_CLOUD_ASK_MODEL]		= "Enter the model name (e.g. deepseek-chat /"
 					  " qwen2.5-7b-instruct):\n> ",
 	[TR_OB_MODEL_EMPTY]		= "onboarding: model name must not be empty.\n",

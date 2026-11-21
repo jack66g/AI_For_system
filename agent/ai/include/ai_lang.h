@@ -98,6 +98,7 @@ enum ai_tr_key {
 	TR_OB_CLOUD_ASK_URL,		/* 请输入云端 base_url */
 	TR_OB_URL_EMPTY,		/* base_url 不能为空 */
 	TR_OB_CLOUD_ASK_KEY,		/* 请输入 API Key */
+	TR_OB_KEY_ONE_LINE,		/* P-37: key 须单行（含空白拒收） */
 	TR_OB_CLOUD_ASK_MODEL,		/* 请输入模型名 */
 	TR_OB_MODEL_EMPTY,		/* 模型名不能为空 */
 	TR_OB_PROBING,			/* 正在测试端点连通性 */

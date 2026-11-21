@@ -495,6 +495,23 @@ static int onboard_model_cloud(struct ai_shell *shell)
 		if (read_secret_line(tr(TR_OB_CLOUD_ASK_KEY), api_key,
 				     sizeof(api_key)) != 0)
 			return -1;
+		/* P-37：单行防御——串口 \r/手滑尾随空白裁边；裁边后仍含
+		 * 空白（行首/行中，多行粘贴碎片特征）拒收重输，绝不带
+		 * 可疑值进 live 测试/写 model.toml（occ /wiz 面板侧由
+		 * provider.c value_safe 拒 \n\r，此为 onboarding 同位防线） */
+		{
+			size_t klen = strlen(api_key);
+
+			while (klen && (api_key[klen - 1] == '\r' ||
+					api_key[klen - 1] == ' ' ||
+					api_key[klen - 1] == '\t'))
+				api_key[--klen] = '\0';
+			if (strpbrk(api_key, " \t")) {
+				printf("%s", tr(TR_OB_KEY_ONE_LINE));
+				explicit_bzero(api_key, sizeof(api_key));
+				continue;
+			}
+		}
 
 		printf("%s", tr(TR_OB_CLOUD_ASK_MODEL));
 		fflush(stdout);

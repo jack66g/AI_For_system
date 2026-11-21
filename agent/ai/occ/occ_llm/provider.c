@@ -977,7 +977,10 @@ static char *render_provider_section(const occ_provider_def *def)
 	return buf;
 }
 
-/* 值含引号/反斜杠/换行 → 拒收（向导输入为裸 key/URL） */
+/* 值含引号/反斜杠/换行 → 拒收（向导输入为裸 key/URL）。
+ * P-37 注记：\n/\r 拒收即多行粘贴防线——api_key 含换行/串口 \r 的
+ * 值在此整段拒绝，model.toml 结构不可能被多行碎片破坏；onboarding
+ * 侧同位防线见 cmd_onboarding.c（裁边+含空白拒收重输）。 */
 static int value_safe(const char *v)
 {
 	for (; v && *v; v++)
