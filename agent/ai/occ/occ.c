@@ -281,6 +281,13 @@ static int run_turn(occ_db *db, occ_provider *p, const char *session_id,
 			occ_loop_result_free(&res);
 			return 130;
 		}
+		/* P-30：步数帽截断出声（87.6k tokens 零交付零提示教训）
+		 * ——headless 尾部明示+retry/recover 指路 */
+		if (res.steps_capped)
+			fprintf(stderr, L_("occ: 步数帽 %d 截断（rounds=%d，工具链未收口）——`occ retry --session %s` 重发，或 `occ --recover %s` 续跑收口\n"),
+				occ_loop_max_steps(), res.rounds,
+				session_id ? session_id : res.session_id,
+				session_id ? session_id : res.session_id);
 		/* 流式正文已在环内输出；行尾补换行 */
 		fputc('\n', stdout);
 		if (rc == OCC_LOOP_ETOOLS)
@@ -1106,6 +1113,16 @@ static void *tui_worker_main(void *arg)
 					    L_("interrupted (safe point); status=interrupted — 下一条消息将自动附续传注记"), 0, NULL, 0);
 			snprintf(footer, sizeof(footer), "OCC · interrupted");
 		} else {
+			/* P-30：TUI 出声（notice 进转写区；续发消息即收口） */
+			if (res.steps_capped) {
+				char nbuf[192];
+
+				snprintf(nbuf, sizeof(nbuf),
+					 L_("步数帽 %d 截断（rounds=%d）——工具链未收口；续发消息可直接收口"),
+					 occ_loop_max_steps(), res.rounds);
+				(void)tui_view_post(a->view, TUI_VIEW_NOTICE,
+						    nbuf, 0, NULL, 0);
+			}
 			double secs = (double)(t1 - t0) / 1000.0;
 			double tps = secs > 0.001 ?
 				     (double)res.tokens.total / secs : 0.0;

@@ -816,11 +816,41 @@ static int tool_read(const occ_tool_ctx *ctx, occ_args *a, occ_obuf *o)
 
 /* ---- write ---- */
 
+/* P-31：子任务 fileset 写面强制（orch spawn 注 env；主会话/非子任务
+ * 无此 env=零扰动）。命中=目标恰为声明项或在其子树内；零分配（不因
+ * 守卫 oom 饿死/误放任务）。bash 命令写面不在此列（沙箱 workdir 域
+ * 约束），边界已在 ORCH 设计与台账登记。 */
+static int task_fileset_ok(const char *abs)
+{
+	const char *fs = getenv("OCC_TASK_FILESET");
+	const char *p;
+
+	if (!fs || !*fs || !abs || abs[0] != '/')
+		return 1;
+	p = fs;
+	while (*p) {
+		const char *nl = strchr(p, '\n');
+		size_t n = nl ? (size_t)(nl - p) : strlen(p);
+
+		if (n && !strncmp(abs, p, n) &&
+		    (abs[n] == '/' || abs[n] == '\0'))
+			return 1;
+		if (!nl)
+			break;
+		p = nl + 1;
+	}
+	return 0;
+}
+
 static int write_guard(const occ_tool_ctx *ctx, const char *abs, occ_obuf *o)
 {
 	char cwd[4096];
 	const char *cwdp = ctx_cwd(ctx, cwd, sizeof(cwd));
 
+	if (!task_fileset_ok(abs)) {
+		occ_ob_printf(o, L_("ERROR: 子任务 fileset 未声明 %s——独占声明外不可写（P-31 写面强制）"), abs);
+		return -1;
+	}
 	if (occ_write_target_ok(abs, cwdp ? cwdp : ""))
 		return 0;
 	/* J-7=A（P-52 刀2·病②「双门」）：本次调用已经 W2 门确认/放行

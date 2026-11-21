@@ -277,6 +277,34 @@ static void utf8_trunc(const char *src, size_t max, char *dst, size_t dstlen)
 	dst[cut] = '\0';
 }
 
+/* P-31：OCC_TASK_FILESET env 值拼装（\n 分隔；元素绝对路径合同
+ * ——orch.h 拍板，原样透传；尾 \n 多余无害，解析跳空段） */
+static char *fs_env_kv(const char *const *fs, size_t n)
+{
+	size_t cap = 32, len = 0, i;
+	char *kv = malloc(cap);
+
+	if (!kv)
+		return NULL;
+	len = (size_t)snprintf(kv, cap, "OCC_TASK_FILESET=");
+	for (i = 0; i < n && fs[i]; i++) {
+		size_t el = strlen(fs[i]) + 2;
+		char *nb;
+
+		while (len + el + 1 > cap)
+			cap *= 2;
+		nb = realloc(kv, cap);
+		if (!nb) {
+			free(kv);
+			return NULL;
+		}
+		kv = nb;
+		len += (size_t)snprintf(kv + len, cap - len, "%s\n",
+					fs[i]);
+	}
+	return kv;
+}
+
 /* ---- env 数组（fork 前建好整张 envp——不 setenv，线程安全面） ---- */
 
 static int env_set(char ***envp, const char *kv)
@@ -1022,6 +1050,24 @@ int occ_orch_spawn(occ_orch *o, const occ_orch_spawn_opts *opts,
 						   "taskid env");
 			return OCC_ORCH_ESPAWN;
 		}
+	}
+	/* P-31：fileset 授权 env 通道（子进程 write_guard 强制依据） */
+	if (tid[0] && opts->fileset && opts->nfileset) {
+		char *kv = fs_env_kv(opts->fileset, opts->nfileset);
+
+		if (!kv || env_set(&envp, kv)) {
+			free(kv);
+			env_free(envp);
+			unlink(sop);
+			unlink(sep);
+			set_err(err, errlen, "%s", L_("occ_orch_spawn: "
+				"OCC_TASK_FILESET env 注入失败（oom）"));
+			if (dispatched)
+				spawn_fail_cleanup(o, tid, rpath, own_result,
+						   "fileset env");
+			return OCC_ORCH_ESPAWN;
+		}
+		free(kv);
 	}
 	if (rpath[0]) {
 		char rkv[512];

@@ -4,8 +4,7 @@
  *
  * 键=zh 原文（与代码内 L_() 入参逐字节一致）；en 缺键时
  * tui_lang_get 回 zh（诚实降级）。
- * A3 起增量法：已提交表为基线+新波 JSON 追加（a1/a2 证据
- * JSON 与历史表有 135 条漂移，全量再生会丢键——考古登记）。
+ * 增量法（A3 立）：已提交表为基线+新波 JSON 追加。
  */
 #ifndef _TUI_LANG_TAB_H
 #define _TUI_LANG_TAB_H
@@ -631,6 +630,10 @@ static const struct {
 	{ "apply_digest: 窗口标记失败（%s）", "apply_digest: window marking failed (%s)" },
 	{ "digest: 摘要过短（%zu < %d 字符），本轮不换窗", "digest: summary too short (%zu < %d chars), window not swapped this round" },
 	{ "compact: ac 不可达（@ac:off）", "compact: ac unreachable (@ac:off)" },
+	{ "ERROR: 子任务 fileset 未声明 %s——独占声明外不可写（P-31 写面强制）", "ERROR: %s is outside the task fileset — sub-tasks may only write declared files (P-31 write enforcement)" },
+	{ "occ: 步数帽 %d 截断（rounds=%d，工具链未收口）——`occ retry --session %s` 重发，或 `occ --recover %s` 续跑收口\n", "occ: step limit %d reached (rounds=%d, tool chain not wrapped up) — resend with `occ retry --session %s`, or resume with `occ --recover %s` to wrap up\n" },
+	{ "步数帽 %d 截断（rounds=%d）——工具链未收口；续发消息可直接收口", "step limit %d reached (rounds=%d) — tool chain not wrapped up; send a follow-up message to wrap up" },
+	{ "occ_orch_spawn: OCC_TASK_FILESET env 注入失败（oom）", "occ_orch_spawn: OCC_TASK_FILESET env injection failed (oom)" },
 };
 
 #endif /* _TUI_LANG_TAB_H */

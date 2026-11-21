@@ -237,9 +237,20 @@ static int sim_main(int argc, char **argv)
 		return 99;
 	}
 	if (!strncmp(prompt, "sim:env ", 8)) {
-		const char *v = getenv(prompt + 8);
+		char name[96];
+		const char *nl = strchr(prompt + 8, '\n');
+		size_t nn = nl ? (size_t)(nl - prompt - 8) :
+				 strlen(prompt + 8);
+		const char *v;
 
-		printf("SIM-ENV %s=%s\n", prompt + 8, v ? v : "(null)");
+		/* P-31：orch spawn 会在 prompt 尾追加行——env 名取首行
+		 * 净名（与 sim:probe 同款防尾处理） */
+		if (nn >= sizeof(name))
+			nn = sizeof(name) - 1;
+		memcpy(name, prompt + 8, nn);
+		name[nn] = '\0';
+		v = getenv(name);
+		printf("SIM-ENV %s=%s\n", name, v ? v : "(null)");
 		return 0;
 	}
 	/*
@@ -1156,6 +1167,51 @@ static int unit_main(void)
 			occ_task_row_free(&t2);
 		} else {
 			OK(0, "a10-task-create");
+		}
+	}
+
+	/* ===== P-31：fileset env 通道（子进程 write_guard 强制依据） ===== */
+	{
+		char outf[192], fsa[192], fsb[192], buf[768];
+		const char *fs[2];
+		occ_orch_spawn_opts opts;
+		occ_orch_child *c = NULL;
+		occ_orch_result r;
+		char err[256];
+		FILE *f;
+		size_t got;
+
+		snprintf(outf, sizeof(outf), "%s/p31_env.out", tmpdir);
+		snprintf(fsa, sizeof(fsa), "%s/p31_decl_a.txt", tmpdir);
+		snprintf(fsb, sizeof(fsb), "%s/p31_decl_dir", tmpdir);
+		fs[0] = fsa;
+		fs[1] = fsb;
+		memset(&opts, 0, sizeof(opts));
+		opts.prompt = "sim:env OCC_TASK_FILESET";
+		opts.parent_session = g_psid;
+		opts.occ_bin = self_bin;
+		opts.env = g_sim_env;
+		opts.timeout_ms = 0;
+		opts.stdout_path = outf;
+		opts.fileset = fs;
+		opts.nfileset = 2;
+		if (occ_orch_spawn(g_o, &opts, &c, err, sizeof(err)) !=
+		    OCC_ORCH_OK) {
+			OK(0, "p31-env-spawn");
+		} else {
+			OK(occ_orch_wait(c, &r, err, sizeof(err)) == 0 &&
+			   r.end == OCC_ORCH_END_EXIT && r.exit_code == 0,
+			   "p31-env-child-exit0");
+			f = fopen(outf, "r");
+			got = f ? fread(buf, 1, sizeof(buf) - 1, f) : 0;
+			if (f)
+				fclose(f);
+			buf[got] = '\0';
+			OK(strstr(buf, "SIM-ENV OCC_TASK_FILESET=") != NULL,
+			   "p31-env-marker");
+			OK(strstr(buf, fsa) != NULL && strstr(buf, fsb) != NULL,
+			   "p31-env-declared-paths");
+			occ_orch_result_free(&r);
 		}
 	}
 

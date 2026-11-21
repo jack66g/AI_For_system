@@ -132,6 +132,7 @@ typedef struct occ_loop_result {
 } occ_loop_result;
 
 void occ_loop_result_free(occ_loop_result *r);
+int occ_loop_max_steps(void);		/* P-30：步数帽值（出声面） */
 
 /*
  * occ_loop_run - 跑一轮对话环（含工具环）。

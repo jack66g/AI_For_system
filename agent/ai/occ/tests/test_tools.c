@@ -964,6 +964,59 @@ int main(void)
 		}
 	}
 
+	/* ---- P-31：子任务 fileset 写面强制（env 注入面=orch spawn） ---- */
+	{
+		char p1[600], p2[600], p3[600], args[1300];
+
+		snprintf(p1, sizeof(p1), "%s/p31_ok.txt", tmpdir);
+		snprintf(p2, sizeof(p2), "%s/p31_out.txt", tmpdir);
+		snprintf(p3, sizeof(p3), "%s/p31_dir_ok", tmpdir);
+		/* env=多条 \n 分隔（文件 p1+目录 p3 声明）；p2 未声明 */
+		{
+			char fenv[1300];
+
+			snprintf(fenv, sizeof(fenv), "%s\n%s", p1, p3);
+			setenv("OCC_TASK_FILESET", fenv, 1);
+		}
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"%s\",\"content\":\"x\"}", p1);
+		s = (char *)exec_tool("write", args);
+		OK(exec_rc() == 0, "p31-write-declared-ok");
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"%s/p31_sub.txt\",\"content\":\"x\"}",
+			 p3);
+		s = (char *)exec_tool("write", args);
+		OK(exec_rc() == 0, "p31-write-declared-subtree-ok");
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"%s\",\"content\":\"x\"}", p2);
+		s = (char *)exec_tool("write", args);
+		OK(exec_rc() != 0 && s && strstr(s, "fileset"),
+		   "p31-write-undeclared-deny");
+		snprintf(args, sizeof(args), "{\"path\":\"%s\"}", p2);
+		s = (char *)exec_tool("mkdir", args);
+		OK(exec_rc() != 0 && s && strstr(s, "fileset"),
+		   "p31-mkdir-undeclared-deny");
+		s = (char *)exec_tool("rm", args);
+		OK(exec_rc() != 0 && s && strstr(s, "fileset"),
+		   "p31-rm-undeclared-deny");
+		snprintf(args, sizeof(args),
+			 "{\"src\":\"%s\",\"dst\":\"%s\"}", p1, p2);
+		s = (char *)exec_tool("mv", args);
+		OK(exec_rc() != 0 && s && strstr(s, "fileset"),
+		   "p31-mv-dst-undeclared-deny");
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"%s\",\"oldString\":\"x\","
+			 "\"newString\":\"y\"}", p1);
+		s = (char *)exec_tool("edit", args);
+		OK(exec_rc() == 0, "p31-edit-declared-ok");
+		/* 无 env=零扰动（主会话面不受限） */
+		unsetenv("OCC_TASK_FILESET");
+		snprintf(args, sizeof(args),
+			 "{\"path\":\"%s\",\"content\":\"x\"}", p2);
+		s = (char *)exec_tool("write", args);
+		OK(exec_rc() == 0, "p31-noenv-unrestricted");
+	}
+
 	occ_tool_result_free(&g_res);
 	{
 		char cmd[300];

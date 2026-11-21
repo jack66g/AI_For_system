@@ -212,6 +212,12 @@ static const char *compose_sys_prompt(const char *mem_blk)
 
 /* ---- 步数/续跑上限（PLAN §6） ---- */
 #define OCC_LOOP_MAX_STEPS 24
+
+/* P-30：帽值出声面消费（occ.c headless/TUI 双面提示） */
+int occ_loop_max_steps(void)
+{
+	return OCC_LOOP_MAX_STEPS;
+}
 #define OCC_LOOP_MAX_LEN_CONT 2
 
 /* ---- dynbuf ---- */
