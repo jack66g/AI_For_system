@@ -524,9 +524,16 @@ done:
 
 		OK(stat(s->probe, &st) != 0, "probe-absent");
 	}
-	if (s->want_ow == 1)
-		OK(file_has_ow(s->probe), "file-o+w-set");
-	else if (s->want_ow == 0 && s->want_exists != 0)
+	if (s->want_ow == 1) {
+		/* P-58②：chmod 探针经 aik-sandbox（非 root 经 sudo 组装=
+		 * 区内 root 无 DAC_OVERRIDE 对他属主文件必 EPERM）——
+		 * root-only 断言，非 root 显式 SKIP 不冒充失败 */
+		if (geteuid() == 0)
+			OK(file_has_ow(s->probe), "file-o+w-set");
+		else
+			printf("SKIP file-o+w-set (root-only: "
+			       "sandbox uid coupling)\n");
+	} else if (s->want_ow == 0 && s->want_exists != 0)
 		OK(!file_has_ow(s->probe), "file-no-o+w");
 	return rc;
 }
@@ -762,8 +769,11 @@ int main(void)
 	}
 
 	/* ---- S7（O-6）：cwd=/root 起 occ→workdir 回退 /var/ai/work，
-	 * ---- 首发 bash pwd 不再非法 rw-path 且输出含回退值（无面板 W1 直接跑） ---- */
-	{
+	 * ---- 首发 bash pwd 不再非法 rw-path 且输出含回退值（无面板 W1 直接跑）
+	 * ---- P-58②：cwd=/root 本身需 root——非 root 显式 SKIP ---- */
+	if (geteuid() != 0) {
+		printf("SKIP S7 (root-only: cwd=/root premise)\n");
+	} else {
 		struct scn s;
 
 		memset(&s, 0, sizeof(s));

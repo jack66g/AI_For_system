@@ -365,7 +365,11 @@ int main(void)
 	/* ---- 面3（O-18）：会话级放行——s 后同键免问×异键仍问
 	 * ×headless 表恒空不受影响（探针同面2：bash chmod 666=
 	 * bash-chmod-ow 键；write /var/tmp=write-outzone 键） ---- */
-	{
+	/* P-58②：chmod 探针过沙箱=root-only（非 root 显式 SKIP，
+	 * 断言保留不删——门禁口径 root 跑全量） */
+	if (geteuid() != 0) {
+		printf("SKIP ses face (root-only: sandbox uid coupling)\n");
+	} else {
 		occ_w2_gate sg;
 		occ_tool_result r;
 
