@@ -1,4 +1,11 @@
 #!/bin/sh
+# aik-console v10 — P-60 出厂：v9 + per-user 回退工作区 root 预建。
+#   v10：resolve_target 非 root 分支在 setpriv 前（root 代组装时刻）
+#   预建 /var/ai/work/<name>（0700 属 uid:gid；幂等 mkdir -p+chown
+#   复归位）——C 棒 occ_sandbox_user_workdir_for 部署前提落位；名字
+#   白名单/长度与该纯函数同一口径，不合法或建不成=不阻塞（occ 侧
+#   诚实回落共享 /var/ai/work，与现状等价不更糟）。DRY=1 不动作
+#   （DRY 打印面零变化，test_console_v9 断言不受扰）。
 # aik-console v9 — P-2 多用户 Phase A：降权 exec 链 + 出厂 admin 归位。
 #   v9：启动（及每轮循环重解）读 /var/lib/aikernel/console-gate.last（A 棒
 #   gate 写的上次成功登录用户；缺省 admin）得目标用户。目标≠root 且 OS
@@ -93,6 +100,19 @@ resolve_target() {
     HOME="$t_home"; USER="$t_user"; export HOME USER
     cd "$t_home" 2>/dev/null || cd /
     [ "$DRY" = 1 ] || mkdir -p -m 750 "$LOGDIR" 2>/dev/null
+    # v10（P-60 /var/ai 权限面）：root 代组装时刻预建 per-user 回退
+    # 工作区（见头部 v10 注）；失败静默=occ 诚实回落共享区不阻塞。
+    if [ "$DRY" != 1 ]; then
+      case "$t_user" in
+        ""|*[!A-Za-z0-9._-]*) ;;
+        *)
+          if [ "${#t_user}" -le 64 ]; then
+            mkdir -p -m 0700 "/var/ai/work/$t_user" 2>/dev/null
+            chown "$t_uid:$t_gid" "/var/ai/work/$t_user" 2>/dev/null
+          fi
+          ;;
+      esac
+    fi
     LOGF="$LOGDIR/$t_user.log"
     ERRF="$LOGDIR/$t_user.err"
   else
