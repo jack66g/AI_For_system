@@ -89,6 +89,36 @@ ck "get --json 结构断言（段序/键值/未知键/推演面）" "[ $? = 0 ]"
 # 还原无 per-user 段基线，后面 set 流从干净态起
 cp "$T/policy.orig" "$PC"
 
+echo "== 1b. 对齐 C 读取器（;/# 注释、重复键后写胜出、段尾注释） =="
+PC2="$T/align.conf"
+cat > "$PC2" <<'EOF'
+; 分号注释行——与 # 同忽略
+[root]
+mode = privileged
+mode = restricted        # 重复键——后写胜出
+[wheel]
+mode = confirmed
+[default]
+mode = restricted
+[user:tstp2d1]  # 段尾注释容错
+mode = confirmed
+EOF
+out=$(AIK_POLICY_CONF="$PC2" $AIKCTL policy get --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+g = {s["section"]: {k["key"]: k["value"] for k in s["keys"]}
+     for s in d["sections"]}
+assert g["root"]["mode"] == "restricted", "重复键后写胜出（C 覆盖语义）"
+assert g["user:tstp2d1"]["mode"] == "confirmed", "段尾注释不入段名"
+eff = {e["name"]: e for e in d["effective"]}
+assert eff["tstp2d1"]["mode"] == "confirmed", "悬空 per-user 段也入推演"
+assert d["wheel_group"] == "wheel", "无 group 键缺省=wheel（C 对齐）"
+')
+ck "--json 对齐断言（后写胜出/段尾注释/缺省 wheel）" "[ $? = 0 ]"
+out=$(AIK_POLICY_CONF="$PC2" $AIKCTL policy get 2>&1)
+ck "分号注释行不入 unparsed" "! has \"\$out\" '分号注释行'"
+ck "重复 mode 行如实都列出" "[ \"\$(AIK_POLICY_CONF='$PC2' $AIKCTL policy get 2>/dev/null | grep -c 'mode = ')\" = 5 ]"
+
 echo "== 2. set 无 --yes：只打前/后 diff 不写 =="
 out=$($AIKCTL policy set user "$U1" mode=restricted 2>&1); rc=$?
 ck "无 --yes rc!=0（W2 拒）" "[ '$rc' != 0 ]"

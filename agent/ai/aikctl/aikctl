@@ -925,22 +925,26 @@ def cmd_selftest(_args):
         pc = os.path.join(td, 'policy.conf')
         stub_conf = (
             '# P-2B selftest stub\n'
+            '; 分号注释——与 # 同忽略（与 C 读取器对齐）\n'
             '[root]\n'
-            'mode = privileged        # root: W1 自动；W2 二次确认\n'
+            'mode = privileged        # root comment\n'
             '[wheel]\n'
             'mode = confirmed\n'
             'group = sudo\n'
             '[default]\n'
             'mode = restricted\n'
-            'extra = keepme          # 未知键原样保留\n'
+            'extra = keepme          # unknown key\n'
+            'mode = confirmed         # 重复键——后写胜出\n'
             'stray no equals here\n'
-            '[user:tstp2d1]\n'
-            'mode = confirmed\n')
+            '[user:tstp2d1]  # 段尾注释容错\n'
+            'mode = confirmed\n'
+            'mode = restricted        # 段内重复——后写胜出\n')
         with open(pc, 'w', encoding='utf-8') as f:
             f.write(stub_conf)
         data, perr = policy_conf_read(pc)
         secs = data['sections'] if data else []
-        case('policy 解析：root/wheel/default/user 段+未知键原样',
+        case('policy 解析：root/wheel/default/user 段+未知键原样+'
+             '段尾注释不入段名',
              perr is None
              and [s['name'] for s in secs] == ['root', 'wheel', 'default',
                                                'user:tstp2d1']
@@ -948,16 +952,23 @@ def cmd_selftest(_args):
              and policy_key_get(secs[1], 'group') == 'sudo'
              and ('extra', 'keepme') in secs[2]['keys']
              and secs[3]['is_user'] and secs[3]['user'] == 'tstp2d1')
+        case('policy 对齐 C 读取器：;/# 注释忽略+重复键后写胜出',
+             perr is None
+             and policy_key_get(secs[2], 'mode') == 'confirmed'
+             and policy_key_get(secs[3], 'mode') == 'restricted'
+             and '; 分号注释——与 # 同忽略（与 C 读取器对齐）'
+             not in [ln for _i, ln in data['unparsed']])
         case('policy 半解析行如实入 unparsed（不猜）',
-             data is not None and data['unparsed'] == [(10,
+             data is not None and data['unparsed'] == [(12,
                                                         'stray no equals '
                                                         'here')])
-        new = policy_set_user_lines(data['raw'], 'tstp2d1', 'restricted')
+        new = policy_set_user_lines(data['raw'], 'tstp2d1', 'confirmed')
         diffpos = [i for i, (a, b) in enumerate(zip(data['raw'], new))
                    if a != b]
-        case('policy set 更新既有段 mode 行（其余行逐字节原样）',
-             len(new) == len(data['raw']) and diffpos == [11]
-             and new[11] == 'mode = restricted')
+        case('policy set 换段内最后一条 mode 行（后写胜出者；其余逐字节）',
+             len(new) == len(data['raw']) and diffpos == [14]
+             and new[14] == 'mode = confirmed'
+             and new[13] == 'mode = confirmed')
         new2 = policy_set_user_lines(data['raw'], 'tstp2d9', 'confirmed')
         case('policy set 追加新段（尾空行隔开+段头+mode 行）',
              new2[:-3] == data['raw'] and new2[-3:] == ['',
@@ -971,11 +982,17 @@ def cmd_selftest(_args):
                                 lambda n: n in ('wheelguy',))
         effr = policy_effective('root', 0, secs, 'sudo', lambda n: False)
         case('policy 生效推演（[user:X]>wheel>default；root 恒 root 段）',
-             eff['mode'] == 'confirmed' and eff['source'] == 'user:tstp2d1'
-             and eff2['mode'] == 'restricted' and eff2['source'] == 'default'
+             eff['mode'] == 'restricted' and eff['source'] == 'user:tstp2d1'
+             and eff2['mode'] == 'confirmed' and eff2['source'] == 'default'
              and eff3['mode'] == 'confirmed'
              and eff3['source'].startswith('wheel')
              and effr['mode'] == 'privileged' and effr['source'] == 'root')
+        case('policy wheel 组缺省=wheel（AI_POLICY_GROUP_DEFAULT 对齐）',
+             _policy_wheel_group(secs) == 'sudo'
+             and _policy_wheel_group([{'name': 'wheel', 'is_user': False,
+                                       'user': None,
+                                       'keys': [('mode', 'confirmed')]}])
+             == 'wheel')
         recs = [
             {'type': UTMP_USER_PROCESS, 'pid': 3512, 'line': 'pts/3',
              'id': 's3', 'user': 'tstp2da', 'host': '10.0.0.9',
@@ -4365,10 +4382,11 @@ def _mounts_path():
 def policy_conf_read(path):
     """解析 policy.conf → (data, None) | (None, 人话原因)。
 
-    data={'raw': 原始行列表（写回/外科手术底稿）, 'sections': [{name,
-    is_user, user, keys: [(键,值)…保留出现序]}…], 'unparsed': [(行号,
-    原行)]}。行内 # 注释剥出值域；未知键/未知段名原样入表（如实列出，
-    不猜语义）；段外键/无等号行 → unparsed（诚实不猜）。
+    与内核侧读取器（ai_user_policy.c parse_conf）逐点对齐：# / ; 整行
+    注释与空行忽略；段头取 '[' 至首个 ']'（段名 trim 容错尾注释）；键
+    在第一个 '=' 处分；值中第一个 '#' 起视为行内注释；同名段/同名键
+    后写胜出（policy_key_get 取最后匹配）。未知键/未知段名保留入表如实
+    列出（C 侧静默忽略——展示面不猜语义）；无等号行 → unparsed。
     """
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -4378,30 +4396,41 @@ def policy_conf_read(path):
     except OSError as e:
         return None, 'policy.conf 读失败 %s: %s' % (path, e)
     sections = []
+    by_name = {}
     unparsed = []
     cur = None
     for i, ln in enumerate(raw, 1):
         s = ln.strip()
-        if not s or s.startswith('#'):
+        if not s or s[0] in '#;':
             continue
-        if s.startswith('[') and s.endswith(']'):
-            name = s[1:-1].strip()
-            if not name or ']' in name or '[' in name:
+        if s.startswith('['):
+            end = s.find(']')
+            if end < 0:
+                unparsed.append((i, ln))   # 段头缺 ]——C 侧警告跳过
+                cur = None
+                continue
+            name = s[1:end].strip()
+            if not name:
                 unparsed.append((i, ln))
                 cur = None
                 continue
             is_user = name.startswith(POLICY_USER_PREFIX)
-            cur = {'name': name, 'is_user': is_user,
-                   'user': name[len(POLICY_USER_PREFIX):] if is_user else None,
-                   'keys': []}
-            sections.append(cur)
+            if name in by_name:            # 同名段重复出现：合并（后写
+                cur = by_name[name]        # 胜出=C 侧持续覆盖语义）
+            else:
+                cur = {'name': name, 'is_user': is_user,
+                       'user': (name[len(POLICY_USER_PREFIX):]
+                                if is_user else None),
+                       'keys': []}
+                sections.append(cur)
+                by_name[name] = cur
             continue
         if '=' in s:
             key, _, val = s.partition('=')
             key = key.strip()
-            m = re.search(r'(?:^|\s)#', val)
-            if m:
-                val = val[:m.start()]
+            hash_pos = val.find('#')       # 值中第一个 # 起为行内注释
+            if hash_pos >= 0:              # （与 C 侧 strchr(val,'#') 同）
+                val = val[:hash_pos]
             val = val.strip()
             if not key or cur is None:
                 unparsed.append((i, ln))   # 键在段外/空键——原样
@@ -4420,18 +4449,21 @@ def policy_section_find(sections, name):
 
 
 def policy_key_get(sec, key):
+    """取键值——同名键后写胜出（与 C 侧逐行覆盖赋值语义一致）。"""
     if not sec:
         return None
+    val = None
     for k, v in sec['keys']:
         if k == key:
-            return v
-    return None
+            val = v
+    return val
 
 
 def _policy_wheel_group(sections):
-    """[wheel] 段的 group= 键（缺省 sudo——Ubuntu 出厂基线）。"""
+    """[wheel] 段的 group= 键；缺省 wheel（AI_POLICY_GROUP_DEFAULT，
+    与 C 侧一致——Ubuntu 出厂文件显式写 group = sudo）。"""
     v = policy_key_get(policy_section_find(sections, 'wheel'), 'group')
-    return v if v else 'sudo'
+    return v if v else 'wheel'
 
 
 def policy_effective(name, uid, sections, wheel_group, in_wheel):
@@ -4445,15 +4477,17 @@ def policy_effective(name, uid, sections, wheel_group, in_wheel):
         sec = policy_section_find(sections, sec_name)
         if sec is None:
             if sec_name == 'root':
-                return {'mode': 'privileged', 'source': source,
-                        'note': '[root] 段缺失——按基线 privileged 推演'}
+                return {'mode': None, 'source': source,
+                        'note': '[root] 段缺失——内核侧回落 restricted'
+                                '（安全兜底）'}
             return {'mode': None, 'source': source,
                     'note': '[%s] 段缺失' % sec_name}
         v = policy_key_get(sec, 'mode')
         if v not in POLICY_MODES:
             return {'mode': None, 'source': source,
-                    'note': '[%s] mode=%r 非法档（合法：%s）'
-                            % (sec_name, v, '/'.join(POLICY_MODES))}
+                    'note': '[%s] mode=%r 非法档（内核侧回落 restricted；'
+                            '合法：%s）' % (sec_name, v,
+                                            '/'.join(POLICY_MODES))}
         return {'mode': v, 'source': source, 'note': None}
 
     if name == 'root' or uid == 0:
@@ -4694,34 +4728,46 @@ def cmd_policy_get_sudoers(args):
 
 def policy_set_user_lines(raw_lines, name, mode):
     """行级外科手术：更新/追加 [user:NAME] 段的 mode= 行；其余行逐字节
-    原样（含注释/空行/未知键/其它段）。→ 新行列表。"""
-    hdr = '[user:%s]' % name
+    原样（含注释/空行/未知键/其它段）。
+
+    段名与读取器同法识别（'[' 起首个 ']' 内文本 strip——容忍段尾注释）；
+    同名段重复出现时取最后一段动刀（后写胜出）；段内多条 mode= 换最后
+    一条（同语义）。→ 新行列表。
+    """
+    hdr_name = POLICY_USER_PREFIX + name
     mode_ln = 'mode = %s' % mode
     out = list(raw_lines)
-    start = None
-    for i, ln in enumerate(out):
-        if ln.strip() == hdr:
-            start = i
-            break
-    if start is None:
+
+    def _sec_name(ln):
+        s2 = ln.strip()
+        if not s2.startswith('['):
+            return None
+        e = s2.find(']')
+        return s2[1:e].strip() if e > 0 else None
+
+    headers = [i for i, ln in enumerate(out) if ln.strip().startswith('[')]
+    target = None
+    for k, s_i in enumerate(headers):
+        e_i = headers[k + 1] if k + 1 < len(headers) else len(out)
+        if _sec_name(out[s_i]) == hdr_name:
+            target = (s_i, e_i)     # 同名多段：循环到最后一个
+    if target is None:
         if out and out[-1].strip():
-            out.append('')                      # 与前文空行隔开
-        out.append(hdr)
+            out.append('')          # 与前文空行隔开
+        out.append('[%s]' % hdr_name)
         out.append(mode_ln)
         return out
-    end = len(out)
-    for j in range(start + 1, len(out)):
-        s2 = out[j].strip()
-        if s2.startswith('[') and s2.endswith(']'):
-            end = j
-            break
+    start, end = target
+    mode_at = None
     for j in range(start + 1, end):
         c = out[j].strip()
-        if not c or c.startswith('#'):
+        if not c or c[0] in '#;':
             continue
         if c.partition('=')[0].strip() == 'mode':
-            out[j] = mode_ln                    # 只换 mode 行，行内注释
-            return out                          # 旧注释随之弃——diff 可见
+            mode_at = j             # 后写胜出——换段内最后一条 mode 行
+    if mode_at is not None:
+        out[mode_at] = mode_ln      # 只换该行，行内注释随之弃——diff 可见
+        return out
     out.insert(end, mode_ln)
     return out
 
