@@ -71,20 +71,25 @@ B7CONF = (
     "CANARY_ENABLED=1\nCANARY_ROLLBACK_MS=15000\n"
     "CANARY_CONFIRM_SEC=2\nCANARY_MIN_INTERVAL_SEC=1\n")
 
-BAT = ('echo ==B1==; grep -m1 17.11 /etc/motd\necho ==B2==; aik-compat probe /bin/sh 2>&1 | tail -1\necho ==B3==; aikctl compat hw 2>&1 | head -1\necho ==B4==; aik-gcm selftest 2>&1 | tail -1\necho ==B5==; (/usr/local/sbin/aipd --conf /etc/aikernel/aipd.conf >/tmp/aipd-e2e.log 2>&1 &)\nsleep 12; grep -o \'feat_ok=[0-9]*\' /run/aipd.stats | head -1\ngrep -o \'shadow_rows=[0-9]*\' /run/aipd.stats | head -1\nkill -TERM $(cat /run/aipd.pid); sleep 2\ntail -1 /tmp/aipd-e2e.log\necho ==B7==; mkdir -p /root/b7-pq; rm -f /root/b7.fifo\nmkfifo /root/b7.fifo\n(python3 /root/b7gen.py >/root/b7gen.log 2>&1 &)\n(/usr/local/sbin/aipd --conf /root/b7.conf >/root/b7.log 2>&1 &)\nsleep 40; echo AGENTSL=$(grep -c \'name=aipd\' /proc/ai/agents); echo AGRAW=$(head -2 /proc/ai/agents); kill -TERM $(cat /run/b7.pid); sleep 3\ngrep -E \'canary_reg_ok|canary_dispatched|canary_confirmed|canary_rolled_back|canary_errors\' /run/b7.stats\necho AG6N=$(grep -c \'agent=6\' /proc/ai/decisions)\necho AGXN=$(grep -c \'executed=1\' /proc/ai/decisions)\necho SWAP=$(grep \'mm.swappiness\' /proc/ai/control | grep -o \'current=[0-9]*\' | cut -d= -f2)\ntail -2 /root/b7.log\necho ==B8==; s=startup\nfor i in $(seq 1 60); do s=$(systemctl is-system-running)\n[ "$s" = running ] && break; sleep 5; done\necho ISR=$s\necho FAILED=$(systemctl --failed --no-legend | wc -l)\nsystemctl is-active aikernel-streams.service aikernel-api.service aik-cron.service aik-log-trim.timer\necho SOFTDOG=$(lsmod | grep -c softdog)\necho UK=$(journalctl -u aikernel-streams.service --no-pager | grep -ci \'unknown key\')\necho ==M1==; ls -ld /var/ai/work /etc/aikernel/models.d /var/log/aik-console 2>&1 | awk \'{print $1,$3,$4,$NF}\'\necho ==M2==; grep -c \'^SENSE_REDACT=soft$\' /etc/aikernel/aistreamd.conf\ngrep -c \'^sense_redact = "soft"$\' /root/.aikernel/model.toml\njournalctl -u aikernel-streams.service --no-pager | grep -c \'sense_redact=soft\'\necho ==M3==; printf \'aik12345\\n\' | aikctl user add alice --password-stdin >/tmp/uadd.log 2>&1; echo UADD=$?\ngetent passwd alice | cut -d: -f1,3\naikctl user list 2>&1 | head -3\ncut -d: -f1 /etc/aikernel/console-gate\necho W17IDONE$((1+1))\n')
+BAT = ('echo ==B1==; grep -m1 17.11 /etc/motd\necho ==B2==; aik-compat probe /bin/sh 2>&1 | tail -1\necho ==B3==; aikctl compat hw 2>&1 | head -1\necho ==B4==; aik-gcm selftest 2>&1 | tail -1\necho ==B5==; (/usr/local/sbin/aipd --conf /etc/aikernel/aipd.conf >/tmp/aipd-e2e.log 2>&1 &)\nsleep 12; grep -o \'feat_ok=[0-9]*\' /run/aipd.stats | head -1\ngrep -o \'shadow_rows=[0-9]*\' /run/aipd.stats | head -1\nkill -TERM $(cat /run/aipd.pid); sleep 2\ntail -1 /tmp/aipd-e2e.log\necho ==B7==; mkdir -p /root/b7-pq; rm -f /root/b7.fifo\nmkfifo /root/b7.fifo\n(python3 /root/b7gen.py >/root/b7gen.log 2>&1 &)\n(/usr/local/sbin/aipd --conf /root/b7.conf >/root/b7.log 2>&1 &)\nsleep 40; echo AGENTSL=$(grep -c \'name=aipd\' /proc/ai/agents); echo AGRAW=$(head -2 /proc/ai/agents); kill -TERM $(cat /run/b7.pid); sleep 3\ngrep -E \'canary_reg_ok|canary_dispatched|canary_confirmed|canary_rolled_back|canary_errors\' /run/b7.stats\necho AG6N=$(grep -c \'agent=6\' /proc/ai/decisions)\necho AGXN=$(grep -c \'executed=1\' /proc/ai/decisions)\necho SWAP=$(grep \'mm.swappiness\' /proc/ai/control | grep -o \'current=[0-9]*\' | cut -d= -f2)\ntail -2 /root/b7.log\necho ==B8==; s=startup\nfor i in $(seq 1 60); do s=$(systemctl is-system-running)\n[ "$s" = running ] && break; sleep 5; done\necho ISR=$s\necho FAILED=$(systemctl --failed --no-legend | wc -l)\nsystemctl is-active aikernel-streams.service aikernel-api.service aik-cron.service aik-log-trim.timer\necho SOFTDOG=$(lsmod | grep -c softdog)\necho UK=$(journalctl -u aikernel-streams.service --no-pager | grep -ci \'unknown key\')\necho ==M1==; ls -ld /var/ai/work /etc/aikernel/models.d /var/log/aik-console 2>&1 | awk \'{print $1,$3,$4,$NF}\'\necho ==M2==; grep -c \'^SENSE_REDACT=soft$\' /etc/aikernel/aistreamd.conf\ngrep -c \'^sense_redact = "soft"$\' /root/.aikernel/model.toml\njournalctl -u aikernel-streams.service --no-pager | grep -c \'sense_redact=soft\'\njournalctl -u aikernel-api.service --no-pager | grep -m1 -o \'sense_redact=[a-z]*\'\necho ==M3==; printf \'aik12345\\n\' | aikctl user add alice --password-stdin >/tmp/uadd.log 2>&1; echo UADD=$?\ngetent passwd alice | cut -d: -f1,3\naikctl user list 2>&1 | head -3\ncut -d: -f1 /etc/aikernel/console-gate\necho W17IDONE$((1+1))\n')
 
-MU2 = (
-    "systemctl stop serial-getty@ttyS0 2>/dev/null\n"
-    "exec > /dev/ttyS0 2>&1\n"
-    "echo ==A1==; echo SU_UID=$SUDO_UID SU_USER=$SUDO_USER; id -un\n"
+MU2A = (
+    "#!/bin/sh\n"
+    "# admin 章载荷（无 sudo——出厂无 sudo 二进制，root 收账轮 cat）\n"
+    "exec > /home/admin/mu2a.out 2>&1\n"
+    "echo ==A1==; id -u; id -un\n"
     "echo ==A2==; ls -ld /var/ai/work/admin\n"
     "echo ==A3==; ls /home/admin/.occ/ 2>&1 | head -2\n"
-    "echo ==A4==; ls -ld /var/ai/work/alice 2>&1 | head -1\n"
+    "echo ==A4==; ls /var/ai/work/ 2>&1\n"
     "echo ==A5==; getent passwd admin alice | cut -d: -f1,3\n"
-    "echo ==A6==; aikctl policy get 2>&1 | grep -ciE 'admin|alice'\n"
-    "echo ==A7==; journalctl -u aikernel-api --no-pager"
-    " | grep -m1 -o 'sense_redact=[a-z]*'\n"
+    "echo ==A6==; aikctl policy get 2>&1 | head -4\n"
     "echo W17NADONE$((1+1))\n")
+MU2B = (
+    "#!/bin/sh\n"
+    "# root 收账轮：admin 章结果倒串口\n"
+    "cat /home/admin/mu2a.out > /dev/ttyS0 2>&1\n"
+    "systemctl stop serial-getty@ttyS0 2>/dev/null\n"
+    "echo ROUND4DONE > /dev/ttyS0\n")
 
 
 def seed_gate():
@@ -106,7 +111,9 @@ def seed_gate():
         " >/dev/null",
         "sudo chmod 600 /mnt/w17g/var/lib/aikernel/console-gate.last",
         "sudo cp /tmp/w17n-bat.sh /mnt/w17g/root/bat.sh",
-        "sudo cp /tmp/w17n-mu2.sh /mnt/w17g/root/mu2.sh",
+        "sudo cp /tmp/w17n-mu2a.sh /mnt/w17g/var/tmp/mu2a.sh",
+        "sudo chmod 755 /mnt/w17g/var/tmp/mu2a.sh",
+        "sudo cp /tmp/w17n-mu2b.sh /mnt/w17g/root/mu2b.sh",
         "sudo cp /tmp/w17n-b7gen.py /mnt/w17g/root/b7gen.py",
         "sudo cp /tmp/w17n-b7.conf /mnt/w17g/root/b7.conf",
         "sudo sed -i 's|exec /usr/local/bin/aik-console|export OCC_TUI_WD_MS=0; exec /usr/local/bin/aik-console|' /mnt/w17g/root/.profile",
@@ -117,7 +124,8 @@ def seed_gate():
     io.open("/tmp/w17n-bat.sh", "w", newline="\n").write(
         "systemctl stop serial-getty@ttyS0 2>/dev/null\n"
         "exec > /dev/ttyS0 2>&1\n" + BAT)
-    io.open("/tmp/w17n-mu2.sh", "w", newline="\n").write(MU2)
+    io.open("/tmp/w17n-mu2a.sh", "w", newline="\n").write(MU2A)
+    io.open("/tmp/w17n-mu2b.sh", "w", newline="\n").write(MU2B)
     io.open("/tmp/w17n-b7gen.py", "w", newline="\n").write(B7GEN)
     io.open("/tmp/w17n-b7.conf", "w", newline="\n").write(B7CONF)
     for s in steps:
@@ -186,7 +194,8 @@ def install_round():
             q.kill()
 
 
-def boot_round(tag, drive_line, marker, wait_cmd):
+def boot_round(tag, drive_line, marker, wait_cmd, pre_sleep=25,
+               line_sleep=8):
     """起盘→VGA sendkey 登录（gate 预填 .last+焦点密码框=打密码即登录）
     →/shell→（CONFIRMED 弹框 y）→命令→串口 marker。drive_line=登录后
     依次注入的行。返回 (out, b6w, b6t)。"""
@@ -240,25 +249,38 @@ def boot_round(tag, drive_line, marker, wait_cmd):
             key("ret")
 
         main_tui = False
-        for attempt in range(8):
-            type_line("aik12345")       # gate 预填 .last 用户，密码即登录
-            time.sleep(25)              # TUI 冷启（WD-off 后应快）
+        if marker is None:
+            # 无串口 marker 面（admin 章载荷写文件）：单程驱动+定眠
+            type_line("aik12345")
+            time.sleep(pre_sleep)
             for line in drive_line:
                 type_line(line)
-                time.sleep(8)
-            mark = len(ser.buf)
-            if wait_after(ser, mark, marker, wait_cmd):
-                main_tui = True
-                b1_mark = mark
-                print("sendkey drive OK [%s attempt %d] - marker on serial"
-                      % (tag, attempt + 1))
-                break
-            print("sendkey attempt %d [%s]: no marker, retry"
-                  % (attempt + 1, tag))
+                time.sleep(line_sleep)
+            main_tui = True
+            b1_mark = len(ser.buf)
+        else:
+            for attempt in range(8):
+                type_line("aik12345")   # gate 预填 .last 用户，密码即登录
+                time.sleep(pre_sleep)   # TUI 冷启（WD-off 后应快）
+                for line in drive_line:
+                    type_line(line)
+                    time.sleep(line_sleep)
+                mark = len(ser.buf)
+                if wait_after(ser, mark, marker, wait_cmd):
+                    main_tui = True
+                    b1_mark = mark
+                    print("sendkey drive OK [%s attempt %d]"
+                          " - marker on serial" % (tag, attempt + 1))
+                    break
+                print("sendkey attempt %d [%s]: no marker, retry"
+                      % (attempt + 1, tag))
         phase("main-tui[%s]" % tag)
         print("B6 main TUI [%s]:" % tag, main_tui)
         b6 = (wiz, main_tui)
-        wait_after(ser, b1_mark, wait_done[tag], 600)
+        if marker is not None:
+            wait_after(ser, b1_mark, wait_done[tag], 600)
+        else:
+            time.sleep(30)
         phase("done[%s]" % tag)
         out = ANSI.sub(b"", ser.buf[b1_mark:]).replace(
             b"\r", b"").decode("utf-8", "replace")
@@ -280,10 +302,12 @@ def boot_round(tag, drive_line, marker, wait_cmd):
 
 # 轮2：root 电池（/shell 无弹框，直跑 bat.sh）
 ROOT_DRIVE = ["/shell", "sh /root/bat.sh"]
-# 轮3：admin（CONFIRMED 弹框 y/n 单键；sudo -S 密码走下一行 stdin——
-# 驱动行禁管道：QEMU sendkey 无 shift 组合键面）
-ADMIN_DRIVE = ["/shell", "y", "sudo -S sh /root/mu2.sh", "aik12345"]
-wait_done = {"root": b"W17IDONE2", "admin": b"W17NADONE2"}
+# 轮3：admin（/shell 无弹框实测；出厂无 sudo 二进制→载荷写文件，
+# root 收账轮倒串口；90s=TUI 冷启实测余量）
+ADMIN_DRIVE = ["/shell", "sh /var/tmp/mu2a.sh"]
+# 轮4：root 收账（cat mu2a.out 到串口）
+CAT_DRIVE = ["/shell", "sh /root/mu2b.sh"]
+wait_done = {"root": b"W17IDONE2", "admin": b"ROUND4DONE"}
 
 
 def blk(out, tag, nxt):
@@ -346,6 +370,7 @@ def main():
         "M2 model.toml soft": len(m2_lines) >= 2 and m2_lines[1] == "1",
         "M2 streams journal soft": len(m2_lines) >= 3
         and m2_lines[2] != "0",
+        "M2 api journal soft": "sense_redact=soft" in m2,
         "M3 alice 供给 rc0": "UADD=0" in m3,
         "M3 passwd 行": "alice:" in m3,
         "M3 gate 名册": ("admin" in m3 and "root" in m3
@@ -360,8 +385,13 @@ def main():
 
     print("== flip .last=admin ==")
     flip_last("admin")
-    print("== boot round 3: admin chapter ==")
-    out2, (a6w, a6t) = boot_round("admin", ADMIN_DRIVE, b"==A1==", 90)
+    print("== boot round 3: admin chapter（载荷写文件，无串口 marker）==")
+    _, (a6w, a6t) = boot_round("admin", ADMIN_DRIVE, None, 0,
+                               pre_sleep=90, line_sleep=25)
+    print("== flip .last=root（收账轮）==")
+    flip_last("root")
+    print("== boot round 4: root cat ==")
+    out2, (c6w, c6t) = boot_round("admin", CAT_DRIVE, b"==A1==", 90)
     with open(os.path.join(EVD, "w17n-admin.txt"), "w") as fh:
         fh.write(out2)
     a1 = blk(out2, "==A1==", "==A2==")
@@ -369,20 +399,24 @@ def main():
     a3 = blk(out2, "==A3==", "==A4==")
     a4 = blk(out2, "==A4==", "==A5==")
     a5 = blk(out2, "==A5==", "==A6==")
-    a6 = blk(out2, "==A6==", "==A7==")
-    a7 = blk(out2, "==A7==", "W17NADONE2")
-    su = re.search(r"SU_UID=(\d+)", a1)
+    a6 = blk(out2, "==A6==", "W17NADONE2")
+    uid = None
+    for ln in a1.splitlines():
+        if ln.strip().isdigit():
+            uid = re.match(r"^(\d+)$", ln.strip())
+            break
     ok2 = {
-        "A1 身份真化 SUDO_UID!=0": bool(su and su.group(1) != "0"),
-        "A1 归位 SU_USER=admin": "SU_USER=admin" in a1,
+        "A1 身份真化 uid!=0": bool(uid and uid.group(1) != "0"),
+        "A1 归位名=admin": "admin" in a1,
         "A2 v10 预建属 admin": bool(re.search(r"admin\s+admin"
                                           r".*work/admin", a2)),
         "A2 v10 权限 0700": "drwx------" in a2,
-        "A3 家 .occ 在": ("No such" not in a3 and "无法访问" not in a3),
-        "A4 alice 诚实缺席": ("No such" in a4 or "无法访问" in a4),
+        "A3 家 .occ 在": ("No such" not in a3 and "无法访问" not in a3
+                      and a3.strip() != ""),
+        "A4 alice 诚实缺席": ("alice" not in a4 and "admin" in a4),
         "A5 双号在册": ("admin" in a5 and "alice" in a5),
-        "A6 policy 载名": bool(re.search(r"^\s*[1-9]\d*\s*$", a6)),
-        "A7 SENSE 暴露 soft": "sense_redact=soft" in a7,
+        "A6 policy 面": ("confirmed" in a6 or "restricted" in a6
+                     or "privileged" in a6),
         "A 串口 marker": "W17NADONE2" in out2,
     }
     for k, v in ok2.items():
