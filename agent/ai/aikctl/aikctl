@@ -88,6 +88,25 @@
                                  /etc/aikernel/aipd.conf
   aipd rollback [--yes]          台账 history 回退+conf 复原 builtin（双发
                                  确认门+--yes；tables/ 文件留档不删）
+  user list                      P-2 多用户 Phase A：console-gate 行+OS 号
+                                 对照表（用户/uid/组/失败计数/时间戳；只读）
+  user add NAME [--wheel] [--password-stdin|--from-gate]
+                                 四件同落：OS 号（useradd -m -s /bin/sh，
+                                 --wheel 并入 sudo）+gate 行（$6$ 哈希）+
+                                 家域骨架（~/.aikernel ~/.occ 属主=该号，
+                                 不动 model.toml）+passwd 同步（usermod -p
+                                 同哈希）；全成或全滚；root。--from-gate
+                                 不收密码，复用既有 gate 行哈希幂等建号
+                                 （admin 出厂归位路径；号已在=跳过）
+  user del NAME [--purge-home]   OS 号+gate 行删；--purge-home 才连家目录
+                                 （缺省保留）；root
+  user passwd NAME [--password-stdin]
+                                 gate 哈希+passwd 同步改（交互两次一致或
+                                 stdin 单行；≥6 位与首启向导同规；改密即
+                                 清失败计数）；root
+  gate 文件契约（与 occ 读取端一致，AIK_CONSOLE_GATE 可指测试桩）：
+    每行 name:$6$hash:unix_ts[:fails]，# 注释/空行忽略，tmp+rename
+    原子写 0600
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -101,9 +120,12 @@
 退出码：0 成功；1 使用/IO 错；2 链校验失配（TAMPER）；3 锚行链断。
 """
 import argparse
+import getpass
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
 import shlex
@@ -808,6 +830,59 @@ def cmd_selftest(_args):
             f.write(lines[1] + '\n')
         acode, _aout = verify_anchor_file(anc_f)
         case('锚去头行 → 退 3', acode == 3)
+
+    # ④ P-2 user：gate 行格式解析/写往返桩（纯函数+临时文件，零系统触）
+    with tempfile.TemporaryDirectory() as td:
+        g = os.path.join(td, 'console-gate')
+        stub_a = '$6$stub01$AbCdEf0123456789AbCdEf0123456789'
+        stub_b = '$6$stub02$BbCdEf0123456789BbCdEf0123456789'
+        with open(g, 'w', encoding='utf-8') as f:
+            f.write('# P-2 selftest stub\n\n'
+                    'admin:%s:1750000000\n'
+                    'tstp2b1:%s:1750000100:2\n' % (stub_a, stub_b))
+        rows, raw_s = gate_read(g)
+        case('gate 解析 2 行（# 注释/空行忽略）',
+             rows is not None and len(rows) == 2
+             and rows[0]['name'] == 'admin' and rows[0]['hash'] == stub_a
+             and rows[0]['ts'] == 1750000000 and rows[0]['fails'] is None
+             and rows[1]['fails'] == 2 and rows[1]['lineno'] == 4)
+        raw2 = [ln if i != 4 else 'tstp2b1:%s:1750000200' % stub_b
+                for i, ln in enumerate(raw_s, 1)]
+        raw2.append('tstp2b2:%s:1750000300' % stub_a)
+        werr = gate_write(g, raw2)
+        rows3, raw3 = gate_read(g)
+        case('gate 原子写往返（改行+加行 → 再解析一致；0600）',
+             werr is None and len(rows3) == 3
+             and gate_row_find(rows3, 'tstp2b1')['ts'] == 1750000200
+             and gate_row_find(rows3, 'tstp2b1')['fails'] is None
+             and gate_row_find(rows3, 'tstp2b2') is not None
+             and raw3[0] == '# P-2 selftest stub'      # 注释行原样保留
+             and oct(os.stat(g).st_mode)[-3:] == '600')
+        for bad, why in (('bob:$5$x:123', '哈希前缀'),
+                         ('alice:%s' % stub_a, '字段数'),
+                         ('carol:%s:xy' % stub_a, '时间戳'),
+                         ('dan:%s:12:zz' % stub_a, '失败计数'),
+                         ('Bad Name:%s:12' % stub_a, '用户名')):
+            gb = os.path.join(td, 'gate-bad')
+            with open(gb, 'w', encoding='utf-8') as f:
+                f.write(bad + '\n')
+            rbad, _ = gate_read(gb)
+            case('gate 坏行拒绝（%s）→ None' % why, rbad is None)
+        case('用户名规则（合法/非法）',
+             USER_NAME_RE.match('tstp2b1') is not None
+             and USER_NAME_RE.match('admin') is not None
+             and USER_NAME_RE.match('Root') is None
+             and USER_NAME_RE.match('1abc') is None
+             and USER_NAME_RE.match('a b') is None
+             and USER_NAME_RE.match('-x') is None)
+        h = _pw_hash('stub123')
+        ok_h = bool(h) and h.startswith('$6$') and len(h) < 128
+        try:
+            import crypt as _c
+            ok_h = ok_h and _c.crypt('stub123', h) == h
+        except ImportError:
+            pass
+        case('sha512crypt 生成/自证（$6$、<128、crypt 复算一致）', ok_h)
 
     print('SELFTEST_RESULT cases=%d ok=%d' % (total[0], ok[0]))
     return 0 if ok[0] == total[0] else 1
@@ -3646,6 +3721,435 @@ def cmd_aipd_status(args):
     return 0 if st is not None else 1
 
 
+# ------------------------------------------------- user（P-2 Phase A）----
+# 多用户身份供给：console-gate 行 ↔ OS 号四件同落。gate 文件契约与
+# occ 读取端（A 棒波次）一致：每行 name:hash:ts[:fails]，# 注释/空行
+# 忽略；原子写 tmp+rename（0600，同 tui_gate_write 手法）。AIK_CONSOLE_
+# GATE 环境变量可指向测试桩（occ tui_gate_path 同款门）。
+
+GATE_PATH_DEFAULT = '/etc/aikernel/console-gate'
+USER_NAME_RE = re.compile(r'^[a-z_][a-z0-9_-]{0,31}$')
+USER_PW_MIN = 6            # 与首启向导同规（tui_gate「密码至少 6 位」）
+USER_PW_MAX = 64           # 与 gate GATE_PW_MAX 同限
+
+
+def _gate_path():
+    env = os.environ.get('AIK_CONSOLE_GATE')
+    return env if env else GATE_PATH_DEFAULT
+
+
+def gate_read(path):
+    """解析 gate → (rows, raw)；坏行 → (None, 原因)（防半解析误写回）。
+
+    rows=[{name,hash,ts,fails,lineno}]；raw=原文件行列表（注释/空行/他号
+    行原样保留，写回用）。文件不存在=空 gate（[] , []）。
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            raw = f.read().splitlines()
+    except FileNotFoundError:
+        return [], []
+    except OSError as e:
+        return None, 'gate 读失败 %s: %s' % (path, e)
+    rows = []
+    for i, ln in enumerate(raw, 1):
+        s = ln.strip()
+        if not s or s.startswith('#'):
+            continue
+        parts = ln.split(':')
+        if len(parts) not in (3, 4):
+            return None, 'gate 第 %d 行字段数≠3/4：%s' % (i, s)
+        name, hs, ts = parts[0], parts[1], parts[2]
+        fails = parts[3] if len(parts) == 4 else None
+        if not USER_NAME_RE.match(name):
+            return None, 'gate 第 %d 行用户名不合法：%s' % (i, name)
+        if not hs.startswith('$6$') or len(hs) >= 128:
+            return None, ('gate 第 %d 行哈希非 $6$ 前缀或超长（≥128）'
+                          % i)
+        if not ts.isdigit():
+            return None, 'gate 第 %d 行时间戳非数字：%s' % (i, ts)
+        if fails is not None and not fails.isdigit():
+            return None, 'gate 第 %d 行失败计数非数字：%s' % (i, fails)
+        rows.append({'name': name, 'hash': hs, 'ts': int(ts),
+                     'fails': int(fails) if fails is not None else None,
+                     'lineno': i})
+    return rows, raw
+
+
+def gate_row_find(rows, name):
+    for r in rows:
+        if r['name'] == name:
+            return r
+    return None
+
+
+def gate_write(path, raw_lines):
+    """全量原子写（tmp+rename，0600）；失败 → 人话原因。"""
+    tmp = '%s.tmp' % path
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            if raw_lines:
+                f.write('\n'.join(raw_lines) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return 'gate 原子写失败 %s: %s' % (path, e)
+    return None
+
+
+def _pw_hash(pw):
+    """sha512crypt（$6$）哈希。crypt 模块优先（guest py3.10）；缺席回落
+    openssl passwd -6（py3.13 移除 crypt 的兜底）。都缺 → None。"""
+    try:
+        import crypt
+        return crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512))
+    except ImportError:
+        pass
+    try:
+        cp = subprocess.run(['openssl', 'passwd', '-6', '-stdin'],
+                            input=(pw + '\n').encode(),
+                            capture_output=True, timeout=15)
+        if cp.returncode == 0:
+            h = cp.stdout.decode().strip()
+            if h.startswith('$6$'):
+                return h
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _pw_acquire(args):
+    """密码来源：--password-stdin（单行）或交互两次一致；≥6 位与向导
+    同规。→ (pw, None) | (None, 拒绝原因)。"""
+    if args.password_stdin:
+        pw = sys.stdin.readline()
+        if pw.endswith('\n'):
+            pw = pw[:-1]
+        if pw.endswith('\r'):
+            pw = pw[:-1]
+    else:
+        if not sys.stdin.isatty():
+            return None, ('无 TTY 且未给 --password-stdin——非交互场景'
+                          '请用该参数喂单行密码')
+        p1 = getpass.getpass('新密码: ')
+        p2 = getpass.getpass('新密码（再输一次）: ')
+        if p1 != p2:
+            return None, '两次输入不一致'
+        pw = p1
+    if len(pw) < USER_PW_MIN:
+        return None, '密码至少 %d 位（与首启向导同规）' % USER_PW_MIN
+    if len(pw) > USER_PW_MAX:
+        return None, '密码超长（>%d，与 gate 输入限同款）' % USER_PW_MAX
+    return pw, None
+
+
+def _user_name_check(name):
+    if not USER_NAME_RE.match(name or ''):
+        return ('用户名不合法（^[a-z_][a-z0-9_-]{0,31}$）：%r' % (name,))
+    if name == 'root':
+        return '拒绝：root 不入 gate（多用户供给面只管普通号；root 路径常在）'
+    return None
+
+
+def _need_root(sub):
+    if os.geteuid() != 0:
+        print('拒绝：aikctl user %s 需要 root（建/删 OS 号+改 console-gate）。'
+              '只读面用 aikctl user list。' % sub, file=sys.stderr)
+        return False
+    return True
+
+
+def _os_user_exists(name):
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+def _run_cmd(argv):
+    """→ (rc, stderr摘)；不抛异常。"""
+    try:
+        cp = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=60)
+        return cp.returncode, (cp.stderr or '').strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+def _home_skeleton(name):
+    """家域骨架：~/.aikernel ~/.occ（属主=该号，0700）；不动 model.toml
+    （用户域——occ 首跑自建或用户自带）。→ (made 列表, None|原因)。"""
+    try:
+        pe = pwd.getpwnam(name)
+    except KeyError:
+        return [], '号 %s 刚建即不可见（passwd 库异常）' % name
+    made = []
+    for d in ('.aikernel', '.occ'):
+        p = os.path.join(pe.pw_dir, d)
+        try:
+            os.makedirs(p, mode=0o700, exist_ok=True)
+            os.chown(p, pe.pw_uid, pe.pw_gid)
+            os.chmod(p, 0o700)
+            made.append(p)
+        except OSError as e:
+            return made, '家域骨架建失败 %s: %s' % (p, e)
+    return made, None
+
+
+def cmd_user_list(_args):
+    """console-gate 行+OS 号对照表（只读，无 root 门槛——文件本身 0600
+    属 root，非 root 会得到人话读失败而非命令拒绝）。"""
+    gpath = _gate_path()
+    rows, gerr = gate_read(gpath)
+    if rows is None:
+        print(gerr, file=sys.stderr)
+        return 1
+    if not rows:
+        print('gate 空（%s 无有效行——首启 SETUP 前）' % gpath)
+        return 0
+    print('gate=%s' % gpath)
+    print('%-16s %-7s %-10s %-4s %-19s %s'
+          % ('用户', 'uid', '组', '失败', '时间戳(本地)', '哈希(前12)'))
+    for r in rows:
+        try:
+            pe = pwd.getpwnam(r['name'])
+            uid = '%d' % pe.pw_uid
+            try:
+                gname = grp.getgrgid(pe.pw_gid).gr_name
+            except KeyError:
+                gname = str(pe.pw_gid)
+        except KeyError:
+            uid = gname = '-'
+        ts = datetime.fromtimestamp(r['ts']).strftime('%Y-%m-%d %H:%M:%S')
+        print('%-16s %-7s %-10s %-4s %-19s %s'
+              % (r['name'], uid, gname,
+                 '-' if r['fails'] is None else str(r['fails']),
+                 ts, r['hash'][:12] + '…'))
+    return 0
+
+
+def cmd_user_add(args):
+    """四件同落（全成或全滚）：①useradd(-m -s /bin/sh[+--wheel 并 sudo])
+    ②gate 行 ③家域骨架 ④passwd 同步（usermod -p 同一 $6$ 哈希——OS 侧
+    与 gate 凭据严格同源）。--from-gate：复用既有 gate 行哈希幂等建号
+    （aik-console v9 admin 出厂归位路径；号已在=跳过 rc 0）。"""
+    nerr = _user_name_check(args.name)
+    if nerr:
+        print(nerr, file=sys.stderr)
+        return 1
+    if not _need_root('add'):
+        return 1
+    gpath = _gate_path()
+    rows, payload = gate_read(gpath)
+    if rows is None:
+        print(payload, file=sys.stderr)
+        return 1
+    row = gate_row_find(rows, args.name)
+    if args.from_gate:
+        if row is None:
+            print('拒绝：--from-gate 需要 gate 行已在（%s 无 %s 行）——'
+                  '手工建号请给 --password-stdin 或交互输密'
+                  % (gpath, args.name), file=sys.stderr)
+            return 1
+        if _os_user_exists(args.name):
+            print('号 %s 已存在，gate 行已在——幂等跳过（from-gate 归位）'
+                  % args.name)
+            return 0
+        hs = row['hash']
+    else:
+        if row is not None:
+            print('拒绝：%s 的 gate 行已在（%s）——改密用 aikctl user '
+                  'passwd，清户用 aikctl user del' % (args.name, gpath),
+                  file=sys.stderr)
+            return 1
+        if _os_user_exists(args.name):
+            print('拒绝：OS 号 %s 已存在但无 gate 行——状态漂移，先核对'
+                  '（getent passwd %s / aikctl user list）再人工处置'
+                  % (args.name, args.name), file=sys.stderr)
+            return 1
+        pw, perr = _pw_acquire(args)
+        if perr:
+            print(perr, file=sys.stderr)
+            return 1
+        hs = _pw_hash(pw)
+        if not hs:
+            print('哈希生成失败（crypt 模块与 openssl passwd -6 都不可用）',
+                  file=sys.stderr)
+            return 1
+
+    gate_written = [False]
+
+    def _rollback():
+        # 逆序回滚已落步骤：gate 行（仅本命令写入的才删——from-gate 路径
+        # 行是既有的，保留）→ userdel -r（连带家目录与骨架）。失败只警告。
+        if gate_written[0]:
+            rows2, raw2 = gate_read(gpath)
+            if rows2 is not None:
+                r2 = gate_row_find(rows2, args.name)
+                if r2 is not None:
+                    gate_write(gpath, [ln for i, ln in enumerate(raw2, 1)
+                                       if i != r2['lineno']])
+        rc, err = _run_cmd(['userdel', '-r', args.name])
+        if rc != 0:
+            print('警告：回滚 userdel -r %s 失败：%s（请人工清理）'
+                  % (args.name, err or 'rc=%d' % rc), file=sys.stderr)
+        else:
+            print('已回滚：OS 号（连带家目录/骨架）%s'
+                  % ('+本命令写入的 gate 行' if gate_written[0] else
+                     '（gate 行未写/既有行保留）'), file=sys.stderr)
+
+    # ① OS 号（+--wheel 并 sudo 组）
+    rc, err = _run_cmd(['useradd', '-m', '-s', '/bin/sh', args.name])
+    if rc != 0:
+        print('useradd 失败：%s' % (err or 'rc=%d' % rc), file=sys.stderr)
+        return 1
+    if args.wheel:
+        rc, err = _run_cmd(['usermod', '-aG', 'sudo', args.name])
+        if rc != 0:
+            _rollback()
+            print('失败：--wheel 并入 sudo 组未成（sudo 组在吗？）：%s'
+                  % (err or 'rc=%d' % rc), file=sys.stderr)
+            return 1
+    # ② gate 行（from-gate 幂等路径行已在=跳过）
+    if not args.from_gate:
+        werr = gate_write(gpath, payload
+                          + ['%s:%s:%d' % (args.name, hs, int(time.time()))])
+        if werr:
+            _rollback()
+            print(werr, file=sys.stderr)
+            return 1
+        gate_written[0] = True
+    # ③ 家域骨架
+    made, serr = _home_skeleton(args.name)
+    if serr:
+        _rollback()
+        print('失败：%s' % serr, file=sys.stderr)
+        return 1
+    # ④ passwd 同步（usermod -p 直填同一 $6$ 哈希——与 gate 凭据同源）
+    rc, err = _run_cmd(['usermod', '-p', hs, args.name])
+    if rc != 0:
+        _rollback()
+        print('失败：passwd 同步未成（usermod -p）：%s'
+              % (err or 'rc=%d' % rc), file=sys.stderr)
+        return 1
+    src = 'from-gate' if args.from_gate else '--password-stdin/交互'
+    print('user add %s：四件同落 OK（%s）' % (args.name, src))
+    print('  ① OS 号 uid=%s%s' % (pwd.getpwnam(args.name).pw_uid,
+                                  '（sudo 组）' if args.wheel else ''))
+    print('  ② gate 行 %s（$6$ 哈希）%s' % (gpath,
+                                           '（复用既有行）' if args.from_gate
+                                           else ''))
+    print('  ③ 家域骨架 %s' % ' '.join(made))
+    print('  ④ passwd 同步（usermod -p 同哈希）')
+    if args.from_gate:
+        print('提示：aik-console v9 下次解析目标即降权 exec（重新登录生效）')
+    return 0
+
+
+def cmd_user_del(args):
+    """OS 号+gate 行删；--purge-home 才连家目录（userdel -r；缺省保留）。"""
+    nerr = _user_name_check(args.name)
+    if nerr:
+        print(nerr, file=sys.stderr)
+        return 1
+    if not _need_root('del'):
+        return 1
+    gpath = _gate_path()
+    rows, payload = gate_read(gpath)
+    if rows is None:
+        print(payload, file=sys.stderr)
+        return 1
+    row = gate_row_find(rows, args.name)
+    if row is None and not _os_user_exists(args.name):
+        print('无此用户：%s 在 gate（%s）与 OS 号里都不存在' % (args.name,
+                                                             gpath),
+              file=sys.stderr)
+        return 1
+    # 先动外部风险面（userdel 失败=啥都没变），gate 行后删（纯文件面）
+    os_del = False
+    if _os_user_exists(args.name):
+        argv = ['userdel'] + (['-r'] if args.purge_home else []) + [args.name]
+        rc, err = _run_cmd(argv)
+        if rc != 0:
+            print('userdel 失败（号在登录中？）：%s' % (err or 'rc=%d' % rc),
+                  file=sys.stderr)
+            return 1
+        os_del = True
+    if row is not None:
+        raw2 = [ln for i, ln in enumerate(payload, 1) if i != row['lineno']]
+        werr = gate_write(gpath, raw2)
+        if werr:
+            print('OS 号已删但 %s——请人工删 %s 的行' % (werr, args.name),
+                  file=sys.stderr)
+            return 1
+    print('user del %s：%s；gate 行%s' % (
+        args.name,
+        'OS 号已删（家目录%s）' % ('连删（--purge-home）' if args.purge_home
+                               else '保留') if os_del else 'OS 号本就不在',
+        '已删' if row is not None else '本就无'))
+    return 0
+
+
+def cmd_user_passwd(args):
+    """gate 哈希+passwd 同步改（同一 $6$ 哈希双落；改密即清失败计数）。"""
+    nerr = _user_name_check(args.name)
+    if nerr:
+        print(nerr, file=sys.stderr)
+        return 1
+    if not _need_root('passwd'):
+        return 1
+    gpath = _gate_path()
+    rows, payload = gate_read(gpath)
+    if rows is None:
+        print(payload, file=sys.stderr)
+        return 1
+    row = gate_row_find(rows, args.name)
+    if row is None:
+        print('拒绝：%s 无 gate 行（%s）——先 aikctl user add' % (args.name,
+                                                               gpath),
+              file=sys.stderr)
+        return 1
+    if not _os_user_exists(args.name):
+        print('拒绝：OS 号 %s 不存在——passwd 同步无处落。归位路径：'
+              'aikctl user add %s --from-gate' % (args.name, args.name),
+              file=sys.stderr)
+        return 1
+    pw, perr = _pw_acquire(args)
+    if perr:
+        print(perr, file=sys.stderr)
+        return 1
+    hs = _pw_hash(pw)
+    if not hs:
+        print('哈希生成失败（crypt 模块与 openssl passwd -6 都不可用）',
+              file=sys.stderr)
+        return 1
+    new_line = '%s:%s:%d' % (args.name, hs, int(time.time()))   # fails 清零
+    raw2 = [new_line if i == row['lineno'] else ln
+            for i, ln in enumerate(payload, 1)]
+    werr = gate_write(gpath, raw2)
+    if werr:
+        print(werr, file=sys.stderr)
+        return 1
+    rc, err = _run_cmd(['usermod', '-p', hs, args.name])
+    if rc != 0:
+        back = gate_write(gpath, payload)     # 尽力回滚 gate 行
+        print('失败：passwd 同步未成（usermod -p）：%s%s'
+              % (err or 'rc=%d' % rc,
+                 '' if back is None else '；且 gate 行回滚失败：%s' % back),
+              file=sys.stderr)
+        return 1
+    print('user passwd %s：gate 哈希已换+passwd 已同步（失败计数清零）'
+          % args.name)
+    return 0
+
+
 def _to_int(v):
     try:
         return int(str(v))
@@ -3658,7 +4162,8 @@ def main(argv=None):
         prog='aikctl', description='AIKernel K8 审计链用户面 CLI（纯 stdlib）')
     sub = ap.add_subparsers(dest='cmd', required=True)
 
-    st = sub.add_parser('selftest', help='xxh64 向量 + 合成链篡改检出自检')
+    st = sub.add_parser('selftest', help='xxh64 向量 + 合成链篡改检出 + '
+                       'user gate 格式往返自检')
     st.set_defaults(func=cmd_selftest)
 
     p_ab = sub.add_parser('abi', help='REG ABI 版本协商双探（K10b）')
@@ -3938,6 +4443,44 @@ def main(argv=None):
                        help='aipd.conf 路径（缺省 $AIKERNEL_AIPD_CONF 或 '
                        '%s）' % AIPD_CONF_DEFAULT)
     p_arb.set_defaults(func=cmd_aipd_rollback)
+
+    # P-2 多用户 Phase A：身份供给子族（console-gate ↔ OS 号四件同落）
+    p_usr = sub.add_parser('user', help='P-2 多用户身份供给'
+                           '（list/add/del/passwd）')
+    usub = p_usr.add_subparsers(dest='user_cmd', required=True)
+
+    u_ls = usub.add_parser('list', help='gate 行+OS 号对照表（只读，无 '
+                           'root 门槛）')
+    u_ls.set_defaults(func=cmd_user_list)
+
+    u_ad = usub.add_parser('add', help='四件同落：OS 号+gate 行+家域骨架'
+                           '+passwd 同步（全成或全滚；root）')
+    u_ad.add_argument('name', metavar='NAME', help='用户名')
+    u_ad.add_argument('--wheel', action='store_true',
+                      help='并入 sudo 组（admin 归位/运维号）')
+    u_ad.add_argument('--password-stdin', action='store_true',
+                      dest='password_stdin',
+                      help='密码从 stdin 单行读（非交互；缺省交互两次）')
+    u_ad.add_argument('--from-gate', action='store_true', dest='from_gate',
+                      help='不收密码：复用既有 gate 行哈希建 OS 号'
+                      '（admin 出厂归位路径；幂等——号已在=跳过）')
+    u_ad.set_defaults(func=cmd_user_add)
+
+    u_de = usub.add_parser('del', help='OS 号+gate 行删（默认保留家'
+                           '目录；root）')
+    u_de.add_argument('name', metavar='NAME', help='用户名')
+    u_de.add_argument('--purge-home', action='store_true',
+                      dest='purge_home',
+                      help='连家目录一起删（userdel -r；缺省保留）')
+    u_de.set_defaults(func=cmd_user_del)
+
+    u_pw = usub.add_parser('passwd', help='gate 哈希+passwd 同步改'
+                           '（root）')
+    u_pw.add_argument('name', metavar='NAME', help='用户名')
+    u_pw.add_argument('--password-stdin', action='store_true',
+                      dest='password_stdin',
+                      help='新密码从 stdin 单行读（缺省交互两次）')
+    u_pw.set_defaults(func=cmd_user_passwd)
 
     args = ap.parse_args(argv)
     return args.func(args)

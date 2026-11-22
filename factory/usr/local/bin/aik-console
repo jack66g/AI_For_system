@@ -1,5 +1,24 @@
 #!/bin/sh
-# aik-console v8 — P-47 退出码出带外（fbterm 吞码终解）。
+# aik-console v9 — P-2 多用户 Phase A：降权 exec 链 + 出厂 admin 归位。
+#   v9：启动（及每轮循环重解）读 /var/lib/aikernel/console-gate.last（A 棒
+#   gate 写的上次成功登录用户；缺省 admin）得目标用户。目标≠root 且 OS
+#   号在 → cd 家目录后 exec setpriv --reuid=<uid> --regid=<gid>
+#   --init-groups --inh-caps=-all /usr/local/bin/occ（fb 链=fbterm --
+#   setpriv … occ 同款降权；HOME/USER 同步改指家目录——occ 用户域
+#   ~/.occ ~/.aikernel 依赖此）。目标=root 或号不在（旧盘升级/归位未
+#   成）→ v8 路径原样。出厂 admin 归位：admin 行已在 gate 而 OS 号缺席
+#   （=首次 SETUP 已过）→ aikctl user add admin --wheel --from-gate
+#   （幂等；aikctl/useradd 缺席=warning 不阻塞登录，回落 root 路径——
+#   旧盘升级路径）。occ 退出 marker 按目标 uid 分路（与 A 棒 occ 写侧
+#   契约一字不差）：uid==0 读现名 /run/aik-occ-exit；uid!=0 读
+#   /run/aik-occ-exit.<uid>；写侧 /run 不可写回落 /tmp 同名，读侧同序
+#   探测。日志：root 目标保持 /root/aik-console.log|err（兼容观察面）；
+#   非 root 目标 /var/log/aik-console/<user>.log|err（目录懒建 0750
+#   root:root——本脚本 root 跑可写；出厂 build-rootfs 亦预建）。
+#   可测面：AIK_CONSOLE_DRY=1 只打印将 exec 的完整命令与目标/marker/
+#   log 解析值，不真 exec 不落盘（无 TTY 也可跑，AIK_CONSOLE_DRY_TTY
+#   可指定分支 tty）。顶部 fbterm/serial 分支逻辑不动，只动身份与路径面。
+#   v8 — P-47 退出码出带外（fbterm 吞码终解）。
 #   v8：occ 在 FBTERM 门控下把终局退出码写 /run/aik-occ-exit（出带
 #   外 marker）；fb 分支在 rc 判定链之前消费（读后即焚）——71=注销
 #   断链 exit 0（v6 语义在 fb 链终于可触发），其它值留痕观察。
@@ -22,32 +41,117 @@
 #   tui_frame_check_resize 已同步补 0 兜底双保险）；v4 语义：serial 分支
 #   补齐 v2 同款循环兜底+取证。
 #   tty1/2/3 = fbterm 内跑 occ（中文渲染 + /zoom 可缩放；FBTERM=1 门）；
-#   退出码 70 = /zoom 字号重启环；chain-start/occ-exit 落
-#   /root/aik-console.log，occ+fbterm stderr 落 /root/aik-console.err。
-TTY=$(tty 2>/dev/null) || exit 0
-log() { echo "$(date +%s) $*" >> /root/aik-console.log; }
+#   退出码 70 = /zoom 字号重启环；chain-start/occ-exit 落目标对应日志
+#   （root=/root/aik-console.log；非 root=/var/log/aik-console/<user>.log），
+#   occ+fbterm stderr 落同名 .err。
+TTY=$(tty 2>/dev/null) || TTY=
+# DRY 可测面：无 TTY 也放行（AIK_CONSOLE_DRY_TTY 选分支；缺省串口）
+if [ -z "$TTY" ] && [ "$AIK_CONSOLE_DRY" = 1 ]; then
+  TTY=${AIK_CONSOLE_DRY_TTY:-/dev/ttyS0}
+fi
+[ -n "$TTY" ] || exit 0
+
+GATE_LAST=/var/lib/aikernel/console-gate.last
+GATE_FILE=/etc/aikernel/console-gate
+LOGDIR=/var/log/aik-console
+DRY=0
+[ "$AIK_CONSOLE_DRY" = 1 ] && DRY=1
+
+# P-2 Phase A：目标用户解析（每轮循环重解——首启 SETUP 归位/号变动即时
+# 生效，无需重启控制台链）。设：t_user/t_uid/t_gid/t_home/OCC_ARGS/
+# MARKER_RUN/MARKER_TMP/LOGF/ERRF（OCC_ARGS 不加引号=按词拆给 exec 面）。
+resolve_target() {
+  t_user=$(cat "$GATE_LAST" 2>/dev/null)
+  [ -n "$t_user" ] || t_user=admin
+  t_uid=$(id -u "$t_user" 2>/dev/null) || t_uid=
+  t_gid=$(id -g "$t_user" 2>/dev/null) || t_gid=
+  # 出厂 admin 归位：gate 有 admin 行而 OS 号缺席（首次 SETUP 已过）
+  if [ "$t_user" = admin ] && [ -z "$t_uid" ] \
+     && grep -q '^admin:\$6\$' "$GATE_FILE" 2>/dev/null; then
+    if [ "$DRY" = 1 ]; then
+      echo "DRY place-admin: /usr/local/bin/aikctl user add admin --wheel --from-gate"
+    elif [ -x /usr/local/bin/aikctl ]; then
+      if /usr/local/bin/aikctl user add admin --wheel --from-gate; then
+        t_uid=$(id -u "$t_user" 2>/dev/null) || t_uid=
+        t_gid=$(id -g "$t_user" 2>/dev/null) || t_gid=
+      else
+        # 旧盘升级路径（useradd 缺席等）：warning 不阻塞，回落 root
+        echo "aik-console: admin 归位失败（aikctl user add；旧盘升级=正常回落）——本轮回 root 路径" >&2
+        echo "$(date +%s) admin-place-failed tty=$TTY" >> /root/aik-console.log 2>/dev/null
+      fi
+    else
+      echo "aik-console: aikctl 缺席，admin 归位跳过（旧盘升级路径）——本轮回 root 路径" >&2
+      echo "$(date +%s) admin-place-skip-no-aikctl tty=$TTY" >> /root/aik-console.log 2>/dev/null
+    fi
+  fi
+  if [ -n "$t_uid" ] && [ -n "$t_gid" ] && [ "$t_uid" != 0 ]; then
+    t_home=$(getent passwd "$t_user" 2>/dev/null | cut -d: -f6)
+    [ -n "$t_home" ] || t_home=/
+    OCC_ARGS="setpriv --reuid=$t_uid --regid=$t_gid --init-groups --inh-caps=-all /usr/local/bin/occ"
+    MARKER_RUN=/run/aik-occ-exit.$t_uid
+    MARKER_TMP=/tmp/aik-occ-exit.$t_uid
+    HOME="$t_home"; USER="$t_user"; export HOME USER
+    cd "$t_home" 2>/dev/null || cd /
+    [ "$DRY" = 1 ] || mkdir -p -m 750 "$LOGDIR" 2>/dev/null
+    LOGF="$LOGDIR/$t_user.log"
+    ERRF="$LOGDIR/$t_user.err"
+  else
+    OCC_ARGS="/usr/local/bin/occ"
+    MARKER_RUN=/run/aik-occ-exit
+    MARKER_TMP=/tmp/aik-occ-exit
+    LOGF=/root/aik-console.log
+    ERRF=/root/aik-console.err
+  fi
+}
+
+log() { echo "$(date +%s) $*" >> "$LOGF"; }
+
+# DRY：打印本轮将 exec 的完整命令与解析值（uid/gid 由 id 实取）
+dry_print() {
+  echo "DRY tty=$TTY user=$t_user uid=${t_uid:-0} gid=${t_gid:-0} home=${t_home:-/root}"
+  echo "DRY log=$LOGF err=$ERRF marker=$MARKER_RUN (fallback $MARKER_TMP)"
+  if [ -n "$FBTERM_BIN" ]; then
+    echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FBTERM_BIN -- $OCC_ARGS 2>> $ERRF"
+  else
+    echo "DRY exec: OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> $ERRF"
+  fi
+}
+
 case "$TTY" in
   /dev/tty1|/dev/tty2|/dev/tty3)
-    log "chain-start $TTY"
-    printf '\033[2J\033[H' # P-38: fbterm 接管前清屏，清历史残影（boot 输出/printk 残条）
+    resolve_target
+    [ "$DRY" = 1 ] || log "chain-start $TTY user=$t_user uid=${t_uid:-0}"
+    [ "$DRY" = 1 ] || printf '\033[2J\033[H' # P-38: fbterm 接管前清屏，清历史残影（boot 输出/printk 残条）
     FBTERM_BIN=$(command -v fbterm 2>/dev/null)
     [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
     n=0
     while :; do
+      resolve_target
+      if [ "$DRY" = 1 ]; then
+        dry_print
+        exit 0
+      fi
       if [ -n "$FBTERM_BIN" ]; then
-        FBTERM=1 OCC_NETCFG_TOOLS=1 "$FBTERM_BIN" -- /usr/local/bin/occ 2>> /root/aik-console.err
+        FBTERM=1 OCC_NETCFG_TOOLS=1 "$FBTERM_BIN" -- $OCC_ARGS 2>> "$ERRF"
       else
-        OCC_NETCFG_TOOLS=1 /usr/local/bin/occ 2>> /root/aik-console.err
+        OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
       fi
       rc=$?
       n=$((n+1))
-      log "occ-exit rc=$rc n=$n tty=fb fb=${FBTERM_BIN:+y}"
+      log "occ-exit rc=$rc n=$n tty=fb user=$t_user fb=${FBTERM_BIN:+y}"
       # P-47：fbterm 吞退出码——occ 出带外 marker（读后即焚）
-      if [ -f /run/aik-occ-exit ]; then
-        read -r mev < /run/aik-occ-exit
-        rm -f /run/aik-occ-exit
-        [ "$mev" = "71" ] && { log "occ-logout-marker 71 tty=fb"; exit 0; }
-        log "occ-exit-marker $mev tty=fb"
+      # v9：按目标 uid 分路（uid==0=现名；/run 优先、/tmp 回落同序探测）
+      mev_path=
+      if [ -f "$MARKER_RUN" ]; then
+        mev_path=$MARKER_RUN
+      elif [ -f "$MARKER_TMP" ]; then
+        mev_path=$MARKER_TMP
+      fi
+      if [ -n "$mev_path" ]; then
+        read -r mev < "$mev_path"
+        rm -f "$mev_path"
+        [ "$mev" = "71" ] && { log "occ-logout-marker 71 tty=fb user=$t_user"; exit 0; }
+        log "occ-exit-marker $mev tty=fb user=$t_user"
       fi
       # P-41/P-44：72=occ 输出看门狗自退（fbterm 楔死）——单独留痕，
       # 循环行为不变（sleep 2 重启整链自愈）
@@ -58,24 +162,31 @@ case "$TTY" in
       [ "$rc" -eq 137 ] && log "occ-wd rc=137 tty=fb"
       # P-41 观测线：139=SIGSEGV fbterm 崩溃计数（4~13 分钟 segfault 面）
       [ "$rc" -eq 139 ] && log "fbterm-crash rc=139 tty=fb"
-      [ "$rc" -eq 71 ] && { log "occ-logout tty=fb"; exit 0; }
+      [ "$rc" -eq 71 ] && { log "occ-logout tty=fb user=$t_user"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
     done
     ;;
   /dev/ttyS*)
-    stty rows 24 cols 80 2>> /root/aik-console.err || true
-    log "chain-start $TTY"
-    printf '\033[2J\033[H' # P-38: occ 接管前清屏，清历史残影
+    resolve_target
+    [ "$DRY" = 1 ] || stty rows 24 cols 80 2>> "$ERRF" || true
+    [ "$DRY" = 1 ] || log "chain-start $TTY user=$t_user uid=${t_uid:-0}"
+    [ "$DRY" = 1 ] || printf '\033[2J\033[H' # P-38: occ 接管前清屏，清历史残影
+    FBTERM_BIN=
     n=0
     while :; do
-      OCC_NETCFG_TOOLS=1 /usr/local/bin/occ 2>> /root/aik-console.err
+      resolve_target
+      if [ "$DRY" = 1 ]; then
+        dry_print
+        exit 0
+      fi
+      OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
       rc=$?
       n=$((n+1))
-      log "occ-exit rc=$rc n=$n tty=serial"
+      log "occ-exit rc=$rc n=$n tty=serial user=$t_user"
       # P-41/P-44：serial 无 fbterm，但 tty 卡死时 occ 同路自退——留痕同款
       [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=serial"
-      [ "$rc" -eq 71 ] && { log "occ-logout tty=serial"; exit 0; }
+      [ "$rc" -eq 71 ] && { log "occ-logout tty=serial user=$t_user"; exit 0; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
     done

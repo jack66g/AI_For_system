@@ -56,6 +56,18 @@ apt-get install -y -qq --no-install-recommends \
     iputils-ping iproute2 curl e2fsprogs
 dpkg -l systemd openssh-server python3 | grep ^ii
 
+# ---- P-2 Phase A: setpriv 依赖确认（aik-console v9 降权 exec 链）----
+# setpriv 属 util-linux（minbase+systemd 依赖链已拉入，无需显式安装）；
+# 此处确认在位+可执行——缺件=构建失败不静默（降权链是安全面，宁可炸构建）。
+command -v setpriv
+setpriv --version | head -1
+
+# ---- P-2 Phase A: 非根目标控制台日志目录出厂建 ----
+# aik-console v9 非根目标日志 /var/log/aik-console/<user>.log|err；脚本
+# 侧也懒建同权限——这里出厂预建是为了权限面（0750 root:root）出厂定死。
+mkdir -p -m 750 /var/log/aik-console
+ls -ld /var/log/aik-console
+
 # ---- root 免密: SSH 公钥 + 控制台 autologin（root 密码保持锁定）----
 mkdir -p -m 700 /root/.ssh
 echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKuhRsSrM2Cv6nS0crB+YooaZAdNBf6fQEDYnk4wTuHx aikernel-build' > /root/.ssh/authorized_keys
@@ -144,8 +156,9 @@ install -D -m755 "$SRC/tools/ai/aikctl"   "$MNT/usr/local/bin/aikctl"
 install -D -m755 "$SRC/agent/ai/aik-compat" "$MNT/usr/local/bin/aik-compat"
 # L1 棒③: aik-gcm（corpus 包加密面；DATA-L1-DESIGN §3——同 [5] strip 统一）
 install -D -m755 "$SRC/agent/ai/aik-gcm"    "$MNT/usr/local/bin/aik-gcm"
-# q17: 控制台接管层 aik-console（v3：tty1=fbterm--occ 循环兜底，70=zoom
-# 重启环；factory 树权威文件）
+# q17/P-2: 控制台接管层 aik-console（v9：P-2 多用户降权 exec 链
+# setpriv+按 uid 退出 marker+admin 出厂归位；v3 起的 tty1=fbterm--occ
+# 循环兜底/70=zoom 重启环保留；factory 树权威文件）
 install -D -m755 "$FACTORY/usr/local/bin/aik-console"     "$MNT/usr/local/bin/aik-console"
 grep -c "fbterm" "$MNT/usr/local/bin/aik-console"
 # q17: 17.2 遗留的 auto-fbterm.sh 若在（增量树），退役之（login 链最前端
@@ -191,6 +204,15 @@ cmp -s "$FACTORY/etc/systemd/system/aikernel-aipd.service" \
       "$MNT/etc/systemd/system/aikernel-aipd.service" \
         || { echo "aikernel-aipd.service mismatch"; exit 1; }
 file "$MNT/usr/local/sbin/aipd" | sed 's/, BuildID.*//'
+
+echo "=== [5.7] P-2 Phase A: /etc/aikernel/models.d 出厂目录（注册表迁移落点）==="
+# P-2 Phase B 迁移目标（本波只建目录+README）：模型注册表从
+# /root/.aikernel/model.toml 的注册表段迁出为 models.d 逐模型片段
+# （读取面=occ 侧，A 棒波次实施）。空目录出厂；K6 models.allow
+# 白名单不动（fail-closed 面与注册表正交）。
+mkdir -p "$MNT/etc/aikernel/models.d"
+printf 'model registry dir (P-2 Phase B migration target; live registry stays in ~/.aikernel/model.toml, reader=occ)\n' > "$MNT/etc/aikernel/models.d/README"
+ls -la "$MNT/etc/aikernel/models.d"
 
 echo "=== [6] 拷入 SME (/opt/sme) + python 依赖 ==="
 rm -rf "$MNT/opt/sme"
@@ -305,6 +327,10 @@ chroot "$MNT" chown -R ollama:ollama /var/lib/ollama
 # W77d: 无预装模型，manifests 目录为空
 
 echo "=== [8] guest root 的 aikernel-shell LLM 配置 (127.0.0.1:11434 guest 本地栈) ==="
+# TODO(P2-B): 出厂迁移注记——本文件（/root/.aikernel/model.toml）的注册表
+# 部分未来迁 /etc/aikernel/models.d（[5.7] 已建目录+README）；本波不动
+# 内容，读取面在 occ 侧，随 A 棒波次一起迁（迁移时 root 侧仅留 [default]
+# [ui] 等行为键，逐模型条目入 models.d）。
 mkdir -p "$MNT/root/.aikernel"
 cat > "$MNT/root/.aikernel/model.toml" <<'M'
 # AIKernel Model Configuration (guest: aikernel)
