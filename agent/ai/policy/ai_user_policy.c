@@ -3,7 +3,8 @@
  * ai_user_policy.c - AIKernel 用户权限分级策略实现（P2）
  *
  * 职责（与 executor/registry 解耦，只依赖 libc）：
- *   1. 解析 /etc/aikernel/policy.conf（INI 风格，AIKERNEL_POLICY 可覆盖）；
+ *   1. 解析 /etc/aikernel/policy.conf（INI 风格，AIKERNEL_POLICY 可覆盖；
+ *      P2 Phase B 起支持 [user:<name>] per-user 档位覆盖段）；
  *   2. getuid + 本地 /etc/passwd、/etc/group 解析判定 uid 档位
  *      （root / sudo 组 / 其他；不经 NSS——静态链接下 getpwuid/
  *      getgrouplist 会 dlopen libnss_*.so 并 SIGSEGV）；
@@ -12,8 +13,12 @@
  *   5. W2 二次确认交互（红色 ANSI 影响面 + y/N）。
  * 兜底原则：任何异常（文件缺失/字段非法/内存不足）一律按 restricted 处理。
  *
- * 自测：gcc -DAI_POLICY_SELFTEST -o policy_test ai_user_policy.c && ./policy_test
- *   （覆盖三 mode 判定、配置解析、兜底、审计落盘，见文件尾 main）
+ * 自测（自 agent/ai 目录）：gcc -Wall -Wextra -std=c11 -DAI_POLICY_SELFTEST \
+ *   -Iinclude -I. -o /tmp/policy_test policy/ai_user_policy.c \
+ *   i18n/lang.c trace/ai_trace.c runtime/ai_json_util.c runtime/ai_types.c \
+ *   && /tmp/policy_test
+ *   （覆盖三 mode 判定、配置解析、per-user 覆盖、兜底、审计落盘，
+ *   见文件尾 main；W48B 起 tr/ai_trace 依赖需一并链接）
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -46,6 +51,25 @@ static enum ai_policy_mode g_modes[AI_POLICY_MODE__COUNT] = {
 	AI_POLICY_MODE_RESTRICTED,	/* [wheel]    缺省 restricted 兜底 */
 	AI_POLICY_MODE_RESTRICTED,	/* [default]  缺省 restricted 兜底 */
 };
+
+/*
+ * per-user 档位覆盖表（P2 Phase B：[user:<name>] 段，优先级最高）。
+ *   - 条目由 ai_policy_init 解析时一次性载入（与 g_modes 同生命周期，
+ *     重复 init 先复位再重载，旧值不残留）；
+ *   - 上限 AI_POLICY_USER_OV_MAX：超出静默忽略（覆盖属管理面小集合，
+ *     超限不炸、多余段不生效，保守无害）；
+ *   - 未知用户名段（passwd 无此名）永不命中，天然无害。
+ */
+#define AI_POLICY_USER_OV_MAX 64
+#define AI_POLICY_USER_NAME_MAX 64	/* 与 ai_pw_ent.name 同宽 */
+
+struct ai_policy_user_ov {
+	char name[AI_POLICY_USER_NAME_MAX];
+	enum ai_policy_mode mode;
+};
+
+static struct ai_policy_user_ov g_user_ov[AI_POLICY_USER_OV_MAX];
+static int g_user_ov_count;
 
 /* ---- 小工具 ---- */
 
@@ -109,10 +133,44 @@ const char *ai_policy_conf_path(void)
 
 /* ---- 配置解析 ---- */
 
+/* per-user 覆盖表操作（P2 Phase B） */
+
+/* 记录/更新一条 [user:<name>] 覆盖（同名段重复出现：后写胜出，
+ * 与现有三段 mode= 重复行的后写语义一致） */
+static void user_ov_set(const char *name, enum ai_policy_mode mode)
+{
+	int i;
+
+	for (i = 0; i < g_user_ov_count; i++) {
+		if (!strcmp(g_user_ov[i].name, name)) {
+			g_user_ov[i].mode = mode;
+			return;
+		}
+	}
+	if (g_user_ov_count >= AI_POLICY_USER_OV_MAX)
+		return;		/* 超限静默忽略（保守：多余覆盖不生效） */
+	snprintf(g_user_ov[g_user_ov_count].name,
+		 sizeof(g_user_ov[g_user_ov_count].name), "%s", name);
+	g_user_ov[g_user_ov_count].mode = mode;
+	g_user_ov_count++;
+}
+
+/* 按用户名精确查覆盖；NULL = 该用户无 [user:<name>] 段 */
+static const struct ai_policy_user_ov *user_ov_find(const char *name)
+{
+	int i;
+
+	for (i = 0; i < g_user_ov_count; i++)
+		if (!strcmp(g_user_ov[i].name, name))
+			return &g_user_ov[i];
+	return NULL;
+}
+
 /*
  * 解析 INI：仅认识 [section] 头与 key = value；# / ; 注释、空行忽略。
- * 认识的键：mode（三段各一）、group（仅 [wheel] 段）。
- * 未知键静默忽略（向前兼容）；非法 mode 值回落 restricted。
+ * 认识的键：mode（三段各一）、group（仅 [wheel] 段）、
+ * mode（[user:<name>] per-user 覆盖段）。
+ * 未知键/未知段名静默忽略（向前兼容）；非法 mode 值回落 restricted。
  */
 static int parse_conf(FILE *fp)
 {
@@ -180,6 +238,17 @@ static int parse_conf(FILE *fp)
 					if (!strcmp(key, "mode"))
 						g_modes[AI_POLICY_MODE_RESTRICTED] =
 							mode_from_str(val);
+				} else if (!strncmp(section, "user:", 5) &&
+					   section[5]) {
+					/* [user:<name>] per-user 覆盖段
+					 * （P2 Phase B）：段名 "user:" 后即
+					 * 用户名（str_trim 容错空白）；
+					 * 仅认 mode=（非法值回落 restricted
+					 * 兜底），其余键忽略不炸；
+					 * "[user:]"（空名）不识别=忽略 */
+					if (!strcmp(key, "mode"))
+						user_ov_set(str_trim(section + 5),
+							    mode_from_str(val));
 				}
 				/* 其他 section/键：忽略（向前兼容） */
 			}
@@ -201,6 +270,7 @@ int ai_policy_init(const char *conf_path)
 	/* 先复位为兜底值（重复调用 init 时旧值不残留） */
 	for (int i = 0; i < AI_POLICY_MODE__COUNT; i++)
 		g_modes[i] = AI_POLICY_MODE_RESTRICTED;
+	g_user_ov_count = 0;	/* per-user 覆盖表同步复位（不残留） */
 	snprintf(g_group, sizeof(g_group), "%s", AI_POLICY_GROUP_DEFAULT);
 	g_conf_path[0] = '\0';
 
@@ -308,19 +378,18 @@ static int local_group_name(gid_t gid, char *out, size_t cap)
 }
 
 /*
- * uid 是否属于指定组名（含主组与 /etc/group 成员列表补充组；
- * 语义与原 getgrouplist+getgrgid 实现一致，但不经 NSS）
+ * passwd 条目是否属于指定组名（含主组与 /etc/group 成员列表补充组；
+ * 语义与原 getgrouplist+getgrgid 实现一致，但不经 NSS）。
+ * P2 Phase B 拆出 pw 已知版本：uid 档位判定需先查 passwd 取用户名
+ * （per-user 覆盖匹配），复用同一条目避免重复扫 /etc/passwd。
  */
-static int uid_in_group(uid_t uid, const char *group)
+static int pw_in_group(const struct ai_pw_ent *pw, const char *group)
 {
-	struct ai_pw_ent pw;
 	FILE *fp;
 	char line[2048];
 	int found = 0;
 
-	if (!group || !group[0])
-		return 0;
-	if (!local_passwd_get(uid, &pw))
+	if (!group || !group[0] || !pw)
 		return 0;
 
 	fp = fopen("/etc/group", "r");
@@ -337,7 +406,7 @@ static int uid_in_group(uid_t uid, const char *group)
 		if (strcmp(gname, group) != 0)
 			continue;
 		/* 主组命中 */
-		if ((gid_t)gid == pw.gid) {
+		if ((gid_t)gid == pw->gid) {
 			found = 1;
 			break;
 		}
@@ -350,26 +419,65 @@ static int uid_in_group(uid_t uid, const char *group)
 		{
 			char *tok = strtok(p + 1, ",\n");
 
-			while (tok) {
-				while (*tok == ' ' || *tok == '\t')
-					tok++;
-				if (!strcmp(tok, pw.name)) {
-					found = 1;
-					break;
+				while (tok) {
+					while (*tok == ' ' || *tok == '\t')
+						tok++;
+					if (!strcmp(tok, pw->name)) {
+						found = 1;
+						break;
+					}
+					tok = strtok(NULL, ",\n");
 				}
-				tok = strtok(NULL, ",\n");
-			}
 		}
 	}
 	fclose(fp);
 	return found;
 }
 
+/* uid 是否属于指定组名（先查 passwd 再判定；行为与重构前逐字节等价） */
+static int uid_in_group(uid_t uid, const char *group)
+{
+	struct ai_pw_ent pw;
+
+	if (!group || !group[0])
+		return 0;
+	if (!local_passwd_get(uid, &pw))
+		return 0;
+	return pw_in_group(&pw, group);
+}
+
+/*
+ * uid → 档位判定序（P2 Phase B 起）：
+ *   1. [user:<passwd 用户名>] per-user 覆盖（优先级最高）；
+ *   2. uid 0 → [root] 段档位（缺省 privileged）；
+ *   3. [wheel] group= 组成员 → [wheel] 段档位（缺省 confirmed）；
+ *   4. 其余 → [default] 段档位（缺省 restricted）。
+ *
+ * 安全面决定（有意，勿"修复"）：per-user 覆盖对 uid 0 恒不生效——
+ * [user:root] 一类段无法把 root 降档，root 档位只由 [root] 段
+ * （缺省 privileged）决定。判定序中的"覆盖最优先"仅在查覆盖表前
+ * 已显式排除 uid 0 的前提下成立：任何配置不能借 [user:*] 段改变
+ * root 档位，防止 per-user 配置面意外扩大 root 的提权/降档面。
+ */
 enum ai_policy_mode ai_policy_mode_for_uid(uid_t uid)
 {
+	struct ai_pw_ent pw;
+	int have_pw = 0;
+
+	if (uid != 0) {
+		have_pw = local_passwd_get(uid, &pw);
+		if (have_pw) {
+			const struct ai_policy_user_ov *ov =
+				user_ov_find(pw.name);
+
+			if (ov)
+				return ov->mode;
+		}
+	}
 	if (uid == 0)
 		return g_modes[AI_POLICY_MODE_PRIVILEGED];
-	if (uid_in_group(uid, g_group))
+	if (have_pw ? pw_in_group(&pw, g_group)
+		    : uid_in_group(uid, g_group))
 		return g_modes[AI_POLICY_MODE_CONFIRMED];
 	return g_modes[AI_POLICY_MODE_RESTRICTED];
 }
@@ -888,6 +996,146 @@ int main(int argc, char **argv)
 	load_str("[root]\nmode = whatever\n[default]\nmode = restricted\n");
 	expect(ai_policy_mode_for_uid(0) == AI_POLICY_MODE_RESTRICTED,
 	       "非法 mode → restricted 兜底");
+
+	/* 4b. per-user 档位覆盖（[user:<name>] 段，P2 Phase B） */
+	{
+		struct ai_pw_ent m_pw, r_pw;
+		int have_m = local_passwd_get(member_uid, &m_pw);
+		int have_root_name = local_passwd_get(0, &r_pw);
+		const char *mname = have_m ? m_pw.name : NULL;
+
+		if (!mname) {
+			printf("SKIP: per-user 用例（uid %u 在 passwd 无名）\n",
+			       (unsigned)member_uid);
+		} else {
+			/* 4b-1 提权：普通号越过 [default] → privileged */
+			{
+				char conf[640];
+
+				snprintf(conf, sizeof(conf),
+					 "[default]\nmode = restricted\n"
+					 "[user:%s]\nmode = privileged\n",
+					 mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_PRIVILEGED,
+			       "per-user：普通号提权 → privileged");
+			expect(ai_policy_check(member_uid, AI_RISK_W2) ==
+			       AI_POLICY_NEED_CONFIRM,
+			       "per-user privileged：W2 → NEED_CONFIRM");
+			expect(ai_policy_mode_for_uid(65534) ==
+			       AI_POLICY_MODE_RESTRICTED,
+			       "per-user：其他用户不受影响（仍 default）");
+
+			/* 4b-2 降档：覆盖 wheel 组员 → restricted */
+			{
+				char conf[768];
+
+				snprintf(conf, sizeof(conf),
+					 "[wheel]\ngroup = %s\nmode = confirmed\n"
+					 "[user:%s]\nmode = restricted\n",
+					 grp ? grp : "root", mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_RESTRICTED,
+			       "per-user：wheel 组员降档 → restricted");
+
+			/* 4b-3 坏段名/大小写变体：不识别=永不命中 */
+			{
+				char conf[896];
+
+				snprintf(conf, sizeof(conf),
+					 "[default]\nmode = restricted\n"
+					 "[user bob]\nmode = privileged\n"
+					 "[user:]\nmode = privileged\n"
+					 "[User:%s]\nmode = privileged\n",
+					 mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_RESTRICTED,
+			       "坏段名（无冒号/空名/大写）→ 忽略");
+
+			/* 4b-4 未知键忽略 + 未知用户段永不命中 */
+			{
+				char conf[896];
+
+				snprintf(conf, sizeof(conf),
+					 "[default]\nmode = restricted\n"
+					 "[user:nosuch-user-zzz]\n"
+					 "mode = privileged\n"
+					 "[user:%s]\nfoo = privileged\n"
+					 "mode = confirmed\n",
+					 mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_CONFIRMED,
+			       "未知键忽略，mode= 生效 → confirmed");
+
+			/* 4b-5 非法 mode 值 → 该用户回落 restricted */
+			{
+				char conf[640];
+
+				snprintf(conf, sizeof(conf),
+					 "[default]\nmode = restricted\n"
+					 "[user:%s]\nmode = Admin\n",
+					 mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_RESTRICTED,
+			       "per-user 非法 mode → restricted 兜底");
+
+			/* 4b-6 重复段后写胜出 */
+			{
+				char conf[768];
+
+				snprintf(conf, sizeof(conf),
+					 "[default]\nmode = restricted\n"
+					 "[user:%s]\nmode = confirmed\n"
+					 "[user:%s]\nmode = privileged\n",
+					 mname, mname);
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_PRIVILEGED,
+			       "重复 [user:] 段：后写胜出");
+
+			/* 4b-7 覆盖表 init 复位：重载无 [user:] 段的
+			 * 配置后旧覆盖不残留（回到三段行为） */
+			{
+				char conf[640];
+
+				snprintf(conf, sizeof(conf),
+					 "[root]\nmode = privileged\n"
+					 "[default]\nmode = restricted\n");
+				load_str(conf);
+			}
+			expect(ai_policy_mode_for_uid(member_uid) ==
+			       AI_POLICY_MODE_RESTRICTED,
+			       "重新 init 无 [user:] 段 → 覆盖不残留");
+		}
+
+		/* 4b-8 对 uid 0 恒不生效（安全面：root 不可经
+		 * [user:root] 降档——有意决定，见判定序注释） */
+		{
+			char conf[512];
+
+			snprintf(conf, sizeof(conf),
+				 "[root]\nmode = privileged\n"
+				 "[user:%s]\nmode = restricted\n",
+				 have_root_name ? r_pw.name : "root");
+			load_str(conf);
+		}
+		expect(ai_policy_mode_for_uid(0) == AI_POLICY_MODE_PRIVILEGED,
+		       "per-user 对 uid 0 不生效（root 恒 [root] 档）");
+		expect(ai_policy_check(0, AI_RISK_W2) == AI_POLICY_NEED_CONFIRM,
+		       "root W2 仍 NEED_CONFIRM（未被 [user:root] 降档）");
+	}
+
 
 	/* 5. 显式路径参数优先于环境变量 */
 	{

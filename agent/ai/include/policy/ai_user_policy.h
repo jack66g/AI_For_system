@@ -24,6 +24,17 @@
  *   group = sudo          # 可选：sudo 组名，缺省 wheel（Ubuntu 用 sudo）
  *   [default]
  *   mode = restricted
+ *   [user:alice]          # P2 Phase B：per-user 档位覆盖段（可选），
+ *   mode = confirmed      #   优先级最高；对 uid 0 恒不生效（有意安全
+ *                         #   面决定：任何 [user:*] 段不能把 root 降档）
+ *
+ * 档位判定优先级（P2 Phase B 起，从高到低）：
+ *   1. [user:<当前用户名>]（uid → passwd 名精确匹配）；
+ *   2. uid 0 → [root] 段；
+ *   3. [wheel] group= 组成员 → [wheel] 段；
+ *   4. [default] 段。
+ * [user:<name>] 段内未知键忽略（不炸）；未知用户名段（passwd 无此名）
+ * 永不命中（无害）；非法 mode 值回落 restricted。
  *
  * 任何读取/解析失败一律回落 restricted（安全兜底）。
  */
