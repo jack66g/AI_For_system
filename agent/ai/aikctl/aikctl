@@ -155,6 +155,7 @@
 """
 import argparse
 import difflib
+import fcntl
 import getpass
 import grp
 import hashlib
@@ -4090,6 +4091,51 @@ def _home_skeleton(name):
     return made, None
 
 
+class _user_mut_lock(object):
+    """P-60（17.11 装机台架咬出）：user 变更族互斥锁——flock
+    /run/aikctl-user.lock 独占。双 console 并发 v9 归位时两边同见
+    号缺席→双 useradd→其一 _rollback 删了对方的号→孤儿家目录属旧
+    uid→occ mkdir .occ 拒绝死循环。串行后第二跑走幂等/拒绝路径。"""
+
+    def __init__(self):
+        self.f = None
+
+    def __enter__(self):
+        # /run→/tmp 回落：非 root 在 /run 开文件即拒绝，但需先
+        # 放行到 impl 的 _need_root 人话拒绝（test_user 断言面）。
+        # root 互斥恒在 /run；非 root 持 /tmp 锁不阻塞 root。
+        for p in ('/run/aikctl-user.lock', '/tmp/aikctl-user.lock'):
+            try:
+                self.f = open(p, 'a')
+                break
+            except OSError:
+                continue
+        if self.f is not None:
+            fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.f is not None:
+            fcntl.flock(self.f, fcntl.LOCK_UN)
+            self.f.close()
+        return False
+
+
+def cmd_user_add(args):
+    with _user_mut_lock():
+        return _user_add_impl(args)
+
+
+def cmd_user_del(args):
+    with _user_mut_lock():
+        return _user_del_impl(args)
+
+
+def cmd_user_passwd(args):
+    with _user_mut_lock():
+        return _user_passwd_impl(args)
+
+
 def cmd_user_list(_args):
     """console-gate 行+OS 号对照表（只读，无 root 门槛——文件本身 0600
     属 root，非 root 会得到人话读失败而非命令拒绝）。"""
@@ -4122,7 +4168,7 @@ def cmd_user_list(_args):
     return 0
 
 
-def cmd_user_add(args):
+def _user_add_impl(args):
     """四件同落（全成或全滚）：①useradd(-m -s /bin/sh[+--wheel 并 sudo])
     ②gate 行 ③家域骨架 ④passwd 同步（usermod -p 同一 $6$ 哈希——OS 侧
     与 gate 凭据严格同源）。--from-gate：复用既有 gate 行哈希幂等建号
@@ -4240,7 +4286,7 @@ def cmd_user_add(args):
     return 0
 
 
-def cmd_user_del(args):
+def _user_del_impl(args):
     """OS 号+gate 行删；--purge-home 才连家目录（userdel -r；缺省保留）。"""
     nerr = _user_name_check(args.name)
     if nerr:
@@ -4284,7 +4330,7 @@ def cmd_user_del(args):
     return 0
 
 
-def cmd_user_passwd(args):
+def _user_passwd_impl(args):
     """gate 哈希+passwd 同步改（同一 $6$ 哈希双落；改密即清失败计数）。"""
     nerr = _user_name_check(args.name)
     if nerr:
