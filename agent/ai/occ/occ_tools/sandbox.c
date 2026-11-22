@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pwd.h>				/* P-2：per-user 回退取名 */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -228,13 +229,22 @@ static int sb_prefix(char **v)
  * 硬编码副本——occ 不链沙箱源（只读 CLI 契约），两处同步维护：
  * agent/ai/sandbox/aik-sandbox.c valid_bind_src 的 deny 表。cwd 命中
  * 任一（含子树）即 --rw-path 挂不进沙箱（140 默认 cwd=/root → 每
- * 会话首发 bash 全灭）——启动处据此回退 /var/ai/work。 */
+ * 会话首发 bash 全灭）——启动处据此回退 /var/ai/work。
+ *
+ * P-2 Phase A（C 棒，MULTIUSER §6）：occ 侧保守面多拒 "/home"——
+ * 家目录树不进沙箱视图（多用户下他人/自家家数据不暴露给沙箱内进程；
+ * 工作区走回退目录）。aik-sandbox 侧 valid_bind_src 无此条（显式
+ * --rw-path /home/… 仍可挂，沙箱内 /home 本是 tmpfs 空目录）——
+ * occ cwd 面先行回退即永不把家树传给 rw-path，两侧不冲突（occ 侧
+ * 更保守，方向安全）。仅目录前缀匹配（"/homex" 不命中），不破坏
+ * 现有 /root、/etc 条目语义。 */
 int occ_sandbox_cwd_denied(const char *cwd)
 {
 	static const char *const deny[] = {
 		"/proc", "/sys", "/dev", "/usr", "/bin", "/sbin",
 		"/lib", "/lib64", "/etc", "/root", "/boot",
-		"/var/lib/aikernel", "/var/ai/sandbox-artifacts", NULL,
+		"/var/lib/aikernel", "/var/ai/sandbox-artifacts",
+		"/home", NULL,
 	};
 	size_t i;
 
@@ -247,6 +257,81 @@ int occ_sandbox_cwd_denied(const char *cwd)
 		    (cwd[n] == '\0' || cwd[n] == '/'))
 			return 1;
 	}
+	return 0;
+}
+
+/* ---- P-2 Phase A（C 棒，MULTIUSER §6/§7）：共享回退工作区 per-user 化 ---- */
+
+/* 共享回退工作区（occ.c occ_workdir_resolve 同值字面量——occ.c 不在本
+ * 棒文件集，两侧以值相等保持契约；root/admin 旧路径恒用此共享路径） */
+#define OCC_SANDBOX_SHARED_WORKDIR "/var/ai/work"
+
+/*
+ * occ_sandbox_user_workdir_for - per-user 回退工作区路径计算（纯函数，
+ * 不碰文件系统；单测直接喂 uid）。口径：
+ *   uid==0            → -1（root/admin 旧路径保持共享 /var/ai/work，
+ *                       兼容现役行为+全部现有测试）；
+ *   无 passwd 条目/名字不合法 → -1（诚实回落共享路径，不炸）；
+ *   否则             → 0 且 buf 填 "/var/ai/work/<pw_name>"。
+ * 名字仅许 [A-Za-z0-9._-]（passwd 常规字符）——路径段防注入；越界
+ * 名（超长）同样 -1 回落。env 无既有覆盖通道（OCC_SANDBOX_WORKDIR
+ * 不存在），默认路径计算即唯一面。
+ */
+int occ_sandbox_user_workdir_for(uid_t uid, char *buf, size_t buflen)
+{
+	struct passwd *pw;
+	size_t n;
+
+	if (uid == 0 || !buf || buflen <= sizeof(OCC_SANDBOX_SHARED_WORKDIR))
+		return -1;
+	pw = getpwuid(uid);
+	if (!pw || !pw->pw_name || !pw->pw_name[0])
+		return -1;
+	for (n = 0; pw->pw_name[n]; n++) {
+		char c = pw->pw_name[n];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+		      c == '-'))
+			return -1;
+	}
+	if (!n || n > 64)			/* 登录名常规上限余量 */
+		return -1;
+	if (snprintf(buf, buflen, "%s/%s", OCC_SANDBOX_SHARED_WORKDIR,
+		     pw->pw_name) >= (int)buflen)
+		return -1;
+	return 0;
+}
+
+/*
+ * occ_sandbox_ensure_user_workdir - 懒建 per-user 工作区（0700 属
+ * uid:gid）。幂等：已有同名目录不重建不清空直接可用；同名非目录
+ * =失败。实际权限路径（按组装者身份注明）：
+ *   euid==0（代组装面）→ mkdir + chown 归 uid:gid（chown 失败=该 uid
+ *                         进不去 0700 目录，诚实判失败）；
+ *   非 root 组装者     → mkdir 属自己（uid 参数即本人；父目录对组装
+ *                         者可写才成——/var/ai/work 属 root 时部署侧
+ *                         需预建 per-user 目录或放开父目录，本函数
+ *                         失败即由调用方诚实回落共享路径，不更糟）。
+ * 返回 0=目录就绪可用；-1=建不成/非目录。
+ */
+int occ_sandbox_ensure_user_workdir(const char *path, uid_t uid, gid_t gid)
+{
+	struct stat st;
+
+	if (!path || !path[0])
+		return -1;
+	if (mkdir(path, 0700) == 0) {
+		if (geteuid() == 0 && uid != 0 &&
+		    chown(path, uid, gid) != 0)
+			return -1;
+		return 0;
+	}
+	if (errno != EEXIST)
+		return -1;
+	/* 已存在：不重建不清空（部署侧预建/上次懒建均算数） */
+	if (stat(path, &st) || !S_ISDIR(st.st_mode))
+		return -1;
 	return 0;
 }
 
@@ -391,6 +476,27 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 			occ_ob_puts(o, L_("ERROR: bash 工作目录不可访问："));
 			occ_ob_puts(o, workdir);
 			return -1;
+		}
+	}
+
+	/* 1b) P-2 Phase A：共享回退工作区 per-user 化——workdir 为共享
+	 * 回退路径且调用者非 root 时，实际 rw 面改挂 /var/ai/work/<user>
+	 * （懒建 0700 属 uid:gid，已有目录不重建）。root（uid==0）保持
+	 * 共享路径不变（兼容现役+现有测试）；路径计算或懒建任一失败 =
+	 * 诚实回落共享路径（现状行为，不更糟不炸——部署侧未放开
+	 * /var/ai/work 时即此态）。stderr 一行披露（destroy 同款风格）。 */
+	if (getuid() != 0 &&
+	    strcmp(workdir, OCC_SANDBOX_SHARED_WORKDIR) == 0) {
+		char udir[256];		/* "/var/ai/work/"+登录名(≤64) 余量 */
+
+		if (occ_sandbox_user_workdir_for(getuid(), udir,
+						 sizeof(udir)) == 0 &&
+		    occ_sandbox_ensure_user_workdir(udir, getuid(),
+						    getgid()) == 0 &&
+		    strlen(udir) < sizeof(workdir)) {
+			snprintf(workdir, sizeof(workdir), "%s", udir);
+			fprintf(stderr, "occ-bash: per-user rw-path %s\n",
+				udir);
 		}
 	}
 

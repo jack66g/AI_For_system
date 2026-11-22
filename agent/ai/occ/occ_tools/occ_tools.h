@@ -51,6 +51,7 @@
 #define _OCC_TOOLS_H
 
 #include <stddef.h>
+#include <sys/types.h>		/* uid_t/gid_t（P-2：per-user 回退工作区） */
 #include <time.h>
 
 #include "occ_llm/occ_llm.h"		/* occ_tool_def */
@@ -98,9 +99,25 @@ int occ_tool_is_known(const char *name);
 
 /* O-6：cwd 是否命中 aik-sandbox 显式 bind 源拒绝面（ro/rw 共用表，
  * 与 agent/ai/sandbox/aik-sandbox.c valid_bind_src 同源硬编码——见
- * sandbox.c 注）。启动处命中即回退 workdir=/var/ai/work（mkdir -p
+ * sandbox.c 注；P-2 Phase A 起 occ 侧保守面多拒 /home——家目录树
+ * 不进沙箱视图）。启动处命中即回退 workdir=/var/ai/work（mkdir -p
  * 0755），否则首发 bash 全灭（rw-path 拒挂）。纯判定不动文件系统。 */
 int occ_sandbox_cwd_denied(const char *cwd);
+
+/* P-2 Phase A（C 棒，MULTIUSER §6/§7）：per-user 沙箱回退工作区。
+ * occ_sandbox_user_workdir_for：纯路径计算（不碰文件系统；单测直接
+ * 喂 uid）。uid==0 → -1（root/admin 保持共享 /var/ai/work，兼容现役
+ * +现有测试）；无 passwd 条目/名字不合法（仅许 [A-Za-z0-9._-]，路径
+ * 段防注入）→ -1（诚实回落共享路径，不炸）；否则 buf 填
+ * "/var/ai/work/<pw_name>" 返回 0。
+ * occ_sandbox_ensure_user_workdir：懒建 per-user 目录（0700 属
+ * uid:gid；euid==0 时 mkdir+chown，非 root 组装者 mkdir 属自己——
+ * 父目录不可写即失败，由调用方诚实回落共享路径）。幂等：已有同名
+ * 目录不重建不清空；同名非目录=失败。bash 执行面（occ_sandbox_bash）
+ * 在 workdir 为共享回退路径且非 root 时接线这两件；env 无既有覆盖
+ * 通道（OCC_SANDBOX_WORKDIR 不存在）——默认路径计算即唯一面。 */
+int occ_sandbox_user_workdir_for(uid_t uid, char *buf, size_t buflen);
+int occ_sandbox_ensure_user_workdir(const char *path, uid_t uid, gid_t gid);
 
 /* ---- O-9/O-4（UX-O §2）：occ 面 W2 高危确认门 ---- */
 struct occ_tool_ctx;			/* 前向（本块早于 ctx typedef） */

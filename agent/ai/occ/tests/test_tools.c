@@ -19,7 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>				/* P-2：per-user 回退取名 */
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <sqlite3.h>
@@ -312,6 +314,73 @@ int main(void)
 		   occ_sandbox_cwd_denied("rel") == 0 &&
 		   occ_sandbox_cwd_denied("/") == 0,
 		   "sbdeny-bad-input");
+		/* P-2 Phase A（C 棒）：deny 扩 /home——家目录树不进沙箱视图
+		 * （与 /root 同款前缀匹配；/homex 不命中=目录边界不破） */
+		OK(occ_sandbox_cwd_denied("/home"), "sbdeny-home");
+		OK(occ_sandbox_cwd_denied("/home/u"), "sbdeny-home-sub");
+		OK(occ_sandbox_cwd_denied("/home/u/deep/x"),
+		   "sbdeny-home-deep");
+		OK(occ_sandbox_cwd_denied("/homex") == 0 &&
+		   occ_sandbox_cwd_denied("/homeless") == 0,
+		   "sbdeny-home-prefix-no");
+	}
+
+	/* ======== P-2 Phase A（C 棒）：per-user 回退工作区 ======== */
+	{
+		char ub[512], d[512];
+		struct stat st;
+		struct passwd *pw;
+		uid_t ghost = 0;
+
+		/* 纯函数（不碰文件系统）：root → -1（保持共享路径） */
+		OK(occ_sandbox_user_workdir_for(0, ub, sizeof(ub)) == -1,
+		   "uwd-root-shared");
+		/* 无 passwd 条目 uid → 诚实回落共享（-1）；动态挑空缺 uid */
+		for (uid_t u = 61000; u < 61100; u++) {
+			if (!getpwuid((uid_t)u)) {
+				ghost = u;
+				break;
+			}
+		}
+		OK(ghost && occ_sandbox_user_workdir_for(ghost, ub,
+		       sizeof(ub)) == -1, "uwd-ghost-shared");
+		/* 缓冲不足 → -1（不半途而废） */
+		OK(occ_sandbox_user_workdir_for(getuid() ? getuid() : 1,
+		       ub, 8) == -1, "uwd-buflen-small");
+		/* 当前真实 uid（非 root 跑测试时必有 passwd 条目）→
+		 * /var/ai/work/<name>；root 跑时 uid==0 恒 -1 已覆盖 */
+		pw = getpwuid(getuid());
+		if (getuid() != 0 && pw && pw->pw_name) {
+			char exp[512];
+
+			snprintf(exp, sizeof(exp), "/var/ai/work/%s",
+				 pw->pw_name);
+			OK(occ_sandbox_user_workdir_for(getuid(), ub,
+			       sizeof(ub)) == 0 && !strcmp(ub, exp),
+			   "uwd-self-path");
+		}
+		/* 懒建（/tmp 面）：建得成/0700/属主/幂等不重建 */
+		snprintf(d, sizeof(d), "%s/uwd0", tmpdir);
+		OK(occ_sandbox_ensure_user_workdir(d, getuid(),
+		       getgid()) == 0, "uens-create");
+		OK(stat(d, &st) == 0 && S_ISDIR(st.st_mode) &&
+		   (st.st_mode & 0777) == 0700 && st.st_uid == getuid(),
+		   "uens-mode-owner");
+		OK(occ_sandbox_ensure_user_workdir(d, getuid(),
+		       getgid()) == 0, "uens-idempotent");
+		/* 同名非目录 → 失败（不重建不清空不误用） */
+		wfile("uwd-non-dir", "x");
+		snprintf(d, sizeof(d), "%s/uwd-non-dir", tmpdir);
+		OK(occ_sandbox_ensure_user_workdir(d, getuid(),
+		       getgid()) == -1, "uens-exist-nondir");
+		/* root 组装者给他人建：mkdir+chown 归 uid:gid（0700） */
+		if (geteuid() == 0) {
+			snprintf(d, sizeof(d), "%s/uwd-ownee", tmpdir);
+			OK(occ_sandbox_ensure_user_workdir(d, 61234,
+			       61234) == 0 && stat(d, &st) == 0 &&
+			   st.st_uid == 61234 && (st.st_mode & 0777) == 0700,
+			   "uens-root-chown");
+		}
 	}
 
 	/* ======== 工具定义（9 件=六件套+O-17 文件管理三件、名字/schema 非空） ======== */
@@ -587,6 +656,54 @@ int main(void)
 		   strstr(s, "[exit=7]") && strstr(s, "stub-zone=occ"),
 		   "bash1-exec-exit-passthrough");
 		OK(s && strstr(s, tmpdir), "bash1-rwpath-workdir");
+
+		/* B1b P-2：共享回退路径 per-user 化接线。root：uid==0 不
+		 * 重定向，rw 精确=共享路径（兼容现役）。非 root：/var/ai
+		 * 属 root（0700/0755）→ stat 不可达=诚实人话拒绝（与
+		 * 现状回退路径不可访问同款；重定向成功分支=部署侧 0711+
+		 * 预建 per-user 目录形态，由纯函数+懒建单测覆盖面） */
+		{
+			occ_tool_ctx tc;
+			char rwexp[64];
+
+			memset(&tc, 0, sizeof(tc));
+			tc.workdir = "/var/ai/work";
+			tc.timeout_ms = 30000;
+			occ_tool_result_free(&g_res);
+			occ_tool_exec(&tc, "bash", "call_tb",
+				      "{\"command\":\"true\"}", &g_res);
+			snprintf(rwexp, sizeof(rwexp), "rw=/var/ai/work\n");
+			if (getuid() == 0) {
+				OK(g_res.rc == 0 && g_res.text &&
+				   strstr(g_res.text, rwexp),
+				   "bash1b-root-shared-rw");
+			} else {
+				/* /var/ai 属 root 两种形态都诚实：0700=
+				 * stat 不可达人话拒；0755=ensure 建不成
+				 * 精确回落共享 rw（绝不 per-user 半态） */
+				int refused = g_res.rc != 0 && g_res.text &&
+					      strstr(g_res.text,
+						     "不可访问");
+				int fellback = g_res.rc == 0 && g_res.text &&
+					       strstr(g_res.text, rwexp);
+
+				OK(refused || fellback,
+				   "bash1b-nonroot-shared-or-refuse");
+			}
+			occ_tool_result_free(&g_res);
+			g_res.text = NULL;
+			/* 对照：正常 workdir 不受 per-user 重定向影响 */
+			memset(&tc, 0, sizeof(tc));
+			tc.workdir = tmpdir;
+			tc.timeout_ms = 30000;
+			occ_tool_exec(&tc, "bash", "call_tc",
+				      "{\"command\":\"true\"}", &g_res);
+			OK(g_res.rc == 0 && g_res.text &&
+			   strstr(g_res.text, tmpdir),
+			   "bash1b-normal-workdir-unaffected");
+			occ_tool_result_free(&g_res);
+			g_res.text = NULL;
+		}
 
 		/* B2 超时：SIGKILL 全组 + 人话 */
 		{
