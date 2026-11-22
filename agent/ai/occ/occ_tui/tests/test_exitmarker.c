@@ -14,6 +14,9 @@
  *   M3 /zoom（退出码 70）不写 marker——fb 循环内重启非终局退出，写
  *      了会被 aik-console 当本轮退出消费、污染下一轮判定（回归门：
  *      70 一旦出带外即破坏「读后即焚」契约）。
+ *   M4 P-2a per-uid：无 OCC_EXIT_MARKER 覆盖时按 uid 选路（uid==0
+ *      → /run/aik-occ-exit 原名；非 root → /run 失败回落 /tmp/
+ *      aik-occ-exit.<uid>）；无 uid 后缀的默认路径不落文件。
  * 隔离：marker 路径用 OCC_EXIT_MARKER 覆盖指 /tmp（生产不设 env、用
  * 缺省 /run/aik-occ-exit——测试绝不碰 /run）；每场景前清目标文件、
  * 全套结束清场防污染其它用例。
@@ -204,7 +207,10 @@ static int run_occ(const char *tmpdir, int fbterm, const char *slash,
 		setenv("HOME", homep, 1);
 		setenv("TERM", "dumb", 1);
 		setenv("AIK_CONSOLE_GATE_SKIP", "1", 1);
-		setenv("OCC_EXIT_MARKER", marker, 1);
+		if (marker)
+			setenv("OCC_EXIT_MARKER", marker, 1);
+		else
+			unsetenv("OCC_EXIT_MARKER");	/* M4：缺省路径面 */
 		if (fbterm)
 			setenv("FBTERM", "1", 1);
 		else
@@ -321,6 +327,42 @@ int main(void)
 	rc = run_occ(tmp, 1, "/zoom 20\r", marker, out, &out_len);
 	OK(rc == 70, "M3-zoom-exit-code-70");
 	OK(access(marker, F_OK) != 0, "M3-no-marker-for-zoom-70");
+
+	/* ---- M4：P-2a per-uid——无 OCC_EXIT_MARKER 按 uid 选路 ---- */
+	{
+		char run_def[64], run_uid[80], tmp_uid[80];
+		char expect[96], other[96];
+
+		snprintf(run_def, sizeof(run_def), "/run/aik-occ-exit");
+		snprintf(run_uid, sizeof(run_uid), "/run/aik-occ-exit.%u",
+			 (unsigned)geteuid());
+		snprintf(tmp_uid, sizeof(tmp_uid), "/tmp/aik-occ-exit.%u",
+			 (unsigned)geteuid());
+		unlink(run_def);
+		unlink(run_uid);
+		unlink(tmp_uid);
+		rc = run_occ(tmp, 1, "/exit\r", NULL, out, &out_len);
+		OK(rc == 71, "M4-exit-code-71");
+		if (geteuid() == 0) {
+			snprintf(expect, sizeof(expect), "%s", run_def);
+			snprintf(other, sizeof(other), "%s", tmp_uid);
+		} else if (access("/run", W_OK) != 0) {
+			snprintf(expect, sizeof(expect), "%s", tmp_uid);
+			snprintf(other, sizeof(other), "%s", run_def);
+		} else {
+			snprintf(expect, sizeof(expect), "%s", run_uid);
+			snprintf(other, sizeof(other), "%s", run_def);
+		}
+		{
+			char b[64];
+			int n = marker_read(expect, b, sizeof(b));
+
+			OK(n == 3 && !strcmp(b, "71\n"), "M4-marker-per-uid");
+		}
+		OK(access(other, F_OK) != 0, "M4-no-other-path-marker");
+		unlink(expect);
+		unlink(other);
+	}
 
 	/* 清场防污染其它用例（marker + 夹具目录 + zoom 写的 .fbtermrc） */
 	unlink(marker);

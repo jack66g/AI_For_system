@@ -26,8 +26,11 @@ static struct termios gate_term_orig;
 
 #define GATE_USER "admin"
 #define GATE_PW_MAX 64
+#define GATE_USER_MAX 32		/* P-2a：用户名上限（含 NUL 边界） */
 #define GATE_MAX_FAIL 3
 #define GATE_COOLDOWN_SEC 10
+#define GATE_ENTRY_MAX 256		/* P-2a：条目行数上限（防无界文件） */
+#define GATE_CD_SLOTS 8			/* P-2a：冷却内存表槽数（逐用户） */
 
 const char *tui_gate_path(void)
 {
@@ -58,20 +61,30 @@ int tui_gate_skipboot(void)
 	return tui_gate_skipboot_path("/proc/cmdline");
 }
 
-int tui_gate_read(const char *path, char hash[128], long long *ts)
-{
-	FILE *f;
-	char line[256];
-	char *p1, *p2;
+/* ---- P-2a 多条目纯逻辑面 ----
+ * 文件格式：每行 `name:$6$<sha512crypt>:<unix_ts>[:<fails>]`。
+ * `#` 注释行与空行忽略；重名首行为准；坏行跳过（不炸整文件）；
+ * 老式单行文件（admin 三段）就是 admin 条目（向后兼容）。
+ * 内部读函数区分「文件不在」与「文件在无此用户」——UI 面需要
+ * （文件消失=复位向导；无此用户=诚实登录失败）。 */
+#define GATE_READ_OK		0
+#define GATE_READ_NO_FILE	-1	/* 文件不存在/不可开 */
+#define GATE_READ_NO_USER	-2	/* 文件在但无此用户（或全坏行） */
+#define GATE_READ_BAD_ARG	-3	/* 参数坏 */
 
-	f = fopen(path, "r");
-	if (!f)
-		return -1;
-	if (!fgets(line, sizeof(line), f)) {
-		fclose(f);
-		return -1;
-	}
-	fclose(f);
+/* 解析一行（就地改写 line）。返回 1=有效条目（name、hash 指入 line，
+ * ts、fails 出参）；0=注释/空行（跳过）；-1=坏行（跳过）。 */
+static int gate_parse_entry(char *line, char **name, char **hash,
+			    long long *ts, int *fails)
+{
+	char *p1, *p2, *p3, *end;
+	size_t hl;
+
+	end = line + strlen(line);
+	while (end > line && (end[-1] == '\n' || end[-1] == '\r'))
+		*--end = '\0';
+	if (line[0] == '\0' || line[0] == '#')
+		return 0;
 	p1 = strchr(line, ':');
 	if (!p1)
 		return -1;
@@ -80,14 +93,78 @@ int tui_gate_read(const char *path, char hash[128], long long *ts)
 	if (!p2)
 		return -1;
 	*p2++ = '\0';
-	if (strcmp(line, GATE_USER) != 0)
+	p3 = strchr(p2, ':');
+	if (p3) {
+		*p3++ = '\0';
+		if (strchr(p3, ':'))
+			return -1;		/* 第 5 段：坏行 */
+	}
+	if (line[0] == '\0')
+		return -1;			/* 空名 */
+	hl = strlen(p1);
+	if (strncmp(p1, "$6$", 3) != 0 || hl >= TUI_GATE_HASH_LEN)
 		return -1;
-	if (strncmp(p1, "$6$", 3) != 0 || strlen(p1) >= 128)
-		return -1;
-	strcpy(hash, p1);
-	if (ts)
-		*ts = strtoll(p2, NULL, 10);
-	return 0;
+	*ts = strtoll(p2, NULL, 10);	/* 老口径：时间戳不严格校验 */
+	if (p3) {
+		char *q;
+		long v;
+
+		v = strtol(p3, &q, 10);
+		if (*p3 == '\0' || *q != '\0' || v < 0 || v > 9999)
+			return -1;
+		*fails = (int)v;
+	} else {
+		*fails = 0;
+	}
+	*name = line;
+	*hash = p1;
+	return 1;
+}
+
+static int gate_read_user_full(const char *path, const char *user,
+			       char hash_out[TUI_GATE_HASH_LEN],
+			       long long *ts_out, int *fails_out)
+{
+	FILE *f;
+	char line[512];
+	char *name, *hash;
+	long long ts;
+	int fails;
+
+	if (!path || !path[0] || !user || !user[0] || !hash_out)
+		return GATE_READ_BAD_ARG;
+	f = fopen(path, "r");
+	if (!f)
+		return GATE_READ_NO_FILE;
+	while (fgets(line, sizeof(line), f)) {
+		if (gate_parse_entry(line, &name, &hash, &ts, &fails) != 1)
+			continue;
+		if (strcmp(name, user) == 0) {
+			strcpy(hash_out, hash);	/* 长度已由解析钳制 */
+			if (ts_out)
+				*ts_out = ts;
+			if (fails_out)
+				*fails_out = fails;
+			fclose(f);
+			return GATE_READ_OK;
+		}
+	}
+	fclose(f);
+	return GATE_READ_NO_USER;
+}
+
+int tui_gate_read_user(const char *path, const char *user,
+		       char hash_out[TUI_GATE_HASH_LEN], int *fails_out)
+{
+	return gate_read_user_full(path, user, hash_out, NULL, fails_out) ==
+	       GATE_READ_OK ? 0 : -1;
+}
+
+/* 老 API 保留：admin 语义委托新多条目面 */
+int tui_gate_read(const char *path, char hash[128], long long *ts)
+{
+	return gate_read_user_full(path, GATE_USER, hash, ts, NULL) ==
+	       GATE_READ_OK ? 0 : -1;
 }
 
 int tui_gate_hash(const char *pw, char out[128])
@@ -141,19 +218,90 @@ int tui_gate_verify(const char *pw, const char *hash)
 	return d == 0;
 }
 
-int tui_gate_write(const char *path, const char *hash)
+/* 用户名合法性（写侧与输入侧同一口径）：非空、<GATE_USER_MAX、
+ * 可见 ASCII 且不含 ':'、不以 '#' 开头（防注释行歧义）。 */
+static int gate_user_valid(const char *user)
+{
+	size_t i, n;
+
+	if (!user)
+		return 0;
+	n = strlen(user);
+	if (n == 0 || n >= GATE_USER_MAX || user[0] == '#')
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)user[i];
+
+		if (c < 33 || c > 126 || c == ':')
+			return 0;
+	}
+	return 1;
+}
+
+static void gate_emit_entry(FILE *f, const char *user, const char *hash,
+			    int fails)
+{
+	if (fails > 0)
+		/* 四段：计数入行（读侧第 4 段存取） */
+		fprintf(f, "%s:%s:%lld:%d\n", user, hash,
+			(long long)time(NULL), fails);
+	else
+		/* 三段：与老写字节形态一致（fails=0 不落段） */
+		fprintf(f, "%s:%s:%lld\n", user, hash, (long long)time(NULL));
+}
+
+int tui_gate_write_entry(const char *path, const char *user,
+			 const char *hash, int fails)
 {
 	char tmp[512];
-	FILE *f;
+	FILE *in = NULL, *out;
+	char line[512];
+	int found = 0, nlines = 0;
 
-	if (!path || !path[0] || !hash || strncmp(hash, "$6$", 3) != 0)
+	if (!path || !path[0] || !gate_user_valid(user) || !hash ||
+	    strncmp(hash, "$6$", 3) != 0 ||
+	    strlen(hash) >= TUI_GATE_HASH_LEN || fails < 0)
 		return -1;
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-	f = fopen(tmp, "w");
-	if (!f)
+	in = fopen(path, "r");		/* 不在=新建文件（追加语义） */
+	out = fopen(tmp, "w");
+	if (!out) {
+		if (in)
+			fclose(in);
 		return -1;
-	fprintf(f, "%s:%s:%lld\n", GATE_USER, hash, (long long)time(NULL));
-	if (fflush(f) != 0 || fclose(f) != 0) {
+	}
+	if (in) {
+		while (fgets(line, sizeof(line), in)) {
+			char work[512], *name, *hash2;
+			long long ts2;
+			int fails2;
+			int r;
+
+			memcpy(work, line, sizeof(work));
+			r = gate_parse_entry(work, &name, &hash2, &ts2,
+					     &fails2);
+			if (!found && r == 1 && strcmp(name, user) == 0) {
+				/* 重名首行=更新点；其余重名行原样保留
+				 *（读侧首行为准，更新后仍居首） */
+				gate_emit_entry(out, user, hash, fails);
+				found = 1;
+			} else {
+				fputs(line, out);
+				if (!strchr(line, '\n'))
+					fputc('\n', out);	/* 末行无换行 */
+			}
+			if (++nlines > GATE_ENTRY_MAX) {
+				fclose(in);
+				fclose(out);
+				unlink(tmp);
+				return -1;	/* 无界文件拒写（防截断用户数据） */
+			}
+		}
+		fclose(in);
+	}
+	if (!found)
+		gate_emit_entry(out, user, hash, fails);
+	if (fflush(out) != 0 || fclose(out) != 0) {
 		unlink(tmp);
 		return -1;
 	}
@@ -163,6 +311,82 @@ int tui_gate_write(const char *path, const char *hash)
 		return -1;
 	}
 	return 0;
+}
+
+/* 老 API 保留：admin 语义（向导建密）——多条目文件下只动 admin 行 */
+int tui_gate_write(const char *path, const char *hash)
+{
+	return tui_gate_write_entry(path, GATE_USER, hash, 0);
+}
+
+/* ---- P-2a：上次成功用户（登录框预填） ---- */
+static const char *gate_last_path(void)
+{
+	const char *env = getenv("AIK_CONSOLE_GATE_LAST");
+
+	if (env && env[0])
+		return env;
+	return "/var/lib/aikernel/console-gate.last";
+}
+
+/* 预填读侧严格净化：仅 [A-Za-z0-9._-] 且 <GATE_USER_MAX——防被改
+ * 文件注入控制字节/冒号进输入框；坏内容回落 admin。 */
+static void gate_last_read(char out[GATE_USER_MAX])
+{
+	FILE *f;
+	char line[128];
+	size_t i;
+	int ok = 1;
+
+	f = fopen(gate_last_path(), "r");
+	if (f && fgets(line, sizeof(line), f)) {
+		char *end = line + strlen(line);
+
+		while (end > line && (end[-1] == '\n' || end[-1] == '\r'))
+			*--end = '\0';
+		if (line[0] == '\0' || strlen(line) >= GATE_USER_MAX)
+			ok = 0;
+		for (i = 0; ok && line[i]; i++) {
+			char c = line[i];
+
+			if (!((c >= 'a' && c <= 'z') ||
+			      (c >= 'A' && c <= 'Z') ||
+			      (c >= '0' && c <= '9') ||
+			      c == '.' || c == '_' || c == '-'))
+				ok = 0;
+		}
+		if (ok)
+			snprintf(out, GATE_USER_MAX, "%s", line);
+	} else {
+		ok = 0;
+	}
+	if (f)
+		fclose(f);
+	if (!ok || !out[0])
+		snprintf(out, GATE_USER_MAX, "%s", GATE_USER);
+}
+
+/* 尽力而为（/var/lib 不可写不碍登录）；原子写 0600 */
+static void gate_last_write(const char *user)
+{
+	char tmp[512];
+	const char *p = gate_last_path();
+	FILE *f;
+
+	if (!gate_user_valid(user))
+		return;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", p);
+	f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "%s\n", user);
+	if (fflush(f) != 0 || fclose(f) != 0) {
+		unlink(tmp);
+		return;
+	}
+	chmod(tmp, 0600);
+	if (rename(tmp, p) != 0)
+		unlink(tmp);
 }
 
 /* ---- UI ---- */
@@ -201,6 +425,25 @@ static void draw_masked(tui_screen *s, int row, int cols,
 	tui_screen_puts(s, row, c, stars, a);
 }
 
+/* P-2a：用户名框（明文+光标；与密码框同 40 列几何） */
+static void draw_user_field(tui_screen *s, int row, int cols,
+			    const struct gate_field *f, int active)
+{
+	char txt[GATE_PW_MAX + 3];
+	int i, c;
+	tui_attr a = tui_thm_attr(TUI_THM_FG, TUI_THM_USER_BG, 0);
+
+	for (i = 0; i < f->len; i++)
+		txt[i] = f->buf[i];
+	txt[f->len] = active ? '_' : ' ';
+	txt[f->len + 1] = '\0';
+	c = (cols - 40) / 2;
+	if (c < 1)
+		c = 1;
+	tui_screen_puts(s, row, c, "                                      ", a);
+	tui_screen_puts(s, row, c, txt, a);
+}
+
 static void box_frame(tui_screen *s, int rows, int cols)
 {
 	int r0 = rows / 2 - 6, r1 = rows / 2 + 5;
@@ -228,6 +471,29 @@ static void box_frame(tui_screen *s, int rows, int cols)
 #define GATE_MODE_SETUP 0
 #define GATE_MODE_LOGIN 1
 
+/* 单事件字段编辑（字符/退格/Esc/Ctrl-C）。max_len=字段容量；
+ * no_colon=用户名字段禁 ':'（文件格式分隔符）。 */
+static void gate_field_edit(const tui_event *ev, struct gate_field *f,
+			    int max_len, int no_colon, int *quit)
+{
+	if (ev->key != TUI_KEY_CHAR) {
+		if (ev->key == TUI_KEY_BACKSPACE) {
+			if (f->len > 0)
+				f->len--;
+		} else if (ev->key == TUI_KEY_ESCAPE) {
+			*quit = 1;
+		}
+		return;
+	}
+	if ((ev->mods & TUI_MOD_CTRL) && (ev->ch == 'c' || ev->ch == 'C')) {
+		*quit = 1;
+		return;
+	}
+	if (ev->ch >= 32 && ev->ch < 127 && f->len < max_len - 1 &&
+	    !(no_colon && ev->ch == ':'))
+		f->buf[f->len++] = (char)ev->ch;
+}
+
 static int gate_field_input(tui_input *in, struct gate_field *f, int *done,
 			    int *quit)
 {
@@ -239,27 +505,78 @@ static int gate_field_input(tui_input *in, struct gate_field *f, int *done,
 		return 0;
 	if (ev.type != TUI_EV_KEY)
 		return 0;
-	if (ev.key == TUI_KEY_CHAR) {
-		if ((ev.mods & TUI_MOD_CTRL) && (ev.ch == 'c' || ev.ch == 'C')) {
-			*quit = 1;
-			return 0;
-		}
-		if (ev.ch >= 32 && ev.ch < 127 && f->len < GATE_PW_MAX - 1)
-			f->buf[f->len++] = (char)ev.ch;
-		return 0;
-	}
 	if (ev.key == TUI_KEY_RETURN) {
 		*done = 1;
 		return 0;
 	}
-	if (ev.key == TUI_KEY_BACKSPACE) {
-		if (f->len > 0)
-			f->len--;
+	gate_field_edit(&ev, f, GATE_PW_MAX, 0, quit);
+	return 0;
+}
+
+/* P-2a：LOGIN 双框输入路由。Tab/上/下=切框（与既有键位习惯兼容：
+ * 缺省焦点密码框——直接打密码+Enter 即登录，老肌肉记忆不动）；
+ * 用户名框 Enter=跳密码框；密码框 Enter=提交。 */
+static int gate_login_input(tui_input *in, struct gate_field *uf,
+			    struct gate_field *pf, int *focus_user,
+			    int *done, int *quit)
+{
+	tui_event ev;
+
+	*done = 0;
+	*quit = 0;
+	if (tui_input_next(in, &ev) <= 0)
+		return 0;
+	if (ev.type != TUI_EV_KEY)
+		return 0;
+	if (ev.key == TUI_KEY_TAB || ev.key == TUI_KEY_UP ||
+	    ev.key == TUI_KEY_DOWN) {
+		*focus_user ^= 1;
 		return 0;
 	}
-	if (ev.key == TUI_KEY_ESCAPE)
-		*quit = 1;
+	if (ev.key == TUI_KEY_RETURN) {
+		if (*focus_user) {
+			*focus_user = 0;
+			return 0;
+		}
+		*done = 1;
+		return 0;
+	}
+	gate_field_edit(&ev, *focus_user ? uf : pf,
+			*focus_user ? GATE_USER_MAX : GATE_PW_MAX,
+			*focus_user, quit);
 	return 0;
+}
+
+/* P-2a：逐用户冷却内存表（非阻塞——A 冷却不牵连 B 登录；
+ * 表小固定，溢出挤 0 号（粗粒度可接受）） */
+struct gate_cd {
+	char name[GATE_USER_MAX];
+	uint64_t until;
+};
+
+static int gate_cd_find(const struct gate_cd *tab, const char *name)
+{
+	int i;
+
+	for (i = 0; i < GATE_CD_SLOTS; i++)
+		if (tab[i].name[0] && strcmp(tab[i].name, name) == 0)
+			return i;
+	return -1;
+}
+
+static void gate_cd_arm(struct gate_cd *tab, const char *name,
+			uint64_t until)
+{
+	int i = gate_cd_find(tab, name);
+
+	if (i < 0) {
+		for (i = 0; i < GATE_CD_SLOTS && tab[i].name[0]; i++)
+			;
+		if (i == GATE_CD_SLOTS)
+			i = 0;
+		snprintf(tab[i].name, GATE_USER_MAX, "%s", name);
+	}
+	tab[i].until = until;
 }
 
 /* q17 实机抓获（audit A-1，致命）：gate 只出队（tui_input_next）不进队
@@ -321,6 +638,19 @@ static void gate_sink_fatal(tui_renderer *ren, int frc)
 	exit(72);
 }
 
+/* 登录框用户名预填（last 文件净化后入框） */
+static void gate_user_prefill(struct gate_field *uf)
+{
+	char pre[GATE_USER_MAX];
+
+	gate_last_read(pre);
+	memset(uf, 0, sizeof(*uf));
+	uf->len = (int)strlen(pre);
+	if (uf->len >= GATE_PW_MAX)
+		uf->len = GATE_PW_MAX - 1;
+	memcpy(uf->buf, pre, (size_t)uf->len + 1);
+}
+
 static int gate_run_ui(int mode, int *unlocked)
 {
 	tui_sink sink;
@@ -329,9 +659,11 @@ static int gate_run_ui(int mode, int *unlocked)
 	tui_screen *s;
 	int rows, cols, rc = 1;
 	struct gate_field f1, f2;
-	int stage = 0;		/* setup: 0=首次输入 1=确认输入 */
-	int fails = 0;
-	char hash[128];
+	struct gate_field uf;		/* P-2a：用户名框（LOGIN） */
+	int focus_user = 0;		/* 缺省焦点=密码框（老习惯兼容） */
+	int stage = 0;			/* setup: 0=首次输入 1=确认输入 */
+	struct gate_cd cd_tab[GATE_CD_SLOTS];
+	char hash[TUI_GATE_HASH_LEN];
 	char login_note[160] = "";	/* 一次性状态（SETUP→LOGIN 切换说明） */
 	int hb_ms;			/* P-41/P-44b：空闲心跳周期（0=禁用） */
 	uint64_t hb_next;		/* 下次心跳探针到点 */
@@ -341,6 +673,7 @@ static int gate_run_ui(int mode, int *unlocked)
 	tui_attr err_a = tui_thm_attr(TUI_THM_ERROR, TUI_THM_BG, 0);
 
 	*unlocked = 0;
+	memset(&cd_tab, 0, sizeof(cd_tab));
 	/* T4 勘误（实机抓获）：tty 默认 ECHO+ICANON 会把密码明文回显到屏上
 	 * （gate 自绘掩码之外的第二份）——进 UI 前关回显转 raw（同 occ 主
 	 * TUI 口径），退出恢复。 */
@@ -382,6 +715,9 @@ static int gate_run_ui(int mode, int *unlocked)
 
 	memset(&f1, 0, sizeof(f1));
 	memset(&f2, 0, sizeof(f2));
+	memset(&uf, 0, sizeof(uf));
+	if (mode == GATE_MODE_LOGIN)
+		gate_user_prefill(&uf);
 	/* P-41/P-44c：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
 	 * 计时（真机实测：静止 gate strace 12s 零 write）；时间基准每
 	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发体量
@@ -434,12 +770,16 @@ static int gate_run_ui(int mode, int *unlocked)
 			draw_center(s, rows / 2 + 4, cols,
 				    L_("本地模型：/models 选 ollama"), mut_a);
 		} else {
+			/* P-2a：用户名框（预填 last）+密码框双字段；
+			 * 布局自上而下：用户标签/用户框/密码标签/掩码框 */
 			draw_center(s, rows / 2 - 4, cols,
 				    "AIKernel · alpha", title_a);
 			draw_center(s, rows / 2 - 3, cols,
-				    L_("用户：admin"), txt_a);
-			draw_center(s, rows / 2 - 2, cols, L_("密码："), txt_a);
-			draw_masked(s, rows / 2 - 1, cols, &f1, 1);
+				    L_("用户："), txt_a);
+			draw_user_field(s, rows / 2 - 2, cols, &uf,
+					focus_user);
+			draw_center(s, rows / 2 - 1, cols, L_("密码："), txt_a);
+			draw_masked(s, rows / 2, cols, &f1, !focus_user);
 			if (login_note[0]) {
 				snprintf(status_buf, sizeof(status_buf), "%s",
 					 login_note);
@@ -449,7 +789,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			draw_center(s, rows / 2 + 1, cols, status,
 				    status[0] ? err_a : txt_a);
 			draw_center(s, rows / 2 + 3, cols,
-				    L_("Enter 登录 · Ctrl-C 退出"), mut_a);
+				    L_("Enter 登录 · Tab 切换 · Ctrl-C 退出"), mut_a);
 		}
 		{
 			int frc = tui_renderer_flush(ren, rows / 2 - 1,
@@ -484,99 +824,67 @@ static int gate_run_ui(int mode, int *unlocked)
 								 sizeof(status_buf),
 								 "%s", L_("再输入一次确认"));
 						}
-				} else {
-					if (strcmp(f1.buf, f2.buf) != 0) {
-						snprintf(status_buf,
-							 sizeof(status_buf),
-							 "%s", L_("两次不一致，重新设置"));
-						memset(&f1, 0, sizeof(f1));
-						memset(&f2, 0, sizeof(f2));
-						stage = 0;
-					} else if (tui_gate_read(tui_gate_path(),
-								 hash, NULL) == 0) {
-						/* q17 覆写探针实机抓获：双
-						 * 控制台并发 SETUP，后到者会
-						 * 静默覆写先设好的密码。提交
-						 * 前重读凭据——已被其他控制
-						 * 台设置则不覆写，转 LOGIN。 */
-						mode = GATE_MODE_LOGIN;
-						memset(&f1, 0, sizeof(f1));
-						memset(&f2, 0, sizeof(f2));
-						stage = 0;
-						fails = 0;
-						snprintf(login_note,
-							 sizeof(login_note),
-							 "%s", L_("密码已由其他控制台设置，请登录"));
-						continue;
-					} else if (tui_gate_hash(f1.buf,
-								 hash) == 0 &&
-						   tui_gate_write(
-							   tui_gate_path(),
-							   hash) == 0) {
-						*unlocked = 1;
-						rc = 0;
-						break;
 					} else {
-						snprintf(status_buf,
-							 sizeof(status_buf),
-							 "%s", L_("写入失败（权限？）"));
-						memset(&f2, 0, sizeof(f2));
+						if (strcmp(f1.buf, f2.buf) != 0) {
+							snprintf(status_buf,
+								 sizeof(status_buf),
+								 "%s", L_("两次不一致，重新设置"));
+							memset(&f1, 0, sizeof(f1));
+							memset(&f2, 0, sizeof(f2));
+							stage = 0;
+						} else if (tui_gate_read(tui_gate_path(),
+									 hash, NULL) == 0) {
+							/* q17 覆写探针实机抓获：双
+							 * 控制台并发 SETUP，后到者会
+							 * 静默覆写先设好的密码。提交
+							 * 前重读凭据——已被其他控制
+							 * 台设置则不覆写，转 LOGIN。 */
+							mode = GATE_MODE_LOGIN;
+							memset(&f1, 0, sizeof(f1));
+							memset(&f2, 0, sizeof(f2));
+							gate_user_prefill(&uf);
+							focus_user = 0;
+							stage = 0;
+							snprintf(login_note,
+								 sizeof(login_note),
+								 "%s", L_("密码已由其他控制台设置，请登录"));
+							continue;
+						} else if (tui_gate_hash(f1.buf,
+									 hash) == 0 &&
+							   tui_gate_write(
+								   tui_gate_path(),
+								   hash) == 0) {
+							gate_last_write(GATE_USER);
+							*unlocked = 1;
+							rc = 0;
+							break;
+						} else {
+							snprintf(status_buf,
+								 sizeof(status_buf),
+								 "%s", L_("写入失败（权限？）"));
+							memset(&f2, 0, sizeof(f2));
+						}
 					}
 				}
-			}
 			continue;
 		}
-		/* LOGIN */
-		if (fails >= GATE_MAX_FAIL) {
-			/* 冷却倒计时（阻塞 1s 步进重绘） */
-			int left = GATE_COOLDOWN_SEC;
-			tui_event ev_drain;
-
-			/* q17 audit A-7：冷却期输入整段丢弃——先排空已泵入
-			 * 队列的事件 + flush tty 层，倒计时结束再 flush 一次
-			 * （否则解冻后旧字符会并入密码首段） */
-			while (tui_input_next(&in, &ev_drain) > 0)
-				;
-			tcflush(STDIN_FILENO, TCIFLUSH);
-			while (left > 0) {
-				int frc;
-
-				snprintf(status_buf, sizeof(status_buf),
-					 L_("尝试过多，冷却 %d 秒…"), left);
-				/* 重绘状态行即可 */
-				draw_center(s, rows / 2 + 1, cols,
-					    status_buf, err_a);
-				frc = tui_renderer_flush(ren, rows / 2 - 1,
-							 cols / 2);
-				if (frc == -2 || frc == -1)
-					gate_sink_fatal(ren, frc);
-				/* P-41/P-44c：冷却 10s > 心跳 5s——内环同
-				 * 步心跳，不留盲窗（帧每秒有输出，心跳只
-				 * 是补 wd 计时锚点） */
-				if (hb_ms > 0 && gate_now_ms() >= hb_next) {
-					int prc = tui_renderer_heartbeat(ren);
-
-					hb_next = gate_now_ms() +
-						  (uint64_t)hb_ms;
-					if (prc == -2 || prc == -1)
-						gate_sink_fatal(ren, prc);
-				}
-				sleep(1);
-				left--;
-			}
-			tcflush(STDIN_FILENO, TCIFLUSH);
-			fails = 0;
-			memset(&f1, 0, sizeof(f1));
-			snprintf(status_buf, sizeof(status_buf), "%s", "");
-			continue;
-		}
-		gate_field_input(&in, &f1, &done, &quit);
+		/* LOGIN（P-2a：用户名+密码提交；失败计数按用户行第 4 段
+		 * 存取；3 错 10s 冷却逐用户独立——A 冷却不阻塞 B） */
+		gate_login_input(&in, &uf, &f1, &focus_user, &done, &quit);
 		if (quit) {
 			rc = 1;
 			break;
 		}
 		if (done) {
-			if (tui_gate_read(tui_gate_path(), hash, NULL) != 0) {
+			char uname[GATE_USER_MAX];
+			int file_fails = 0;
+			int rd;
+
+			memcpy(uname, uf.buf, (size_t)uf.len);
+			uname[uf.len] = '\0';
+			rd = gate_read_user_full(tui_gate_path(), uname,
+						 hash, NULL, &file_fails);
+			if (rd == GATE_READ_NO_FILE) {
 				/* 文件消失（管理员删除=复位）→ 转向导 */
 				mode = GATE_MODE_SETUP;
 				memset(&f1, 0, sizeof(f1));
@@ -584,18 +892,95 @@ static int gate_run_ui(int mode, int *unlocked)
 				status_buf[0] = '\0';	/* q17 audit A-8 */
 				continue;
 			}
-			if (f1.len > 0 && tui_gate_verify(f1.buf, hash)) {
-				*unlocked = 1;
-				rc = 0;
-				break;
+			if (uf.len == 0) {
+				snprintf(status_buf, sizeof(status_buf),
+					 "%s", L_("请输入用户名"));
+				continue;
 			}
-			fails++;
+			if (rd != GATE_READ_OK) {
+				/* 文件在但无此用户：不枚举用户名的统一
+				 * 失败文案（计数无处落——不伪造进度） */
+				snprintf(status_buf, sizeof(status_buf),
+					 "%s", L_("用户名或密码不正确"));
+				memset(&f1, 0, sizeof(f1));
+				continue;
+			}
+			{
+				int ci = gate_cd_find(cd_tab, uname);
+				uint64_t now_ms = gate_now_ms();
+
+				if (ci >= 0) {
+					if (now_ms < cd_tab[ci].until) {
+						long long left = (long long)
+							((cd_tab[ci].until -
+							  now_ms + 999) / 1000);
+
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 L_("冷却中（%lld 秒后再试）"),
+							 left);
+						memset(&f1, 0, sizeof(f1));
+						continue;
+					}
+					/* 冷却期满：清该用户计数（文件+
+					 * 内存）——冷却后计数清零口径 */
+					cd_tab[ci].name[0] = '\0';
+					(void)tui_gate_write_entry(
+						tui_gate_path(), uname,
+						hash, 0);
+					file_fails = 0;
+				}
+				if (file_fails >= GATE_MAX_FAIL) {
+					/* 文件残留计数≥3（如 gate 进程
+					 * 重启）：重启不清锁——重新起算
+					 * 10s 冷却（诚实防绕） */
+					gate_cd_arm(cd_tab, uname,
+						    now_ms + (uint64_t)
+						    GATE_COOLDOWN_SEC * 1000u);
+					snprintf(status_buf,
+						 sizeof(status_buf),
+						 L_("尝试过多，冷却 %d 秒…"),
+						 GATE_COOLDOWN_SEC);
+					memset(&f1, 0, sizeof(f1));
+					continue;
+				}
+				if (f1.len > 0 && tui_gate_verify(f1.buf, hash)) {
+					(void)tui_gate_write_entry(
+						tui_gate_path(), uname,
+						hash, 0);	/* 计数清零 */
+					gate_last_write(uname);
+					*unlocked = 1;
+					rc = 0;
+					break;
+				}
+				{
+					int nf = file_fails + 1;
+
+					(void)tui_gate_write_entry(
+						tui_gate_path(), uname,
+						hash, nf);
+					if (nf >= GATE_MAX_FAIL) {
+						gate_cd_arm(cd_tab, uname,
+							    gate_now_ms() +
+							    (uint64_t)
+							    GATE_COOLDOWN_SEC *
+							    1000u);
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 L_("尝试过多，冷却 %d 秒…"),
+							 GATE_COOLDOWN_SEC);
+					} else {
+						snprintf(status_buf,
+							 sizeof(status_buf),
+							 L_("密码不正确（%d/%d）"),
+							 nf, GATE_MAX_FAIL);
+					}
+				}
+			}
+			memset(&f1, 0, sizeof(f1));
 			/* q17 实机抓获：msg 曾是循环顶每帧置空的局部量，
 			 * LOGIN 画面前状态就被清空——错误消息从未上过屏。
 			 * 改直接写 status_buf（SETUP 口径）。 */
-			snprintf(status_buf, sizeof(status_buf),
-				 L_("密码不正确（%d/%d）"), fails, GATE_MAX_FAIL);
-			memset(&f1, 0, sizeof(f1));
 		}
 	}
 	if (gate_term_restore)
@@ -609,7 +994,7 @@ static int gate_run_ui(int mode, int *unlocked)
 
 int tui_gate_enter(void)
 {
-	char hash[128];
+	char hash[TUI_GATE_HASH_LEN];
 	long long ts;
 	int unlocked;
 
@@ -622,6 +1007,7 @@ int tui_gate_enter(void)
 		if (e && e[0] && strcmp(e, "0") != 0)
 			return 0;
 	}
+	/* admin 条目在=LOGIN（多用户框）；不在=SETUP 向导（仍建 admin） */
 	if (tui_gate_read(tui_gate_path(), hash, &ts) != 0)
 		return gate_run_ui(GATE_MODE_SETUP, &unlocked);
 	return gate_run_ui(GATE_MODE_LOGIN, &unlocked);

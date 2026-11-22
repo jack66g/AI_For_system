@@ -23,7 +23,10 @@
  *   130 = SIGINT 安全点中断（status=interrupted，可 occ retry/--recover）。
  *
  * 环境覆盖（产品配置路径，非测试后门）：
- *   OCC_MODEL_TOML   模型配置（缺省 ~/.aikernel/model.toml）
+ *   OCC_MODEL_TOML   模型配置（显式最高，单文件老语义；未设时走
+ *                    P-2a 查找链：~/.aikernel/model.toml 用户层 ＞
+ *                    /etc/aikernel/models.d 下 *.toml 系统层文件名序；
+ *                    同名 id 用户层覆盖系统层；坏层跳过）
  *   OCC_PROVIDER_TOML provider 类型表（缺省 ~/.aikernel/provider.toml）
  *   OCC_DB           会话库（缺省 ~/.occ/sessions.db）
  *   OCC_SNAPROOT     快照根（缺省 ~/.occ/sessions… 见 occ_tools.h）
@@ -56,6 +59,7 @@
 #include "occ_core/occ_revert.h"
 #include "occ_core/orch.h"			/* E3：编排运行时挂载 */
 #include "occ_core/task.h"			/* E8：/tasks 面板+occ tasks */
+#include "occ_exit_marker.h"		/* P-2a：退出 marker per-uid */
 #include "occ_llm/occ_catalog.h"
 #include "occ_llm/occ_registry.h"
 #include "occ_tui/tui_data.h"
@@ -177,6 +181,22 @@ static int cmd_sessions(occ_db *db)
 	return 0;
 }
 
+/* P-2a：models 三层查找链（读面）——OCC_MODEL_TOML 显式（main 已把
+ * model_toml 解析为该值；单文件老语义不变）＞ ~/.aikernel/model.toml
+ * 用户层 ＞ /etc/aikernel/models.d 下 *.toml 系统层（文件名序）。同名
+ * id 用户层覆盖系统层；任一层坏=跳过（诚实降级）；全层不可读才 -1。
+ * 写面（向导）仍只落 model_toml（用户层）——出厂迁移归 B 棒/主会话。 */
+static int occ_models_load(occ_provider_config *cfg, const char *model_toml,
+			   const char *provider_toml)
+{
+	const char *env = getenv("OCC_MODEL_TOML");
+
+	if (env && env[0])
+		return occ_provider_load_all(cfg, model_toml, provider_toml);
+	return occ_provider_load_user_system(cfg, NULL, model_toml,
+					     OCC_MODELS_D_DIR, provider_toml);
+}
+
 static int resolve_provider(const char *model_toml, const char *provider_toml,
 			    occ_provider *p, char *err, size_t errlen)
 {
@@ -184,7 +204,7 @@ static int resolve_provider(const char *model_toml, const char *provider_toml,
 	const char *slot;
 
 	occ_provider_config_init(&cfg);
-	if (occ_provider_load_all(&cfg, model_toml, provider_toml)) {
+	if (occ_models_load(&cfg, model_toml, provider_toml)) {
 		snprintf(err, errlen,
 			 "model config unreadable: %s", model_toml);
 		occ_provider_config_free(&cfg);
@@ -1772,7 +1792,7 @@ static void wiz_save(struct tui_app *a)
 	/* reload cfg → 重建注册表 → 空闲则立即切换 */
 	occ_provider_config_free(&a->cfg);
 	occ_provider_config_init(&a->cfg);
-	if (occ_provider_load_all(&a->cfg, a->model_toml, a->provider_toml)) {
+	if (occ_models_load(&a->cfg, a->model_toml, a->provider_toml)) {
 		tui_view_overlay_status(a->view, L_("model.toml 重读失败"), 1);
 		return;
 	}
@@ -3334,6 +3354,7 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 	 * /su 0 永不回落（真机 P-45 实证①②③）。 */
 	if (!strcmp(line, "/su")) {
 		long long now = (long long)tui_now_ms();
+		char rhash[TUI_GATE_HASH_LEN];
 
 		if (a->su.elevated) {
 			tui_view_notice(a->view, L_("已在特权档（/su 0 回落）"));
@@ -3347,8 +3368,17 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 			tui_view_notice(a->view, nb);
 			return 0;
 		}
+		/* P-2a：root 门不在=开框前诚实拒绝（弹了密码框也永远
+		 * 不会过——不误导输入）；OV_SU 提交处保留同一道防线
+		 * （凭据文件可在开框后被删）。 */
+		if (tui_gate_read_user(tui_gate_path(), "root", rhash,
+				       NULL) != 0) {
+			tui_view_notice(a->view,
+					L_("本机未开 root 门（console-gate 无 root 条目）"));
+			return 0;
+		}
 		(void)tui_view_open_input(a->view, OV_SU, L_("/su 提权"),
-					  L_("admin 密码"), "", 1);
+					  L_("root 密码"), "", 1);
 		return 0;
 	}
 	if (!strcmp(line, "/su 0")) {
@@ -3770,10 +3800,10 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 		return 0;
 	}
 	if (ov_id == OV_SU) {
-		/* O-10：tui_gate crypt 复用（console-gate admin hash）；
-		 * 3 错→10s 冷却（照 gate 口径）。 */
-		char hash[128];
-		long long ts;
+		/* P-2a 多用户：/su 重定义——验 console-gate 的 root 条目
+		 * （不再用 admin）；root 条目不存在=诚实拒绝（人话）。
+		 * fails/3 错 10s 冷却沿用本会话计数口径（不变）。 */
+		char hash[TUI_GATE_HASH_LEN];
 		long long now = (long long)tui_now_ms();
 		int ok;
 
@@ -3792,10 +3822,11 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 			}
 			return 0;
 		}
-		if (tui_gate_read(tui_gate_path(), hash, &ts) != 0) {
+		if (tui_gate_read_user(tui_gate_path(), "root", hash,
+				       NULL) != 0) {
 			pthread_mutex_unlock(&a->mu);
 			tui_view_overlay_status(a->view,
-						 L_("凭据未设置（先在 T4 设密向导建 admin 密码）"),
+						 L_("本机未开 root 门（console-gate 无 root 条目）"),
 						 1);
 			return 0;
 		}
@@ -4241,32 +4272,23 @@ static void tui_app_on_shutdown(void *ud)
  * 70（/zoom）不写：fb 循环内重启而非终局退出，marker 会被
  * aik-console 当作本轮退出消费、污染下一轮判定。
  * OCC_EXIT_MARKER 仅测试用（指 /tmp 文件）；生产不设——缺省
- * /run/aik-occ-exit（VM /run 为 tmpfs 可写；不可写回落 /tmp 同名）。
- * 写失败只 stderr 警告，绝不影响退出码本身。 */
+ * P-2a per-uid：uid==0=/run/aik-occ-exit（P-47 原名，兼容不动）；
+ * uid!=0=/run/aik-occ-exit.<uid>（aik-console v9 同契约读）；/run
+ * 不可写回落 /tmp 同名。写失败只 stderr 警告，绝不影响退出码本身。 */
 static void tui_exit_marker(int code)
 {
 	const char *fb = getenv("FBTERM");
-	const char *path;
-	FILE *fp;
+	char path[192];
 
 	if (code == 70)
 		return;			/* /zoom：非终局退出不出带外 */
 	if (!fb || !fb[0])
 		return;
-	path = getenv("OCC_EXIT_MARKER");
-	if (!path || !path[0])
-		path = "/run/aik-occ-exit";
-	fp = fopen(path, "w");
-	if (!fp && !strcmp(path, "/run/aik-occ-exit")) {
-		path = "/tmp/aik-occ-exit";	/* /run 不可写回落 */
-		fp = fopen(path, "w");
-	}
-	if (!fp) {
+	if (occ_exit_marker_write(getuid(), code, getenv("OCC_EXIT_MARKER"),
+				  path, sizeof(path)) != 0) {
 		fprintf(stderr, L_("occ: 退出 marker 写失败（%s）\n"), path);
 		return;
 	}
-	fprintf(fp, "%d\n", code);
-	fclose(fp);
 }
 
 /* O-13：模型 last-used 持久化（读侧）——state.json last_model 键
@@ -4340,7 +4362,7 @@ static int run_interactive(occ_db *db, const char *model_toml,
 	occ_provider_config_init(&a.cfg);
 	/* c3：cfg 常驻（/models 切换与向导 reload 都用它）；初始解析失败
 	 * 在进屏前报错（stderr 仍正常终端）——与 headless 同口径。 */
-	if (occ_provider_load_all(&a.cfg, model_toml, provider_toml)) {
+	if (occ_models_load(&a.cfg, model_toml, provider_toml)) {
 		fprintf(stderr, "occ: model config unreadable: %s\n",
 			model_toml);
 		occ_provider_config_free(&a.cfg);

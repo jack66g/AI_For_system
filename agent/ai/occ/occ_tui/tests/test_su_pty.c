@@ -10,7 +10,8 @@
  * 本测试在真 pty 上 fork+exec occ 二进制（fixture 隔离），桩凭据走
  * gate 同源机制（tui_gate_hash 生成——不硬编码真密码），policy.conf
  * 桩统一 restricted（base 档稳定 = 受限，与运行 uid 无关）。断言：
- *   A. /su → 密码 overlay（「admin 密码」字节）
+ *   A0. P-2a：gate 无 root 条目 → /su 诚实拒绝（人话），不弹密码框
+ *   A. /su → 密码 overlay（「root 密码」字节——P-2a 起验 root 条目）
  *   B. 错密码 → overlay 内「密码错误」+ audit.log fail 记账
  *   C. 对密码 → 「已提权至特权档」+ footer 新字节「特权*」
  *   D. 已特权再 /su → 「已在特权档（/su 0 回落）」
@@ -355,12 +356,32 @@ int main(void)
 	OK(read_until_contains(pt.master, out, OUT_CAP, &have,
 			       "\x1b[?1049h", 8000) == 0, "enter-alt-screen");
 
+	/* A0. P-2a：无 root 条目——诚实拒绝（人话），无密码框 */
+	mark = have;
+	if (write(pt.master, "/su\r", 4) < 0)
+		printf("FAIL write\n");
+	OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
+		    "本机未开 root 门（console-gate 无 root 条目）", 15000) == 0,
+	   "a0-no-root-entry-honest-reject");
+	{
+		int mark2 = have;
+
+		OK(wait_new(pt.master, out, OUT_CAP, &have, mark2,
+			    "密码", 1200) != 0,
+		   "a0-no-pw-overlay-without-root");
+	}
+	/* P-2a：开 root 门（root 条目桩——admin 条目在但不参与 /su） */
+	if (tui_gate_write_entry(gatep, "root", hash, 0) != 0) {
+		printf("FAIL root entry stub\n");
+		return 1;
+	}
+
 	/* A. /su → 密码 overlay */
 	mark = have;
 	if (write(pt.master, "/su\r", 4) < 0)
 		printf("FAIL write\n");
 	OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
-		    "admin 密码", 15000) == 0, "a-su-overlay-opens");
+		    "root 密码", 15000) == 0, "a-su-overlay-opens");
 
 	/* B. 错密码 → overlay 内拒绝 + audit fail */
 	mark = have;
@@ -410,7 +431,7 @@ int main(void)
 	if (write(pt.master, "/su\r", 4) < 0)
 		printf("FAIL write\n");
 	OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
-		    "admin 密码", 15000) == 0,
+		    "root 密码", 15000) == 0,
 	   "f-su-overlay-reopens-after-delevate");
 	/* Esc 关闭密码框（25ms 结算窗——孤立 Esc 字节） */
 	usleep(100000);

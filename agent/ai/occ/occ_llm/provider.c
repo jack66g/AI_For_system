@@ -13,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "occ_provider.h"
 
+#include <dirent.h>			/* P-2a：models.d 目录收集 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -661,18 +662,15 @@ static void parse_top_selector(const char *txt, occ_provider_config *cfg)
 	}
 }
 
-int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
-			  const char *provider_toml)
+/* 单文件解析主体（P-2a 抽出供链式加载复用；不 init cfg、不读
+ * provider.toml、不打诊断——调用方收口）。成功 0；不可读/超限 -1。 */
+static int parse_model_toml_into(occ_provider_config *cfg, const char *path)
 {
 	char *txt;
 	struct toml_sec secs[TOML_MAX_SECS];
 	size_t nsecs, i;
 
-	if (!cfg || !model_toml)
-		return -1;
-	occ_provider_config_init(cfg);
-
-	txt = read_file(model_toml, NULL);
+	txt = read_file(path, NULL);
 	if (!txt)
 		return -1;
 	{
@@ -702,7 +700,13 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 			parse_provider_section(txt, &secs[i], cfg);
 	}
 	free(txt);
+	return 0;
+}
 
+/* provider.toml 类型表（load_all/load_chain 收口共用） */
+static void load_provider_types(occ_provider_config *cfg,
+				const char *provider_toml)
+{
 	if (provider_toml) {
 		char *ptxt = read_file(provider_toml, NULL);
 
@@ -720,12 +724,197 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 		}
 		/* provider.toml 缺/坏 → 类型表空（不影响模型槽位） */
 	}
-	/* O-3（LT-1 踩坑）：被拒段不再无声——加载完逐条 stderr 人话告警
-	 * （headless/TUI 同源；TUI 侧另取首条进 notice，见 occ.c）。合法
-	 * 段零条零输出（不噪）。 */
+}
+
+/* O-3（LT-1 踩坑）：被拒段诊断收口——逐条 stderr 人话告警（headless/
+ * TUI 同源；TUI 侧另取首条进 notice，见 occ.c）。合法段零条零输出。 */
+static void diag_print(const occ_provider_config *cfg)
+{
+	size_t i;
+
 	for (i = 0; i < cfg->nslot_diag; i++)
 		fprintf(stderr, "%s\n", cfg->slot_diag[i]);
+}
+
+int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
+			  const char *provider_toml)
+{
+	if (!cfg || !model_toml)
+		return -1;
+	occ_provider_config_init(cfg);
+	if (parse_model_toml_into(cfg, model_toml) != 0)
+		return -1;
+	load_provider_types(cfg, provider_toml);
+	diag_print(cfg);
 	return 0;
+}
+
+/* ---- P-2a 多用户：三层查找链（读面） ---- */
+
+/* 后层并入前层：槽位/引用段按 id/name 覆盖（api_key 所有权移交，
+ * 旧值净化释放）；类型表追加去重；选择器后层非空才覆盖；诊断/
+ * malformed 累加。 */
+static void chain_merge_cfg(occ_provider_config *dst,
+			    occ_provider_config *src)
+{
+	size_t i, j;
+
+	for (i = 0; i < src->nslots; i++) {
+		occ_model_slot *s = &src->slots[i];
+
+		for (j = 0; j < dst->nslots; j++)
+			if (!strcmp(dst->slots[j].id, s->id))
+				break;
+		if (j < dst->nslots) {
+			heap_scrub_free(&dst->slots[j].api_key);
+			dst->slots[j] = *s;
+		} else {
+			if (cfg_reserve((void **)&dst->slots,
+					&dst->slots_cap, dst->nslots + 1,
+					sizeof(*s)) != 0)
+				continue;	/* 内存穷：丢该槽不炸 */
+			dst->slots[dst->nslots++] = *s;
+		}
+		s->api_key = NULL;		/* 所有权移交 dst */
+	}
+	for (i = 0; i < src->nproviders; i++) {
+		occ_provider_def *d = &src->providers[i];
+
+		for (j = 0; j < dst->nproviders; j++)
+			if (!strcmp(dst->providers[j].name, d->name))
+				break;
+		if (j < dst->nproviders) {
+			heap_scrub_free(&dst->providers[j].api_key);
+			dst->providers[j] = *d;
+		} else {
+			if (cfg_reserve((void **)&dst->providers,
+					&dst->providers_cap,
+					dst->nproviders + 1,
+					sizeof(*d)) != 0)
+				continue;
+			dst->providers[dst->nproviders++] = *d;
+		}
+		d->api_key = NULL;
+	}
+	for (i = 0; i < src->navailable; i++) {
+		for (j = 0; j < dst->navailable; j++)
+			if (!strcmp(dst->available_types[j],
+				    src->available_types[i]))
+				break;
+		if (j == dst->navailable &&
+		    dst->navailable < sizeof(dst->available_types) /
+				      sizeof(dst->available_types[0]))
+			snprintf(dst->available_types[dst->navailable++],
+				 sizeof(dst->available_types[0]), "%s",
+				 src->available_types[i]);
+	}
+	if (src->selector[0])
+		snprintf(dst->selector, sizeof(dst->selector), "%s",
+			 src->selector);
+	dst->malformed += src->malformed;
+	for (i = 0; i < src->nslot_diag; i++) {
+		if (dst->nslot_diag >= OCC_CFG_DIAG_MAX)
+			break;
+		snprintf(dst->slot_diag[dst->nslot_diag],
+			 OCC_CFG_DIAG_LEN, "%s", src->slot_diag[i]);
+		dst->nslot_diag++;
+	}
+}
+
+int occ_provider_load_chain(occ_provider_config *cfg,
+			    const char *const *paths, size_t npaths,
+			    const char *provider_toml)
+{
+	size_t k;
+	int any = 0;
+
+	if (!cfg)
+		return -1;
+	occ_provider_config_init(cfg);
+	for (k = 0; k < npaths; k++) {
+		occ_provider_config tmp;
+
+		if (!paths[k] || !paths[k][0])
+			continue;
+		occ_provider_config_init(&tmp);
+		if (parse_model_toml_into(&tmp, paths[k]) == 0) {
+			chain_merge_cfg(cfg, &tmp);
+			any = 1;
+		} else if (access(paths[k], F_OK) == 0) {
+			/* 文件在却读不出/超限：一行人话告警后跳过该层
+			 * （缺文件=正常缺层，静默——诚实降级不噪） */
+			fprintf(stderr,
+				L_("occ: models 层不可读，已跳过（%s）\n"),
+				paths[k]);
+		}
+		occ_provider_config_free(&tmp);
+	}
+	if (!any)
+		return -1;
+	load_provider_types(cfg, provider_toml);
+	diag_print(cfg);
+	return 0;
+}
+
+/* 系统层目录收集：*.toml 非点文件，文件名序（strcmp 全序=alphasort
+ * 语义）。返回写入 bufs 的层数（≤maxb；越界文件截断不炸）。 */
+static size_t modelsd_collect(const char *dir,
+			      char (*bufs)[OCC_MODELS_D_PATH], size_t maxb)
+{
+	DIR *d;
+	struct dirent *e;
+	char *names[OCC_MODELS_D_MAX];
+	size_t n = 0, i, j;
+
+	d = opendir(dir);
+	if (!d)
+		return 0;
+	while ((e = readdir(d)) != NULL) {
+		const char *dn = e->d_name;
+		size_t dl = strlen(dn);
+
+		if (dn[0] == '.' || dl < 6 ||
+		    strcmp(dn + dl - 5, ".toml") != 0)
+			continue;
+		if (n < OCC_MODELS_D_MAX)
+			names[n++] = strdup(dn);
+	}
+	closedir(d);
+	/* 插入序（n≤OCC_MODELS_D_MAX 小表直插，免 qsort 依赖） */
+	for (i = 1; i < n; i++) {
+		char *key = names[i];
+
+		for (j = i; j > 0 && strcmp(names[j - 1], key) > 0; j--)
+			names[j] = names[j - 1];
+		names[j] = key;
+	}
+	for (i = 0; i < n && i < maxb; i++)
+		snprintf(bufs[i], OCC_MODELS_D_PATH, "%s/%s", dir, names[i]);
+	for (i = 0; i < n; i++)
+		free(names[i]);
+	return n < maxb ? n : maxb;
+}
+
+int occ_provider_load_user_system(occ_provider_config *cfg,
+				  const char *env_toml,
+				  const char *user_toml,
+				  const char *sys_dir,
+				  const char *provider_toml)
+{
+	char bufs[OCC_MODELS_D_MAX][OCC_MODELS_D_PATH];
+	const char *paths[OCC_MODELS_D_MAX + 1];
+	size_t n = 0, k;
+
+	/* env 显式=单文件老语义（最高优先，整链旁路——语义不变） */
+	if (env_toml && env_toml[0])
+		return occ_provider_load_all(cfg, env_toml, provider_toml);
+	if (sys_dir && sys_dir[0])
+		n = modelsd_collect(sys_dir, bufs, OCC_MODELS_D_MAX);
+	for (k = 0; k < n; k++)
+		paths[k] = bufs[k];
+	if (user_toml && user_toml[0])
+		paths[n++] = user_toml;		/* 用户层最后=覆盖系统层 */
+	return occ_provider_load_chain(cfg, paths, n, provider_toml);
 }
 
 const char *occ_provider_default_slot(const occ_provider_config *cfg)

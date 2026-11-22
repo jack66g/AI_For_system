@@ -40,6 +40,7 @@ static int fails;
 
 static char acc[65536];
 static size_t acc_n;
+static char g_last[160];			/* P-2a：last-user 隔离桩路径 */
 
 static int find_tok(const char *tok)
 {
@@ -88,6 +89,12 @@ static void feed(int mfd, const char *s)
 
 	(void)!write(mfd, s, n);
 	(void)!write(mfd, &cr, 1);
+}
+
+/* P-2a：原样写字节（Tab/退格等控制键——feed 会补 \r 破坏控制流） */
+static void feedraw(int mfd, const char *s)
+{
+	(void)!write(mfd, s, strlen(s));
 }
 
 /* 限时等子进程退出（q17 教训：waitpid 第三参是 flags 不是秒——
@@ -141,6 +148,7 @@ static int spawn_gate(const char *path, pid_t *pid)
 			close(s);
 		close(m);
 		setenv("AIK_CONSOLE_GATE", path, 1);
+		setenv("AIK_CONSOLE_GATE_LAST", g_last, 1);
 		unsetenv("AIK_CONSOLE_GATE_SKIP");
 		_exit(tui_gate_enter() == 0 ? 0 : 42);
 	}
@@ -169,6 +177,8 @@ int main(void)
 		unlink(tmpl);	/* SETUP 要求凭据文件不存在 */
 		snprintf(path, sizeof(path), "%s", tmpl);
 
+		snprintf(g_last, sizeof(g_last), "%s-last", path);
+		unlink(g_last);
 		acc_n = 0;
 		m = spawn_gate(path, &pid);
 		CHECK(m >= 0);
@@ -251,6 +261,116 @@ int main(void)
 		printf("test_gate_pty C (overwrite guard): %s\n",
 		       fails ? "FAIL" : "ok");
 	}
+
+	/* D: P-2a 双用户登录（用户名框+密码错/对、逐用户独立计数、
+	 * 冷却独立、last 预填与落盘）——gate 文件 admin+u1+u2 三条目 */
+	{
+		char h_admin[128], h_u1[128], h_u2[128], rd[128];
+		char lb[64];
+		int ff = -1;
+		FILE *lf;
+
+		CHECK(tui_gate_hash("adm-p2a-pw", h_admin) == 0);
+		CHECK(tui_gate_hash("u1-p2a-pw", h_u1) == 0);
+		CHECK(tui_gate_hash("u2-p2a-pw", h_u2) == 0);
+		CHECK(tui_gate_write(path, h_admin) == 0);
+		CHECK(tui_gate_write_entry(path, "u1", h_u1, 0) == 0);
+		CHECK(tui_gate_write_entry(path, "u2", h_u2, 0) == 0);
+		unlink(g_last);			/* 无 last → 预填 admin */
+
+		/* D1: u1 错一次——计数只落 u1 行 */
+		acc_n = 0;
+		m = spawn_gate(path, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 8));
+		CHECK(wait_tok(m, "用户", 8));			/* 用户名框在屏 */
+		feedraw(m, "\t");				/* Tab→用户名框 */
+		feedraw(m, "\x7f\x7f\x7f\x7f\x7f");	/* 退格清预填 admin */
+		feed(m, "u1");				/* 用户名+Enter 跳密码 */
+		feed(m, "wrong-pw");
+		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
+		kill(pid, SIGKILL);
+		waitpid(pid, &status, 0);
+		close(m);
+		CHECK(tui_gate_read_user(path, "u1", rd, &ff) == 0 && ff == 1);
+		CHECK(tui_gate_read_user(path, "u2", rd, &ff) == 0 && ff == 0);
+		CHECK(tui_gate_read_user(path, "admin", rd, &ff) == 0 &&
+		      ff == 0);
+
+		/* D2: 预填 admin——不动用户名直接打密码（老习惯兼容）；
+		 * admin 计数独立于 u1 */
+		acc_n = 0;
+		m = spawn_gate(path, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 8));
+		feed(m, "wrong-pw");
+		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
+		kill(pid, SIGKILL);
+		waitpid(pid, &status, 0);
+		close(m);
+		CHECK(tui_gate_read_user(path, "admin", rd, &ff) == 0 &&
+		      ff == 1);
+		CHECK(tui_gate_read_user(path, "u1", rd, &ff) == 0 && ff == 1);
+
+		/* D3: ghost 拒绝（不枚举用户）→ 改回 u1 成功 + last 落盘 */
+		acc_n = 0;
+		m = spawn_gate(path, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 8));
+		feedraw(m, "\t");
+		feedraw(m, "\x7f\x7f\x7f\x7f\x7f");	/* 退格清预填 */
+		feed(m, "ghost");
+		feed(m, "whatever");
+		CHECK(wait_tok(m, "用户名或密码不正确", 8));
+		feedraw(m, "\t");			/* 用户名框保留 ghost */
+		feedraw(m, "\x7f\x7f\x7f\x7f\x7f");
+		feed(m, "u1");
+		feed(m, "u1-p2a-pw");
+		CHECK(wait_exit(pid, &status, 15));
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		close(m);
+		lf = fopen(g_last, "r");
+		CHECK(lf != NULL);
+		if (lf) {
+			CHECK(fgets(lb, sizeof(lb), lf) != NULL &&
+			      strcmp(lb, "u1\n") == 0);
+			fclose(lf);
+		}
+		CHECK(tui_gate_read_user(path, "u1", rd, &ff) == 0 &&
+		      ff == 0);			/* 成功清零 */
+
+		/* D4: u1（预填）打满 3 错触发冷却——u2 不受牵连可登录
+		 * （逐用户独立：非阻塞冷却） */
+		acc_n = 0;
+		m = spawn_gate(path, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 8));
+		feed(m, "w1");
+		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
+		feed(m, "w2");
+		/* 差分渲染只发变化格：1/3→2/3 仅一个数字格变化，字节流
+		 * 不再含完整 token——以文件计数为准（写侧同步落盘） */
+		usleep(700000);
+		CHECK(tui_gate_read_user(path, "u1", rd, &ff) == 0 &&
+		      ff == 2);
+		feed(m, "w3");
+		CHECK(wait_tok(m, "尝试过多，冷却", 8));
+		feedraw(m, "\t");			/* 冷却中切用户名 */
+		feedraw(m, "\x7f\x7f");			/* 清 "u1" */
+		feed(m, "u2");
+		feed(m, "u2-p2a-pw");
+		CHECK(wait_exit(pid, &status, 15));
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		close(m);
+		CHECK(tui_gate_read_user(path, "u1", rd, &ff) == 0 &&
+		      ff == 3);			/* u1 计数留痕 */
+		CHECK(tui_gate_read_user(path, "u2", rd, &ff) == 0 &&
+		      ff == 0);
+		printf("test_gate_pty D (multi-user login): %s\n",
+		       fails ? "FAIL" : "ok");
+	}
+	unlink(path);
+	unlink(g_last);
 
 	printf("test_gate_pty: %s (%d fails)\n", fails ? "FAIL" : "all ok",
 	       fails);

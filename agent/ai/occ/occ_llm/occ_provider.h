@@ -122,6 +122,36 @@ int occ_provider_load_all(occ_provider_config *cfg, const char *model_toml,
 			  const char *provider_toml);
 
 /*
+ * P-2a 多用户：models 三层查找链（读面；出厂迁移写面归 B 棒/主会话）。
+ *
+ * occ_provider_load_chain - 按 paths 顺序（低→高优先级）逐层解析合并：
+ * 槽位/引用段按 id/name 后层覆盖前层（api_key 所有权移交）；类型表
+ * 追加去重；选择器后层非空覆盖；任一层不可读=跳过该层（文件在却读
+ * 不出给一行 stderr 告警——诚实降级，不整脸崩）；全层不可读 → -1。
+ * provider_toml 类型表只在收口读一次。
+ */
+int occ_provider_load_chain(occ_provider_config *cfg,
+			    const char *const *paths, size_t npaths,
+			    const char *provider_toml);
+
+/*
+ * occ_provider_load_user_system - 查找链入口：
+ *   env_toml（$OCC_MODEL_TOML，显式最高）非空 → 单文件老语义
+ *   （load_all 整链旁路，语义不变）；否则 sys_dir 下 *.toml 按文件
+ *   名序（系统层）+ user_toml（用户层，同名 id 覆盖系统层）。
+ *   sys_dir 目录不存在=空系统层（现状等价，只走用户层）。
+ */
+#define OCC_MODELS_D_DIR "/etc/aikernel/models.d"
+#define OCC_MODELS_D_MAX 32		/* 系统层文件数上限（超出截断） */
+#define OCC_MODELS_D_PATH 320		/* 单层完整路径缓冲 */
+
+int occ_provider_load_user_system(occ_provider_config *cfg,
+				  const char *env_toml,
+				  const char *user_toml,
+				  const char *sys_dir,
+				  const char *provider_toml);
+
+/*
  * occ_provider_default_slot - 默认活动槽位（LT-BUG-011 口径）：
  * 顶层 model = 选择器命中 → 该槽；未指定 → "cloud"（有则）→ 首槽。
  * 选择器悬空（指向不存在的槽）→ NULL 且不静默兜底（调用方报人话错）；

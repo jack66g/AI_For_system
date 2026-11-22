@@ -106,6 +106,11 @@ TOOLS_SRCS := occ_tools/tools.c occ_tools/sandbox.c occ_tools/trace.c \
 	      occ_tools/sha256.c
 TOOLS_OBJS := $(TOOLS_SRCS:%.c=$(OBJ_DIR)/%.o)
 
+# P-2a：occ 终局退出 marker 路径/写面（per-uid；occ.c tui_exit_marker
+# 收口消费；单测 tests/test_exit_marker_path 直链——纯 libc 零依赖）
+EXITMARK_SRCS := occ_exit_marker.c
+EXITMARK_OBJS := $(EXITMARK_SRCS:%.c=$(OBJ_DIR)/%.o)
+
 # occ_tui（T9c1 原语 + T9c2 视图层 + T9c3 overlay/keymap/theme/usage）：
 # 交互入口链入；单测仍走 occ_tui/Makefile
 # c3：tui_data（/tools /trace /lease 读取器，链 aik_json——只入 occ 与
@@ -122,7 +127,8 @@ TUI_OBJS := $(TUI_SRCS:%.c=$(OBJ_DIR)/%.o)
 PURE_BINS := tests/test_provider tests/test_openai_build \
 	     tests/test_anthropic_build tests/test_sse_openai \
 	     tests/test_sse_anthropic tests/occ_reqbuild \
-	     tests/occ_ssereplay tests/test_catalog tests/test_registry
+	     tests/occ_ssereplay tests/test_catalog tests/test_registry \
+	     tests/test_models_chain tests/test_exit_marker_path
 
 # 真传输程序（链 http_client + mbedtls）：occ_smoke（差分台架真调用证据）
 # + test_http_headers（本地 mock 断言请求头字节——共享文件增量行为门）
@@ -161,11 +167,12 @@ NORM_SRC := tests/occ_norm.c
 
 all: $(BIN_OCC) $(PURE_BINS) $(NET_BINS) $(CORE_BINS)
 
-test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout tests/test_lang tests/test_lang_tools
+test: $(PURE_BINS) $(CORE_BINS) tests/test_w2gate tests/test_netcfg tests/test_cli_rc tests/test_net_timeout tests/test_lang tests/test_lang_tools tests/test_models_chain tests/test_exit_marker_path
 	@for t in tests/test_provider tests/test_openai_build \
 		  tests/test_anthropic_build tests/test_sse_openai \
 		  tests/test_sse_anthropic tests/test_catalog \
-		  tests/test_registry tests/test_session \
+		  tests/test_registry tests/test_models_chain \
+		  tests/test_exit_marker_path tests/test_session \
 		  tests/test_tokens tests/test_loop tests/test_tools \
 		  tests/test_revert tests/test_retry tests/test_zoomrc tests/test_sink \
 		  tests/test_tui_data tests/test_sme tests/test_ac \
@@ -314,10 +321,11 @@ tests/test_netcfg: tests/test_netcfg.c $(TOOLS_OBJS) \
 		  $(STORE_LIB) $(SQLITE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
 
 # ---- occ 主程序（T9a3+b1+c2+d1）：headless 一次对话 + 工具环 + 交互 TUI ----
-$(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB)
+$(BIN_OCC): occ.c $(CORE_OBJS) $(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) $(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(EXITMARK_OBJS) $(STORE_LIB) $(SQLITE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SQLITE_INC) -o $@ occ.c $(CORE_OBJS) \
 		$(TOOLS_OBJS) $(TUI_OBJS) $(LLM_OBJS) $(LLM_CALL_OBJ) $(HTTP_CLIENT_OBJ) \
-		$(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
+		$(SME_REUSE_OBJS) $(PQ_REUSE_OBJS) $(POLICY_REUSE_OBJS) $(EXITMARK_OBJS) \
+		$(STORE_LIB) $(SQLITE_LIB) $(MBEDTLS_LIBS) $(LDLIBS)
 
 # occ_tui 对象：-D_DEFAULT_SOURCE（与各 .c 顶部同值定义共存，照 occ_tui/Makefile）
 # +$(INCLUDES)：tui_data.c 需 store/store_json.h（-I../include）
@@ -328,6 +336,15 @@ $(OBJ_DIR)/occ_tui/%.o: occ_tui/%.c
 # 纯协议链接（无 http_client/mbedtls；aik_json 来自 STORE_LIB）
 tests/test_provider: tests/test_provider.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_provider.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
+
+# P-2a：models 三层查找链（env 显式＞用户层＞系统层 models.d 文件名
+# 序；同名 id 用户层覆盖；坏层跳过诚实降级）——链接面同 test_provider
+tests/test_models_chain: tests/test_models_chain.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_models_chain.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
+
+# P-2a：退出 marker per-uid 路径/写面（纯 libc 直链）
+tests/test_exit_marker_path: tests/test_exit_marker_path.c $(EXITMARK_OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_exit_marker_path.c $(EXITMARK_OBJS)
 
 tests/test_openai_build: tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(OBJ_DIR)/occ_tui/tui_lang.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_openai_build.c $(LLM_OBJS) $(STORE_LIB) $(LDLIBS) $(OBJ_DIR)/occ_tui/tui_lang.o
