@@ -103,6 +103,10 @@ install_file("/etc/aikernel/policy.conf",
 ensure_dir("/etc/aikernel/models.d", 0o755)
 ensure_dir("/var/log/aik-console", 0o750)
 ensure_dir("/var/ai/work", 0o755)
+# P-60 定谳补件：系统层共享槽——fresh 用户三层链的可解析底座
+# （全链空=load -1 硬拒契约；17.11 装机台架 admin 章咬出）
+install_file("/etc/aikernel/models.d/cloud.toml",
+             F + "/etc/aikernel/models.d/cloud.toml", 0o644)
 
 # 1d) P-2 Phase C：出厂 model.toml（暴露侧 soft）——单源= aik-reset
 #     write_factory_model_toml heredoc（toml_replace_section 为逐段手术，
@@ -116,6 +120,8 @@ assert m, "aik-reset heredoc not found"
 tmpl = m.group(1) + "\n"
 assert '[api]' in tmpl and 'sense_redact = "soft"' in tmpl, \
     "template lacks [api] soft (D-3①)"
+assert '[models.cloud]' in tmpl and 'base_url = "http://127.0.0.1:11434/v1"' \
+    in tmpl, "template lacks [models.cloud] skeleton (occ 零槽死循环修复)"
 assert '[ui]' in tmpl and '[default]' in tmpl, "template malformed"
 dst = ROOT + "/root/.aikernel"
 os.makedirs(dst, exist_ok=True)
@@ -284,6 +290,10 @@ assert '[api]' in mtoml and 'sense_redact = "soft"' in mtoml, \
 polc = open(ROOT + "/etc/aikernel/policy.conf", encoding="utf-8").read()
 assert "[user:" in polc, "policy.conf lacks [user:] 示例段"
 assert os.path.isdir(ROOT + "/etc/aikernel/models.d")
+mdc = open(ROOT + "/etc/aikernel/models.d/cloud.toml",
+           encoding="utf-8").read()
+assert "[models.cloud]" in mdc and "base_url" in mdc, \
+    "models.d cloud.toml malformed"
 assert os.path.isdir(ROOT + "/var/ai/work")
 assert os.path.isdir(ROOT + "/var/log/aik-console")
 print("17.11 anchors: P-2 全量（console v9/v10+aikctl 五族+occ 四面）"

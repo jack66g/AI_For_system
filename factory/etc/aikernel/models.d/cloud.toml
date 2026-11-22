@@ -1,0 +1,20 @@
+# AIKernel 系统层共享模型槽（P-2 Phase A models.d 三层链之系统层；
+# P-60 17.11 出厂落位）。链序=env > 用户家 ~/.aikernel/model.toml >
+# 本目录（用户层同名槽覆盖此层）。
+#
+# 出厂职责（P-60 2026-11-23 装机台架定谳）：fresh 用户（家层无
+# model.toml）的三层链由此获得可解析 [models.cloud] 槽——occ TUI
+# 才能开框（全链空=load -1 硬拒=test_models_chain 钉死契约）。
+# 单用户时代 root 靠出厂 model.toml 血统件，多用户形态全体用户
+# 靠本文件。管理员可在此放共享槽/换 base_url；用户各自 key 放
+# 家层同名槽（api_key 不入共享层）。
+[default]
+model = "cloud"
+
+[models.cloud]
+# 缺省指本机 ollama OpenAI 兼容口（与出厂 model.toml 模板同语义）；
+# onboarding 密钥向导/手填即换真云端（用户层覆盖）。
+provider_type = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model_name = ""
+api_key = ""
