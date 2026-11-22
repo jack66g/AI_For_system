@@ -104,9 +104,43 @@
                                  gate 哈希+passwd 同步改（交互两次一致或
                                  stdin 单行；≥6 位与首启向导同规；改密即
                                  清失败计数）；root
+  policy get [--json]           P-2 Phase B（G-012）：policy.conf 整表结构
+                                 化（[root]/[wheel]/[default]/[user:X] 段；
+                                 未知键/未知段原样保留如实列出）+每人生效
+                                 档推演（[user:X]>wheel 组>[default]，root
+                                 恒 privileged——推演仅供展示，生效面以
+                                 内核侧读取器为准）
+  policy get sudoers [--json]   /etc/sudoers 结构化只读（%组/用户/别名行→
+                                 逐条 user host=(runas) commands；解析不了
+                                 的行原样标 unparsed——诚实不猜；仅 root
+                                 可读=perms 自然挡）
+  policy set user NAME mode=privileged|confirmed|restricted [--yes]
+                                 写 [user:NAME] 段（行级外科手术，其余行
+                                 逐字节原样；W2：无 --yes 只打前/后 diff
+                                 不写；--yes=先备份 policy.conf.bak.<ts>
+                                 再 tmp+rename 原子写，保现文件权限；
+                                 无此 OS 号拒绝）；policy set --rollback
+                                 恢复最近一次备份（逐字节）
+  session list [--json]         P-2 Phase B（G-025）：活登录会话面
+                                 （/var/run/utmp USER_PROCESS 行：用户/tty/
+                                 来源/登录时间；idle=/dev/<tty> atime 推算，
+                                 不可得='-'；wtmp 历史不在此面，注明）
+  quota get [user|group] [--name X] [--json]
+                                 P-2 Phase B（G-007）：blocks/inodes soft/
+                                 hard 结构化；quota 工具或 usrquota/grpquota
+                                 挂载缺席=诚实 unavailable（退出码 0——
+                                 缺席是合法态不是错误）
+  audit tail [--user X] [--all] [-n N]
+                                 用户家 ~/.aikernel/audit.log 尾 N 行原样
+                                 （缺省 20；行已含 uid=/user= 字段；--user/
+                                 --all=root 专；--all 聚合 /root+/home/*，
+                                 行首标用户；文件缺失=人话+rc 0）
   gate 文件契约（与 occ 读取端一致，AIK_CONSOLE_GATE 可指测试桩）：
     每行 name:$6$hash:unix_ts[:fails]，# 注释/空行忽略，tmp+rename
     原子写 0600
+  Phase B 读面环境桩（测试隔离，照 AIK_CONSOLE_GATE 先例）：
+    AIK_POLICY_CONF/AIK_SUDOERS/AIK_UTMP/AIK_PROC_MOUNTS/
+    AIK_AUDIT_HOME_DIRS（冒号分隔家目录列表，替 /root+/home/* 扫描）
 
 节点布局（72B 小端，A 路冻结契约）：
   {u64 seq; u64 ts_ns; u64 prev_hash; u64 self_hash; u32 pid; u16 kind;
@@ -120,6 +154,7 @@
 退出码：0 成功；1 使用/IO 错；2 链校验失配（TAMPER）；3 锚行链断。
 """
 import argparse
+import difflib
 import getpass
 import grp
 import hashlib
@@ -883,6 +918,141 @@ def cmd_selftest(_args):
         except ImportError:
             pass
         case('sha512crypt 生成/自证（$6$、<128、crypt 复算一致）', ok_h)
+
+    # ⑤ P-2 Phase B：policy 格式往返/生效推演 + utmp 编解码 + quota
+    #    unavailable 判定 + sudoers 桩（纯函数+临时文件，零系统触）
+    with tempfile.TemporaryDirectory() as td:
+        pc = os.path.join(td, 'policy.conf')
+        stub_conf = (
+            '# P-2B selftest stub\n'
+            '[root]\n'
+            'mode = privileged        # root: W1 自动；W2 二次确认\n'
+            '[wheel]\n'
+            'mode = confirmed\n'
+            'group = sudo\n'
+            '[default]\n'
+            'mode = restricted\n'
+            'extra = keepme          # 未知键原样保留\n'
+            'stray no equals here\n'
+            '[user:tstp2d1]\n'
+            'mode = confirmed\n')
+        with open(pc, 'w', encoding='utf-8') as f:
+            f.write(stub_conf)
+        data, perr = policy_conf_read(pc)
+        secs = data['sections'] if data else []
+        case('policy 解析：root/wheel/default/user 段+未知键原样',
+             perr is None
+             and [s['name'] for s in secs] == ['root', 'wheel', 'default',
+                                               'user:tstp2d1']
+             and policy_key_get(secs[0], 'mode') == 'privileged'
+             and policy_key_get(secs[1], 'group') == 'sudo'
+             and ('extra', 'keepme') in secs[2]['keys']
+             and secs[3]['is_user'] and secs[3]['user'] == 'tstp2d1')
+        case('policy 半解析行如实入 unparsed（不猜）',
+             data is not None and data['unparsed'] == [(10,
+                                                        'stray no equals '
+                                                        'here')])
+        new = policy_set_user_lines(data['raw'], 'tstp2d1', 'restricted')
+        diffpos = [i for i, (a, b) in enumerate(zip(data['raw'], new))
+                   if a != b]
+        case('policy set 更新既有段 mode 行（其余行逐字节原样）',
+             len(new) == len(data['raw']) and diffpos == [11]
+             and new[11] == 'mode = restricted')
+        new2 = policy_set_user_lines(data['raw'], 'tstp2d9', 'confirmed')
+        case('policy set 追加新段（尾空行隔开+段头+mode 行）',
+             new2[:-3] == data['raw'] and new2[-3:] == ['',
+                                                       '[user:tstp2d9]',
+                                                       'mode = confirmed'])
+        eff = policy_effective('tstp2d1', 1001, secs, 'sudo',
+                               lambda n: n in ('wheelguy',))
+        eff2 = policy_effective('plainjoe', 1002, secs, 'sudo',
+                                lambda n: n in ('wheelguy',))
+        eff3 = policy_effective('wheelguy', 1003, secs, 'sudo',
+                                lambda n: n in ('wheelguy',))
+        effr = policy_effective('root', 0, secs, 'sudo', lambda n: False)
+        case('policy 生效推演（[user:X]>wheel>default；root 恒 root 段）',
+             eff['mode'] == 'confirmed' and eff['source'] == 'user:tstp2d1'
+             and eff2['mode'] == 'restricted' and eff2['source'] == 'default'
+             and eff3['mode'] == 'confirmed'
+             and eff3['source'].startswith('wheel')
+             and effr['mode'] == 'privileged' and effr['source'] == 'root')
+        recs = [
+            {'type': UTMP_USER_PROCESS, 'pid': 3512, 'line': 'pts/3',
+             'id': 's3', 'user': 'tstp2da', 'host': '10.0.0.9',
+             'tv_sec': 1750000000, 'tv_usec': 123456},
+            {'type': 2, 'pid': 0, 'line': '~', 'id': '~~', 'user': 'reboot',
+             'host': '6.8.0-149-generic', 'tv_sec': 1750000100},
+            {'type': UTMP_USER_PROCESS, 'pid': 4000, 'line': 'tty1',
+             'id': '1', 'user': '', 'host': '', 'tv_sec': 1750000200},
+        ]
+        blob = b''.join(utmp_pack(r) for r in recs)
+        sess, warns = utmp_parse(blob + b'\x00' * 10)
+        case('utmp 记录 384B/条（glibc 布局实测钉扎）',
+             all(len(utmp_pack(r)) == UTMP_REC_SIZE for r in recs)
+             and UTMP_REC_SIZE == 384)
+        case('utmp 编解码往返+USER_PROCESS 过滤（非 7 型/空名滤出）',
+             len(sess) == 1 and sess[0]['user'] == 'tstp2da'
+             and sess[0]['tty'] == 'pts/3'
+             and sess[0]['host'] == '10.0.0.9'
+             and sess[0]['begin_epoch'] == 1750000000)
+        case('utmp 诚实面：空名 USER_PROCESS+尾零头都进 warnings',
+             any('user 空' in w for w in warns)
+             and any('尾 10 字节忽略' in w for w in warns))
+        st = quota_state({}, [], 'user')
+        st2 = quota_state({'quota': '/usr/bin/quota'}, [], 'user')
+        st3 = quota_state({'quota': '/usr/bin/quota'},
+                          [{'dev': '/dev/sda1', 'mount': '/', 'fstype':
+                            'ext4', 'usrquota': True, 'grpquota': False}],
+                          'group')
+        case('quota unavailable 判定（工具缺/挂载缺各按 kind）',
+             st['status'] == 'unavailable' and 'quota 工具不在 PATH' in
+             st['reason']
+             and st2['status'] == 'unavailable' and 'usrquota' in
+             st2['reason']
+             and st3['status'] == 'unavailable' and 'grpquota' in
+             st3['reason'])
+        rows = quota_parse_table('Disk quotas for user tstp2da (uid 1001):\n'
+                                 'Filesystem  blocks  quota  limit  grace   '
+                                 'files  quota  limit  grace\n'
+                                 '/dev/sda1     100    200     300    7days'
+                                 '      10      0      0       -\n'
+                                 'not a row\n')
+        case('quota 表解析（blocks/inodes soft-hard；废行丢）',
+             len(rows) == 1 and rows[0]['fs'] == '/dev/sda1'
+             and rows[0]['blocks'] == {'used': '100', 'soft': '200',
+                                       'hard': '300', 'grace': '7days'}
+             and rows[0]['inodes']['used'] == '10')
+        sf = os.path.join(td, 'sudoers')
+        with open(sf, 'w', encoding='utf-8') as f:
+            f.write('Defaults env_reset\n'
+                    'root ALL=(ALL:ALL) ALL\n'
+                    '%sudo ALL=(ALL:ALL) ALL\n'
+                    'User_Alias ADMINS = alice, bob\n'
+                    'ADMINS rushmore = /bin/kill, /bin/ls \\\n'
+                    '    NOPASSWD: /usr/bin/tee\n'
+                    'jack rushmore = /bin/ls\n'
+                    '@includedir /etc/sudoers.d\n')
+        sdata, serr = sudoers_read(sf)
+        sent = sdata['entries'] if sdata else []
+        sunp = sdata['unparsed'] if sdata else []
+        case('sudoers 解析：user/%组/别名行→host=(runas) commands',
+             serr is None
+             and [(e['kind'], e['token']) for e in sent] == [('user',
+                                                              'root'),
+                                                             ('group',
+                                                              'sudo'),
+                                                             ('alias',
+                                                              'ADMINS'),
+                                                             ('user',
+                                                              'jack')]
+             and sent[1]['runas'] == 'ALL:ALL'
+             and sent[2]['members'] == ['alice', 'bob']
+             and sent[2]['host'] == 'rushmore' and sent[2]['runas'] is None
+             and 'NOPASSWD: /usr/bin/tee' in sent[2]['commands']
+             and sent[3]['commands'] == '/bin/ls')
+        case('sudoers 诚实面：Defaults/@includedir 原样标 unparsed',
+             [ln for _i, ln in sunp] == ['Defaults env_reset',
+                                         '@includedir /etc/sudoers.d'])
 
     print('SELFTEST_RESULT cases=%d ok=%d' % (total[0], ok[0]))
     return 0 if ok[0] == total[0] else 1
@@ -4150,6 +4320,928 @@ def cmd_user_passwd(args):
     return 0
 
 
+# ============================== P-2 Phase B：结构化读四件（§8/§9）====
+# G-012 policy get/set + G-025 session list + G-007 quota get + audit
+# tail。读面=结构化+诚实（解析不了的行原样标 unparsed；工具/挂载/文件
+# 缺席=unavailable/人话而非报错）；写面（policy set）=W2 --yes 硬门+
+# 写前备份+--rollback。policy.conf 格式与内核侧 per-user 读取器
+# （ai_user_policy.c，E 棒并行施工）一字对齐：INI 形段 [root]/[wheel]/
+# [default]/[user:<名字>]，键 key = value（行内 # 注释），未知键/未知段
+# 原样保留不动。
+
+POLICY_CONF_DEFAULT = '/etc/aikernel/policy.conf'
+SUDOERS_DEFAULT = '/etc/sudoers'
+POLICY_MODES = ('privileged', 'confirmed', 'restricted')
+POLICY_KNOWN_SECTIONS = ('root', 'wheel', 'default')
+POLICY_USER_PREFIX = 'user:'
+UTMP_DEFAULT = '/var/run/utmp'
+UTMP_REC_SIZE = 384            # glibc x86_64 实测（od 验证：tv 秒域与
+                               # 文件 mtime 一致；e_termination/e_exit 为
+                               # 2×int16，尾 20B __glibc_reserved）
+UTMP_FMT = '<h2xi32s4s32s256shhiii16s20x'
+UTMP_USER_PROCESS = 7
+
+
+def _policy_conf_path():
+    env = os.environ.get('AIK_POLICY_CONF')
+    return env if env else POLICY_CONF_DEFAULT
+
+
+def _sudoers_path():
+    env = os.environ.get('AIK_SUDOERS')
+    return env if env else SUDOERS_DEFAULT
+
+
+def _utmp_path():
+    env = os.environ.get('AIK_UTMP')
+    return env if env else UTMP_DEFAULT
+
+
+def _mounts_path():
+    env = os.environ.get('AIK_PROC_MOUNTS')
+    return env if env else '/proc/mounts'
+
+
+def policy_conf_read(path):
+    """解析 policy.conf → (data, None) | (None, 人话原因)。
+
+    data={'raw': 原始行列表（写回/外科手术底稿）, 'sections': [{name,
+    is_user, user, keys: [(键,值)…保留出现序]}…], 'unparsed': [(行号,
+    原行)]}。行内 # 注释剥出值域；未知键/未知段名原样入表（如实列出，
+    不猜语义）；段外键/无等号行 → unparsed（诚实不猜）。
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            raw = f.read().splitlines()
+    except FileNotFoundError:
+        return None, 'policy.conf 不存在：%s（get 面无从读起）' % path
+    except OSError as e:
+        return None, 'policy.conf 读失败 %s: %s' % (path, e)
+    sections = []
+    unparsed = []
+    cur = None
+    for i, ln in enumerate(raw, 1):
+        s = ln.strip()
+        if not s or s.startswith('#'):
+            continue
+        if s.startswith('[') and s.endswith(']'):
+            name = s[1:-1].strip()
+            if not name or ']' in name or '[' in name:
+                unparsed.append((i, ln))
+                cur = None
+                continue
+            is_user = name.startswith(POLICY_USER_PREFIX)
+            cur = {'name': name, 'is_user': is_user,
+                   'user': name[len(POLICY_USER_PREFIX):] if is_user else None,
+                   'keys': []}
+            sections.append(cur)
+            continue
+        if '=' in s:
+            key, _, val = s.partition('=')
+            key = key.strip()
+            m = re.search(r'(?:^|\s)#', val)
+            if m:
+                val = val[:m.start()]
+            val = val.strip()
+            if not key or cur is None:
+                unparsed.append((i, ln))   # 键在段外/空键——原样
+                continue
+            cur['keys'].append((key, val))
+            continue
+        unparsed.append((i, ln))
+    return {'raw': raw, 'sections': sections, 'unparsed': unparsed}, None
+
+
+def policy_section_find(sections, name):
+    for sec in sections:
+        if sec['name'] == name:
+            return sec
+    return None
+
+
+def policy_key_get(sec, key):
+    if not sec:
+        return None
+    for k, v in sec['keys']:
+        if k == key:
+            return v
+    return None
+
+
+def _policy_wheel_group(sections):
+    """[wheel] 段的 group= 键（缺省 sudo——Ubuntu 出厂基线）。"""
+    v = policy_key_get(policy_section_find(sections, 'wheel'), 'group')
+    return v if v else 'sudo'
+
+
+def policy_effective(name, uid, sections, wheel_group, in_wheel):
+    """单人生效档推演 → {'mode':…|None, 'source':…, 'note':…|None}。
+
+    优先级 [user:X] > wheel 组员 > [default]；root 恒 [root]（缺段=
+    privileged 基线）。mode 键缺失/非法 → mode=None+note（诚实）。
+    推演仅供展示——生效面以内核侧读取器为准。
+    """
+    def _mode_of(sec_name, source):
+        sec = policy_section_find(sections, sec_name)
+        if sec is None:
+            if sec_name == 'root':
+                return {'mode': 'privileged', 'source': source,
+                        'note': '[root] 段缺失——按基线 privileged 推演'}
+            return {'mode': None, 'source': source,
+                    'note': '[%s] 段缺失' % sec_name}
+        v = policy_key_get(sec, 'mode')
+        if v not in POLICY_MODES:
+            return {'mode': None, 'source': source,
+                    'note': '[%s] mode=%r 非法档（合法：%s）'
+                            % (sec_name, v, '/'.join(POLICY_MODES))}
+        return {'mode': v, 'source': source, 'note': None}
+
+    if name == 'root' or uid == 0:
+        return _mode_of('root', 'root')
+    usec = policy_section_find(sections, POLICY_USER_PREFIX + name)
+    if usec is not None:
+        r = _mode_of(POLICY_USER_PREFIX + name, POLICY_USER_PREFIX + name)
+        return r
+    if in_wheel(name):
+        return _mode_of('wheel', 'wheel(%s 组)' % wheel_group)
+    return _mode_of('default', 'default')
+
+
+def _user_in_group(name, group):
+    try:
+        gr = grp.getgrnam(group)
+    except KeyError:
+        return False
+    try:
+        pe = pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return pe.pw_gid == gr.gr_gid or name in gr.gr_mem
+
+
+def _policy_effective_rows(sections):
+    """推演名单：root+全部 uid>=1000 实号+[user:X] 悬空名（OS 无此号也
+    如实入表）。→ [{'name','uid','mode','source','note'}…]（按 uid 排）。"""
+    wg = _policy_wheel_group(sections)
+    users = {}
+    for pe in pwd.getpwall():
+        if pe.pw_uid == 0 or pe.pw_uid >= 1000:
+            users[pe.pw_name] = pe.pw_uid
+    for sec in sections:
+        if sec['is_user'] and sec['user'] and sec['user'] not in users:
+            users[sec['user']] = None     # 悬空覆盖段——如实呈现
+    rows = []
+    for name, uid in users.items():
+        r = policy_effective(name, uid, sections, wg,
+                             lambda n: _user_in_group(n, wg))
+        rows.append({'name': name, 'uid': uid, 'mode': r['mode'],
+                     'source': r['source'], 'note': r['note']})
+    rows.sort(key=lambda r: (r['uid'] is None, r['uid'] if r['uid'] is not None
+                             else 0, r['name']))
+    return rows, wg
+
+
+def cmd_policy_get(args):
+    """整表结构化+每人生效档推演（只读，无 root 门槛——文件本身 root 属
+    0600/0644，非 root 得到人话读失败而非命令拒绝）。"""
+    path = _policy_conf_path()
+    data, err = policy_conf_read(path)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    rows, wg = _policy_effective_rows(data['sections'])
+    jsec = []
+    for sec in data['sections']:
+        jsec.append({'section': sec['name'],
+                     'kind': ('per_user' if sec['is_user'] else
+                              'known' if sec['name'] in POLICY_KNOWN_SECTIONS
+                              else 'unknown'),
+                     'keys': [{'key': k, 'value': v} for k, v in sec['keys']]})
+    jdata = {'path': path, 'sections': jsec,
+             'unparsed': [{'line': i, 'raw': ln}
+                          for i, ln in data['unparsed']],
+             'wheel_group': wg,
+             'effective': rows,
+             'note': '推演仅供展示——生效面以内核侧读取器'
+                     '（ai_user_policy）为准'}
+    if args.json:
+        print(json.dumps(jdata, ensure_ascii=False, indent=2))
+        return 0
+    print('policy.conf=%s' % path)
+    for sec in data['sections']:
+        tag = ('per-user' if sec['is_user'] else
+               'known' if sec['name'] in POLICY_KNOWN_SECTIONS else 'unknown')
+        print('[%s]（%s）' % (sec['name'], tag))
+        for k, v in sec['keys']:
+            bad = ''
+            if k == 'mode' and v not in POLICY_MODES:
+                bad = '   ← 非法档（合法：%s）' % '/'.join(POLICY_MODES)
+            print('  %s = %s%s' % (k, v, bad))
+    if data['unparsed']:
+        print('未解析行（原样，不猜）：')
+        for i, ln in data['unparsed']:
+            print('  %4d %s' % (i, ln))
+    print('生效档推演（[user:X]>wheel(%s)>[default]；root 恒 privileged）：'
+          % wg)
+    print('%-16s %-6s %-11s %-18s %s'
+          % ('用户', 'uid', '生效档', '来源段', '备注'))
+    for r in rows:
+        print('%-16s %-6s %-11s %-18s %s'
+              % (r['name'], '-' if r['uid'] is None else str(r['uid']),
+                 r['mode'] or '?', r['source'], r['note'] or ''))
+    print('注：推演仅供展示——生效面以内核侧读取器（ai_user_policy）为准。')
+    return 0
+
+
+def sudoers_read(path):
+    """解析 sudoers → (data, 人话原因|None)。data={'entries': […],
+    'unparsed': [(行号, 原行)]}。
+
+    只解确定性形态：`user|%组|别名 host [=(…)] cmds`（含续行 \\ 归并）；
+    Defaults/别名定义（User_Alias 单名单解）、include、网组等其余行
+    原样标 unparsed——诚实不猜。
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            raw = f.read().splitlines()
+    except FileNotFoundError:
+        return None, 'sudoers 不存在：%s' % path
+    except PermissionError:
+        return None, ('读 %s 权限不够——/etc/sudoers 仅 root 可读'
+                      '（perms 自然挡；sudo 跑）' % path)
+    except OSError as e:
+        return None, 'sudoers 读失败 %s: %s' % (path, e)
+    # 续行归并（行尾 \ 接下一行，行号=首行）
+    joined = []
+    buf, buf_ln = None, 0
+    for i, ln in enumerate(raw, 1):
+        if buf is not None:
+            buf += ' ' + ln.strip()
+        elif ln.strip():
+            buf, buf_ln = ln.rstrip(), i
+        else:
+            continue
+        if buf.endswith('\\'):
+            buf = buf[:-1].rstrip()
+            continue
+        joined.append((buf_ln, buf))
+        buf = None
+    if buf is not None:
+        joined.append((buf_ln, buf))
+    entries = []
+    unparsed = []
+    aliases = {}
+    alias_re = re.compile(r'^(User_Alias)\s+([A-Z][A-Z0-9_]*)\s*=\s*(.+)$')
+    for lineno, text in joined:
+        s = text.strip()
+        if not s:
+            continue
+        if s.startswith('#'):
+            if not s.startswith('#include'):
+                continue          # 普通注释——非解析对象，不入 unparsed
+            unparsed.append((lineno, text.strip()))
+            continue
+        if s.startswith('@includedir') or s.startswith('Defaults'):
+            unparsed.append((lineno, text.strip()))
+            continue
+        m = alias_re.match(s)
+        if m:
+            aliases[m.group(2)] = [p.strip() for p in m.group(3).split(',')
+                                   if p.strip()]
+            continue
+        if re.match(r'^(Cmnd_Alias|Host_Alias|Runas_Alias|User_Alias)\b', s):
+            unparsed.append((lineno, text.strip()))   # 多名/复杂别名——不猜
+            continue
+        toks = s.split()
+        if len(toks) < 2:
+            unparsed.append((lineno, text.strip()))
+            continue
+        utok = toks[0]
+        hosttok = toks[1]
+        rest = toks[2:]
+        runas = None
+        if '(' in hosttok:
+            # 常态粘连形：host=(runas)（真实 sudoers 无空格分隔）
+            idx = hosttok.find('(')
+            host = hosttok[:idx]
+            if not host or not hosttok.endswith(')'):
+                unparsed.append((lineno, text.strip()))
+                continue
+            runas = hosttok[idx + 1:-1]
+        elif '=' in hosttok:
+            host, _, tail = hosttok.partition('=')
+            rest = ([tail] if tail else []) + rest
+            while rest and rest[0] == '=':
+                rest = rest[1:]
+        else:
+            host = hosttok
+            while rest and rest[0] == '=':
+                rest = rest[1:]
+        if not rest:
+            unparsed.append((lineno, text.strip()))
+            continue
+        if utok.startswith('%'):
+            kind, token = 'group', utok[1:]
+            members = None
+            try:
+                members = grp.getgrnam(token).gr_mem
+            except KeyError:
+                pass
+        elif utok in aliases:
+            kind, token = 'alias', utok
+            members = aliases[utok]
+        elif utok == 'ALL':
+            kind, token, members = 'any', utok, None
+        elif re.match(r'^[A-Za-z0-9_.][A-Za-z0-9_.-]*$', utok) \
+                and not re.match(r'^[A-Z][A-Z0-9_]*$', utok):
+            kind, token, members = 'user', utok, None
+        else:
+            unparsed.append((lineno, text.strip()))   # 网组/uid 形态——不猜
+            continue
+        entries.append({'line': lineno, 'kind': kind, 'token': token,
+                        'members': members, 'host': host, 'runas': runas,
+                        'commands': ' '.join(rest), 'raw': text.strip()})
+    return {'entries': entries, 'unparsed': unparsed}, None
+
+
+def cmd_policy_get_sudoers(args):
+    """/etc/sudoers 结构化只读（解析不了的行原样标 unparsed）。"""
+    path = _sudoers_path()
+    data, err = sudoers_read(path)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({'path': path, **data}, ensure_ascii=False,
+                         indent=2))
+        return 0
+    print('sudoers=%s（只读——本命令绝不写 sudoers）' % path)
+    if not data['entries']:
+        print('（无已解析授权行）')
+    for e in data['entries']:
+        runas = '(%s)' % e['runas'] if e['runas'] else ''
+        print('%4d %-14s %s%s %s'
+              % (e['line'], e['kind'] + ':' + e['token'],
+                 e['host'], runas, e['commands']))
+        if e['members'] is not None:
+            print('     ├ 成员：%s' % ', '.join(e['members']))
+    if data['unparsed']:
+        print('unparsed（原样，不猜）：')
+        for i, ln in data['unparsed']:
+            print('  %4d %s' % (i, ln))
+    return 0
+
+
+def policy_set_user_lines(raw_lines, name, mode):
+    """行级外科手术：更新/追加 [user:NAME] 段的 mode= 行；其余行逐字节
+    原样（含注释/空行/未知键/其它段）。→ 新行列表。"""
+    hdr = '[user:%s]' % name
+    mode_ln = 'mode = %s' % mode
+    out = list(raw_lines)
+    start = None
+    for i, ln in enumerate(out):
+        if ln.strip() == hdr:
+            start = i
+            break
+    if start is None:
+        if out and out[-1].strip():
+            out.append('')                      # 与前文空行隔开
+        out.append(hdr)
+        out.append(mode_ln)
+        return out
+    end = len(out)
+    for j in range(start + 1, len(out)):
+        s2 = out[j].strip()
+        if s2.startswith('[') and s2.endswith(']'):
+            end = j
+            break
+    for j in range(start + 1, end):
+        c = out[j].strip()
+        if not c or c.startswith('#'):
+            continue
+        if c.partition('=')[0].strip() == 'mode':
+            out[j] = mode_ln                    # 只换 mode 行，行内注释
+            return out                          # 旧注释随之弃——diff 可见
+    out.insert(end, mode_ln)
+    return out
+
+
+def _policy_backup_path(conf):
+    d = os.path.dirname(conf) or '.'
+    base = os.path.basename(conf)
+    ts = time.strftime('%Y%m%d-%H%M%S')
+    cand = os.path.join(d, '%s.bak.%s' % (base, ts))
+    n = 1
+    while os.path.exists(cand):
+        cand = os.path.join(d, '%s.bak.%s-%d' % (base, ts, n))
+        n += 1
+    return cand
+
+
+def _policy_backup_list(conf):
+    d = os.path.dirname(conf) or '.'
+    base = os.path.basename(conf)
+    pat = re.compile(r'^' + re.escape(base)
+                     + r'\.bak\.\d{8}-\d{6}(?:-\d+)?$')
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    return sorted(os.path.join(d, nm) for nm in names if pat.match(nm))
+
+
+def _file_write_bytes(path, data, mode=0o600):
+    """tmp+rename 原子写（字节逐字节；mode 显式给）。→ None|人话原因。"""
+    tmp = '%s.tmp.%d' % (path, os.getpid())
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return '原子写失败 %s: %s' % (path, e)
+    return None
+
+
+def _policy_conf_write(path, lines):
+    """原子写新内容；权限=现文件 mode & 0777（现文件不在=0600）。"""
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    body = '\n'.join(lines) + ('\n' if lines else '')
+    return _file_write_bytes(path, body.encode('utf-8'), mode)
+
+
+def _need_root_policy(sub):
+    if os.geteuid() != 0:
+        print('拒绝：aikctl policy %s 需要 root（改 %s 生效档）。'
+              '只读面用 aikctl policy get。' % (sub, _policy_conf_path()),
+              file=sys.stderr)
+        return False
+    return True
+
+
+def cmd_policy_set_user(args):
+    """aikctl policy set user NAME mode=档 [--yes]——W2 确认+备份+回滚。"""
+    if getattr(args, 'rollback', False):
+        return _policy_rollback()
+    if not _need_root_policy('set'):
+        return 1
+    spec = args.modespec
+    if not spec.startswith('mode='):
+        print('用法：aikctl policy set user <名> mode=%s（收到 %r）'
+              % ('|'.join(POLICY_MODES), spec), file=sys.stderr)
+        return 2
+    mode = spec[len('mode='):]
+    if mode not in POLICY_MODES:
+        print('拒绝：mode=%r 非法档（合法：%s）'
+              % (mode, '/'.join(POLICY_MODES)), file=sys.stderr)
+        return 2
+    if args.name == 'root':
+        print('拒绝：root 恒 privileged（[root] 段即权威），无 per-user '
+              '覆盖一说', file=sys.stderr)
+        return 1
+    nerr = _user_name_check(args.name)
+    if nerr:
+        print(nerr, file=sys.stderr)
+        return 1
+    if not _os_user_exists(args.name):
+        print('拒绝：OS 无此号 %s（id 校验不过——per-user 覆盖段只落'
+              '实号）' % args.name, file=sys.stderr)
+        return 1
+    path = _policy_conf_path()
+    data, err = policy_conf_read(path)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    new_lines = policy_set_user_lines(data['raw'], args.name, mode)
+    if new_lines == data['raw']:
+        print('[user:%s] 已是 mode = %s——幂等，未写' % (args.name, mode))
+        return 0
+    for ln in difflib.unified_diff(data['raw'], new_lines,
+                                   fromfile='policy.conf(前)',
+                                   tofile='policy.conf(后)', lineterm=''):
+        print(ln)
+    if not args.yes:
+        print('拒绝：policy set 是 W2 写操作（改 %s 生效档——上面是前/后'
+              ' diff，未写）。\n下一步：aikctl policy set user %s mode=%s '
+              '--yes' % (path, args.name, mode), file=sys.stderr)
+        return 2
+    backup = _policy_backup_path(path)
+    try:
+        with open(path, 'rb') as f:
+            cur = f.read()
+        berr = _file_write_bytes(backup, cur, os.stat(path).st_mode & 0o777)
+    except OSError as e:
+        berr = '读现文件失败 %s: %s' % (path, e)
+    if berr:
+        print('失败：写前备份未成（%s）——未动 %s' % (berr, path),
+              file=sys.stderr)
+        return 1
+    werr = _policy_conf_write(path, new_lines)
+    if werr:
+        print(werr, file=sys.stderr)
+        return 1
+    print('policy set user %s mode=%s：已写（[user:%s] 段；其余行逐字节'
+          '原样）' % (args.name, mode, args.name))
+    print('  备份：%s' % backup)
+    print('  回滚：aikctl policy set --rollback（恢复最近一次备份）')
+    return 0
+
+
+def _policy_rollback():
+    path = _policy_conf_path()
+    if not _need_root_policy('set --rollback'):
+        return 1
+    baks = _policy_backup_list(path)
+    if not baks:
+        print('无备份可恢复（%s.bak.<时间戳> 一个都没有——set 从未写过'
+              '或备份被清）' % path, file=sys.stderr)
+        return 1
+    latest = baks[-1]
+    try:
+        with open(latest, 'rb') as f:
+            data = f.read()
+    except OSError as e:
+        print('备份读失败 %s: %s' % (latest, e), file=sys.stderr)
+        return 1
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    werr = _file_write_bytes(path, data, mode)
+    if werr:
+        print(werr, file=sys.stderr)
+        return 1
+    try:
+        os.unlink(latest)          # 消费式：恢复成功才用掉该备份——
+    except OSError:                # 再 --rollback 可退更早一版
+        pass
+    print('已回滚：%s → %s（逐字节恢复；该备份已消费——再 --rollback '
+          '可退更早一版）' % (latest, path))
+    return 0
+
+
+def cmd_policy_set(args):
+    """aikctl policy set --rollback（无 user 子命令时唯一合法形态）。"""
+    if args.rollback:
+        return _policy_rollback()
+    print('用法：aikctl policy set user <名> mode=%s [--yes] | '
+          'aikctl policy set --rollback' % '|'.join(POLICY_MODES),
+          file=sys.stderr)
+    return 2
+
+
+def utmp_pack(rec):
+    """utmp 记录 dict → 384B bytes（selftest 编解码往返/桩生成用）。"""
+    return struct.pack(
+        UTMP_FMT, rec['type'], rec.get('pid', 0),
+        rec.get('line', '').encode('utf-8')[:32],
+        rec.get('id', '').encode('utf-8')[:4],
+        rec.get('user', '').encode('utf-8')[:32],
+        rec.get('host', '').encode('utf-8')[:256],
+        rec.get('e_term', 0), rec.get('e_exit', 0),
+        rec.get('session', 0), rec.get('tv_sec', 0), rec.get('tv_usec', 0),
+        bytes(16))
+
+
+def _cstr(b):
+    return b.split(b'\x00', 1)[0].decode('utf-8', 'replace')
+
+
+def utmp_parse(data):
+    """utmp 字节流 → (sessions, warnings)。384B 步进；USER_PROCESS(7)
+    且 user 非空入表；尺寸非整倍/空名 USER_PROCESS → warnings（诚实）。"""
+    sessions = []
+    warns = []
+    if len(data) % UTMP_REC_SIZE:
+        warns.append('文件尺寸 %d 非 %dB 整数倍——尾 %d 字节忽略'
+                     % (len(data), UTMP_REC_SIZE, len(data) % UTMP_REC_SIZE))
+    for i in range(len(data) // UTMP_REC_SIZE):
+        (t, pid, line, lid, user, host, et, ee, sess, sec, usec,
+         addr) = struct.unpack_from(UTMP_FMT, data, i * UTMP_REC_SIZE)
+        if t != UTMP_USER_PROCESS:
+            continue
+        u = _cstr(user)
+        if not u:
+            warns.append('记录 %d：USER_PROCESS 但 user 空——跳过' % i)
+            continue
+        sessions.append({'user': u, 'tty': _cstr(line), 'host': _cstr(host),
+                         'pid': pid, 'session': sess, 'begin_epoch': sec,
+                         'begin_usec': usec})
+    return sessions, warns
+
+
+def _tty_idle_secs(line):
+    """tty 对应 /dev/<line> 的 atime 与 now 差（秒）；不可得=None。"""
+    if not line or line.startswith('/'):
+        return None
+    try:
+        at = os.stat('/dev/%s' % line).st_atime
+    except OSError:
+        return None
+    return max(0, int(time.time() - at))
+
+
+def _fmt_idle(s):
+    if s is None:
+        return '-'
+    if s < 60:
+        return '%ds' % s
+    if s < 3600:
+        return '%dm%ds' % (s // 60, s % 60)
+    return '%dh%dm' % (s // 3600, (s % 3600) // 60)
+
+
+def cmd_session_list(args):
+    """活登录会话面（/var/run/utmp USER_PROCESS；--json）。"""
+    path = _utmp_path()
+    try:
+        with open(path, 'rb') as f:
+            blob = f.read()
+    except FileNotFoundError:
+        blob = b''
+        sess, warns = [], ['%s 不存在——当前无 utmp 会话记录' % path]
+    except OSError as e:
+        print('utmp 读失败 %s: %s' % (path, e), file=sys.stderr)
+        return 1
+    else:
+        sess, warns = utmp_parse(blob)
+    note = '仅活会话面（/var/run/utmp）；/var/log/wtmp 登录历史不在此面'
+    if args.json:
+        out = []
+        for s in sess:
+            out.append({'user': s['user'], 'tty': s['tty'],
+                        'host': s['host'] or None, 'pid': s['pid'],
+                        'begin_epoch': s['begin_epoch'],
+                        'begin_local': datetime.fromtimestamp(
+                            s['begin_epoch']).strftime('%Y-%m-%d %H:%M:%S'),
+                        'idle_seconds': _tty_idle_secs(s['tty'])})
+        print(json.dumps({'utmp': path, 'sessions': out,
+                          'warnings': warns, 'note': note},
+                         ensure_ascii=False, indent=2))
+        return 0
+    print('utmp=%s 记录=%d USER_PROCESS 会话=%d'
+          % (path, len(blob) // UTMP_REC_SIZE, len(sess)))
+    if not sess:
+        print('（无 USER_PROCESS 活会话）')
+    print('%-16s %-10s %-24s %-19s %-8s'
+          % ('用户', 'TTY', '来源', '登录于(本地)', '空闲'))
+    for s in sess:
+        idle = _tty_idle_secs(s['tty'])
+        print('%-16s %-10s %-24s %-19s %-8s'
+              % (s['user'], s['tty'] or '-', s['host'] or '-',
+                 datetime.fromtimestamp(s['begin_epoch']).strftime(
+                     '%Y-%m-%d %H:%M:%S'), _fmt_idle(idle)))
+    for w in warns:
+        print('警告：%s' % w)
+    print('注：%s；idle=对应 /dev/<tty> atime 推算（不可得=-）' % note)
+    return 0
+
+
+def quota_probe():
+    """探测 quota 工具（PATH）+配额挂载（/proc/mounts usrquota/grpquota）。
+    → (tools{name:path|None}, mounts[{dev,mount,fstype,usrquota,grpquota,
+    opts}], mounts 读失败原因|None)。"""
+    tools = {t: shutil.which(t) for t in ('quota', 'repquota', 'setquota')}
+    mounts = []
+    try:
+        with open(_mounts_path(), 'r', encoding='utf-8',
+                  errors='replace') as f:
+            mlines = f.read().splitlines()
+    except OSError as e:
+        return tools, mounts, '读 %s 失败：%s' % (_mounts_path(), e)
+    for ln in mlines:
+        toks = ln.split()
+        if len(toks) < 4:
+            continue
+        opts = toks[3].split(',')
+        has_u = any('usrquota' in o for o in opts)
+        has_g = any('grpquota' in o for o in opts)
+        if has_u or has_g:
+            mounts.append({'dev': toks[0], 'mount': toks[1],
+                           'fstype': toks[2], 'usrquota': has_u,
+                           'grpquota': has_g, 'opts': toks[3]})
+    return tools, mounts, None
+
+
+def _quota_num(tok):
+    return re.match(r'^\d+[KMGTM]?$', tok) is not None
+
+
+def quota_parse_table(text):
+    """`quota -u/-g` 表 → rows（fs/blocks/inodes soft-hard-grace 字符串
+    原样——不猜单位）。解析不了的行丢弃（工具面，非用户契约）。"""
+    rows = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s.startswith('Disk quotas') \
+                or s.lower().startswith('filesystem'):
+            continue
+        toks = s.split()
+        if len(toks) >= 9 and _quota_num(toks[1]) and _quota_num(toks[5]):
+            rows.append({'fs': toks[0],
+                         'blocks': {'used': toks[1], 'soft': toks[2],
+                                    'hard': toks[3], 'grace': toks[4]},
+                         'inodes': {'used': toks[5], 'soft': toks[6],
+                                    'hard': toks[7], 'grace': toks[8]}})
+    return rows
+
+
+def quota_state(tools, mounts, kind):
+    """缺席判定（纯函数，selftest 桩用）：→ {'status':'ok'|'unavailable',
+    'reason':…}。缺席是合法态不是错误。"""
+    if mounts is None:
+        return {'status': 'unavailable', 'reason': '挂载表不可读'}
+    if not tools.get('quota'):
+        return {'status': 'unavailable',
+                'reason': 'quota 工具不在 PATH（探测：quota=%s repquota=%s '
+                          'setquota=%s）'
+                          % (tools.get('quota') or '缺',
+                             tools.get('repquota') or '缺',
+                             tools.get('setquota') or '缺')}
+    key = 'usrquota' if kind == 'user' else 'grpquota'
+    if not any(m.get(key) for m in mounts):
+        return {'status': 'unavailable',
+                'reason': '无 %s 配额挂载（%s 探测为空——本机文件系统'
+                          '未开配额）' % (key, _mounts_path())}
+    return {'status': 'ok', 'reason': None}
+
+
+def cmd_quota_get(args):
+    """aikctl quota get [user|group] [--name X] [--json]（G-007）。"""
+    if args.kind == 'user':
+        name = args.name or getpass.getuser()
+    else:
+        name = args.name or grp.getgrgid(os.getgid()).gr_name
+    tools, mounts, merr = quota_probe()
+    tools_bool = {k: bool(v) for k, v in tools.items()}
+    st = quota_state(tools, None if merr else mounts, args.kind)
+    base = {'status': st['status'], 'kind': args.kind, 'name': name,
+            'tools': tools_bool,
+            'mounts': mounts if not merr else [],
+            'mounts_error': merr}
+    if st['reason']:
+        base['reason'] = st['reason']
+    if st['status'] == 'unavailable':
+        base.update(st)
+        if args.json:
+            print(json.dumps(base, ensure_ascii=False, indent=2))
+        else:
+            print('配额面 kind=%s name=%s：unavailable' % (args.kind, name))
+            print('  原因：%s' % st['reason'])
+            if merr:
+                print('  %s' % merr)
+            print('（工具/挂载缺席是合法态，非错误——rc 0）')
+        return 0
+    cp = subprocess.run([tools['quota'], '-g' if args.kind == 'group'
+                         else '-u', name], capture_output=True, text=True,
+                        timeout=30)
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or '').strip() or 'rc=%d' \
+            % cp.returncode
+        print('quota %s %s 失败：%s' % (args.kind, name, detail),
+              file=sys.stderr)
+        return 1
+    rows = quota_parse_table(cp.stdout)
+    base['rows'] = rows
+    if args.json:
+        print(json.dumps(base, ensure_ascii=False, indent=2))
+        return 0
+    print('配额面 kind=%s name=%s（工具：quota=%s repquota=%s setquota=%s）'
+          % (args.kind, name, '在' if tools_bool['quota'] else '缺',
+             '在' if tools_bool['repquota'] else '缺',
+             '在' if tools_bool['setquota'] else '缺'))
+    for m in mounts:
+        tag = '+'.join(t for t in ('usrquota', 'grpquota') if m.get(t))
+        print('配额挂载：%s on %s（%s）' % (m['dev'], m['mount'], tag))
+    if not rows:
+        print('（quota 无输出行——该 %s 无配额记录）' % args.kind)
+        return 0
+    print('%-20s %-22s %-22s'
+          % ('Filesystem', 'blocks used/soft/hard', 'inodes used/soft/hard'))
+    for r in rows:
+        print('%-20s %-22s %-22s'
+              % (r['fs'],
+                 '%s/%s/%s' % (r['blocks']['used'], r['blocks']['soft'],
+                               r['blocks']['hard']),
+                 '%s/%s/%s' % (r['inodes']['used'], r['inodes']['soft'],
+                               r['inodes']['hard'])))
+    return 0
+
+
+def _audit_home_dirs():
+    env = os.environ.get('AIK_AUDIT_HOME_DIRS')
+    if env:
+        return [d for d in env.split(':') if d]
+    dirs = ['/root']
+    try:
+        for nm in sorted(os.listdir('/home')):
+            p = os.path.join('/home', nm)
+            if os.path.isdir(p):
+                dirs.append(p)
+    except OSError:
+        pass
+    return dirs
+
+
+def _audit_log_path(home):
+    return os.path.join(home, '.aikernel', 'audit.log')
+
+
+def _audit_read_lines(path, n):
+    """→ (lines|None, 人话原因|None)。行原样（audit 行已含 uid=/user=）。"""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return None, None        # 缺失=合法态，由调用方给上下文人话
+    except OSError as e:
+        return None, '读失败 %s: %s' % (path, e)
+    return lines[-n:] if n > 0 else [], None
+
+
+def _need_root_audit(sub):
+    if os.geteuid() != 0:
+        print('拒绝：aikctl audit tail %s 看他人审计日志需要 root。'
+              '自己的面：aikctl audit tail（不带参数）。' % sub,
+              file=sys.stderr)
+        return False
+    return True
+
+
+def cmd_audit_tail(args):
+    """aikctl audit tail [--user X] [--all] [-n N]——行原样尾读。"""
+    if args.n < 0:
+        print('拒绝：-n 不能为负（收到 %d）' % args.n, file=sys.stderr)
+        return 2
+    if args.all_users:
+        if not _need_root_audit('--all'):
+            return 1
+        dirs = _audit_home_dirs()
+        shown = 0
+        missing = []
+        homes = []
+        for home in dirs:
+            nm = os.path.basename(home.rstrip('/')) or home
+            log = _audit_log_path(home)
+            lines, rerr = _audit_read_lines(log, args.n)
+            if rerr:
+                print('警告：%s：%s（跳过）' % (nm, rerr), file=sys.stderr)
+                continue
+            if lines is None:
+                missing.append(nm)
+                continue
+            homes.append(nm)
+            for ln in lines:
+                print('%s: %s' % (nm, ln))
+                shown += 1
+        print('聚合 %d 家（%s）共 %d 行（每家尾 %d）%s'
+              % (len(homes), ' '.join(homes) or '-', shown, args.n,
+                 '；无日志：' + ' '.join(missing) if missing else ''),
+              file=sys.stderr)
+        return 0
+    if args.user:
+        if not _need_root_audit('--user'):
+            return 1
+        try:
+            pe = pwd.getpwnam(args.user)
+        except KeyError:
+            print('拒绝：OS 无此号 %s（getpwnam 查无）' % args.user,
+                  file=sys.stderr)
+            return 1
+        log = _audit_log_path(pe.pw_dir)
+        lines, rerr = _audit_read_lines(log, args.n)
+        if rerr:
+            print(rerr, file=sys.stderr)
+            return 1
+        if lines is None:
+            print('无审计日志：%s（该号还没跑过任何被审计动作）' % log)
+            return 0
+        for ln in lines:
+            print(ln)
+        return 0
+    home = os.path.expanduser('~')
+    log = _audit_log_path(home)
+    lines, rerr = _audit_read_lines(log, args.n)
+    if rerr:
+        print(rerr, file=sys.stderr)
+        return 1
+    if lines is None:
+        print('无审计日志：%s（还没跑过任何被审计动作）' % log)
+        return 0
+    for ln in lines:
+        print(ln)
+    return 0
+
+
 def _to_int(v):
     try:
         return int(str(v))
@@ -4163,7 +5255,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     st = sub.add_parser('selftest', help='xxh64 向量 + 合成链篡改检出 + '
-                       'user gate 格式往返自检')
+                       'user gate 格式往返 + P-2B policy/utmp/quota/sudoers '
+                       '桩自检')
     st.set_defaults(func=cmd_selftest)
 
     p_ab = sub.add_parser('abi', help='REG ABI 版本协商双探（K10b）')
@@ -4481,6 +5574,72 @@ def main(argv=None):
                       dest='password_stdin',
                       help='新密码从 stdin 单行读（缺省交互两次）')
     u_pw.set_defaults(func=cmd_user_passwd)
+
+    # P-2 Phase B：结构化读四件（G-012/G-025/G-007 + audit tail）
+    p_pol = sub.add_parser('policy', help='P-2 分级策略面（get/set；'
+                           'G-012；格式与内核侧 per-user 读取器对齐）')
+    polsub = p_pol.add_subparsers(dest='policy_cmd')
+
+    p_pg = polsub.add_parser('get', help='policy.conf 整表结构化+每人生效'
+                             '档推演（只读；推演仅供展示，生效面以内核侧'
+                             '为准）')
+    p_pg.add_argument('--json', action='store_true',
+                      help='结构化 JSON 输出（G 系口径）')
+    pgsub = p_pg.add_subparsers(dest='policy_get_cmd')
+    p_pgs = pgsub.add_parser('sudoers', help='/etc/sudoers 结构化只读'
+                             '（解析不了的行原样标 unparsed；仅 root 可读'
+                             '=perms 自然挡）')
+    p_pgs.add_argument('--json', action='store_true',
+                       help='结构化 JSON 输出（G 系口径）')
+    p_pgs.set_defaults(func=cmd_policy_get_sudoers)
+    p_pg.set_defaults(func=cmd_policy_get)
+
+    p_ps = polsub.add_parser('set', help='改 per-user 档（[user:X] 段；'
+                             'W2 --yes 硬门+写前备份+--rollback）')
+    p_ps.add_argument('--rollback', action='store_true',
+                      help='恢复最近一次备份（policy.conf.bak.<ts> 逐字节）')
+    pssub = p_ps.add_subparsers(dest='policy_set_cmd')
+    p_psu = pssub.add_parser('user', help='设置 [user:NAME] 段的 mode=')
+    p_psu.add_argument('name', metavar='NAME',
+                       help='用户名（须 OS 实号；root 拒绝）')
+    p_psu.add_argument('modespec', metavar='mode=MODE',
+                       help='mode=privileged|confirmed|restricted')
+    p_psu.add_argument('--yes', action='store_true',
+                       help='确认真写（W2 硬门；缺省只打前/后 diff 不写）')
+    p_psu.set_defaults(func=cmd_policy_set_user)
+    p_ps.set_defaults(func=cmd_policy_set)
+
+    p_ses = sub.add_parser('session', help='活登录会话面（utmp '
+                           'USER_PROCESS；G-025）')
+    sessub = p_ses.add_subparsers(dest='session_cmd', required=True)
+    p_sl = sessub.add_parser('list', help='USER_PROCESS 会话表（用户/tty/'
+                             '来源/登录时间/idle）')
+    p_sl.add_argument('--json', action='store_true',
+                      help='结构化 JSON 输出（G 系口径）')
+    p_sl.set_defaults(func=cmd_session_list)
+
+    p_q = sub.add_parser('quota', help='文件系统配额面（G-007；缺席=诚实 '
+                        'unavailable 非 error）')
+    qsub2 = p_q.add_subparsers(dest='quota_cmd', required=True)
+    p_qg = qsub2.add_parser('get', help='blocks/inodes soft/hard 结构化'
+                            '（探测 quota 工具+usrquota/grpquota 挂载）')
+    p_qg.add_argument('kind', nargs='?', choices=['user', 'group'],
+                      default='user', help='user（缺省）|group')
+    p_qg.add_argument('--name', default=None, metavar='NAME',
+                      help='查谁（缺省=当前用户/当前主组）')
+    p_qg.add_argument('--json', action='store_true',
+                      help='结构化 JSON 输出（G 系口径）')
+    p_qg.set_defaults(func=cmd_quota_get)
+
+    p_tl = asub.add_parser('tail', help='用户家 ~/.aikernel/audit.log 尾'
+                           'N 行原样（--user/--all=root 专；P-2 Phase B）')
+    p_tl.add_argument('--user', default=None, metavar='NAME',
+                      help='看该号的家（root 专；非 root 请求=人话拒绝）')
+    p_tl.add_argument('--all', action='store_true', dest='all_users',
+                      help='聚合 /root+/home/*（root 专；行首标用户）')
+    p_tl.add_argument('-n', type=int, default=20, metavar='N',
+                      help='尾 N 行（缺省 20）')
+    p_tl.set_defaults(func=cmd_audit_tail)
 
     args = ap.parse_args(argv)
     return args.func(args)
