@@ -80,6 +80,13 @@ lang = "zh"
 mode = "auto"
 local_catalog = false
 
+[api]
+# SENSE 暴露侧脱敏出厂档（D-3① 翻档 2026-11-22，P2-MULTIUSER）：
+# soft 与 aistreamd.conf SENSE_REDACT=soft 同步（两面同出厂默认）；
+# off=单用户零字节；strict=多租户/不可信消费方。改后重启
+# aikernel-api 生效。
+sense_redact = "soft"
+
 # [models.local] 在本地模型安装（aik model install）后自动生成；出厂无
 EOF
 }
