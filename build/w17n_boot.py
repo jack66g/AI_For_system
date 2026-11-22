@@ -99,7 +99,9 @@ def seed_gate():
         "sudo mkdir -p /mnt/w17g/etc/aikernel /mnt/w17g/var/lib/aikernel",
         "printf 'admin:%s:0\\nroot:%s:0\\n' %s %s"
         " | sudo tee /mnt/w17g/etc/aikernel/console-gate >/dev/null" % (h, h, h, h),
-        "sudo chmod 600 /mnt/w17g/etc/aikernel/console-gate",
+        # P-60：0640 root:aik-gate(gid 942)——非 root occ 组读面
+        "sudo chown 0:942 /mnt/w17g/etc/aikernel/console-gate",
+        "sudo chmod 640 /mnt/w17g/etc/aikernel/console-gate",
         "echo root | sudo tee /mnt/w17g/var/lib/aikernel/console-gate.last"
         " >/dev/null",
         "sudo chmod 600 /mnt/w17g/var/lib/aikernel/console-gate.last",

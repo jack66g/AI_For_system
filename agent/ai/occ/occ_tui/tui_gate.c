@@ -552,6 +552,7 @@ static int gate_login_input(tui_input *in, struct gate_field *uf,
 struct gate_cd {
 	char name[GATE_USER_MAX];
 	uint64_t until;
+	int fails;		/* P-60：进程内失败计数（非 root 组只读面） */
 };
 
 static int gate_cd_find(const struct gate_cd *tab, const char *name)
@@ -562,6 +563,24 @@ static int gate_cd_find(const struct gate_cd *tab, const char *name)
 		if (tab[i].name[0] && strcmp(tab[i].name, name) == 0)
 			return i;
 	return -1;
+}
+
+/* P-60：失败计数入内存槽（找位或建位；不动 until——冷却由 arm 管）。
+ * 满 8 槽丢计数不炸（冷却表兜底仍在）。 */
+static void gate_cd_note(struct gate_cd *tab, const char *name,
+			 int fails)
+{
+	int i = gate_cd_find(tab, name);
+
+	if (i < 0) {
+		for (i = 0; i < GATE_CD_SLOTS && tab[i].name[0]; i++)
+			;
+		if (i == GATE_CD_SLOTS)
+			return;
+		snprintf(tab[i].name, sizeof(tab[i].name), "%s", name);
+		tab[i].until = 0;
+	}
+	tab[i].fails = fails;
 }
 
 static void gate_cd_arm(struct gate_cd *tab, const char *name,
@@ -908,6 +927,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			{
 				int ci = gate_cd_find(cd_tab, uname);
 				uint64_t now_ms = gate_now_ms();
+				int mem_fails = ci >= 0 ? cd_tab[ci].fails : 0;
 
 				if (ci >= 0) {
 					if (now_ms < cd_tab[ci].until) {
@@ -923,14 +943,25 @@ static int gate_run_ui(int mode, int *unlocked)
 						continue;
 					}
 					/* 冷却期满：清该用户计数（文件+
-					 * 内存）——冷却后计数清零口径 */
+					 * 内存）——冷却后计数清零口径。
+					 * P-60：仅真武装过的槽（until>0）走
+					 * 此路——gate_cd_note 的纯计数槽
+					 * （until=0）不得误触清零。 */
+					if (cd_tab[ci].until > 0) {
 					cd_tab[ci].name[0] = '\0';
+					cd_tab[ci].fails = 0;
+					mem_fails = 0;
 					(void)tui_gate_write_entry(
 						tui_gate_path(), uname,
 						hash, 0);
 					file_fails = 0;
+					}
 				}
-				if (file_fails >= GATE_MAX_FAIL) {
+				/* P-60：有效计数=文件与内存取大——非 root（gate 0640 */
+				/* 组只读）文件写不进恒 0，内存计数保 per-boot 锁定； */
+				/* root 侧文件持久计数跨重启优先生效 */
+				if ((file_fails > mem_fails ? file_fails : mem_fails)
+				    >= GATE_MAX_FAIL) {
 					/* 文件残留计数≥3（如 gate 进程
 					 * 重启）：重启不清锁——重新起算
 					 * 10s 冷却（诚实防绕） */
@@ -954,11 +985,13 @@ static int gate_run_ui(int mode, int *unlocked)
 					break;
 				}
 				{
-					int nf = file_fails + 1;
+					int nf = (file_fails > mem_fails ? file_fails : mem_fails)
+					    + 1;
 
 					(void)tui_gate_write_entry(
 						tui_gate_path(), uname,
 						hash, nf);
+					gate_cd_note(cd_tab, uname, nf);
 					if (nf >= GATE_MAX_FAIL) {
 						gate_cd_arm(cd_tab, uname,
 							    gate_now_ms() +

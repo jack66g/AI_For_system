@@ -107,6 +107,17 @@ ensure_dir("/var/ai/work", 0o755)
 # （全链空=load -1 硬拒契约；17.11 装机台架 admin 章咬出）
 install_file("/etc/aikernel/models.d/cloud.toml",
              F + "/etc/aikernel/models.d/cloud.toml", 0o644)
+# P-60：aik-gate 系统组（gate 文件 0640 组读面——非 root occ 须读
+# gate 渲染 LOGIN；gid 942 定值=种子/断言用）
+r = subprocess.run(["chroot", ROOT, "getent", "group", "aik-gate"],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    r2 = subprocess.run(["chroot", ROOT, "groupadd", "-r", "-g", "942",
+                         "aik-gate"], capture_output=True, text=True)
+    assert r2.returncode == 0, "groupadd aik-gate: " + r2.stderr
+    print("group aik-gate created (gid 942)")
+else:
+    print("group aik-gate present:", r.stdout.strip())
 
 # 1d) P-2 Phase C：出厂 model.toml（暴露侧 soft）——单源= aik-reset
 #     write_factory_model_toml heredoc（toml_replace_section 为逐段手术，
@@ -290,6 +301,9 @@ assert '[api]' in mtoml and 'sense_redact = "soft"' in mtoml, \
 polc = open(ROOT + "/etc/aikernel/policy.conf", encoding="utf-8").read()
 assert "[user:" in polc, "policy.conf lacks [user:] 示例段"
 assert os.path.isdir(ROOT + "/etc/aikernel/models.d")
+r = subprocess.run(["chroot", ROOT, "getent", "group", "aik-gate"],
+                   capture_output=True, text=True)
+assert r.returncode == 0 and ":942:" in r.stdout, "aik-gate group missing"
 mdc = open(ROOT + "/etc/aikernel/models.d/cloud.toml",
            encoding="utf-8").read()
 assert "[models.cloud]" in mdc and "base_url" in mdc, \

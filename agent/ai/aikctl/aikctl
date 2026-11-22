@@ -3980,7 +3980,17 @@ def gate_write(path, raw_lines):
                 f.write('\n'.join(raw_lines) + '\n')
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
+        # P-60：0640 root:aik-gate——非 root 的 occ（setpriv 后）须
+        # 读 gate 渲染 LOGIN 框（0600 时代读失败→误入 SETUP 向导，
+        # 17.11 装机台架咬出）。组缺席=旧机升级前过渡，回落老口径
+        # 0600 root:root（非 root gate 不可用直到建组）。哈希组内
+        # 可读=已登记硬话项（出厂硬化：root 侧 gate/token 化）。
+        try:
+            gid = grp.getgrnam('aik-gate').gr_gid
+            os.chown(tmp, 0, gid)
+            os.chmod(tmp, 0o640)
+        except (KeyError, OSError, PermissionError):
+            os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError as e:
         try:
@@ -4239,12 +4249,28 @@ def _user_add_impl(args):
                      '（gate 行未写/既有行保留）'), file=sys.stderr)
 
     # ① OS 号（+--wheel 并 sudo 组）
-    rc, err = _run_cmd(['useradd', '-m', '-s', '/bin/sh', args.name])
+    # P-60：并 aik-gate 组（gate 文件组读面；组缺席不阻建号）
+    ucmd = ['useradd', '-m', '-s', '/bin/sh', args.name]
+    try:
+        grp.getgrnam('aik-gate')
+        ucmd = ['useradd', '-m', '-s', '/bin/sh', '-G', 'aik-gate',
+                args.name]
+    except KeyError:
+        pass
+    rc, err = _run_cmd(ucmd)
     if rc != 0:
         print('useradd 失败：%s' % (err or 'rc=%d' % rc), file=sys.stderr)
         return 1
     if args.wheel:
-        rc, err = _run_cmd(['usermod', '-aG', 'sudo', args.name])
+        # P-60：组表动态——aik-gate 缺席（L1/旧盘）只并 sudo
+        _wgroups = ['sudo']
+        try:
+            grp.getgrnam('aik-gate')
+            _wgroups.append('aik-gate')
+        except KeyError:
+            pass
+        rc, err = _run_cmd(['usermod', '-aG', ','.join(_wgroups),
+                            args.name])
         if rc != 0:
             _rollback()
             print('失败：--wheel 并入 sudo 组未成（sudo 组在吗？）：%s'
