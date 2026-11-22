@@ -87,6 +87,18 @@ local_catalog = false
 # aikernel-api 生效。
 sense_redact = "soft"
 
+[models.cloud]
+# 出厂云端槽骨架（P-60 2026-11-23 补）：resolve 校验面 base_url
+# 必填（provider.c occ_provider_resolve_ex B3 门）——本模板原
+# 零 [models.*] 段=occ TUI 在 gate 渲染前 rc=1 死循环（槽位解
+# 析先于 tui_gate_enter；17.11 装机台架咬出）。缺省指本机
+# ollama OpenAI 兼容口=与无文件时代代码缺省同语义；onboarding
+# 密钥向导/手填即换真云端。
+provider_type = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model_name = ""
+api_key = ""
+
 # [models.local] 在本地模型安装（aik model install）后自动生成；出厂无
 EOF
 }
