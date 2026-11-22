@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * tui_lang_tab.h - en 双语表（生成物：gen_lang_tab.py / mk_tab_delta.py 勿手编）
+ * tui_lang_tab.h - en 双语表（生成物：gen_lang_tab.py / mk_tab_delta.py / mk_tab_p2a.py 勿手编）
  *
  * 键=zh 原文（与代码内 L_() 入参逐字节一致）；en 缺键时
  * tui_lang_get 回 zh（诚实降级）。
- * 增量法（A3 立）：已提交表为基线+新波 JSON 追加。
+ * 增量法（A3 起）：已提交表为基线+新波 JSON 追加（全量再生有丢键史——考古登记 P-58）。
  */
 #ifndef _TUI_LANG_TAB_H
 #define _TUI_LANG_TAB_H
@@ -642,6 +642,13 @@ static const struct {
 	{ "occ-undo: 补偿恢复失败 %s（文件停留在回滚后状态，请手工检查）\n", "occ-undo: compensation restore failed for %s (file left in rolled-back state, inspect manually)\n" },
 	{ "shell 退出码 %d·cwd=%s", "shell exit code %d·cwd=%s" },
 	{ "occ: 已退至 shell——exit 返回 occ", "occ: dropped to shell -- exit returns to occ" },
+	{ "用户：", "User:" },
+	{ "Enter 登录 · Tab 切换 · Ctrl-C 退出", "Enter login · Tab switch field · Ctrl-C exit" },
+	{ "请输入用户名", "enter a username" },
+	{ "用户名或密码不正确", "incorrect username or password" },
+	{ "root 密码", "root password" },
+	{ "本机未开 root 门（console-gate 无 root 条目）", "root gate not open on this machine (no root entry in console-gate)" },
+	{ "occ: models 层不可读，已跳过（%s）\\n", "occ: models layer unreadable, skipped (%s)\\n" },
 };
 
 #endif /* _TUI_LANG_TAB_H */
