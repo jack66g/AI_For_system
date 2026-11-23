@@ -39,6 +39,20 @@ tests=(
 pass=0
 fail=0
 failed=()
+
+# ---- Gate 0: tree charter (docs/TREE-CHARTER.md section 4) ----------------
+# Runs first: tracked build artifacts, non-whitelisted ELFs, new hardcoded
+# environment addresses, secrets and stray run reports must never reach a commit.
+echo "== tree charter gate (docs/TREE-CHARTER.md) =="
+if timeout 120 bash "$agent/tools/check_tree.sh" > /tmp/aik-tree-charter.log 2>&1; then
+    echo "PASS tree-charter"
+    pass=$((pass + 1))
+else
+    echo "FAIL tree-charter (see /tmp/aik-tree-charter.log)"
+    fail=$((fail + 1))
+    failed+=("tree-charter")
+fi
+
 for t in "${tests[@]}"; do
     if [ ! -x "./$t" ]; then
         echo "MISSING $t"
