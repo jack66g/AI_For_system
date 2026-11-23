@@ -1,4 +1,16 @@
 #!/bin/sh
+# aik-console v12 — P-60/D7 出厂：gate 权限归一（DEC-07 过渡方案）。
+#   v12：root 时刻（fb/串口两条循环每轮 resolve_target 之后、真 exec 之
+#   前）跑 gate_perm_fix——①gate 文件在 ②机器上有 aik-gate 组 ③文件尚
+#   不是「root:aik-gate + 0640」三条齐备才 chown+chmod 并 log 一行；任
+#   一不满足一字不动（无组的机器保持 0600，行为同 v11）。幂等：已合规
+#   直接返回，不重复改、不刷日志。为什么：非 root 的 occ 靠组读面读
+#   gate；存量机的 gate 是 0600 root:root（换装后组由镜像带入，脚本首
+#   轮即修），首启 root 向导建出的旧口径文件同此（向导侧的根治在 occ：
+#   tui_gate.c 写出即合规——本步管存量与兜底）。DRY=1 只打印将执行的
+#   动作，不真改。DRY 可测面另加 AIK_CONSOLE_GATE_FILE / AIK_CONSOLE_
+#   GATE_GROUP（仅 DRY 生效，真跑一律用定值）：无组、或不便动真 gate
+#   的机器上，可指桩文件与桩组名验三条分支。
 # aik-console v11 — CON-02(c) 出厂：非 root 控制台的 fbterm 配置。
 #   v11：fb 链上 fbterm 改以系统配置 HOME（/root——出厂 /root/.fbtermrc：
 #   input-method=aik-ime）起，与 root 控制台同一条路；occ 子进程经
@@ -76,9 +88,15 @@ fi
 
 GATE_LAST=/var/lib/aikernel/console-gate.last
 GATE_FILE=/etc/aikernel/console-gate
+GATE_GROUP=aik-gate				# v12：gate 组读面的系统组
 LOGDIR=/var/log/aik-console
 DRY=0
 [ "$AIK_CONSOLE_DRY" = 1 ] && DRY=1
+# v12 DRY 可测面：桩文件/桩组名（仅 DRY 生效；真跑一律用上面的定值）
+if [ "$DRY" = 1 ]; then
+  [ -n "${AIK_CONSOLE_GATE_FILE:-}" ] && GATE_FILE=$AIK_CONSOLE_GATE_FILE
+  [ -n "${AIK_CONSOLE_GATE_GROUP:-}" ] && GATE_GROUP=$AIK_CONSOLE_GATE_GROUP
+fi
 
 # v11：per-user 字号透传。fbterm 改以系统配置 HOME 起后，用户 /zoom 写
 # 在自家 ~/.fbtermrc 的 font-size 不再被 fbterm 直接读到——这里从该文件
@@ -175,6 +193,29 @@ resolve_target() {
 
 log() { echo "$(date +%s) $*" >> "$LOGF"; }
 
+# v12：gate 权限归一（见头部 v12 注）。幂等——三条齐备才动；stat 取不
+# 到任何一项=不动（不拿空值去 chown）。已合规直接返回。
+gate_perm_fix() {
+  gpgid=$(getent group "$GATE_GROUP" 2>/dev/null | cut -d: -f3)
+  [ -n "$gpgid" ] || return 0			# 无组：不动
+  [ -f "$GATE_FILE" ] || return 0			# 无文件：不动
+  gpown=$(stat -c %u "$GATE_FILE" 2>/dev/null) || return 0
+  gpgrp=$(stat -c %g "$GATE_FILE" 2>/dev/null) || return 0
+  gpmode=$(stat -c %a "$GATE_FILE" 2>/dev/null) || return 0
+  [ -n "$gpown" ] && [ -n "$gpgrp" ] && [ -n "$gpmode" ] || return 0
+  [ "$gpown" = 0 ] && [ "$gpgrp" = "$gpgid" ] && [ "$gpmode" = 640 ] && return 0
+  if [ "$DRY" = 1 ]; then
+    echo "DRY gate-perm: chown root:$GATE_GROUP $GATE_FILE; chmod 0640 $GATE_FILE (now uid=$gpown gid=$gpgrp mode=$gpmode)"
+    return 0
+  fi
+  if chown "0:$gpgid" "$GATE_FILE" && chmod 0640 "$GATE_FILE"; then
+    log "gate-perm normalized to 0640 root:$GATE_GROUP (was uid=$gpown gid=$gpgrp mode=$gpmode)"
+  else
+    log "gate-perm normalize FAILED (uid=$gpown gid=$gpgrp mode=$gpmode)"
+  fi
+  return 0
+}
+
 # DRY：打印本轮将 exec 的完整命令与解析值（uid/gid 由 id 实取）
 dry_print() {
   echo "DRY tty=$TTY user=$t_user uid=${t_uid:-0} gid=${t_gid:-0} home=${t_home:-/root}"
@@ -206,6 +247,7 @@ case "$TTY" in
     n=0
     while :; do
       resolve_target
+      gate_perm_fix
       if [ "$DRY" = 1 ]; then
         dry_print
         exit 0
@@ -256,6 +298,7 @@ case "$TTY" in
     n=0
     while :; do
       resolve_target
+      gate_perm_fix
       if [ "$DRY" = 1 ]; then
         dry_print
         exit 0

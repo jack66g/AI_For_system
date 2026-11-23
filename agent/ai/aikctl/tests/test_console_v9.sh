@@ -13,6 +13,12 @@
 # fbterm 有无都能测：DRY 面用 AIK_CONSOLE_FBTERM 指定桩路径（只影响
 # 打印，不 exec）。
 #
+# v12（P-60/D7，DEC-07 过渡方案）增 10 节：gate 权限归一 gate_perm_fix 的
+# DRY 面——不合规（组在、文件在、非 root:aik-gate+0640）打印、合规不打印、
+# 无组不打印、无文件不打印、串口分支同样挂、root 与非 root 目标的 exec
+# 行逐字不变。桩文件/桩组名走 DRY 专用变量 AIK_CONSOLE_GATE_FILE /
+# AIK_CONSOLE_GATE_GROUP，不碰真 gate、不建组。
+#
 # 测试号仅作 id/getent 解析桩（v9 降权链的 uid/gid 由此取），不真登录。
 set -u
 CONSOLE="$(cd "$(dirname "$0")/../../../../factory/usr/local/bin" \
@@ -45,6 +51,7 @@ cleanup() {
     rm -f "$SAVED"
     id -u "$U" >/dev/null 2>&1 && userdel -r "$U" 2>/dev/null
     [ -n "${FBSTUB:-}" ] && rm -f "$FBSTUB"
+    [ -n "${GSTUB:-}" ] && rm -f "$GSTUB"
     true
 }
 trap cleanup EXIT INT TERM
@@ -186,6 +193,75 @@ ck "串口 exec 行逐字不变（桩 fbterm 不影响串口分支）" \
    "case '$out' in *'DRY exec: OCC_NETCFG_TOOLS=1 $SP 2>> /var/log/aik-console/$U.err'*) true;; *) false;; esac"
 ck "串口无 env 前缀/无 fb 一览行" \
    "case '$out' in *' env HOME='*|*'DRY fb:'*|*'DRY exec: FBTERM'*) false;; *) true;; esac"
+
+echo "== 10. v12 gate 权限归一（DRY 面：不合规打印／合规不打印／无组不打印；exec 行逐字不变） =="
+# 三条分支全走 DRY、不碰真 gate 也不建组：AIK_CONSOLE_GATE_FILE 指桩文件，
+# AIK_CONSOLE_GATE_GROUP 指桩组名——「有组」用恒在的 root 组（gid 0），
+# 「无组」用必不存在的名字。结果与机器上有没有 aik-gate 组无关。
+GSTUB=$(mktemp /tmp/p2b-gatefile.XXXXXX)
+echo "$U" > "$LAST"
+run10() { # run10 <组名> → out（fb 分支、桩 fbterm、桩 gate 文件）
+    out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+          AIK_CONSOLE_FBTERM="$FBSTUB" \
+          AIK_CONSOLE_GATE_FILE="$GSTUB" AIK_CONSOLE_GATE_GROUP="$1" \
+          sh "$CONSOLE" 2>&1)
+}
+echo "  -- 10.1 有组+不合规（0600 root:root）→ 打印归一动作"
+chown root:root "$GSTUB"
+chmod 0600 "$GSTUB"
+run10 root
+ck "10.1 打印归一动作（现值 uid=0 gid=0 mode=600）" \
+   "case '$out' in *\"DRY gate-perm: chown root:root $GSTUB; chmod 0640 $GSTUB (now uid=0 gid=0 mode=600)\"*) true;; *) false;; esac"
+ck "10.1 DRY 不真改（桩文件仍 0600 root:root）" \
+   "[ \"\$(stat -c '%a %U %G' '$GSTUB')\" = '600 root root' ]"
+ck "10.1 非 root 目标的其余 DRY 行照常" \
+   "case '$out' in *\"user=$U uid=$uid gid=$gid home=$home\"*) true;; *) false;; esac"
+echo "  -- 10.2 有组+合规（0640 root:root）→ 不打印"
+chmod 0640 "$GSTUB"
+run10 root
+ck "10.2 合规不打印 gate-perm" "case '$out' in *gate-perm*) false;; *) true;; esac"
+ck "10.2 DRY 输出仍在（非误退出）" "case '$out' in *'DRY tty=/dev/tty1 user='$U*) true;; *) false;; esac"
+echo "  -- 10.3 无组（组名必不存在）+不合规 → 不打印"
+chmod 0600 "$GSTUB"
+run10 "nosuchgp$$x"
+ck "10.3 无组不打印 gate-perm" "case '$out' in *gate-perm*) false;; *) true;; esac"
+echo "  -- 10.4 gate 文件不在 → 不打印"
+rm -f "$GSTUB"
+run10 root
+ck "10.4 无文件不打印 gate-perm" "case '$out' in *gate-perm*) false;; *) true;; esac"
+echo "  -- 10.5 串口分支同样挂了归一（两条循环都要）"
+printf 'x\n' > "$GSTUB"
+chown root:root "$GSTUB"
+chmod 0600 "$GSTUB"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_GATE_FILE="$GSTUB" \
+      AIK_CONSOLE_GATE_GROUP=root sh "$CONSOLE" 2>&1)
+ck "10.5 串口分支打印归一动作" \
+   "case '$out' in *\"DRY gate-perm: chown root:root $GSTUB; chmod 0640 $GSTUB\"*) true;; *) false;; esac"
+ck "10.5 串口 exec 行逐字不变" \
+   "case '$out' in *'DRY exec: OCC_NETCFG_TOOLS=1 $SP 2>> /var/log/aik-console/$U.err'*) true;; *) false;; esac"
+echo "  -- 10.6 归一动作在打印面上，exec 行逐字不变"
+run10 root
+ck "10.6 非 root 目标 fb 链 exec 行逐字同 v11" \
+   "case '$out' in *\"DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 HOME=/root USER=root $FBSTUB -- env HOME=$home USER=$U $SP 2>> /var/log/aik-console/$U.err\"*) true;; *) false;; esac"
+echo root > "$LAST"
+run10 root
+ck "10.6 root 目标 fb 链 exec 行逐字同 v11" \
+   "case '$out' in *'DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FBSTUB -- /usr/local/bin/occ 2>> /root/aik-console.err'*) true;; *) false;; esac"
+ck "10.6 归一发生在 root 时刻，与目标用户无关（root 目标同样打印）" \
+   "case '$out' in *\"DRY gate-perm: chown root:root $GSTUB; chmod 0640 $GSTUB\"*) true;; *) false;; esac"
+echo "  -- 10.7 缺省组名（aik-gate）：随机器有无该组"
+echo "$U" > "$LAST"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" AIK_CONSOLE_GATE_FILE="$GSTUB" \
+      sh "$CONSOLE" 2>&1)
+if getent group aik-gate >/dev/null 2>&1; then
+    ck "10.7 本机有 aik-gate：缺省组名下打印归一动作" \
+       "case '$out' in *\"DRY gate-perm: chown root:aik-gate $GSTUB; chmod 0640 $GSTUB\"*) true;; *) false;; esac"
+else
+    ck "10.7 本机无 aik-gate：缺省组名不打印（回落，行为同 v11）" \
+       "case '$out' in *gate-perm*) false;; *) true;; esac"
+fi
+rm -f "$GSTUB"
 
 echo
 echo "RESULT: pass=$pass fail=$fail"
