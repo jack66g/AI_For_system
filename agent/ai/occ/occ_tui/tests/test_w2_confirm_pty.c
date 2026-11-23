@@ -25,6 +25,13 @@
  * 骨架复用 test_view_pty.c / test_su_pty.c 的 PTY+mock 手法（mock 起
  * 法/fixture 隔离/策略桩照 test_su_pty；SSE 参数结构照既有 mock）。
  *
+ * P-60/D3（AIF-05a）增审计行断言（真 occ + 真 policy 对象 →
+ * $HOME/.aikernel/audit.log，HOME=临时目录）：每次 W2 裁决恰落一行，
+ * tool=args=result=confirm= 与裁决一致——放行来源可区分（TUI 确认
+ * =CONFIRM=yes/tui；会话放行=ALLOW/session）与拒绝原因（面板拒/超时
+ * =CONFIRM=no/tui-refused）；S1 另查整行九字段齐全（ts uid user mode
+ * tool args result lease danger confirm）。
+ *
  * 运行面：须以 root 跑（sudo ./tests/test_w2_confirm_pty——bench 生产
  * 面=特权档 root）。S1-S5 的 chmod 走 aik-sandbox（W71 能力裁到
  * CAP_NET_RAW、无 DAC_OVERRIDE/FOWNER）——沙箱内 chmod 需 uid 与文件
@@ -289,7 +296,88 @@ static int file_has_ow(const char *path)
 	return stat(path, &st) == 0 && (st.st_mode & S_IWOTH);
 }
 
+/* ---- P-60/D3：W2 裁决审计行（真 occ + 真 policy 对象 →
+ * $HOME/.aikernel/audit.log；HOME=临时目录） ---- */
+static int audit_lines(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[4096];
+	int n = 0;
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f))
+		n++;
+	fclose(f);
+	return n;
+}
+
+/* 是否存在一行同时含 needles 全部（NULL 结尾；空表=无） */
+static int audit_row_has(const char *path, const char *const *needles)
+{
+	FILE *f = fopen(path, "r");
+	char line[4096];
+
+	if (!f || !needles[0])
+		return 0;
+	while (fgets(line, sizeof(line), f)) {
+		int i, ok = 1;
+
+		for (i = 0; needles[i]; i++)
+			if (!strstr(line, needles[i]))
+				ok = 0;
+		if (ok) {
+			fclose(f);
+			return 1;
+		}
+	}
+	fclose(f);
+	return 0;
+}
+
+/* 把首条含 needle 的审计行原样打到测试输出（留证：门禁日志可见真行） */
+static void audit_show(const char *path, const char *needle)
+{
+	FILE *f = fopen(path, "r");
+	char line[4096];
+
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		if (strstr(line, needle)) {
+			printf("  [%s audit] %s", g_scn, line);
+			break;
+		}
+	}
+	fclose(f);
+}
+
+/* 审计断言失败时整文件原文打到测试输出（定位行形/字段用） */
+static void audit_dump(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[4096];
+
+	if (!f) {
+		printf("  [%s audit dump] %s: unreadable\n", g_scn, path);
+		return;
+	}
+	printf("  [%s audit dump] %s:\n", g_scn, path);
+	while (fgets(line, sizeof(line), f))
+		printf("    %s", line);
+	fclose(f);
+}
+
 /* ---- 场景驱动 ---- */
+
+/* P-60/D3：bash chmod 探针的裁决审计行（args 摘要=命令全文，executor 口径） */
+#define AUD_YES ("tool=bash args=command=chmod 666 f.txt " \
+		 "result=CONFIRM=yes")
+#define AUD_NO ("tool=bash args=command=chmod 666 f.txt " \
+		"result=CONFIRM=no")
+#define AUD_TUI "tui"			/* 放行来源：TUI 面板确认 */
+#define AUD_TUI_REF "tui-refused"	/* 拒绝原因：面板拒/超时 */
+#define AUD_SESSION "session"		/* 放行来源：会话放行表 */
 
 struct scn {
 	const char *tag;		/* S1…S6a/S6b（目录名+OK 前缀） */
@@ -314,6 +402,16 @@ struct scn {
 	char second_args[512];	/* turn2 mock ctl ARGS */
 	const char *second_allow;	/* turn2 放行侧新字节证据 */
 	const char *second_absent;	/* turn2 区间不得出现（免问断言） */
+	/* ---- P-60/D3：裁决审计行 ----
+	 * 真实行形：<ts> uid= user= mode= tool= args= result= lease= danger=
+	 * confirm=。audit_row=「tool=… args=… result=…」须在同一行；
+	 * audit_confirm=该行的 confirm= 值（并钉 lease=- danger=-）。 */
+	int audit_delta;		/* 本场景应新增的审计行数（0=不查） */
+	const char *audit_row;		/* tool=…args=…result=… */
+	const char *audit_confirm;	/* confirm= 值（放行来源/拒绝原因） */
+	const char *audit_row2;		/* 两阶段场景的第二行 */
+	const char *audit_confirm2;
+	int audit_full;			/* 1=另查整行九字段齐全 */
 };
 
 static int run_scenario(const struct scn *s, const char *root,
@@ -322,15 +420,19 @@ static int run_scenario(const struct scn *s, const char *root,
 			const char *reqdir)
 {
 	static char out[OUT_CAP];
-	char wd[300], dbp[360], fpath[360], ctl[900];
+	char wd[300], dbp[360], fpath[360], ctl[900], auditp[360];
 	struct pty pt;
 	struct winsize ws = { .ws_row = 24, .ws_col = 120 };
 	pid_t pid;
 	int have = 0, mark;
 	int rc = 0;
 	int childrc;
+	int a0;
 
 	g_scn = s->tag;
+	/* P-60/D3：审计行数基线（本场景结束后的增量=裁决次数） */
+	snprintf(auditp, sizeof(auditp), "%s/.aikernel/audit.log", homep);
+	a0 = audit_lines(auditp);
 	/* 独立 workdir（cwd）+ f.txt 0644（chmod 场景靶件） */
 	snprintf(wd, sizeof(wd), "%s/%s", root, s->tag);
 	mkdir(wd, 0755);
@@ -501,6 +603,54 @@ done:
 		OK(childrc == 71 || childrc == 0, "child-exit-clean");
 	close(pt.master);
 
+	/* P-60/D3：裁决审计行——放行与拒绝各留一行、字段齐全 */
+	if (s->audit_delta > 0 || s->audit_row) {
+		int a1 = audit_lines(auditp);
+		char cn[64], cn2[64];
+		int ok1 = 1, ok2 = 1;
+		const char *n1[4] = { NULL, " lease=- danger=-", NULL, NULL };
+		const char *n2[4] = { NULL, " lease=- danger=-", NULL, NULL };
+
+		if (a0 < 0)
+			a0 = 0;		/* 首场景：审计文件尚未建 */
+		OK(a1 - a0 == s->audit_delta, "audit-row-count");
+		if (s->audit_row) {
+			n1[0] = s->audit_row;
+			if (s->audit_confirm) {
+				snprintf(cn, sizeof(cn), " confirm=%s",
+					 s->audit_confirm);
+				n1[2] = cn;
+			}
+			ok1 = audit_row_has(auditp, n1);
+			OK(ok1, "audit-row-decision");
+			if (s->audit_full) {
+				const char *const nf[] = {
+					" uid=", " user=", " mode=", " tool=",
+					" args=", " result=", " lease=-",
+					" danger=-", " confirm=", s->audit_row,
+					NULL
+				};
+
+				OK(audit_row_has(auditp, nf),
+				   "audit-row-all-fields");
+			}
+			audit_show(auditp, s->audit_row);	/* 留证：真行原文 */
+		}
+		if (s->audit_row2) {
+			n2[0] = s->audit_row2;
+			if (s->audit_confirm2) {
+				snprintf(cn2, sizeof(cn2), " confirm=%s",
+					 s->audit_confirm2);
+				n2[2] = cn2;
+			}
+			ok2 = audit_row_has(auditp, n2);
+			OK(ok2, "audit-row-second");
+			audit_show(auditp, s->audit_row2);
+		}
+		if (!ok1 || !ok2)
+			audit_dump(auditp);	/* 失败即整文件原文留证 */
+	}
+
 	/* 世界态断言（occ 退出后 stat——文件真值） */
 	if (s->want_exists == 1) {
 		struct stat st;
@@ -628,10 +778,13 @@ int main(void)
 		s.key = "y";
 		s.key_len = 1;
 		s.allow_needle = "收到工具结果";	/* 工具链走通=回投文案 */
-		s.probe = fpath;
-		s.want_exists = 1;
-		s.want_ow = 1;
-		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
+	s.probe = fpath;
+	s.want_exists = 1;
+	s.want_ow = 1;
+	s.audit_delta = 1;		/* D3：面板确认放行 → 一行 */
+	s.audit_row = AUD_YES;
+	s.audit_full = 1;		/* 整行九字段齐全 */
+	run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 	/* ---- S2 Enter：同 S1 但发 '\r'（CR）——「Enter 聋」裁决样本 ---- */
 	{
@@ -654,6 +807,9 @@ int main(void)
 		s.probe = fpath;
 		s.want_exists = 1;
 		s.want_ow = 1;
+		s.audit_delta = 1;
+		s.audit_row = AUD_YES;
+		s.audit_confirm = AUD_TUI;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 	/* ---- S3 n 拒绝 ---- */
@@ -678,6 +834,9 @@ int main(void)
 		s.probe = fpath;
 		s.want_exists = 1;
 		s.want_ow = 0;
+		s.audit_delta = 1;		/* D3：面板拒 → 一行 */
+		s.audit_row = AUD_NO;
+		s.audit_confirm = AUD_TUI_REF;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 	/* ---- S4 Esc 拒绝（孤立 Esc 结算窗） ---- */
@@ -703,6 +862,9 @@ int main(void)
 		s.probe = fpath;
 		s.want_exists = 1;
 		s.want_ow = 0;
+		s.audit_delta = 1;		/* D3：Esc 拒 → 一行 */
+		s.audit_row = AUD_NO;
+		s.audit_confirm = AUD_TUI_REF;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 	/* ---- S5 超时兜底：OCC_W2_TIMEOUT_MS=2000，面板后不发键 ---- */
@@ -727,12 +889,16 @@ int main(void)
 		s.probe = fpath;
 		s.want_exists = 1;
 		s.want_ow = 0;
+		s.audit_delta = 1;		/* D3：超时拒 → 一行 */
+		s.audit_row = AUD_NO;
+		s.audit_confirm = AUD_TUI_REF;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 	/* ---- S6 写侧双门：域外写确认后真落盘（y）／拒绝无文件（n） ---- */
 	{
 		struct scn s;
 		char out_a[360], out_b[360];
+		char row_a[560], row_b[560];
 
 		snprintf(out_a, sizeof(out_a),
 			 "/var/tmp/uxo_w52_out_%d_a/x.txt", (int)getpid());
@@ -740,6 +906,10 @@ int main(void)
 			 "/var/tmp/uxo_w52_out_%d_b/x.txt", (int)getpid());
 		unlink(out_a);
 		unlink(out_b);
+		snprintf(row_a, sizeof(row_a),
+			 "tool=write args=path=%s result=CONFIRM=yes", out_a);
+		snprintf(row_b, sizeof(row_b),
+			 "tool=write args=path=%s result=CONFIRM=no", out_b);
 
 		memset(&s, 0, sizeof(s));
 		s.tag = "S6a";
@@ -752,6 +922,9 @@ int main(void)
 		s.probe = out_a;
 		s.want_exists = 1;
 		s.want_content = "p52";
+		s.audit_delta = 1;		/* D3：确认放行；args 摘要只含 path */
+		s.audit_row = row_a;
+		s.audit_confirm = AUD_TUI;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 
 		memset(&s, 0, sizeof(s));
@@ -765,6 +938,9 @@ int main(void)
 		s.deny_wait_ms = 5000;
 		s.probe = out_b;
 		s.want_exists = 0;
+		s.audit_delta = 1;
+		s.audit_row = row_b;
+		s.audit_confirm = AUD_TUI_REF;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 
@@ -812,6 +988,12 @@ int main(void)
 		s.probe = f2;
 		s.want_exists = 1;
 		s.want_ow = 1;
+		s.audit_delta = 2;		/* D3：turn1 面板确认 + turn2 会话放行 */
+		s.audit_row = AUD_YES;
+		s.audit_confirm = AUD_TUI;
+		s.audit_row2 = "tool=bash args=command=chmod 666 f2.txt "
+			       "result=ALLOW";
+		s.audit_confirm2 = AUD_SESSION;
 		run_scenario(&s, root, homep, toml, polp, occbin, reqdir);
 	}
 

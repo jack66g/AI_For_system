@@ -51,6 +51,23 @@
 
 #include "occ_tui/tui_lang.h"		/* O-20 A2：语档文案面 */
 
+#include "policy/ai_user_policy.h"	/* P-60/D3：W2 裁决落审计 */
+
+/* ---- P-60/D3（AIF-05a）：W2 裁决落审计 ----
+ * 审计 API 以弱引用接入：occ 主程序链入 policy 对象（真落
+ * ~/.aikernel/audit.log）；只链 occ_tools 的单测二进制不链 policy——弱
+ * 未定义符号解析为 NULL、审计静默跳过（agent/ai/occ/Makefile 各条测试
+ * 链接行零改动）。test_w2gate 以强定义桩压过弱引用，截获调用断言字段。
+ * 审计写失败（含符号缺席）绝不改变裁决结果。 */
+extern int ai_policy_audit_ex(uid_t uid, enum ai_policy_mode mode,
+			      const char *tool, const char *args,
+			      const char *result, const char *lease_id,
+			      const char *danger,
+			      const char *confirm_source)
+	__attribute__((weak));
+extern enum ai_policy_mode ai_policy_mode_for_uid(uid_t uid)
+	__attribute__((weak));
+
 /* ---- 结果缓冲（occ_tools_priv.h 契约实现） ---- */
 
 void occ_ob_put(occ_obuf *o, const char *s, size_t n)
@@ -3707,17 +3724,163 @@ void occ_w2_ses_allow_add(struct occ_w2_gate *g)
 	}
 }
 
+/* ---- P-60/D3（AIF-05a）：W2 裁决审计的参数摘要 ----
+ * 审计行 args= 只放「白名单键 + 净化 + 截断」的参数摘要：
+ *   - 键白名单（按工具）：bash=command/workdir；write/edit=path/replaceAll；
+ *     rm/mkdir=path；mv=src/dst。文件内容类（content/oldString/newString）
+ *     与一切非白名单键不入审计——凭据可能藏在正文里；
+ *   - bash 的 command 按 executor 路径口径记命令全文（同受净化+截断）；
+ *   - 净化：C0/DEL 控制字符（含换行、ESC）替空格——防审计行注入；
+ *   - 截断：总长 < policy 层 args 上限 255（本层先截、不切多字节字符，
+ *     截断尾标「…」）。 */
+#define W2_AUDIT_MAX 240
+
+/* 审计键白名单（见上；未知工具=无键——只记工具名） */
+static const char *const *w2_audit_keys(const char *name)
+{
+	static const char *const K_BASH[] = { "command", "workdir", NULL };
+	static const char *const K_WEDIT[] = { "path", "replaceAll", NULL };
+	static const char *const K_PATH[] = { "path", NULL };
+	static const char *const K_MV[] = { "src", "dst", NULL };
+	static const char *const K_NONE[] = { NULL };
+
+	if (!strcmp(name, OCC_T_BASH))
+		return K_BASH;
+	if (!strcmp(name, OCC_T_WRITE) || !strcmp(name, OCC_T_EDIT))
+		return K_WEDIT;
+	if (!strcmp(name, OCC_T_RM) || !strcmp(name, OCC_T_MKDIR))
+		return K_PATH;
+	if (!strcmp(name, OCC_T_MV))
+		return K_MV;
+	return K_NONE;
+}
+
+/* 把 s 净化后追加到 out+n（cap=out 容量）：控制字符→空格；多字节序列
+ * 整拷不切；整字符放不下即停（*trunc 置位）。返回写后偏移。 */
+static size_t w2_audit_copy(char *out, size_t cap, size_t n, const char *s,
+			    int *trunc)
+{
+	const unsigned char *p = (const unsigned char *)(s ? s : "");
+
+	while (*p && n + 1 < cap) {
+		size_t len = *p < 0x80 ? 1 : *p < 0xE0 ? 2 : *p < 0xF0 ? 3 : 4;
+		size_t k;
+
+		if (n + len >= cap)
+			break;			/* 整字符放不下：不切多字节 */
+		if (len == 1) {
+			out[n++] = (*p < 0x20 || *p == 0x7f) ? ' ' : (char)*p;
+			p++;
+			continue;
+		}
+		for (k = 1; k < len && (p[k] & 0xC0) == 0x80; k++)
+			;
+		if (k < len)
+			break;			/* 截断/坏序列：止于此 */
+		memcpy(out + n, p, len);
+		n += len;
+		p += len;
+	}
+	if (*p && trunc)
+		*trunc = 1;
+	out[n] = '\0';
+	return n;
+}
+
+static void w2_audit_digest(const char *name, const char *args_json,
+			    char *out, size_t cap)
+{
+	const char *const *keys;
+	aik_json *root;
+	char val[512];
+	char err[64];
+	size_t n = 0;
+	size_t room = cap > 3 ? cap - 3 : cap;	/* 尾部预留截断标「…」 */
+	int trunc = 0;
+
+	out[0] = '\0';
+	if (!args_json || !args_json[0] || !strcmp(args_json, "{}"))
+		goto none;			/* 无参数 */
+	root = aik_json_parse(args_json, strlen(args_json), err, sizeof(err));
+	if (!root) {
+		strcpy(out, "(unparsed)");	/* 坏 JSON：不落原文 */
+		return;
+	}
+	for (keys = w2_audit_keys(name); keys && *keys; keys++) {
+		const aik_json *v = aik_json_get(root, *keys);
+
+		if (!v)
+			continue;
+		if (aik_json_typeof(v) == AIK_JSON_STR) {
+			w2_audit_copy(val, sizeof(val), 0, aik_json_str(v),
+				      &trunc);
+		} else if (aik_json_typeof(v) == AIK_JSON_BOOL) {
+			snprintf(val, sizeof(val), "%d", aik_json_bool(v));
+		} else {
+			snprintf(val, sizeof(val), "%lld",
+				 aik_json_int(v));
+		}
+		if (n && n + 2 < room) {
+			out[n++] = ';';
+			out[n++] = ' ';
+		}
+		n = w2_audit_copy(out, room, n, *keys, NULL);
+		if (n + 1 < room)
+			out[n++] = '=';
+		n = w2_audit_copy(out, room, n, val, &trunc);
+	}
+	aik_json_free(root);
+	if (!n)
+		goto none;			/* 无白名单键有值 */
+	if (trunc) {
+		memcpy(out + n, "\xe2\x80\xa6", 3);	/* … */
+		n += 3;
+		out[n] = '\0';
+	}
+	return;
+none:
+	strcpy(out, "-");
+}
+
+/* 一次 W2 裁决写一行审计。字段语义同 executor/lease 路径（ai_lease.c
+ * gate_audit）：tool=<工具名> args=<净化截断的参数摘要> result=
+ * ALLOW|CONFIRM=yes|CONFIRM=no|CONFIRM=unattended|DENY，confirm=<放行
+ * 来源|拒绝原因>（allow-w2/session/tui；tier-deny/tui-refused/none）；
+ * lease/danger 无（occ W2 门无租约面→"-"）。返回值丢弃：审计写失败
+ * 不改裁决。 */
+static void w2_audit(const char *name, const char *args_json,
+		     const char *result, const char *confirm)
+{
+	char digest[W2_AUDIT_MAX];
+	enum ai_policy_mode mode = AI_POLICY_MODE_RESTRICTED;
+	uid_t uid;
+
+	if (!ai_policy_audit_ex)
+		return;				/* 未链 policy：跳过 */
+	uid = getuid();
+	if (ai_policy_mode_for_uid)
+		mode = ai_policy_mode_for_uid(uid);
+	w2_audit_digest(name, args_json, digest, sizeof(digest));
+	(void)ai_policy_audit_ex(uid, mode, name, digest, result, NULL, NULL,
+				 confirm);
+}
+
 /* 三态裁决：allow_w2 > tier 闸 > confirm 交互 > headless 拒。
- * 返回 1=放行（o 不动）；0=拒绝（o 填人话错误，denied++）。 */
+ * 返回 1=放行（o 不动）；0=拒绝（o 填人话错误，denied++）。
+ * P-60/D3：每个出口落一行审计（w2_audit——写失败不改裁决）。 */
 static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
-			  const char *why, occ_obuf *o)
+			  const char *why, const char *args_json,
+			  occ_obuf *o)
 {
 	struct occ_w2_gate *g = c->w2;
 
-	if (g->allow_w2)
+	if (g->allow_w2) {
+		w2_audit(name, args_json, "ALLOW", "allow-w2");
 		return 1;	/* 显式开门（headless --allow-w2） */
+	}
 	if (g->tier != OCC_W2_TIER_PRIVILEGED) {
 		g->denied++;
+		w2_audit(name, args_json, "DENY", "tier-deny");
 		occ_ob_printf(o, L_("ERROR: W2 拒绝（%s：%s）——当前档位不允许高危写；/su 提权后重试（policy 见 /etc/aikernel/policy.conf）"), name, why ? why : "?");
 		return 0;
 	}
@@ -3729,12 +3892,20 @@ static int w2_gate_decide(const occ_tool_ctx *c, const char *name,
 		for (i = 0; i < g->ses_allow_n; i++)
 			if (!strcmp(g->ses_allow[i], g->last_key)) {
 				g->ses_allow_hits++;
+				w2_audit(name, args_json, "ALLOW", "session");
 				return 1;
 			}
 	}
-	if (g->confirm && g->confirm(g->ud, L_("W2 高危操作确认"), why ? why : "") == 1)
+	if (g->confirm && g->confirm(g->ud, L_("W2 高危操作确认"), why ? why : "") == 1) {
+		w2_audit(name, args_json, "CONFIRM=yes", "tui");
 		return 1;
+	}
 	g->denied++;
+	/* 拒绝原因入 confirm=：有确认面=用户在面板上拒了/超时；无确认面
+	 * =headless 无人可确认（executor 同口径 CONFIRM=unattended） */
+	w2_audit(name, args_json,
+		 g->confirm ? "CONFIRM=no" : "CONFIRM=unattended",
+		 g->confirm ? "tui-refused" : "none");
 	occ_ob_printf(o, L_("ERROR: W2 拒绝（%s：%s）——%s"), name, why ? why : "?", g->confirm ? L_("已按您的选择取消") : L_("headless 默认拒绝（occ -p 需 --allow-w2 显式开门）"));
 	return 0;
 }
@@ -3782,7 +3953,7 @@ int occ_tool_exec(const occ_tool_ctx *ctx, const char *name,
 		 * 应答侧入表共用） */
 		w2_reason_key(c.w2->last_key, sizeof(c.w2->last_key),
 			      name, wd);
-		if (!w2_gate_decide(&c, name, wd, &o)) {
+		if (!w2_gate_decide(&c, name, wd, args_json, &o)) {
 			rc = -1;
 			goto w2_done;
 		}

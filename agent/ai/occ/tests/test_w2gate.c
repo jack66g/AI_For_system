@@ -4,6 +4,11 @@
  *
  * 面1 分类器：write/edit 路径安全区 + bash 命令级 W2 表 + O-4 粘贴形态。
  * 面2 三态裁决矩阵：tier/confirm/allow_w2/NULL 面（occ_tool_exec 真链）。
+ * 面4 P-60/D3（AIF-05a）：裁决审计——w2_gate_decide 每个出口一行、字段
+ *   齐全、参数摘要净化/截断/白名单（凭据类内容不入审计）、审计写失败
+ *   不改裁决。（单测二进制不链 policy 对象：以强定义桩压过 tools.c 的
+ *   弱引用截获调用；真落盘行由 occ_tui/tests/test_w2_confirm_pty 打真
+ *   occ 二进制断言。）
  * 探针=write→/var/tmp（W2 区外写——write 自身允许域=工作目录∪/tmp∪
  * /var/ai，故放行断言=「过闸」（无 W2 拒文）；真实执行证据走 bash
  * `kill -0 1`（W2 表命中 + aik-sandbox 内无害）。
@@ -15,6 +20,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "occ_tools/occ_tools.h"
+#include "policy/ai_user_policy.h"		/* D3：审计桩签名同源 */
 
 static int fails;
 
@@ -22,6 +28,101 @@ static int fails;
 	if (cond) { printf("ok %s\n", name); } \
 	else { printf("FAIL %s\n", name); fails++; } \
 } while (0)
+
+/* ---- P-60/D3 审计桩 ----
+ * 强定义压过 tools.c 的弱引用（本二进制不链 policy 对象）。截获
+ * w2_gate_decide 各出口的审计调用并原样记字段供断言；恒返回 -1=模拟
+ * 审计写失败——各裁决断言照旧成立即「审计失败不改裁决」的证据。 */
+static char g_audit[24][700];
+static int g_audit_n;
+
+int ai_policy_audit_ex(uid_t uid, enum ai_policy_mode mode, const char *tool,
+		       const char *args, const char *result,
+		       const char *lease_id, const char *danger,
+		       const char *confirm_source)
+{
+	if (g_audit_n < (int)(sizeof(g_audit) / sizeof(g_audit[0]))) {
+		snprintf(g_audit[g_audit_n], sizeof(g_audit[0]),
+			 "uid=%u mode=%d tool=%s args=%s result=%s "
+			 "lease=%s danger=%s confirm=%s",
+			 (unsigned)uid, (int)mode,
+			 tool ? tool : "(null)", args ? args : "(null)",
+			 result ? result : "(null)",
+			 lease_id ? lease_id : "(null)",
+			 danger ? danger : "(null)",
+			 confirm_source ? confirm_source : "(null)");
+		g_audit_n++;
+	}
+	return -1;
+}
+
+enum ai_policy_mode ai_policy_mode_for_uid(uid_t uid)
+{
+	(void)uid;
+	return AI_POLICY_MODE_CONFIRMED;
+}
+
+/* 断言「恰一行审计且字段逐项相符」：tool/args/result/confirm 四项为
+ * 期望值，uid=当前 uid，lease/danger=空（occ W2 门无租约面）。 */
+static void audit_case(const char *tag, const char *tool, const char *args,
+		       const char *result, const char *confirm)
+{
+	char want[900];
+	char uidb[48];
+	int hit = -1;
+	int i;
+
+	snprintf(uidb, sizeof(uidb), "uid=%u ", (unsigned)getuid());
+	snprintf(want, sizeof(want), " tool=%s args=%s result=%s "
+		 "lease=(null) danger=(null) confirm=%s",
+		 tool, args, result, confirm);
+	for (i = 0; i < g_audit_n; i++)
+		if (strstr(g_audit[i], uidb) && strstr(g_audit[i], want))
+			hit = i;
+	CK(g_audit_n == 1 && hit == 0, tag);
+	if (hit != 0)
+		printf("  [audit %s] want%s | got %d row(s): %s\n", tag, want,
+		       g_audit_n, g_audit_n ? g_audit[0] : "(none)");
+}
+
+/* 取审计行 args= 的值（就地在其后的 " result=" 处截断——row 被改写）。
+ * → 值起始指针与长度；行形不符返回 0 且 *val=NULL。 */
+static size_t audit_args_value(char *row, char **val)
+{
+	char *av = strstr(row, " args=");
+	char *ae = av ? strstr(av, " result=") : NULL;
+
+	if (!av || !ae) {
+		*val = NULL;
+		return 0;
+	}
+	*ae = '\0';
+	*val = av + 6;
+	return strlen(*val);
+}
+
+/* UTF-8 序列完整性：返回 0=合法（无截断/坏序列；控制字符零出现） */
+static int audit_text_sane(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+
+	while (*p) {
+		size_t len = *p < 0x80 ? 1 : *p < 0xE0 ? 2 : *p < 0xF0 ? 3 : 4;
+		size_t k;
+
+		if (*p < 0x20 || *p == 0x7f)
+			return -1;		/* 控制字符漏进审计 */
+		if (*p < 0x80)
+			len = 1;
+		else if (*p < 0xC0 || *p > 0xF4)
+			return -2;		/* 非法前导字节 */
+		for (k = 1; k < len; k++)
+			if ((p[k] & 0xC0) != 0x80)
+				return -3;	/* 截断/坏序列 */
+		p += len;
+	}
+	return 0;
+}
 
 static const char *g_last_detail;
 
@@ -437,10 +538,228 @@ int main(void)
 		occ_tool_result r;
 
 		run_tool("write", W_ARGS("/var/tmp/uxo_w2_probe_null.txt"),
-			 NULL, &r);
+			NULL, &r);
 		CK(r.text && strstr(r.text, "ERROR: W2") == NULL,
 		   "mx_null_embed_old_behavior");
 		occ_tool_result_free(&r);
+	}
+
+	/* ---- 面4（P-60/D3）：W2 裁决审计 ----
+	 * 审计桩恒返回 -1（=写失败）：放行/拒绝断言与面2 同口径照旧成立，
+	 * 即「审计失败不改裁决」。每例恰一行，uid/tool/args/result/lease/
+	 * danger/confirm 逐项相符。 */
+	{
+		occ_w2_gate ag;
+		occ_tool_result r;
+		char big[5600], cmd[2400 + 1];
+		int i;
+
+		/* 1) 档位拒 → DENY / tier-deny */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_RESTRICTED;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_tier.txt"), &ag,
+			 &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") != NULL,
+		   "aud_tier_deny_verdict");
+		occ_tool_result_free(&r);
+		audit_case("aud_tier_deny_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_tier.txt", "DENY",
+			   "tier-deny");
+
+		/* 2) headless（无确认面）拒 → CONFIRM=unattended / none */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_hd.txt"), &ag, &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") != NULL,
+		   "aud_headless_deny_verdict");
+		occ_tool_result_free(&r);
+		audit_case("aud_headless_deny_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_hd.txt",
+			   "CONFIRM=unattended", "none");
+
+		/* 3) 面板拒 → CONFIRM=no / tui-refused */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_no;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_no.txt"), &ag, &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") != NULL,
+		   "aud_confirm_no_verdict");
+		occ_tool_result_free(&r);
+		audit_case("aud_confirm_no_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_no.txt", "CONFIRM=no",
+			   "tui-refused");
+
+		/* 4) 面板确认放行 → CONFIRM=yes / tui */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_yes;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_yes.txt"), &ag,
+			 &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") == NULL,
+		   "aud_confirm_yes_verdict");
+		occ_tool_result_free(&r);
+		audit_case("aud_confirm_yes_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_yes.txt", "CONFIRM=yes",
+			   "tui");
+
+		/* 5) --allow-w2 → ALLOW / allow-w2 */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_RESTRICTED;
+		ag.allow_w2 = 1;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_allow.txt"), &ag,
+			 &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") == NULL,
+		   "aud_allow_w2_verdict");
+		occ_tool_result_free(&r);
+		audit_case("aud_allow_w2_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_allow.txt", "ALLOW",
+			   "allow-w2");
+
+		/* 6) 会话放行 → ALLOW / session（write 探针：非 root 也可跑
+		 *    ——只断言过闸、免问与审计行，不断言落盘） */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_yes_counted;
+		snprintf(ag.last_key, sizeof(ag.last_key), "write-outzone");
+		occ_w2_ses_allow_add(&ag);
+		g_confirm_calls = 0;
+		g_audit_n = 0;
+		run_tool("write", W_ARGS("/var/tmp/uxo_w2_aud_ses.txt"), &ag, &r);
+		CK(r.text && strstr(r.text, "ERROR: W2") == NULL,
+		   "aud_session_verdict");
+		CK(g_confirm_calls == 0, "aud_session_no_ask");
+		occ_tool_result_free(&r);
+		audit_case("aud_session_row", "write",
+			   "path=/var/tmp/uxo_w2_aud_ses.txt", "ALLOW",
+			   "session");
+		unlink("/var/tmp/uxo_w2_aud_yes.txt");
+		unlink("/var/tmp/uxo_w2_aud_allow.txt");
+		unlink("/var/tmp/uxo_w2_aud_ses.txt");
+
+		/* 7) bash：命令全文入审计（executor 路径口径） */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_no;
+		g_audit_n = 0;
+		run_tool("bash", B_ARGS("kill -0 1"), &ag, &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_bash_full_command", "bash", "command=kill -0 1",
+			   "CONFIRM=no", "tui-refused");
+
+		/* 8) 净化+截断（ASCII）：换行/ESC/控制字符→空格；超长截断带
+		 *    「…」；总长 < policy 层 args 上限 255（本层先截） */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_no;
+		for (i = 0; i < 2400; i++)
+			cmd[i] = 'A';
+		cmd[2400] = '\0';
+		snprintf(big, sizeof(big),
+			 "{\"command\":\"kill -0 1\\n\\u001b[31m%s\\u0001 end\"}",
+			 cmd);
+		g_audit_n = 0;
+		run_tool("bash", big, &ag, &r);
+		occ_tool_result_free(&r);
+		CK(g_audit_n == 1, "aud_sanitize_one_row");
+		if (g_audit_n == 1) {
+			char *av;
+			size_t al = audit_args_value(g_audit[0], &av);
+
+			CK(av != NULL &&
+			   strncmp(av, "command=kill -0 1  [31m", 23) == 0,
+			   "aud_sanitize_newline_esc_to_space");
+			CK(al > 0 && al <= 239, "aud_truncate_len_lt_255");
+			CK(al >= 3 && memcmp(av + al - 3, "\xe2\x80\xa6", 3) == 0,
+			   "aud_truncate_marker");
+			CK(av && audit_text_sane(av) == 0,
+			   "aud_no_control_chars");
+		}
+
+		/* 9) 截断不切多字节字符（CJK 命令体）：尾字节仍是完整序列 */
+		{
+			char cjk[3200];
+			size_t off = 0;
+
+			for (i = 0; i < 400; i++) {
+				memcpy(cjk + off, "\xe4\xb8\xad", 3);	/* 中 */
+				off += 3;
+			}
+			cjk[off] = '\0';
+			snprintf(big, sizeof(big),
+				 "{\"command\":\"kill -0 1 %s\"}", cjk);
+			memset(&ag, 0, sizeof(ag));
+			ag.tier = OCC_W2_TIER_PRIVILEGED;
+			ag.confirm = stub_no;
+			g_audit_n = 0;
+			run_tool("bash", big, &ag, &r);
+			occ_tool_result_free(&r);
+			CK(g_audit_n == 1, "aud_cjk_one_row");
+			if (g_audit_n == 1) {
+				char *av;
+				size_t al = audit_args_value(g_audit[0], &av);
+
+				CK(av != NULL &&
+				   strncmp(av, "command=kill -0 1 ", 18) == 0,
+				   "aud_cjk_row_shape");
+				CK(al > 60 && al <= 239, "aud_cjk_len");
+				CK(al >= 3 && memcmp(av + al - 3,
+						     "\xe2\x80\xa6", 3) == 0,
+				   "aud_cjk_truncated");
+				CK(av && audit_text_sane(av) == 0,
+				   "aud_cjk_no_split_sequence");
+			}
+		}
+
+		/* 10) 凭据类内容不入审计（白名单摘要）：write/edit 的正文
+		 *     （content/oldString/newString）与任何非白名单键一律不落。 */
+		memset(&ag, 0, sizeof(ag));
+		ag.tier = OCC_W2_TIER_PRIVILEGED;
+		ag.confirm = stub_no;
+		g_audit_n = 0;
+		run_tool("write",
+			 "{\"path\":\"/var/tmp/uxo_w2_aud_sec.txt\","
+			 "\"content\":\"api_key=sk-CANARY-SECRET-0001\\n"
+			 "password=hunter2 CANARY-OLD\"}", &ag, &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_write_content_excluded", "write",
+			   "path=/var/tmp/uxo_w2_aud_sec.txt", "CONFIRM=no",
+			   "tui-refused");
+		CK(g_audit_n == 1 && strstr(g_audit[0], "CANARY") == NULL &&
+		   strstr(g_audit[0], "hunter2") == NULL &&
+		   strstr(g_audit[0], "sk-") == NULL, "aud_write_no_secret");
+		g_audit_n = 0;
+		run_tool("edit",
+			 "{\"path\":\"/etc/uxo_w2_aud\",\"oldString\":"
+			 "\"CANARY-OLD\",\"newString\":\"CANARY-NEW\","
+			 "\"replaceAll\":true}", &ag, &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_edit_text_excluded", "edit",
+			   "path=/etc/uxo_w2_aud; replaceAll=1", "CONFIRM=no",
+			   "tui-refused");
+		CK(g_audit_n == 1 && strstr(g_audit[0], "CANARY") == NULL,
+		   "aud_edit_no_secret");
+		g_audit_n = 0;
+		run_tool("mv", "{\"src\":\"/tmp/a\",\"dst\":\"/etc/b\"}", &ag,
+			 &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_mv_src_dst", "mv", "src=/tmp/a; dst=/etc/b",
+			   "CONFIRM=no", "tui-refused");
+		g_audit_n = 0;
+		run_tool("rm", "{\"path\":\"/etc/hosts\"}", &ag, &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_rm_path", "rm", "path=/etc/hosts", "CONFIRM=no",
+			   "tui-refused");
+		/* 路径值里的控制字符同样净化（防审计行注入） */
+		g_audit_n = 0;
+		run_tool("rm", "{\"path\":\"/etc/h\\nosts\"}", &ag, &r);
+		occ_tool_result_free(&r);
+		audit_case("aud_path_sanitized", "rm", "path=/etc/h osts",
+			   "CONFIRM=no", "tui-refused");
 	}
 
 	if (fails) {
