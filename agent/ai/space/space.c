@@ -12,6 +12,16 @@
  *   - update_edges_for 先 sync，再删两端涉事旧边，最后逐 Region 重算；
  *   - 所有 id 都是本 space 自增生成，无全局状态。
  *
+ * MEM-01b（有意偏离基线 e72bc75，依据上游 ed5378a
+ * sme/space/region_manager.py，2026-11-20 测试战役 P2-5 / P3-6）：
+ *   - evolution_pass 的单轮上限仍是 8 次拆分 + 8 次合并（上游
+ *     MAX_SPLITS_PER_PASS / MAX_MERGES_PER_PASS），但超限后**没检视到的
+ *     候选滚入下一轮**；基线把整批候选（含本轮新登记的）清空，bulk
+ *     import 后超阈 Region 多于 8 个时，排在前 8 个之外的永不拆分；
+ *   - merge_regions 剪掉被吸收 Region 与第三方的邻边（delete 路径本来
+ *     就剪），不再留端点已不存在的悬空边。
+ *   回归见 tests/test_space.c 的 MEM-01b 段。
+ *
  * 一致性：除 history_push 失败这种 OOM 情形外，所有函数在失败时尽量保持
  * 结构可继续使用；错误一律写 err（可为 NULL）。
  */
@@ -488,6 +498,25 @@ static char **cand_take(char ***arr, size_t *n, size_t *cap, size_t *out_n)
 	return out;
 }
 
+/*
+ * cands_carry_over - 把本轮没来得及检视的候选放回候选集
+ *
+ * MEM-01b（上游 ed5378a evolution_pass：space._split_candidates.update(
+ * todo[examined:])）。cand_add 自带去重，按原相对顺序追加；任一步 OOM
+ * 返回 -1（调用方按错误处理，不静默丢候选）。
+ */
+static int cands_carry_over(char ***arr, size_t *n, size_t *cap, char **ids,
+			    size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		if (cand_add(arr, n, cap, ids[i]) != 0)
+			return -1;
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* 边与 close 集合                                                    */
 /* ------------------------------------------------------------------ */
@@ -643,6 +672,28 @@ static void close_prune_for(aik_space *sp, const char *id)
 		    strcmp(sp->close_keys[i].b, id) == 0)
 			close_remove_at(sp, i);
 	}
+}
+
+/*
+ * prune_edges_for - 剪掉一端为 region_id 的全部邻边与 close 键
+ *（sme/space/space.py::_prune_edges_for）
+ *
+ * 调用方已把该 Region 从 regions 移走。删除路径一直在做；merge 路径自
+ * MEM-01b 起同样调用（上游 ed5378a P3-6：被吸收 Region 与第三方的邻边
+ * 不剪，会留下端点已不存在的悬空边，edge_count 虚高）。
+ */
+static void prune_edges_for(aik_space *sp, const char *region_id)
+{
+	size_t i = sp->n_edges;
+
+	while (i-- > 0) {
+		if (strcmp(sp->edges[i].a, region_id) == 0 ||
+		    strcmp(sp->edges[i].b, region_id) == 0) {
+			close_remove(sp, sp->edges[i].a, sp->edges[i].b);
+			edge_remove_at(sp, i);
+		}
+	}
+	close_prune_for(sp, region_id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -982,14 +1033,7 @@ static int delete_region(aik_space *sp, const char *region_id,
 		    strcmp(sp->vtab[i].region_id, region_id) == 0)
 			sp->vtab[i].region_id = NULL;
 	}
-	for (i = sp->n_edges; i-- > 0;) {
-		if (strcmp(sp->edges[i].a, region_id) == 0 ||
-		    strcmp(sp->edges[i].b, region_id) == 0) {
-			close_remove(sp, sp->edges[i].a, sp->edges[i].b);
-			edge_remove_at(sp, i);
-		}
-	}
-	close_prune_for(sp, region_id);
+	prune_edges_for(sp, region_id);
 	region_remove_at(sp, idx);
 	note_region(sp, saved_id);
 	if (history_push(sp, "region_deleted", saved_id, NULL, members,
@@ -1425,6 +1469,12 @@ static int merge_regions(aik_space *sp, const char *a_id, const char *b_id,
 			slot->region_id = aik_region_id(keeper);
 	}
 	region_remove_at(sp, absorbed_idx);
+	/*
+	 * MEM-01b（上游 ed5378a merge_regions，P3-6）：被吸收 Region 与第三方
+	 * 的邻边一并剪掉；下面的 update_edges_for 只重算 keeper 的边，不会
+	 * 触碰这些以 absorbed 为端点的旧边。
+	 */
+	prune_edges_for(sp, absorbed_id);
 	note_region(sp, keeper_id_copy);
 	note_region(sp, absorbed_id);
 	{
@@ -1526,11 +1576,23 @@ static int evolution_pass(aik_space *sp, aik_space_event **events_out,
 	/* 1) 密度拆分 */
 	snap = cand_take(&sp->split_cands, &sp->n_split, &sp->cap_split,
 			 &n_snap);
-	for (i = 0; i < n_snap && splits < AIK_MAX_EVOLVE_ACTIONS; i++) {
-		aik_region *r = region_find(sp, snap[i]);
+	for (i = 0; i < n_snap; i++) {
+		aik_region *r;
 		int merge_ops;
 		int allow;
 
+		if (splits >= AIK_MAX_EVOLVE_ACTIONS) {
+			/* MEM-01b：未检视的候选滚入下一轮，不再整批丢弃 */
+			if (cands_carry_over(&sp->split_cands, &sp->n_split,
+					     &sp->cap_split, snap + i,
+					     n_snap - i) != 0) {
+				set_err(err, errlen, "aik_space: out of memory");
+				rc = -1;
+				goto done_free_snap;
+			}
+			break;
+		}
+		r = region_find(sp, snap[i]);
 		if (!r)
 			continue;
 		merge_ops = merge_ops_get(sp, snap[i], -(interval * 4));
@@ -1556,21 +1618,31 @@ static int evolution_pass(aik_space *sp, aik_space_event **events_out,
 		}
 	}
 	free_str_array(snap, n_snap);
-	{
-		size_t extra = 0;
-		char **leftover = cand_take(&sp->split_cands, &sp->n_split,
-					    &sp->cap_split, &extra);
-
-		free_str_array(leftover, extra);
-	}
+	/*
+	 * 本轮期间由 note_region 新登记的候选（如拆分后仍然超阈的子
+	 * Region）保留到下一轮：上游 ed5378a 把候选集的清空从事后挪到了
+	 * 事前（cand_take 已清），这里不再像 e72bc75 那样把新增候选丢弃。
+	 */
 
 	/* 2) 小 Region 并入最近邻（质心余弦门槛） */
 	snap = cand_take(&sp->small_cands, &sp->n_small, &sp->cap_small,
 			 &n_snap);
-	for (i = 0; i < n_snap && merges < AIK_MAX_EVOLVE_ACTIONS; i++) {
-		aik_region *r = region_find(sp, snap[i]);
+	for (i = 0; i < n_snap; i++) {
+		aik_region *r;
 		aik_region *neighbor;
 
+		if (merges >= AIK_MAX_EVOLVE_ACTIONS) {
+			/* MEM-01b：未检视的候选滚入下一轮，不再整批丢弃 */
+			if (cands_carry_over(&sp->small_cands, &sp->n_small,
+					     &sp->cap_small, snap + i,
+					     n_snap - i) != 0) {
+				set_err(err, errlen, "aik_space: out of memory");
+				rc = -1;
+				goto done_free_snap;
+			}
+			break;
+		}
+		r = region_find(sp, snap[i]);
 		if (!r || (int)aik_region_size(r) >= sp->cfg.min_region_size)
 			continue;
 		neighbor = closest_region(sp, snap[i]);
@@ -1606,13 +1678,6 @@ static int evolution_pass(aik_space *sp, aik_space_event **events_out,
 		}
 	}
 	free_str_array(snap, n_snap);
-	{
-		size_t extra = 0;
-		char **leftover = cand_take(&sp->small_cands, &sp->n_small,
-					    &sp->cap_small, &extra);
-
-		free_str_array(leftover, extra);
-	}
 
 	/* 3) close 边合并 */
 	{
@@ -1724,6 +1789,10 @@ static int evolution_pass(aik_space *sp, aik_space_event **events_out,
 	if (sp->n_merge_ops > 64)
 		merge_ops_prune(sp, sp->write_ops - interval * 8);
 
+	goto done;
+
+done_free_snap:
+	free_str_array(snap, n_snap);
 done:
 	if (rc == 0) {
 		if (events_out) {

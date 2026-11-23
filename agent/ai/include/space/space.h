@@ -121,6 +121,10 @@ int aik_space_query_regions(const aik_space *sp, const double *query, int top_k,
  *
  * *events 为本次演化产生的事件数组（深拷贝，单块 malloc），无事件时为 NULL；
  * 调用者用 aik_space_events_free 释放。同一批事件也已追加到内部 history。
+ *
+ * MEM-01b（有意偏离 e72bc75，依据上游 ed5378a，P2-5）：单轮最多 8 次
+ * 拆分、8 次合并；达到上限后**尚未检视的候选保留到下一轮**（基线把
+ * 候选集整批清空，超额候选永久滞留）。本轮期间新登记的候选同样保留。
  */
 int aik_space_evolution_pass(aik_space *sp, aik_space_event **events,
 			     size_t *n_events, char *err, size_t errlen);
@@ -132,6 +136,9 @@ void aik_space_events_free(aik_space_event *events, size_t n);
  * 返回 0 表示执行成功（keep_id / new_id / keeper_id 指向 malloc 字符串，
  * 调用者 free）；1 表示前置条件不满足（Region 不存在、成员数不足、种子
  * 相同等）；-1 表示错误（err 已写）。
+ *
+ * MEM-01b（依据上游 ed5378a，P3-6）：merge 后被吸收 Region 与第三方的
+ * 邻边、close 键一并剪掉，不留端点已不存在的悬空边。
  */
 int aik_space_split(aik_space *sp, const char *region_id,
 		    char **keep_id, char **new_id, char *err, size_t errlen);

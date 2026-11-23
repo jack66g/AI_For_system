@@ -13,6 +13,10 @@
  * 全部操作结束后比较 history 的 kind/region_key/detail（merge detail 用
  * `absorbed [key] (N members)`），以及 6 组 query_regions 与 region_stats。
  *
+ * MEM-01b 段（文件末尾，自包含、不读向量）：演化候选超额后滚入下一轮
+ * （基线 e72bc75 整批丢弃）、merge 后不留悬空边——有意偏离基线，依据
+ * 上游 ed5378a sme/space/region_manager.py（P2-5 / P3-6）。
+ *
  * 输出最后一行：checks=<N> mismatches=<M>；有失配 exit 1 并打印路径。
  * 读向量失败 / 字段缺失同样 exit 1 并说明。
  */
@@ -1002,6 +1006,374 @@ static void replay(aik_space *sp, const aik_json *root, int dim)
 }
 
 /* ------------------------------------------------------------------ */
+/* MEM-01b：演化候选饥饿 / merge 后悬空边（自包含回归，不读向量）        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 对应上游 experiment/regression/test_fix_round2_20261120.py::
+ * test_split_candidates_carry_over_when_capped / test_merge_prunes_
+ * absorbed_region_edges（依据上游 ed5378a sme/space/region_manager.py，
+ * 2026-11-20 测试战役 P2-5 / P3-6）。上游用 monkeypatch 把单轮上限压到
+ * 2；C 的上限是编译期常量 AIK_MAX_EVOLVE_ACTIONS=8（= 上游
+ * MAX_SPLITS_PER_PASS / MAX_MERGES_PER_PASS），这里造 12 个候选让单轮
+ * 必然超限。基线 e72bc75 把超额候选整批丢弃，下面标「基线」的断言在
+ * 基线上分别是 0 与「留有悬空边」。
+ */
+#define MEM01B_DIM 36
+#define MEM01B_CLUSTERS 12
+
+static void mem01b_cfg(aik_region_config *c, int split_threshold,
+		       int min_region_size, double join_cosine,
+		       double neighbor_factor, double merge_distance)
+{
+	memset(c, 0, sizeof(*c));
+	c->min_region_size = min_region_size;
+	c->min_join_cosine = join_cosine;
+	c->split_threshold = split_threshold;
+	c->max_density = 0.0;		/* 密度门全开，只看规模 */
+	c->merge_distance = merge_distance;
+	c->neighbor_factor = neighbor_factor;
+	c->auto_evolve = 0;		/* 灌数据期间不演化，显式调 evolution_pass */
+	c->evolve_interval = 1;
+}
+
+static void mem01b_sizes(const aik_space *sp, size_t *n_regions,
+			 size_t *max_size, size_t *n_ge, int threshold)
+{
+	size_t i;
+
+	*n_regions = aik_space_region_count(sp);
+	*max_size = 0;
+	*n_ge = 0;
+	for (i = 0; i < *n_regions; i++) {
+		size_t s = aik_region_size(aik_space_region_at(sp, i));
+
+		if (s > *max_size)
+			*max_size = s;
+		if ((int)s >= threshold)
+			(*n_ge)++;
+	}
+}
+
+/* 跑一轮演化，断言 split / merge 事件数（其余 kind 一律计入 other 并要求 0） */
+static void mem01b_pass(const char *tag, aik_space *sp, long long exp_split,
+			long long exp_merge)
+{
+	aik_space_event *ev = NULL;
+	size_t n = 0;
+	size_t i;
+	char path[96];
+	char err[256];
+	long long ns = 0;
+	long long nm = 0;
+	long long no = 0;
+
+	if (aik_space_evolution_pass(sp, &ev, &n, err, sizeof(err)) != 0) {
+		snprintf(path, sizeof(path), "mem01b %s: evolution_pass", tag);
+		check_str(path, err, "(no error)");
+		return;
+	}
+	for (i = 0; i < n; i++) {
+		if (strcmp(ev[i].kind, "split") == 0)
+			ns++;
+		else if (strcmp(ev[i].kind, "merge") == 0)
+			nm++;
+		else
+			no++;
+	}
+	aik_space_events_free(ev, n);
+	snprintf(path, sizeof(path), "mem01b %s: split events", tag);
+	check_int(path, ns, exp_split);
+	snprintf(path, sizeof(path), "mem01b %s: merge events", tag);
+	check_int(path, nm, exp_merge);
+	snprintf(path, sizeof(path), "mem01b %s: other events", tag);
+	check_int(path, no, 0);
+}
+
+/* 端点已不是存活 Region 的边数（悬空边） */
+static long long mem01b_dangling_edges(const aik_space *sp)
+{
+	size_t i;
+	size_t n = aik_space_edge_count(sp);
+	long long bad = 0;
+
+	for (i = 0; i < n; i++) {
+		const char *a = NULL;
+		const char *b = NULL;
+
+		if (aik_space_edge_at(sp, i, &a, &b, NULL) != 0)
+			continue;
+		if (!aik_space_region(sp, a) || !aik_space_region(sp, b))
+			bad++;
+	}
+	return bad;
+}
+
+/*
+ * A) 拆分候选超额：12 个互相正交的簇，每簇 6 条 = 两个子簇各 3 条
+ *（g = i%2；同子簇向量相同，两子簇余弦 0.8 > 加入门槛 0.70，所以每簇
+ * 恰好长成一个 6 成员 Region）。每簇都是超阈候选（阈值 4），拆出来是
+ * 3/3 两个稳定子 Region。单轮上限 8：第一轮拆 8 个，其余 4 个必须滚入
+ * 第二轮。
+ */
+static void mem01b_split_carry_over(void)
+{
+	aik_region_config cfg;
+	aik_space *sp;
+	char err[256];
+	char path[96];
+	char mid[32];
+	double v[MEM01B_DIM];
+	size_t n_regions;
+	size_t max_size;
+	size_t n_ge;
+	int c;
+	int i;
+
+	mem01b_cfg(&cfg, 4, 2, 0.70, 1.8, 0.12);
+	sp = aik_space_new(&cfg, MEM01B_DIM, err, sizeof(err));
+	check_str("mem01b split: aik_space_new", sp ? "ok" : err, "ok");
+	if (!sp)
+		return;
+	for (c = 0; c < MEM01B_CLUSTERS; c++) {
+		for (i = 0; i < 6; i++) {
+			memset(v, 0, sizeof(v));
+			v[c] = 1.0;
+			v[MEM01B_CLUSTERS + 2 * c + (i % 2)] = 0.5;
+			snprintf(mid, sizeof(mid), "ms%d_%d", c, i);
+			snprintf(path, sizeof(path), "mem01b split: insert %s",
+				 mid);
+			check_int(path,
+				  aik_space_insert(sp, mid, v, err, sizeof(err)),
+				  0);
+		}
+	}
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b split: regions after fill", (long long)n_regions,
+		  MEM01B_CLUSTERS);
+	check_int("mem01b split: oversized after fill", (long long)n_ge,
+		  MEM01B_CLUSTERS);
+
+	mem01b_pass("split pass1", sp, 8, 0);
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b split: regions after pass1", (long long)n_regions,
+		  MEM01B_CLUSTERS + 8);
+	check_int("mem01b split: oversized after pass1", (long long)n_ge, 4);
+	check_int("mem01b split: max size after pass1", (long long)max_size,
+		  6);
+
+	/* 基线：第一轮后候选集被清空，这一轮 0 个事件，4 个大 Region 永不拆 */
+	mem01b_pass("split pass2", sp, 4, 0);
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b split: regions after pass2", (long long)n_regions,
+		  MEM01B_CLUSTERS * 2);
+	check_int("mem01b split: oversized after pass2", (long long)n_ge, 0);
+	check_int("mem01b split: max size after pass2", (long long)max_size,
+		  3);
+	/* 候选耗尽：再来一轮不应有任何动作 */
+	mem01b_pass("split pass3", sp, 0, 0);
+	check_int("mem01b split: dangling edges",
+		  mem01b_dangling_edges(sp), 0);
+	aik_space_free(sp);
+}
+
+/*
+ * B) 合并候选超额：每簇 5 条相同向量 + 1 条偏移向量（余弦 0.894，加入
+ * 同一 Region）。显式拆成 5 + 1，单成员子 Region 全部进 small 候选
+ *（共 12 个）。一轮最多并 8 个，其余 4 个必须滚入下一轮。
+ */
+static void mem01b_small_merge_carry_over(void)
+{
+	aik_region_config cfg;
+	aik_space *sp;
+	char err[256];
+	char path[96];
+	char mid[32];
+	double v[MEM01B_DIM];
+	size_t n_regions;
+	size_t max_size;
+	size_t n_ge;
+	size_t n_small;
+	size_t i;
+	int c;
+	int k;
+
+	mem01b_cfg(&cfg, 4, 2, 0.70, 1.8, 0.12);
+	sp = aik_space_new(&cfg, MEM01B_DIM, err, sizeof(err));
+	check_str("mem01b merge: aik_space_new", sp ? "ok" : err, "ok");
+	if (!sp)
+		return;
+	for (c = 0; c < MEM01B_CLUSTERS; c++) {
+		for (k = 0; k < 6; k++) {
+			memset(v, 0, sizeof(v));
+			v[c] = 1.0;
+			if (k == 5)
+				v[MEM01B_CLUSTERS + 2 * c] = 0.5;
+			snprintf(mid, sizeof(mid), "mm%d_%d", c, k);
+			snprintf(path, sizeof(path), "mem01b merge: insert %s",
+				 mid);
+			check_int(path,
+				  aik_space_insert(sp, mid, v, err, sizeof(err)),
+				  0);
+		}
+	}
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b merge: regions after fill", (long long)n_regions,
+		  MEM01B_CLUSTERS);
+	for (c = 0; c < MEM01B_CLUSTERS; c++) {
+		char *keep = NULL;
+		char *child = NULL;
+		const char *rid;
+		int rc;
+
+		snprintf(mid, sizeof(mid), "mm%d_0", c);
+		rid = aik_space_region_for(sp, mid);
+		snprintf(path, sizeof(path), "mem01b merge: split cluster %d",
+			 c);
+		if (!rid) {
+			check_str(path, "(no region)", "region");
+			continue;
+		}
+		rc = aik_space_split(sp, rid, &keep, &child, err, sizeof(err));
+		check_int(path, rc, 0);
+		free(keep);
+		free(child);
+	}
+	n_small = 0;
+	for (i = 0; i < aik_space_region_count(sp); i++)
+		if (aik_region_size(aik_space_region_at(sp, i)) < 2)
+			n_small++;
+	check_int("mem01b merge: tiny after explicit splits",
+		  (long long)n_small, MEM01B_CLUSTERS);
+
+	/* 单轮上限 8：并入 8 个，4 个 tiny 滚入下一轮 */
+	mem01b_pass("merge pass1", sp, 0, 8);
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b merge: regions after pass1", (long long)n_regions,
+		  MEM01B_CLUSTERS + 4);
+	n_small = 0;
+	for (i = 0; i < aik_space_region_count(sp); i++)
+		if (aik_region_size(aik_space_region_at(sp, i)) < 2)
+			n_small++;
+	check_int("mem01b merge: tiny after pass1", (long long)n_small, 4);
+
+	/* 基线：候选被清空，这一轮 0 个事件，4 个 tiny 永久滞留 */
+	mem01b_pass("merge pass2", sp, 0, 4);
+	mem01b_sizes(sp, &n_regions, &max_size, &n_ge, cfg.split_threshold);
+	check_int("mem01b merge: regions after pass2", (long long)n_regions,
+		  MEM01B_CLUSTERS);
+	check_int("mem01b merge: max size after pass2", (long long)max_size,
+		  6);
+	/* 刚并过的 Region 有滞后窗口，不会被立刻再拆 */
+	mem01b_pass("merge pass3", sp, 0, 0);
+	check_int("mem01b merge: dangling edges",
+		  mem01b_dangling_edges(sp), 0);
+	aik_space_free(sp);
+}
+
+/*
+ * C) merge 后不留悬空边：显式 aik_space_merge（via_evolution=0）与演化
+ * 的 close 边合并（via_evolution=1）两条路径各验一遍。
+ *
+ * P = 沿 e1 的四个点 0 / 0.6 / 1.2 / 1.8（链式加入，与所在 Region 质心
+ * 的余弦都 >= 0.83），拆成 2 + 2。Q = 偏离 P 的两点点（q1 与 P 质心余弦
+ * 0.667 < 0.70，自立门户），与两个子 Region 的质心距离都是 1.849，落在
+ * 建边阈值 (0.3 + 0.25) * 4.0 = 2.2 之内。Region 邻边只在 split / merge
+ * 时计算，所以拆分之后才有边：P–child、P–Q、child–Q。
+ */
+static void mem01b_merge_prunes_edges(int via_evolution)
+{
+	aik_region_config cfg;
+	aik_space *sp;
+	char err[256];
+	char path[96];
+	double v[8];
+	const char *p;
+	const char *q;
+	char *keep = NULL;
+	char *child = NULL;
+	char *keeper = NULL;
+	const double step[4] = { 0.0, 0.6, 1.2, 1.8 };
+	int i;
+
+	mem01b_cfg(&cfg, 1000, 2, 0.70, 4.0, via_evolution ? 1.5 : 0.12);
+	sp = aik_space_new(&cfg, 8, err, sizeof(err));
+	snprintf(path, sizeof(path), "mem01b prune(%d): aik_space_new",
+		 via_evolution);
+	check_str(path, sp ? "ok" : err, "ok");
+	if (!sp)
+		return;
+	for (i = 0; i < 4; i++) {
+		char pid[8];
+
+		memset(v, 0, sizeof(v));
+		v[0] = 1.0;
+		v[1] = step[i];
+		snprintf(pid, sizeof(pid), "mp%d", i);
+		snprintf(path, sizeof(path), "mem01b prune(%d): insert %s",
+			 via_evolution, pid);
+		check_int(path,
+			  aik_space_insert(sp, pid, v, err, sizeof(err)), 0);
+	}
+	for (i = 0; i < 2; i++) {
+		char qid[8];
+
+		memset(v, 0, sizeof(v));
+		v[0] = 1.0;
+		v[1] = 0.9;
+		v[2] = i == 0 ? 1.5 : 2.0;
+		snprintf(qid, sizeof(qid), "mq%d", i);
+		snprintf(path, sizeof(path), "mem01b prune(%d): insert %s",
+			 via_evolution, qid);
+		check_int(path,
+			  aik_space_insert(sp, qid, v, err, sizeof(err)), 0);
+	}
+	p = aik_space_region_for(sp, "mp0");
+	q = aik_space_region_for(sp, "mq0");
+	snprintf(path, sizeof(path), "mem01b prune(%d): two regions",
+		 via_evolution);
+	check_int(path, p && q && strcmp(p, q) != 0, 1);
+	snprintf(path, sizeof(path), "mem01b prune(%d): edges before split",
+		 via_evolution);
+	check_int(path, (long long)aik_space_edge_count(sp), 0);
+	snprintf(path, sizeof(path), "mem01b prune(%d): split", via_evolution);
+	check_int(path,
+		  aik_space_split(sp, p, &keep, &child, err, sizeof(err)), 0);
+	snprintf(path, sizeof(path), "mem01b prune(%d): edges after split",
+		 via_evolution);
+	check_int(path, (long long)aik_space_edge_count(sp), 3);
+	snprintf(path, sizeof(path), "mem01b prune(%d): dangling after split",
+		 via_evolution);
+	check_int(path, mem01b_dangling_edges(sp), 0);
+
+	if (via_evolution) {
+		/* 子 Region 质心距 1.2 < merge_distance 1.5 → close 边合并 */
+		snprintf(path, sizeof(path), "merge(evolve)(%d)", via_evolution);
+		mem01b_pass(path, sp, 0, 1);
+	} else {
+		snprintf(path, sizeof(path), "mem01b prune(%d): merge",
+			 via_evolution);
+		check_int(path, aik_space_merge(sp, keep, child, &keeper, err,
+						sizeof(err)), 0);
+	}
+	/* 基线：被吸收 Region 与 Q 的那条边残留成悬空边（2 条边，1 条悬空） */
+	snprintf(path, sizeof(path), "mem01b prune(%d): edges after merge",
+		 via_evolution);
+	check_int(path, (long long)aik_space_edge_count(sp), 1);
+	snprintf(path, sizeof(path), "mem01b prune(%d): dangling edges",
+		 via_evolution);
+	check_int(path, mem01b_dangling_edges(sp), 0);
+	snprintf(path, sizeof(path), "mem01b prune(%d): regions",
+		 via_evolution);
+	check_int(path, (long long)aik_space_region_count(sp), 2);
+
+	free(keep);
+	free(child);
+	free(keeper);
+	aik_space_free(sp);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 int main(void)
@@ -1052,6 +1424,13 @@ int main(void)
 	compare_stats(sp, need(root, "region_stats", "root"), "region_stats");
 	aik_space_free(sp);
 	aik_json_free(root);
+
+	/* MEM-01b：自包含回归（不依赖上面的向量重放结果） */
+	mem01b_split_carry_over();
+	mem01b_small_merge_carry_over();
+	mem01b_merge_prunes_edges(0);
+	mem01b_merge_prunes_edges(1);
+
 	printf("checks=%zu mismatches=%zu\n", checks, mismatches);
 	return mismatches == 0 ? 0 : 1;
 }
