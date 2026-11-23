@@ -22,6 +22,8 @@
 #ifndef OCC_TUI_GATE_H
 #define OCC_TUI_GATE_H
 
+#include <sys/types.h>		/* uid_t/gid_t/mode_t（P-60/D7 权限契约） */
+
 #define TUI_GATE_HASH_LEN 128	/* sha512crypt 文本上限（含 NUL 边界） */
 
 /* 纯逻辑面（headless 可测） */
@@ -38,7 +40,8 @@ int tui_gate_write(const char *path, const char *hash);
  * tui_gate_read_user - 按用户名取条目。
  *   返回 0=找到（hash_out 收哈希；fails_out 可 NULL，收行尾第 4 段
  *   失败计数，缺省段=0）；<0=无此用户/坏文件/参数坏。
- * tui_gate_write_entry - 原子写（tmp+rename，0600）一条用户条目：
+ * tui_gate_write_entry - 原子写（tmp+rename）一条用户条目：权限按下方
+ *   D7 契约（root 且机器上有 aik-gate 组=0640 root:aik-gate；否则 0600）：
  *   更新已存在行（重名首行）或追加；其余行（含注释）原样保留。
  *   fails==0 写三段（老式字节形态），>0 写四段。成功 0。
  */
@@ -74,6 +77,27 @@ int tui_gate_write_entry(const char *path, const char *user,
 #define TUI_GATE_LOCKED		1
 #define TUI_GATE_DENIED		2
 int tui_gate_open_class(int err);
+
+/*
+ * P-60/D7（DEC-07 过渡方案）：写出的 gate 文件权限契约。
+ * 背景：首启 SETUP 向导（root）建出的 gate 恒 0600 root:root，而 admin
+ * 归位降权后非 root 的 occ 读不了——出厂首启的多用户控制台实际不可用
+ * （admin 停在 D1 的「凭据不可读」报错屏；台架当年靠预种 0640 绕开）。
+ * 契约（tui_gate_write_entry / tui_gate_write 写出的文件）：
+ *   进程 euid==0 且机器上有 aik-gate 系统组 → 0640 root:aik-gate
+ *     （非 root 的 occ 组读面）；
+ *   否则 0600（老口径不变；非 root 写恒 0600、不改属主）。
+ * 落地方式：tmp 文件建出即 0600（不靠 umask，写入期间他人读不到哈希）；
+ * 属主/模式在 tmp 的 fd 上归一（fchown→fchmod）之后才 rename——最终
+ * 路径上不存在「已就位但权限未归一」的窗口。fchown/fchmod 失败=写失败
+ * （返回 -1，不留半成品）。
+ * tui_gate_file_policy - 该契约的纯判定（无 IO，可单测）：
+ *   euid==0 且 have_group 非 0 → 返回 1，*mode_out=0640、*gid_out=group_gid；
+ *   否则 → 返回 0，*mode_out=0600、*gid_out=(gid_t)-1（不改属主）。
+ *   出参可为 NULL。
+ */
+int tui_gate_file_policy(uid_t euid, int have_group, gid_t group_gid,
+			 mode_t *mode_out, gid_t *gid_out);
 
 /*
  * UI 面：进屏登录门。返回 0=解锁（或旁路）；非 0=未解锁退出

@@ -19,6 +19,9 @@
  *      （P-45 后 ctx fallback 星在水位段——档标段无假星）
  *   F. 降权后再 /su → 密码 overlay 再弹（重提权必过密码）
  *   G. audit.log 三笔齐：elevate fail / elevate ok / delevate ok
+ *   H. P-60/D7：凭据「读不出」时 /su 两处判定给诚实文案（整句新文案；
+ *      不弹框／overlay 状态行），且不提权（/su 0 答「未在提权档」）。
+ *      非 root 前提，root 显式 SKIP。
  */
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE 1
@@ -50,6 +53,9 @@ static int n_ok, n_fail;
 
 /* 测试桩密码（gate 哈希同源生成——非真机凭据） */
 #define SU_PW "p45-pty-stub-pw"
+
+/* P-60/D7：凭据读不出时 /su 的诚实文案（整句；与 occ.c L_() 键逐字同） */
+#define SU_UNRD_MSG ("登录凭据不可读，无法验证 root 密码——请联系管理员")
 
 struct pty {
 	int master;
@@ -438,6 +444,61 @@ int main(void)
 	if (write(pt.master, "\x1b", 1) < 0)
 		printf("FAIL write\n");
 	usleep(200000);
+
+	/* H（P-60/D7）：凭据「读不出」时 /su 的诚实文案——occ.c 两处判定
+	 *    H1 开框前读不出 → 不弹密码框，notice=完整新文案；
+	 *    H2 密码框已开、提交前变读不出 → overlay 状态行同一文案，且
+	 *       未提权（其后 /su 0 答「未在提权档」——状态断言，不靠屏面
+	 *       排除旧文案：整屏重绘会带出历史行里的旧 notice）。
+	 * 文案 token 取整句（此前从未出现过，不会与历史行撞）。前提：把
+	 * 自家 gate 文件改成只写（0200）——root 读得了任何文件，前提不
+	 * 成立→显式 SKIP（断言保留不删）。 */
+	if (geteuid() != 0) {
+		OK(chmod(gatep, 0200) == 0, "h-gate-unreadable");
+		mark = have;
+		if (write(pt.master, "/su\r", 4) < 0)
+			printf("FAIL write\n");
+		OK(wait_new(pt.master, out, OUT_CAP, &have, mark, SU_UNRD_MSG,
+			    15000) == 0, "h1-su-unreadable-honest-notice");
+		usleep(400000);		/* notice 余下字节落定后再取基线 */
+		{
+			int mark2 = have;
+
+			OK(wait_new(pt.master, out, OUT_CAP, &have, mark2,
+				    "/su 提权", 1200) != 0,
+			   "h1-no-pw-overlay");
+		}
+		/* H2：先让密码框打开，再让凭据读不出，然后提交 */
+		OK(chmod(gatep, 0600) == 0, "h-gate-readable-again");
+		mark = have;
+		if (write(pt.master, "/su\r", 4) < 0)
+			printf("FAIL write\n");
+		OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
+			    "/su 提权", 15000) == 0,
+		   "h2-overlay-opens-while-readable");
+		OK(chmod(gatep, 0200) == 0, "h-gate-unreadable-before-submit");
+		mark = have;
+		if (write(pt.master, SU_PW "\r", (int)strlen(SU_PW) + 1) < 0)
+			printf("FAIL write\n");
+		OK(wait_new(pt.master, out, OUT_CAP, &have, mark, SU_UNRD_MSG,
+			    15000) == 0,
+		   "h2-submit-unreadable-honest-status");
+		OK(chmod(gatep, 0600) == 0, "h-gate-restored");
+		/* Esc 关闭密码框（孤立 Esc 结算窗） */
+		usleep(100000);
+		if (write(pt.master, "\x1b", 1) < 0)
+			printf("FAIL write\n");
+		usleep(200000);
+		/* 未提权：/su 0 答「未在提权档」（对密码≠提权成功） */
+		mark = have;
+		if (write(pt.master, "/su 0\r", 6) < 0)
+			printf("FAIL write\n");
+		OK(wait_new(pt.master, out, OUT_CAP, &have, mark,
+			    "未在提权档", 15000) == 0, "h2-not-elevated-state");
+	} else {
+		printf("SKIP H (root-only premise: root reads any gate "
+		       "file)\n");
+	}
 
 	/* 退出 */
 	if (write(pt.master, "/exit\r", 6) < 0)

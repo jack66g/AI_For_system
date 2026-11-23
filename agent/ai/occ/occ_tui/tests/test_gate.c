@@ -1,9 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* test_gate.c - T4 登录门纯逻辑面单测（凭据文件/哈希/旁路判定）
  * ⑨ P-60/D1（CON-02b）：凭据「读不了」≠「没有」——errno 分类纯函数、
- *   目录/只写文件读出=TUI_GATE_READ_DENIED、写侧对读不出的既有文件拒写 */
+ *   目录/只写文件读出=TUI_GATE_READ_DENIED、写侧对读不出的既有文件拒写
+ * ⑩ P-60/D7（DEC-07 过渡方案）：写出的 gate 文件权限契约——root 且机器上
+ *   有 aik-gate 组=0640 root:aik-gate，否则 0600。有组环境须 root 且显式
+ *   开关 AIK_TEST_HAVE_GATE_GROUP=1（测试自建组 gid 942、atexit 删组）。
+ */
 #include <assert.h>
 #include <errno.h>
+#include <grp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +38,73 @@ static void write_file(const char *p, const char *s)
 		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly" \
 		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly:1\n")
 
+/* ---- P-60/D7：写出文件的权限契约 ----
+ * 期望值由测试侧独立查组得出（不复用被测的判定函数——否则「把契约
+ * 改没了」的变异会连期望值一起改，测试空过）。 */
+static int g_made_group;		/* 本测试建的 aik-gate 组（退出时删） */
+
+static void gate_group_cleanup(void)
+{
+	if (g_made_group) {
+		int rc = system("groupdel aik-gate >/dev/null 2>&1");
+
+		if (rc != 0)
+			printf("WARN groupdel aik-gate failed (rc=%d) -- "
+			       "please clean up\n", rc);
+	}
+}
+
+/* 有组环境：仅 root 且显式开关 AIK_TEST_HAVE_GATE_GROUP=1 才建组
+ * （gid 942=出厂定值）；机器上本有该组=直接沿用、不建不删。 */
+static void gate_group_setup(void)
+{
+	struct group gr, *res = NULL;
+	char buf[2048];
+	const char *sw;
+
+	if (geteuid() != 0)
+		return;			/* 非 root 建不了组：测 0600 老口径 */
+	if (getgrnam_r("aik-gate", &gr, buf, sizeof(buf), &res) == 0 && res) {
+		printf("[D7] machine has aik-gate (gid %u): 0640 path\n",
+		       (unsigned)gr.gr_gid);
+		return;
+	}
+	sw = getenv("AIK_TEST_HAVE_GATE_GROUP");
+	if (!sw || strcmp(sw, "1") != 0) {
+		printf("SKIP D7 0640 path (needs AIK_TEST_HAVE_GATE_GROUP=1;"
+		       " testing 0600 fallback)\n");
+		return;
+	}
+	if (system("groupadd -g 942 aik-gate >/dev/null 2>&1") == 0) {
+		g_made_group = 1;
+		printf("[D7] created group aik-gate gid 942 (groupdel at "
+		       "exit): 0640 path\n");
+	} else {
+		printf("SKIP D7 0640 path (groupadd -g 942 aik-gate failed;"
+		       " testing 0600 fallback)\n");
+	}
+}
+
+/* 测试侧独立判定：当前环境写出的 gate 是否应为 0640 root:aik-gate */
+static int test_wide(gid_t *gid)
+{
+	struct group gr, *res = NULL;
+	char buf[2048];
+
+	if (geteuid() != 0)
+		return 0;
+	if (getgrnam_r("aik-gate", &gr, buf, sizeof(buf), &res) != 0 || !res)
+		return 0;
+	if (gid)
+		*gid = gr.gr_gid;
+	return 1;
+}
+
+static mode_t expect_gate_mode(void)
+{
+	return test_wide(NULL) ? (mode_t)0640 : (mode_t)0600;
+}
+
 int main(void)
 {
 	char dir[] = "/tmp/gateXXXXXX";
@@ -44,6 +116,8 @@ int main(void)
 	snprintf(p, sizeof(p), "%s/console-gate", dir);
 	snprintf(cmdline, sizeof(cmdline), "%s/cmdline", dir);
 	setenv("AIK_CONSOLE_GATE", p, 1);
+	atexit(gate_group_cleanup);		/* P-60/D7：本测试建的组退出即删 */
+	gate_group_setup();
 
 	/* ① 路径覆盖生效 */
 	CHECK(strcmp(tui_gate_path(), p) == 0);
@@ -79,7 +153,8 @@ int main(void)
 
 	/* ④ 写+读 roundtrip */
 	CHECK(tui_gate_write(p, hash) == 0);
-	CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == 0600);
+	/* 模式=契约值（D7：root 且有 aik-gate 组=0640，否则 0600） */
+	CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == expect_gate_mode());
 	CHECK(access("p.tmp-path-none", 0) != 0);
 	{
 		char tmpchk[300];
@@ -183,7 +258,8 @@ int main(void)
 			snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", p);
 			CHECK(access(tmpchk, 0) != 0);
 		}
-		CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == 0600);
+		CHECK(stat(p, &st) == 0 &&
+		      (st.st_mode & 0777) == expect_gate_mode());	/* D7 */
 		/* 非法参数拒 */
 		CHECK(tui_gate_write_entry(p, "a:b", hash, 0) == -1);
 		CHECK(tui_gate_write_entry(p, "", hash, 0) == -1);
@@ -280,6 +356,50 @@ int main(void)
 			       "reads any file)\n");
 		}
 		unlink(wo);
+	}
+
+	/* ⑩ P-60/D7：写出的 gate 文件权限契约（期望值独立得出，见上） */
+	{
+		char q[256], tmpchk[300];
+		struct stat sq;
+		mode_t want = expect_gate_mode();
+		mode_t pm = 0;
+		gid_t pg = 0;
+		gid_t gg = 0;
+		int wide = test_wide(&gg);
+
+		/* 纯判定（与运行 uid 无关，非 root 也可测） */
+		CHECK(tui_gate_file_policy(0, 1, 942, &pm, &pg) == 1 &&
+		      pm == 0640 && pg == 942);		/* root+有组 */
+		CHECK(tui_gate_file_policy(0, 0, 942, &pm, &pg) == 0 &&
+		      pm == 0600 && pg == (gid_t)-1);	/* root+无组 */
+		CHECK(tui_gate_file_policy(1000, 1, 942, &pm, &pg) == 0 &&
+		      pm == 0600 && pg == (gid_t)-1);	/* 非 root */
+		CHECK(tui_gate_file_policy(0, 1, 7, &pm, &pg) == 1 &&
+		      pg == 7);				/* gid 原样带出 */
+		CHECK(tui_gate_file_policy(0, 1, 942, NULL, NULL) == 1);
+		/* 新建路径（首启 SETUP 向导所经的 tui_gate_write） */
+		snprintf(q, sizeof(q), "%s/d7-gate", dir);
+		CHECK(tui_gate_write(q, hash) == 0);
+		CHECK(stat(q, &sq) == 0 && (sq.st_mode & 0777) == want);
+		if (wide)
+			CHECK(sq.st_uid == 0 && sq.st_gid == gg);	/* root:aik-gate */
+		else
+			CHECK(sq.st_uid == geteuid());		/* 属主未被改 */
+		/* 更新路径（登录计数/清零所经的 tui_gate_write_entry）契约保持 */
+		CHECK(tui_gate_write_entry(q, "admin", hash, 1) == 0);
+		CHECK(stat(q, &sq) == 0 && (sq.st_mode & 0777) == want);
+		if (wide)
+			CHECK(sq.st_uid == 0 && sq.st_gid == gg);
+		/* 多条目文件（④~⑧ 写过多次的 p）同样符合契约 */
+		CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == want);
+		if (wide)
+			CHECK(st.st_uid == 0 && st.st_gid == gg);
+		/* 原子写无残留；内容回读无误（归一不伤内容） */
+		snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", q);
+		CHECK(access(tmpchk, 0) != 0);
+		CHECK(tui_gate_read(q, rd, &ts) == 0 && strcmp(rd, hash) == 0);
+		unlink(q);
 	}
 	unlink(p);
 	unlink(cmdline);

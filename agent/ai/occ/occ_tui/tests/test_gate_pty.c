@@ -25,6 +25,10 @@
  *      1/3 起算、正确密码可解锁）；文件字节不动。
  *   H. D1 SETUP 提交复核：向导进行中凭据文件「出现但读不出」→ 不覆写
  *      （旧口径 fopen 失败=不在→新建覆写+解锁）、转诚实报错屏（非 root）。
+ *   D7（DEC-07 过渡方案）：A/D 段的文件权限断言为「契约值」——root 且
+ *      机器上有 aik-gate 组=0640 root:aik-gate（期望值测试侧独立查组得出），
+ *      否则 0600；有组环境须 root 且显式开关 AIK_TEST_HAVE_GATE_GROUP=1
+ *      （测试自建组 gid 942、atexit 删组）。
  */
 #define _XOPEN_SOURCE 700	/* posix_openpt/grantpt/unlockpt/ptsname */
 #define _DEFAULT_SOURCE 1
@@ -70,6 +74,72 @@ static int g_raw_exit;
 #define WO_LINE ("admin:$6$wo$" \
 		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly" \
 		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly:1\n")
+
+/* P-60/D7：写出文件的权限契约——期望值由测试侧独立查组得出（不复用
+ * 被测的判定函数，免得「把契约改没了」的变异连期望值一起改）。
+ * 有组环境：仅 root 且显式开关 AIK_TEST_HAVE_GATE_GROUP=1 才建组
+ * （gid 942=出厂定值），atexit 兜底删组（C 侧的「trap」）；机器上本有
+ * 该组=沿用、不建不删；否则测 0600 老口径。 */
+static int g_made_group;
+
+static void gate_group_cleanup(void)
+{
+	if (g_made_group) {
+		int rc = system("groupdel aik-gate >/dev/null 2>&1");
+
+		if (rc != 0)
+			printf("WARN groupdel aik-gate failed (rc=%d) -- "
+			       "please clean up\n", rc);
+	}
+}
+
+static void gate_group_setup(void)
+{
+	struct group gr, *res = NULL;
+	char buf[2048];
+	const char *sw;
+
+	if (geteuid() != 0)
+		return;
+	if (getgrnam_r("aik-gate", &gr, buf, sizeof(buf), &res) == 0 && res) {
+		printf("[D7] machine has aik-gate (gid %u): 0640 path\n",
+		       (unsigned)gr.gr_gid);
+		return;
+	}
+	sw = getenv("AIK_TEST_HAVE_GATE_GROUP");
+	if (!sw || strcmp(sw, "1") != 0) {
+		printf("SKIP D7 0640 path (needs AIK_TEST_HAVE_GATE_GROUP=1;"
+		       " testing 0600 fallback)\n");
+		return;
+	}
+	if (system("groupadd -g 942 aik-gate >/dev/null 2>&1") == 0) {
+		g_made_group = 1;
+		printf("[D7] created group aik-gate gid 942 (groupdel at "
+		       "exit): 0640 path\n");
+	} else {
+		printf("SKIP D7 0640 path (groupadd -g 942 aik-gate failed;"
+		       " testing 0600 fallback)\n");
+	}
+}
+
+static int test_wide(gid_t *gid)
+{
+	struct group gr, *res = NULL;
+	char buf[2048];
+
+	if (geteuid() != 0)
+		return 0;
+	if (getgrnam_r("aik-gate", &gr, buf, sizeof(buf), &res) != 0 || !res)
+		return 0;
+	if (gid)
+		*gid = gr.gr_gid;
+	return 1;
+}
+
+static mode_t expect_gate_mode(void)
+{
+	return test_wide(NULL) ? (mode_t)0640 : (mode_t)0600;
+}
 
 static int find_tok(const char *tok)
 {
@@ -269,6 +339,8 @@ int main(void)
 	FILE *f;
 
 	alarm(60);	/* gate 冻死类回归=挂起形态，60s 硬杀 */
+	atexit(gate_group_cleanup);		/* P-60/D7：本测试建的组退出即删 */
+	gate_group_setup();
 
 	/* A: SETUP 全流 */
 	{
@@ -299,7 +371,15 @@ int main(void)
 		CHECK(wait_exit(pid, &status, 15));
 		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 		CHECK(stat(path, &st) == 0);
-		CHECK((st.st_mode & 0777) == 0600);
+		/* P-60/D7：向导建出的文件=契约值（root 且有 aik-gate 组=
+		 * 0640 root:aik-gate；否则 0600——期望值测试侧独立得出） */
+		CHECK((st.st_mode & 0777) == expect_gate_mode());
+		{
+			gid_t gg = 0;
+
+			if (test_wide(&gg))
+				CHECK(st.st_uid == 0 && st.st_gid == gg);
+		}
 		f = fopen(path, "r");
 		CHECK(f != NULL);
 		if (f) {
@@ -468,6 +548,16 @@ int main(void)
 		      ff == 3);			/* u1 计数留痕 */
 		CHECK(tui_gate_read_user(path, "u2", rd, &ff) == 0 &&
 		      ff == 0);
+		/* P-60/D7：登录计数多次重写（tui_gate_write_entry 的更新
+		 * 路径）之后，文件权限仍是契约值 */
+		CHECK(stat(path, &st) == 0 &&
+		      (st.st_mode & 0777) == expect_gate_mode());
+		{
+			gid_t gg = 0;
+
+			if (test_wide(&gg))
+				CHECK(st.st_uid == 0 && st.st_gid == gg);
+		}
 		printf("test_gate_pty D (multi-user login): %s\n",
 		       fails ? "FAIL" : "ok");
 	}

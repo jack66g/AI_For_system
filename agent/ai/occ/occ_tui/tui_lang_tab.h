@@ -656,6 +656,8 @@ static const struct {
 	{ "凭据文件不是普通文件", "credentials file is not a regular file" },
 	{ "读取错误", "read error" },
 	{ "按任意键退出", "Press any key to exit" },
+	/* ---- P-60/D7（/su：凭据读不出的诚实文案；手工追加，2026-11-24） ---- */
+	{ "登录凭据不可读，无法验证 root 密码——请联系管理员", "Login credentials unreadable, cannot verify the root password -- contact your administrator" },
 };
 
 #endif /* _TUI_LANG_TAB_H */

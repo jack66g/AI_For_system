@@ -3370,12 +3370,19 @@ static int tui_app_on_command_impl(void *ud, const char *line)
 		}
 		/* P-2a：root 门不在=开框前诚实拒绝（弹了密码框也永远
 		 * 不会过——不误导输入）；OV_SU 提交处保留同一道防线
-		 * （凭据文件可在开框后被删）。 */
-		if (tui_gate_read_user(tui_gate_path(), "root", rhash,
-				       NULL) != 0) {
-			tui_view_notice(a->view,
-					L_("本机未开 root 门（console-gate 无 root 条目）"));
-			return 0;
+		 * （凭据文件可在开框后被删）。P-60/D7：凭据「读不出」
+		 * （TUI_GATE_READ_DENIED）另给诚实文案——读不了≠没开。 */
+		{
+			int grr = tui_gate_read_user(tui_gate_path(), "root",
+						     rhash, NULL);
+
+			if (grr != 0) {
+				tui_view_notice(a->view, grr ==
+						TUI_GATE_READ_DENIED ?
+						L_("登录凭据不可读，无法验证 root 密码——请联系管理员") :
+						L_("本机未开 root 门（console-gate 无 root 条目）"));
+				return 0;
+			}
 		}
 		(void)tui_view_open_input(a->view, OV_SU, L_("/su 提权"),
 					  L_("root 密码"), "", 1);
@@ -3822,13 +3829,21 @@ static int tui_app_on_overlay_input(void *ud, int ov_id, const char *text,
 			}
 			return 0;
 		}
-		if (tui_gate_read_user(tui_gate_path(), "root", hash,
-				       NULL) != 0) {
-			pthread_mutex_unlock(&a->mu);
-			tui_view_overlay_status(a->view,
-						 L_("本机未开 root 门（console-gate 无 root 条目）"),
-						 1);
-			return 0;
+		/* P-60/D7：凭据「读不出」（TUI_GATE_READ_DENIED）另给诚实
+		 * 文案——读不了≠没开；其余口径不变（不在=诚实拒绝） */
+		{
+			int grr = tui_gate_read_user(tui_gate_path(), "root",
+						     hash, NULL);
+
+			if (grr != 0) {
+				pthread_mutex_unlock(&a->mu);
+				tui_view_overlay_status(a->view,
+							grr == TUI_GATE_READ_DENIED ?
+							L_("登录凭据不可读，无法验证 root 密码——请联系管理员") :
+							L_("本机未开 root 门（console-gate 无 root 条目）"),
+							1);
+				return 0;
+			}
 		}
 		ok = (len > 0 && len < 128 &&
 		      tui_gate_verify(text, hash));

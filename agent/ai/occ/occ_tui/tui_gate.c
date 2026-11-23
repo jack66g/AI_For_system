@@ -3,11 +3,13 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>				/* P-60/D7：getgrnam_r（aik-gate 组） */
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -288,6 +290,64 @@ static void gate_emit_entry(FILE *f, const char *user, const char *hash,
 		fprintf(f, "%s:%s:%lld\n", user, hash, (long long)time(NULL));
 }
 
+/* ---- P-60/D7（DEC-07 过渡方案）：写出文件的权限契约 ----
+ * 契约全文见 tui_gate.h。首启 SETUP 向导（root）建出的 gate 曾恒
+ * 0600 root:root，admin 归位降权后非 root 的 occ 读不了——出厂首启的
+ * 多用户控制台实际不可用。修在写侧最底层：SETUP 建文件（tui_gate_
+ * write）、登录计数、/su 后清零全经 tui_gate_write_entry 一个口，向导
+ * 建出的文件即合规，不依赖脚本。无组=保持 0600（行为不变）。 */
+
+int tui_gate_file_policy(uid_t euid, int have_group, gid_t group_gid,
+			 mode_t *mode_out, gid_t *gid_out)
+{
+	if (euid == 0 && have_group) {
+		if (mode_out)
+			*mode_out = 0640;
+		if (gid_out)
+			*gid_out = group_gid;
+		return 1;
+	}
+	if (mode_out)
+		*mode_out = 0600;
+	if (gid_out)
+		*gid_out = (gid_t)-1;	/* 不改属主 */
+	return 0;
+}
+
+/* aik-gate 系统组在否（getgrnam_r：可重入、不碰静态缓冲。occ 动态链接
+ * glibc——policy 模块「静态链接勿用 NSS」之诫不适用；同 occ_tools/
+ * sandbox.c 的 getpwuid 先例）。在=1 并写 *gid；不在/查询失败=0。 */
+static int gate_group_aik(gid_t *gid)
+{
+	struct group gr, *res = NULL;
+	char buf[2048];
+
+	if (getgrnam_r("aik-gate", &gr, buf, sizeof(buf), &res) != 0 ||
+	    !res)
+		return 0;
+	*gid = gr.gr_gid;
+	return 1;
+}
+
+/* tmp 文件的属主/模式归一——rename 之前、只在 fd 上做（路径式 chmod
+ * 会被同名替换/符号链接插队）。0=成；-1=失败（调用方按写失败收尾：
+ * unlink tmp，不留半成品）。 */
+static int gate_tmp_finalize(int fd)
+{
+	mode_t mode;
+	gid_t gid = (gid_t)-1;
+	gid_t gg = 0;
+	int wide;
+
+	wide = tui_gate_file_policy(geteuid(), gate_group_aik(&gg), gg,
+				    &mode, &gid);
+	if (wide && fchown(fd, 0, gid) != 0)
+		return -1;
+	if (fchmod(fd, mode) != 0)
+		return -1;
+	return 0;
+}
+
 int tui_gate_write_entry(const char *path, const char *user,
 			 const char *hash, int fails)
 {
@@ -295,6 +355,7 @@ int tui_gate_write_entry(const char *path, const char *user,
 	FILE *in = NULL, *out;
 	char line[512];
 	int found = 0, nlines = 0;
+	int fd;
 
 	if (!path || !path[0] || !gate_user_valid(user) || !hash ||
 	    strncmp(hash, "$6$", 3) != 0 ||
@@ -308,8 +369,18 @@ int tui_gate_write_entry(const char *path, const char *user,
 		 * 丢他人条目（目录可写时真能写成）。调用方按写失败处理。 */
 		return -1;
 	}
-	out = fopen(tmp, "w");
+	/* P-60/D7：tmp 建出即 0600（O_CREAT 模位不靠 umask 放宽）。旧口径
+	 * fopen(…,"w") 建出 0644、写完再 chmod——写入期间哈希可被他人读。 */
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0) {
+		if (in)
+			fclose(in);
+		return -1;
+	}
+	out = fdopen(fd, "w");
 	if (!out) {
+		close(fd);
+		unlink(tmp);
 		if (in)
 			fclose(in);
 		return -1;
@@ -353,11 +424,23 @@ int tui_gate_write_entry(const char *path, const char *user,
 	}
 	if (!found)
 		gate_emit_entry(out, user, hash, fails);
-	if (fflush(out) != 0 || fclose(out) != 0) {
+	if (fflush(out) != 0) {
+		fclose(out);
 		unlink(tmp);
 		return -1;
 	}
-	chmod(tmp, 0600);
+	/* P-60/D7：属主/模式在 tmp 的 fd 上归一（root 且有 aik-gate 组=
+	 * 0640 root:aik-gate；否则 0600），之后才 rename——最终路径上不
+	 * 存在「已就位但权限未归一」的窗口；归一失败=写失败、不留半成品 */
+	if (gate_tmp_finalize(fd) != 0) {
+		fclose(out);
+		unlink(tmp);
+		return -1;
+	}
+	if (fclose(out) != 0) {
+		unlink(tmp);
+		return -1;
+	}
 	if (rename(tmp, path) != 0) {
 		unlink(tmp);
 		return -1;
