@@ -9,15 +9,21 @@
  *   <root>/config/config_file.expected.txt  save_config() 逐字节输出
  *
  * 覆盖（T4E-DESIGN.md §1.3）：
- *   1) 注册表 97/5/10、抽样字段、api_key 结尾项数量；
+ *   1) 注册表 101/5/10、抽样字段、api_key 结尾项数量（97 → 101 见 10）；
  *   2) groups/presets 与向量逐字节一致（默认）；
  *   3) mutated 场景逐字节一致（掩码 ****** + set:true）；
  *   4) save_file 与 config_file.expected.txt 逐字节一致 + load_file 往返；
  *   5) parse_value 正/负例（含逐字错误文案）；
  *   6) validate_value 正/负例；
  *   7) validate_all：默认 0 告警、注入 LLM/embedding 后文案逐字；
- *   8) load_file：缺失/坏 JSON/顶层数组 -> 97 项默认；
- *   9) value_equal 的 Python == 语义。
+ *   8) load_file：缺失/坏 JSON/顶层数组 -> 101 项默认；
+ *   9) value_equal 的 Python == 语义；
+ *   10) MEM-01c：补录的 4 个注册表项（上游 e72bc75 sme/config_items.py，
+ *       98071d9 新增）的字段、ITEMS 位置与 parse/validate 取值范围。
+ *
+ * MEM-01c：注册表 97 → 101。config_items_data.h 仍由仓外的
+ * scripts/gen_config_items.py 生成（参考树 = 出厂树 + 上游 e72bc75 的这
+ * 4 项）；下面各处 101 都是包含新项后的总数，向量按同一参考树重录。
  *
  * 换行基准：向量 config_file.expected.txt 已归一到 LF（Linux 参考实现的
  * 文本形态；Windows 文本模式会写 CRLF，与 T2-LOG.md 的 WAL 结论同源）。
@@ -250,7 +256,11 @@ static void test_registry(void)
 	const aik_config_preset *p;
 	size_t i, api_key_items = 0;
 
-	check(aik_config_item_count == 97, "registry: %zu items != 97",
+	/*
+	 * MEM-01c：97 → 101。新项的逐字段断言与 parse/validate 见文件末尾的
+	 * test_mem01c_registry()；下面的 101 都是包含新项后的总数。
+	 */
+	check(aik_config_item_count == 101, "registry: %zu items != 101",
 	      aik_config_item_count);
 	check(aik_config_preset_count == 5, "registry: %zu presets != 5",
 	      aik_config_preset_count);
@@ -388,7 +398,7 @@ static void test_registry(void)
 	check(aik_config_preset_find("nope") == NULL,
 	      "registry: unknown preset must be NULL");
 
-	/* defaults_config()：97 项、ITEMS 插入序 */
+	/* defaults_config()：101 项、ITEMS 插入序 */
 	{
 		aik_json *def = aik_config_defaults_build();
 		size_t n = 0;
@@ -400,7 +410,7 @@ static void test_registry(void)
 			for (i = 0; i < aik_config_item_count; i++)
 				if (aik_config_item_has(def, &aik_config_items[i]))
 					n++;
-			check(n == 97, "registry: defaults has %zu items != 97",
+			check(n == 101, "registry: defaults has %zu items != 101",
 			      n);
 			check(aik_json_count(def) == 25,
 			      "registry: defaults has %zu sections != 25",
@@ -448,7 +458,7 @@ static void test_groups_presets(const aik_json *cdef)
 	free(got);
 	free(want);
 
-	/* 结构抽样：9 个非空分组、97 项、空可视化组不下发 */
+	/* 结构抽样：9 个非空分组、101 项、空可视化组不下发 */
 	if (groups) {
 		size_t i, items = 0;
 		int has_viz = 0;
@@ -465,7 +475,7 @@ static void test_groups_presets(const aik_json *cdef)
 				   "visualization") == 0)
 				has_viz = 1;
 		}
-		check(items == 97, "groups: %zu items != 97", items);
+		check(items == 101, "groups: %zu items != 101", items);
 		check(!has_viz, "groups: empty visualization group leaked");
 	}
 
@@ -675,7 +685,9 @@ static void test_save_load(const aik_json *cdef)
 		check(!has_crlf, "save: output must be LF-only");
 		check(rawlen > 0 && raw[rawlen - 1] != '\n',
 		      "save: output must not end with newline");
-		check(rawlen == 14240, "save: %zu bytes != 14240", rawlen);
+		/* MEM-01c：注册表 97 → 101，complete 多补 4 个键、_help 多 4 条
+		 * （每条一行 help + 一行取值），14240 → 14907 字节 */
+		check(rawlen == 14907, "save: %zu bytes != 14907", rawlen);
 		check(strstr(raw, "\"half_life_days\": 30.0") != NULL,
 		      "save: 30.0 must stay NUM");
 		check(strstr(raw, "\"max_density\": 120.0") != NULL,
@@ -706,8 +718,8 @@ static void test_save_load(const aik_json *cdef)
 				const aik_json *d = aik_json_get(
 					help, "llm.max_tokens");
 
-				check(aik_json_count(help) == 97,
-				      "load: _help %zu != 97",
+				check(aik_json_count(help) == 101,
+				      "load: _help %zu != 101",
 				      aik_json_count(help));
 				check(first && strcmp(first, "llm.base_url") == 0,
 				      "load: _help first key");
@@ -739,7 +751,7 @@ static void test_save_load(const aik_json *cdef)
 				check(b != NULL && json_strict_eq(a, b),
 				      "load: section %s differs", key);
 			}
-			/* 97 项全部可读 */
+			/* 101 项全部可读 */
 			{
 				size_t hits = 0;
 
@@ -748,8 +760,8 @@ static void test_save_load(const aik_json *cdef)
 						    loaded,
 						    &aik_config_items[i]))
 						hits++;
-				check(hits == 97,
-				      "load: %zu items != 97", hits);
+				check(hits == 101,
+				      "load: %zu items != 101", hits);
 			}
 			/* 再存一次：字节完全相同（往返稳定） */
 			{
@@ -1231,7 +1243,7 @@ static void test_load_fallback(void)
 	check(mkdtemp(tmpl) != NULL, "load: mkdtemp failed");
 	snprintf(path, sizeof(path), "%s/cfg.json", tmpl);
 
-	/* 缺失 -> 97 项默认 */
+	/* 缺失 -> 101 项默认 */
 	{
 		aik_json *dom = aik_config_load_file(path, err, sizeof(err));
 		size_t i, hits = 0;
@@ -1245,7 +1257,7 @@ static void test_load_fallback(void)
 				if (aik_config_item_has(dom,
 							&aik_config_items[i]))
 					hits++;
-			check(hits == 97, "load(missing): %zu items != 97",
+			check(hits == 101, "load(missing): %zu items != 101",
 			      hits);
 			aik_json_free(dom);
 		}
@@ -1516,6 +1528,178 @@ static void test_set_get(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* 10) MEM-01c：补录的 4 个注册表项                                     */
+/* ------------------------------------------------------------------ */
+static void expect_item_fields(const char *path, const char *name,
+			       const char *group, aik_config_kind kind,
+			       const char *minimum, const char *maximum,
+			       const char *def)
+{
+	const aik_config_item *it = aik_config_item_find(path);
+
+	check(it != NULL, "mem01c: %s missing from registry", path);
+	if (!it)
+		return;
+	check(strcmp(it->name, name) == 0, "mem01c: %s name '%s'", path,
+	      it->name);
+	check(strcmp(it->group, group) == 0, "mem01c: %s group '%s'", path,
+	      it->group);
+	check(it->kind == kind, "mem01c: %s kind %d != %d", path, it->kind,
+	      kind);
+	check((it->minimum == NULL) == (minimum == NULL) &&
+	      (!minimum || strcmp(it->minimum, minimum) == 0),
+	      "mem01c: %s minimum %s", path,
+	      it->minimum ? it->minimum : "(null)");
+	check((it->maximum == NULL) == (maximum == NULL) &&
+	      (!maximum || strcmp(it->maximum, maximum) == 0),
+	      "mem01c: %s maximum %s", path,
+	      it->maximum ? it->maximum : "(null)");
+	check(strcmp(it->default_json, def) == 0,
+	      "mem01c: %s default %s", path, it->default_json);
+	check(it->required == 0, "mem01c: %s must not be required", path);
+}
+
+static void validate_err_is(const char *label, const char *path,
+			    const aik_json *value, const char *prefix)
+{
+	const aik_config_item *it = aik_config_item_find(path);
+	char err[512];
+
+	err[0] = '\0';
+	check(it != NULL, "%s: unknown item %s", label, path);
+	if (!it)
+		return;
+	check(aik_config_item_validate(it, value, err, sizeof(err)) == -1,
+	      "%s: rc != -1", label);
+	check(strncmp(err, prefix, strlen(prefix)) == 0,
+	      "%s: err \"%s\" want prefix \"%s\"", label, err, prefix);
+}
+
+static void test_mem01c_registry(void)
+{
+	static const struct {
+		const char *prev;
+		const char *path;
+		const char *next;
+	} order[] = {
+		{ "embedding.batch_size", "embedding.query_prefix",
+		  "embedding.revision" },
+		{ "retrieval.candidate_window", "retrieval.keyword_candidates",
+		  "retrieval.min_similarity" },
+		{ "retrieval.keyword_candidates", "retrieval.min_similarity",
+		  "retrieval.query_cache_size" },
+		{ "retrieval.min_similarity", "retrieval.query_cache_size",
+		  "retrieval.fusion" },
+	};
+	size_t i;
+
+	/* 字段逐项对照上游 _it(...)（kind / min / max / default / 分组） */
+	expect_item_fields("embedding.query_prefix", "查询指令前缀",
+			   "embedding", AIK_CFG_KIND_STR, NULL, NULL,
+			   "\"\"");
+	expect_item_fields("retrieval.keyword_candidates", "独立关键词候选",
+			   "retrieval", AIK_CFG_KIND_INT, "0", "1000", "0");
+	expect_item_fields("retrieval.min_similarity", "最低原始相似度",
+			   "retrieval", AIK_CFG_KIND_FLOAT, "-1", "1", "-1");
+	expect_item_fields("retrieval.query_cache_size", "查询向量缓存",
+			   "retrieval", AIK_CFG_KIND_INT, "0", "4096", "128");
+	/* help 文案与上游逐字一致（前缀） */
+	{
+		const aik_config_item *it = aik_config_item_find(
+			"retrieval.keyword_candidates");
+
+		check(it && strncmp(it->desc, "从全库 BM25 独立补充的候选数",
+				    strlen("从全库 BM25 独立补充的候选数")) == 0,
+		      "mem01c: keyword_candidates desc");
+	}
+
+	/* 位置 = 上游 ITEMS 序（分组内按 path 字母序） */
+	for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+		size_t j;
+		size_t at = (size_t)-1;
+
+		for (j = 0; j < aik_config_item_count; j++)
+			if (strcmp(aik_config_items[j].path, order[i].path) == 0)
+				at = j;
+		check(at != (size_t)-1 && at > 0 &&
+		      at + 1 < aik_config_item_count &&
+		      strcmp(aik_config_items[at - 1].path, order[i].prev) == 0 &&
+		      strcmp(aik_config_items[at + 1].path, order[i].next) == 0,
+		      "mem01c: %s not between %s and %s", order[i].path,
+		      order[i].prev, order[i].next);
+	}
+
+	/* parse_value：类型与上下限（文案格式同上游 parse_value/validate_value） */
+	parse_ok("mem01c kc 20", "retrieval.keyword_candidates", "20", "20");
+	parse_ok("mem01c kc 0", "retrieval.keyword_candidates", "0", "0");
+	parse_ok("mem01c kc max", "retrieval.keyword_candidates", "1000",
+		 "1000");
+	parse_err("mem01c kc low", "retrieval.keyword_candidates", "-1",
+		  "独立关键词候选 不能小于 0");
+	parse_err("mem01c kc high", "retrieval.keyword_candidates", "1001",
+		  "独立关键词候选 不能大于 1000");
+	parse_err("mem01c kc float", "retrieval.keyword_candidates", "2.5",
+		  "独立关键词候选 必须是整数");
+	parse_ok("mem01c ms 0.35", "retrieval.min_similarity", "0.35",
+		 "0.35");
+	parse_ok("mem01c ms -1", "retrieval.min_similarity", "-1", "-1.0");
+	parse_ok("mem01c ms max", "retrieval.min_similarity", "1", "1.0");
+	parse_err("mem01c ms low", "retrieval.min_similarity", "-1.5",
+		  "最低原始相似度 不能小于 -1");
+	parse_err("mem01c ms high", "retrieval.min_similarity", "1.5",
+		  "最低原始相似度 不能大于 1");
+	parse_ok("mem01c qc 0", "retrieval.query_cache_size", "0", "0");
+	parse_ok("mem01c qc max", "retrieval.query_cache_size", "4096",
+		 "4096");
+	parse_err("mem01c qc high", "retrieval.query_cache_size", "4097",
+		  "查询向量缓存 不能大于 4096");
+	/* str 与上游一样先 strip：尾随空格被去掉 */
+	parse_ok("mem01c qp", "embedding.query_prefix", "query: ",
+		 "\"query:\"");
+
+	/* validate_value：原生 JSON 值的上下限（文案不带项名，同上游 validate_value） */
+	{
+		aik_json *bad = aik_json_new_int(-1);
+
+		validate_err_is("mem01c v kc low",
+				"retrieval.keyword_candidates", bad,
+				"不能小于 0");
+		aik_json_free(bad);
+		bad = aik_json_new_num(2.0);
+		validate_err_is("mem01c v ms high", "retrieval.min_similarity",
+				bad, "不能大于 1");
+		aik_json_free(bad);
+	}
+
+	/* 默认配置里 4 个键都有值（否则 GET /config 回显 null） */
+	{
+		aik_config *cdef = aik_config_defaults(NULL, 0);
+		const aik_json *dom;
+
+		check(cdef != NULL, "mem01c: defaults");
+		if (cdef) {
+			static const char *const paths[] = {
+				"embedding.query_prefix",
+				"retrieval.keyword_candidates",
+				"retrieval.min_similarity",
+				"retrieval.query_cache_size",
+			};
+
+			dom = aik_config_dom(cdef);
+			for (i = 0; i < 4; i++) {
+				const aik_config_item *it =
+					aik_config_item_find(paths[i]);
+
+				check(it && aik_config_item_has(dom, it),
+				      "mem01c: %s has no value in defaults",
+				      paths[i]);
+			}
+			aik_config_free(cdef);
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ */
 int main(void)
 {
 	char err[256];
@@ -1539,6 +1723,7 @@ int main(void)
 	test_load_fallback();
 	test_value_equal();
 	test_set_get();
+	test_mem01c_registry();
 
 	aik_config_free(cdef);
 

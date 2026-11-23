@@ -12,6 +12,21 @@
  * 数据表（config_items_data.h）由 scripts/gen_config_items.py 从参考实现
  * 生成，本模块只提供行为。语义约定：
  *
+ *   【生成器不在仓内】gen_config_items.py 与 gen_config_default.py 位于
+ *   用户工作区 work/refactor/scripts/（命令见 config_items_data.h 头部），
+ *   仓里只有生成结果。改注册表必须重跑生成器，不要手改生成头。
+ *
+ *   【MEM-01c：97 → 101】T7d 把生成头钉到出厂树（/opt/sme，5a6604d+dirty）
+ *   时是 97 项；上面的「101」当时是过期注释。现补回上游 e72bc75 就有、
+ *   出厂树没有的 4 项（上游 98071d9 新增）：embedding.query_prefix /
+ *   retrieval.keyword_candidates / retrieval.min_similarity /
+ *   retrieval.query_cache_size。参考树 = 出厂树 + 上游 e72bc75 的这 4 项
+ *   （用同一生成器对「e72bc75 减去这 4 项、再退回 1f635e7 的两处
+ *   namespaces 文案」的树重生成，与补录前的生成头逐字节相同）。
+ *   注意：namespaces.enabled / default_ns 的 help 文案仍停留在出厂树的
+ *   旧措辞，与上游 e72bc75（1f635e7「文案诚实化」之后）不同，未在本次
+ *   范围内。
+ *
  *   - 取值/设值作用在**完整配置 DOM**（aik_config_defaults / _load /
  *     engine.config.to_dict 形状，137 键）上，路径不存在时 get 返回 NULL；
  *   - parse_value 把用户输入的字符串转成类型化 JSON（bool/enum/int/

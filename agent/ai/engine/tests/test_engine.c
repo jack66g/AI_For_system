@@ -30,6 +30,11 @@
  *     stats 与 snapshot.canonical.json 独立重算的期望一致（1e-9），
  *     region_edges 数与 space_load.expected.json 一致，counters 恢复。
  *
+ * 段 4：MEM-01c 配置旋钮直达引擎（文件末尾，自包含）
+ *   - retrieval.keyword_candidates / retrieval.min_similarity 经
+ *     aik_config_from_json（启动期与 PUT /config 的同一入口）进引擎后，
+ *     确实改变检索行为；修复前这两个键被配置层白名单丢弃。
+ *
  * 末行 "SUMMARY engine checks=N mismatches=M"；有失配退出码 1。
  */
 #define _POSIX_C_SOURCE 200809L
@@ -3021,6 +3026,260 @@ static void run_autosave_tests(void)
 	free(tmpdir);
 }
 
+/* ------------------------------------------------------------------ */
+/* 段 4：MEM-01c 配置旋钮直达引擎                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * retrieval.keyword_candidates / retrieval.min_similarity 这两个键此前被
+ * 配置层（config.c 的 section/key 白名单）当未知键丢弃，引擎只能读到自己的
+ * 兜底默认值（0 / -1.0）：配置文件与 PUT /config 里写了也不生效。这里走
+ * 与启动期、与 PUT /config 相同的入口 aik_config_from_json →
+ * aik_engine_new，证明配置值真的改变了检索行为。
+ *
+ * 数据：KNOB_N 条记忆各成一个 Region（min_join_cosine=0.999、文本互不
+ * 相同）。默认候选池 = top_regions=1 那 1 条成员，再按余弦全局补池到
+ * pool_target = max(top_k*2, candidate_window=20) = 20 条。
+ *   - 前 KNOB_N-1 条是诱饵 "zeteta NN"：与查询 "zeta" 不含同一个词（BM25
+ *     为 0），但共享 zet / eta 字符三元组，余弦约 0.7；
+ *   - 最后一条是目标 "zeta quarterly ..."：BM25 命中 "zeta"，余弦只有约
+ *     0.3，在 20 条诱饵之后，进不了默认候选池。
+ * 余弦数值来自上游 e72bc75 HashingEmbeddingProvider（dim=64 / factors=3 /
+ * window=3 / seed=7）的实算，C 版与之逐位对齐（见 test_embed_hash）。
+ */
+#define KNOB_N 30
+#define KNOB_DIM 64
+#define KNOB_TARGET "zeta quarterly financial compliance summary"
+
+static const char *knob_text(size_t i)
+{
+	static char texts[KNOB_N][sizeof(KNOB_TARGET)];
+	static int filled;
+
+	if (!filled) {
+		size_t k;
+
+		for (k = 0; k < KNOB_N - 1; k++)
+			snprintf(texts[k], sizeof(texts[k]), "zeteta %02zu",
+				 k + 1);
+		snprintf(texts[KNOB_N - 1], sizeof(texts[KNOB_N - 1]),
+			 "%s", KNOB_TARGET);
+		filled = 1;
+	}
+	return texts[i];
+}
+
+static aik_config *make_cfg_ret(const char *tmpdir, long long keyword_candidates,
+				double min_similarity, int keyword_only,
+				char *err, size_t errlen)
+{
+	aik_json *raw = jobj();
+	aik_json *emb = jobj();
+	aik_json *reg = jobj();
+	aik_json *ret = jobj();
+	aik_json *stor = jobj();
+	char *full = path_join(tmpdir, "data/engine.json");
+	aik_config *cfg;
+
+	if (!full)
+		die("out of memory");
+	jput(emb, "provider", jstr("hashing"));
+	jput(emb, "model", jstr("m"));
+	jput(emb, "dim", jint(KNOB_DIM));
+	jput(emb, "hash_factors", jint(3));
+	jput(emb, "hash_window", jint(3));
+	jput(emb, "hash_seed", jint(7));
+	jput(emb, "normalize", jbool(1));
+	jput(reg, "min_join_cosine", jnum(0.999));
+	jput(reg, "min_region_size", jint(3));
+	jput(reg, "split_threshold", jint(48));
+	jput(reg, "auto_evolve", jbool(0));
+	jput(ret, "top_regions", jint(1));
+	jput(ret, "keyword_candidates", jint(keyword_candidates));
+	jput(ret, "min_similarity", jnum(min_similarity));
+	if (keyword_only) {
+		/* 只看关键词通道：BM25 命中的那条只要进了候选池就排第一 */
+		jput(ret, "keyword_weight", jnum(1.0));
+		jput(ret, "vector_weight", jnum(0.0));
+		jput(ret, "metadata_weight", jnum(0.0));
+	}
+	jput(stor, "path", jstr(full));
+	jput(stor, "autosave", jbool(0));
+	jput(raw, "embedding", emb);
+	jput(raw, "region", reg);
+	jput(raw, "retrieval", ret);
+	jput(raw, "storage", stor);
+	cfg = aik_config_from_json(raw, err, errlen);
+	aik_json_free(raw);
+	free(full);
+	return cfg;
+}
+
+static aik_engine *knob_engine(const char *tmpdir, long long keyword_candidates,
+			       double min_similarity, int keyword_only,
+			       char *err, size_t errlen)
+{
+	aik_engine *e = new_test_engine(make_cfg_ret(tmpdir,
+				      keyword_candidates, min_similarity,
+				      keyword_only, err, errlen), err, errlen);
+	size_t i;
+
+	for (i = 0; i < KNOB_N; i++) {
+		aik_memory *m = add_mem(e, knob_text(i), NULL, NULL, 0, 0.5,
+					"user", NULL, err, errlen);
+
+		if (!m)
+			die("knob: add %s: %s", knob_text(i), err);
+	}
+	return e;
+}
+
+/* 查询 text，返回命中数；first_text 收首个命中的记忆文本（malloc） */
+static long long knob_search(aik_engine *e, const char *text, int top_k,
+			     char **first_text)
+{
+	aik_json *body = jobj();
+	aik_json *out;
+	long long n = 0;
+	char err[256];
+
+	if (first_text)
+		*first_text = NULL;
+	jput(body, "text", jstr(text));
+	jput(body, "top_k", jint(top_k));
+	out = do_search(e, body, err, sizeof(err), &n);
+	aik_json_free(body);
+	if (first_text && n > 0) {
+		/* SearchHit.to_dict：memory 的键平铺在命中对象上 */
+		const char *t = aik_json_str(aik_json_get(
+			aik_json_at(aik_json_get(out, "results"), 0), "text"));
+
+		if (t)
+			*first_text = strdup(t);
+	}
+	aik_json_free(out);
+	return n;
+}
+
+	/*
+	 * 候选池大小随查询 top_k 变：pool_target = max(top_k*2, 20)。下面的查询
+	 * 一律 top_k<=10，pool_target 才是 20 < KNOB_N=30，默认候选池才是真子集。
+	 */
+#define KNOB_QK 10
+
+/* 命中里是否含 text 对应的那条记忆（按文本比对） */
+static int knob_results_contain(aik_engine *e, const char *query,
+				const char *text)
+{
+	aik_json *body = jobj();
+	aik_json *out;
+	const aik_json *res;
+	size_t i;
+	int hit = 0;
+	char err[256];
+	long long n = 0;
+
+	jput(body, "text", jstr(query));
+	jput(body, "top_k", jint(KNOB_QK));
+	out = do_search(e, body, err, sizeof(err), &n);
+	aik_json_free(body);
+	res = aik_json_get(out, "results");
+	for (i = 0; res && i < aik_json_count(res); i++) {
+		const char *t = aik_json_str(aik_json_get(aik_json_at(res, i),
+							 "text"));
+
+		if (t && strcmp(t, text) == 0)
+			hit = 1;
+	}
+	aik_json_free(out);
+	return hit;
+}
+
+static void run_mem01c_knob_tests(void)
+{
+	char err[256];
+	char *tmpdir = make_tmpdir();
+	char *first = NULL;
+	aik_engine *e;
+	long long n;
+
+	if (!tmpdir)
+		die("out of memory");
+
+	/*
+	 * min_similarity（原始余弦下限）：-1 关闭 → 候选池 20 条、按 top_k=10
+	 * 截断后回 10 条；0.999 只留查询自己那条（自身余弦 1.0，最近的邻居约
+	 * 0.9）；2.0 高于一切余弦 → 全拒。
+	 */
+	e = knob_engine(tmpdir, 0, -1.0, 0, err, sizeof(err));
+	n = knob_search(e, knob_text(0), KNOB_QK, &first);
+	check_int("knob min_similarity off: count", n, KNOB_QK);
+	check_str("knob min_similarity off: top", first ? first : "(null)",
+		  knob_text(0));
+	free(first);
+	aik_engine_free(e);
+
+	e = knob_engine(tmpdir, 0, 0.999, 0, err, sizeof(err));
+	n = knob_search(e, knob_text(0), KNOB_QK, &first);
+	check_int("knob min_similarity 0.999: count", n, 1);
+	check_str("knob min_similarity 0.999: top", first ? first : "(null)",
+		  knob_text(0));
+	free(first);
+	aik_engine_free(e);
+
+	e = knob_engine(tmpdir, 0, 2.0, 0, err, sizeof(err));
+	n = knob_search(e, knob_text(0), KNOB_QK, &first);
+	check_int("knob min_similarity 2.0: count", n, 0);
+	check_int("knob min_similarity 2.0: no first", first == NULL, 1);
+	free(first);
+	aik_engine_free(e);
+
+	/*
+	 * keyword_candidates（BM25 全库独立召回）：0 = 目标进不了默认候选池
+	 * （余弦排在 29 条诱饵之后），查 "zeta" 查不到它；30 = BM25 全库召回
+	 * 把它并入候选池 → 排第一。
+	 */
+	e = knob_engine(tmpdir, 0, -1.0, 1, err, sizeof(err));
+	check_int("knob keyword_candidates 0: target absent",
+		  knob_results_contain(e, "zeta", KNOB_TARGET), 0);
+	n = knob_search(e, "zeta", 5, &first);
+	check_int("knob keyword_candidates 0: top is not target",
+		  first && strcmp(first, KNOB_TARGET) != 0, 1);
+	free(first);
+	aik_engine_free(e);
+
+	e = knob_engine(tmpdir, KNOB_N, -1.0, 1, err, sizeof(err));
+	check_int("knob keyword_candidates 30: target present",
+		  knob_results_contain(e, "zeta", KNOB_TARGET), 1);
+	n = knob_search(e, "zeta", 5, &first);
+	check_int("knob keyword_candidates 30: count", n >= 1, 1);
+	check_str("knob keyword_candidates 30: top is target",
+		  first ? first : "(null)", KNOB_TARGET);
+	free(first);
+	aik_engine_free(e);
+
+	/* 配置对象里读到的就是写进去的值（修复前被白名单丢弃，读回兜底默认） */
+	{
+		aik_config *c = make_cfg_ret(tmpdir, 6, 0.5, 0, err, sizeof(err));
+		long long kc = -99;
+		double ms = -99.0;
+
+		check_int("knob config: built", c != NULL, 1);
+		if (c) {
+			(void)aik_config_get_i64(c, "retrieval.keyword_candidates",
+						 &kc);
+			(void)aik_config_get_num(c, "retrieval.min_similarity",
+						 &ms);
+			aik_config_free(c);
+		}
+		check_int("knob config: keyword_candidates", kc, 6);
+		check_num("knob config: min_similarity", ms, 0.5, 1e-12);
+	}
+
+	rmdir(tmpdir);
+	free(tmpdir);
+}
+
 int main(void)
 {
 	run_api_case();
@@ -3032,6 +3291,7 @@ int main(void)
 	run_evolve_tests();
 	run_save_load_tests();
 	run_autosave_tests();
+	run_mem01c_knob_tests();
 	printf("SUMMARY engine checks=%zu mismatches=%zu\n", checks,
 	       mismatches);
 	return mismatches ? 1 : 0;

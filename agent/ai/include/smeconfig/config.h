@@ -9,6 +9,14 @@
  *     静默忽略；键序保持 Python to_dict() 的插入序，seed 永远第一；
  *   - 覆盖值按输入 JSON 的类型原样保存（Python setattr 不做类型转换）。
  *
+ * MEM-01c：config.c 的 section/key 白名单（from_dict 的 hasattr 守卫）
+ * 必须与 config_default.h 的键集同步。此前白名单与默认 DOM 都缺上游
+ * e72bc75 的 4 个字段（embedding.query_prefix /
+ * retrieval.keyword_candidates / retrieval.min_similarity /
+ * retrieval.query_cache_size），写入的配置被静默丢弃；现补齐（133 → 137
+ * 键，默认 DOM 按上游 e72bc75 的 SMEConfig().to_dict() 重新生成）。
+ * config_default.h 的生成器 gen_config_default.py 同样不在仓内。
+ *
  * 显式键（`_explicit_keys`）只记录来自输入文件的已知 section.key：
  * 默认键不显式，seed 永不显式（Python 的 seed 分支不写 _explicit_keys）。
  * 供 engine 的 region.min_join_cosine 校准判断使用。

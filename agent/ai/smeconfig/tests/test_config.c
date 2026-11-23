@@ -17,18 +17,22 @@
  *      embedding.hash_seed、storage.autosave —— 这四个键只校验存在，并在
  *      结构检查里逐一断言其 Python 默认值。运行配置保留的是
  *      config_template 的手写键序（不是 to_dict() 键序），所以这里只比
- *      存在性与值；26 section / 133 键的完整键序由内置 Python 默认 JSON
+ *      存在性与值；26 section / 137 键的完整键序由内置 Python 默认 JSON
  *      与全键覆盖用例验证。
  *   2) 内置默认 JSON（config_default.h，Python 真值）的结构：26 section /
- *      133 键 / 每节键名顺序 / 非 ASCII 字符串。
+ *      137 键 / 每节键名顺序 / 非 ASCII 字符串。
  *   3) 全键覆盖：用 Python 默认 JSON 的每个键构造覆盖值跑
- *      aik_config_from_json，要求 DOM 与输入逐键逐序逐类型相等、133 个键
+ *      aik_config_from_json，要求 DOM 与输入逐键逐序逐类型相等、137 个键
  *      全部 is_explicit（seed 除外）、get_* 读回覆盖值、默认对象不被污染。
  *   4) config_template：<TMP> 替换为 /tmp/x 后覆盖生效、未覆盖键保持
  *      默认、键序不变、is_explicit 只标记文件里写了的键。
  *   5) aik_config_load：{"sme": {...}} 包装、未知 section/key 忽略、
  *      坏 JSON/缺失文件/空路径报错。
  *   6) get_i64/get_num/get_bool/get_str 类型规则（各 2 个正例 + 反例）。
+ *   7) MEM-01c：补录的 4 个键（embedding.query_prefix /
+ *      retrieval.keyword_candidates / retrieval.min_similarity /
+ *      retrieval.query_cache_size）的默认值、键序位置，以及过得了
+ *      from_json 的白名单（修复前被当未知键丢弃）。
  *
  * 输出末行：SUMMARY config checks=N mismatches=M；有失配 exit 1。
  */
@@ -349,16 +353,20 @@ fail:
 }
 
 /* ------------------------------------------------------------------ */
-/* 1) 默认配置结构（Python 真值：26 section / 133 键）                 */
+/* 1) 默认配置结构（Python 真值：26 section / 137 键）                 */
+/*                                                                     */
+/* MEM-01c：133 → 137。config_default.h 按上游 e72bc75 的               */
+/* SMEConfig().to_dict() 重新生成——与出厂树（5a6604d+dirty）的差别恰好 */
+/* 只有 98071d9 新增的 4 个键，其余 133 个键逐键逐序逐值不变。          */
 /* ------------------------------------------------------------------ */
 static const struct {
 	const char *name;
 	size_t nkeys;	/* 顶层 seed 记 1 */
 } EXPECT_SECTIONS[] = {
 	{ "seed", 1 },
-	{ "embedding", 13 },
+	{ "embedding", 14 },
 	{ "region", 10 },
-	{ "retrieval", 11 },
+	{ "retrieval", 14 },
 	{ "ranking", 8 },
 	{ "policy", 3 },
 	{ "reinforcement", 7 },
@@ -425,9 +433,9 @@ static void test_structure(const aik_config *cdef)
 			total += aik_json_count(sec);
 		}
 	}
-	check(total == 133, "defaults: %zu keys != 133", total);
+	check(total == 137, "defaults: %zu keys != 137", total);
 
-	/* 默认 DOM 必须与 Python 真值 JSON 逐键逐序逐值一致（133 键） */
+	/* 默认 DOM 必须与 Python 真值 JSON 逐键逐序逐值一致（137 键） */
 	{
 		char perr[256];
 		aik_json *py = aik_json_parse(
@@ -442,8 +450,8 @@ static void test_structure(const aik_config *cdef)
 	}
 
 	/* 生成文件本身：长度 + 非 ASCII 字符串（八进制转义正确性） */
-	check(strlen(AIK_CONFIG_DEFAULT_JSON) == 3333,
-	      "config_default.h: JSON length %zu != 3333",
+	check(strlen(AIK_CONFIG_DEFAULT_JSON) == 3427,
+	      "config_default.h: JSON length %zu != 3427",
 	      strlen(AIK_CONFIG_DEFAULT_JSON));
 	v = aik_json_get(aik_json_get(dom, "factversion"), "correct_markers");
 	check(v && aik_json_typeof(v) == AIK_JSON_ARR &&
@@ -485,6 +493,46 @@ static void test_structure(const aik_config *cdef)
 		      aik_json_int(aik_json_at(v, 0)) == 1 &&
 		      aik_json_int(aik_json_at(v, 2)) == 5,
 	      "defaults: retrieval.region_options != [1, 3, 5]");
+
+	/*
+	 * MEM-01c：补录的 4 个键（上游 e72bc75 sme/config.py 的 dataclass
+	 * 默认值）与它们在 to_dict() 键序里的位置——都是所在 dataclass 的
+	 * 末尾字段，所以落在各自 section 的末尾。
+	 */
+	expect_str("defaults: embedding.query_prefix", cdef,
+		   "embedding.query_prefix", "");
+	expect_i64("defaults: retrieval.keyword_candidates", cdef,
+		   "retrieval.keyword_candidates", 0);
+	expect_num("defaults: retrieval.min_similarity", cdef,
+		   "retrieval.min_similarity", -1.0);
+	expect_i64("defaults: retrieval.query_cache_size", cdef,
+		   "retrieval.query_cache_size", 128);
+	v = aik_json_get(aik_json_get(dom, "embedding"), "query_prefix");
+	check(v && aik_json_typeof(v) == AIK_JSON_STR,
+	      "defaults: embedding.query_prefix is not a string");
+	v = aik_json_get(aik_json_get(dom, "retrieval"), "min_similarity");
+	check(v && aik_json_typeof(v) == AIK_JSON_NUM,
+	      "defaults: retrieval.min_similarity is not a float (to_dict 写 -1.0)");
+	{
+		const aik_json *emb = aik_json_get(dom, "embedding");
+		const aik_json *ret = aik_json_get(dom, "retrieval");
+		size_t ne = aik_json_count(emb);
+		size_t nr = aik_json_count(ret);
+
+		check(ne >= 1 && strcmp(aik_json_key_at(emb, ne - 1),
+					"query_prefix") == 0,
+		      "defaults: query_prefix is not the last embedding key");
+		check(nr >= 3 && strcmp(aik_json_key_at(ret, nr - 3),
+					"keyword_candidates") == 0 &&
+		      strcmp(aik_json_key_at(ret, nr - 2), "min_similarity") == 0 &&
+		      strcmp(aik_json_key_at(ret, nr - 1), "query_cache_size") == 0,
+		      "defaults: retrieval tail != keyword_candidates,min_similarity,query_cache_size");
+	}
+	/* 默认值不显式 */
+	check(aik_config_is_explicit(cdef, "retrieval.keyword_candidates") == 0,
+	      "defaults: retrieval.keyword_candidates must not be explicit");
+	check(aik_config_is_explicit(cdef, "retrieval.min_similarity") == 0,
+	      "defaults: retrieval.min_similarity must not be explicit");
 }
 
 /* ------------------------------------------------------------------ */
@@ -610,7 +658,7 @@ static void test_reference(const aik_config *cdef)
 }
 
 /* ------------------------------------------------------------------ */
-/* 3) 全键覆盖：Python 默认 JSON 的 133 个键全部改写                  */
+/* 3) 全键覆盖：Python 默认 JSON 的 137 个键全部改写                  */
 /* ------------------------------------------------------------------ */
 static aik_json *perturb(const aik_json *v)
 {
@@ -709,7 +757,7 @@ static void test_override_all(const aik_config *cdef)
 		aik_json_free(pydef);
 		return;
 	}
-	/* 133 键逐键逐序逐类型（含数组/对象/null 覆盖） */
+	/* 137 键逐键逐序逐类型（含数组/对象/null 覆盖） */
 	check(json_eq(aik_config_dom(ov), input),
 	      "override: DOM != input（值/类型/键序有偏差）");
 
@@ -1067,6 +1115,62 @@ static void test_load(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* 7) MEM-01c：补录的 4 个键过得了 from_dict 的 hasattr 守卫            */
+/* ------------------------------------------------------------------ */
+static void test_mem01c_keys(void)
+{
+	static const char json[] =
+		"{\"embedding\":{\"query_prefix\":\"query: \"},"
+		"\"retrieval\":{\"keyword_candidates\":20,"
+		"\"min_similarity\":0.35,\"query_cache_size\":0}}";
+	char err[256];
+	aik_json *root;
+	aik_config *c;
+
+	root = aik_json_parse(json, strlen(json), err, sizeof(err));
+	check(root != NULL, "mem01c: parse failed: %s", err);
+	if (!root)
+		return;
+	c = aik_config_from_json(root, err, sizeof(err));
+	check(c != NULL, "mem01c: from_json failed: %s", err);
+	if (c) {
+		const aik_json *dom = aik_config_dom(c);
+		const aik_json *emb = aik_json_get(dom, "embedding");
+		const aik_json *ret = aik_json_get(dom, "retrieval");
+
+		/* 修复前：4 个键都不在白名单里，被 overlay_section 当未知键丢弃，
+		 * 引擎只能读到自己的兜底默认值（0 / -1.0 / 空串）。 */
+		expect_str("mem01c: embedding.query_prefix", c,
+			   "embedding.query_prefix", "query: ");
+		expect_i64("mem01c: retrieval.keyword_candidates", c,
+			   "retrieval.keyword_candidates", 20);
+		expect_num("mem01c: retrieval.min_similarity", c,
+			   "retrieval.min_similarity", 0.35);
+		expect_i64("mem01c: retrieval.query_cache_size", c,
+			   "retrieval.query_cache_size", 0);
+		check(aik_config_is_explicit(c, "embedding.query_prefix") == 1,
+		      "mem01c: embedding.query_prefix must be explicit");
+		check(aik_config_is_explicit(c, "retrieval.keyword_candidates") == 1,
+		      "mem01c: retrieval.keyword_candidates must be explicit");
+		check(aik_config_is_explicit(c, "retrieval.min_similarity") == 1,
+		      "mem01c: retrieval.min_similarity must be explicit");
+		check(aik_config_is_explicit(c, "retrieval.query_cache_size") == 1,
+		      "mem01c: retrieval.query_cache_size must be explicit");
+		/* 覆盖只换值不换位：键数不变，4 个键仍在各自 section 末尾 */
+		check(emb && aik_json_count(emb) == 14 &&
+		      strcmp(aik_json_key_at(emb, 13), "query_prefix") == 0,
+		      "mem01c: embedding key order/count changed by override");
+		check(ret && aik_json_count(ret) == 14 &&
+		      strcmp(aik_json_key_at(ret, 11), "keyword_candidates") == 0 &&
+		      strcmp(aik_json_key_at(ret, 12), "min_similarity") == 0 &&
+		      strcmp(aik_json_key_at(ret, 13), "query_cache_size") == 0,
+		      "mem01c: retrieval key order/count changed by override");
+		aik_config_free(c);
+	}
+	aik_json_free(root);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void)
 {
 	char err[256];
@@ -1085,6 +1189,7 @@ int main(void)
 	test_template(cdef);
 	test_types(cdef);
 	test_load();
+	test_mem01c_keys();
 	aik_config_free(cdef);
 
 	printf("SUMMARY config checks=%zu mismatches=%zu\n", checks, mismatches);

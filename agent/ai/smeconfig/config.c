@@ -13,6 +13,16 @@
  *   - 值按输入 JSON 类型原样保存（Python 不做类型转换），字符串/数组原样
  *     保留，嵌套对象深拷贝，调用方随后修改输入 DOM 不会影响配置。
  *
+ * MEM-01c：下表是 from_dict 的 hasattr 守卫，必须与 config_default.h 的
+ * 键集同步。此前缺 4 个上游基线 e72bc75 就有的字段——
+ * embedding.query_prefix / retrieval.keyword_candidates /
+ * retrieval.min_similarity / retrieval.query_cache_size（上游 98071d9 新增），
+ * 配置文件、PUT /config、快照里写的这几个键被当成未知键静默丢弃；
+ * 引擎侧（engine.c）本来就读 retrieval.keyword_candidates /
+ * retrieval.min_similarity，等于旋钮失效。现补齐（133 → 137 键）。
+ * 其中 query_prefix 在 hashing 嵌入下无意义、query_cache_size 的查询向量
+ * 缓存尚未实现：这两个键可配置、可回显、会校验取值范围，但引擎暂不消费。
+ *
  * 本文件零第三方依赖，C11，构建串行（见 Makefile）。
  */
 #include "smeconfig/config.h"
@@ -36,7 +46,8 @@ typedef struct {
 static const section_def SECTIONS[] = {
 	{ "embedding",
 	  "provider,model,dim,base_url,api_key,batch_size,normalize,"
-	  "hash_factors,hash_window,revision,mrl_dim,hash_seed,revision_stamp" },
+	  "hash_factors,hash_window,revision,mrl_dim,hash_seed,revision_stamp,"
+	  "query_prefix" },
 	{ "region",
 	  "min_region_size,min_join_cosine,split_threshold,max_density,"
 	  "merge_distance,neighbor_factor,auto_evolve,evolve_interval,"
@@ -44,7 +55,8 @@ static const section_def SECTIONS[] = {
 	{ "retrieval",
 	  "top_regions,region_options,top_k,vector_weight,keyword_weight,"
 	  "metadata_weight,region_dampening,summary_penalty,cjk_bigram,"
-	  "candidate_window,fusion" },
+	  "candidate_window,fusion,keyword_candidates,min_similarity,"
+	  "query_cache_size" },
 	{ "ranking",
 	  "semantic,importance,freshness,weight,decay,hit_count,recency,region" },
 	{ "policy", "full_memory,importance_threshold,decay_enabled" },
