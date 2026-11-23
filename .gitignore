@@ -1,8 +1,56 @@
-# 构建产物（仓库只含源码；构建目录与中间件不入库）
-/agent/ai/build/
+# AIKernel 仓库忽略规则
+# 配套文件：树宪章 docs/TREE-CHARTER.md；门禁 agent/ai/tools/check_tree.sh（含忽略规则自检哨兵）。
+#
+# 写法约定（改规则前先读）：
+#   1. 同类产物只有一种待遇：按「类别」写规则，不逐个罗列产物路径。
+#      逐个罗列是旧版 .gitignore 的病根——规则路径与实际产物路径脱节，
+#      aipd/tests 的 11 个测试 ELF 与 25 个 .d 因此入库。
+#   2. 顺序敏感：后写的规则覆盖先写的。放行规则（! 开头）必须写在同类
+#      产物扩展名规则（*.d / *.o / *.pyc …）之前，否则会把产物重新放行。
+#   3. 现役入库二进制不写忽略规则，白名单在 check_tree.sh 的 ELF_ALLOW：
+#      agent/ai/occ/occ、agent/ai/aistreamd/aistreamd、agent/ai/aipd/aipd、
+#      factory/usr/local/bin/{aik-ime,busybox}、factory/usr/local/lib/aik-ime/*.so。
+#   4. 改完必须跑：bash agent/ai/tools/check_tree.sh
+
+# ---------------------------------------------------------------------------
+# 一、测试目录（tests/）：无扩展名文件 = make 产物
+#    测试可执行文件、探针、辅助工具就地构建落在 tests/ 下；
+#    源码、夹具、数据一律带扩展名（.c/.h/.py/.sh/.json/.tsv/…）。
+# ---------------------------------------------------------------------------
+/agent/ai/**/tests/test_*
+# 目录永不忽略：防止 test_xxx/ 夹具目录被上一条整目录吞掉
+!/agent/ai/**/tests/test_*/
+# 带扩展名 = 源码或夹具；其中的产物扩展名（.d/.o/.pyc）由第二、四节接管
+!/agent/ai/**/tests/test_*.*
+/agent/ai/**/tests/*_probe
+/agent/ai/tests/w10b_tls_probe_asan
+/agent/ai/tests/demo_sandbox_chain
+/agent/ai/aistreamd/tests/ai_inject
+/agent/ai/aistreamd/tests/pq_dump
+/agent/ai/occ/tests/occ_reqbuild
+/agent/ai/occ/tests/occ_smoke
+/agent/ai/occ/tests/occ_ssereplay
+/agent/ai/sandbox/tests/aik-sandbox
+# 测试运行落盘的差异文件（带扩展名，需点名）
+/agent/ai/engine/tests/engine.actual.json
+/agent/ai/tests/engine.actual.json
+
+# ---------------------------------------------------------------------------
+# 二、编译中间件（全树通用类别）
+# ---------------------------------------------------------------------------
+# gcc -MMD 的依赖文件。系统惯例里 *.d 也是「配置目录」的后缀
+# （factory/etc/sysctl.d/、apt.conf.d/、ld.so.conf.d/ …），所以紧跟一条放行：
+# 只忽略名为 *.d 的文件，永不忽略名为 *.d 的目录。
+*.d
+!*.d/
 *.o
 *.o.*
 *.a
+obj/
+
+# ---------------------------------------------------------------------------
+# 三、kbuild 外部模块产物（kernel-overlays/ 以 M= 方式构建时落在源码目录）
+# ---------------------------------------------------------------------------
 *.ko
 *.ko.*
 *.cmd
@@ -15,36 +63,42 @@
 .tmp_versions/
 modules.builtin*
 Module.symvers
-vmlinux
-vmlinux.*
-System.map
-bzImage
-zImage
-Image
 
-# 可执行文件/测试编译产物（保留 .c/.h/.py/.sh/.tsv/.json 测试源码）
-/agent/ai/aikernel-shell
-/agent/ai/aik-sandbox
-/agent/ai/ai
-/agent/ai/tests/test_*
-!/agent/ai/tests/test_*.c
-/agent/ai/tests/netlink_probe
-!/agent/ai/tests/test_*.h
-!/agent/ai/tests/test_*.py
-!/agent/ai/tests/test_*.sh
-!/agent/ai/tests/test_*.tsv
-!/agent/ai/tests/test_*.json
-/agent/ai/tests/w10b_tls_probe
-/agent/ai/tests/w10b_tls_probe_asan
-/agent/ai/tests/demo_sandbox_chain
-/agent/ai/sandbox/tests/aik-sandbox
-
-# Python 缓存
+# ---------------------------------------------------------------------------
+# 四、构建目录与 Python 缓存
+# ---------------------------------------------------------------------------
+/agent/ai/build/
+/agent/ai/build-*/
 __pycache__/
 *.pyc
-*.pyo
 
-# 镜像/打包产物
+# ---------------------------------------------------------------------------
+# 五、自有二进制（守护与工具就地构建落在各自目录；白名单件见文件头第 3 条）
+# ---------------------------------------------------------------------------
+/agent/ai/aikernel-shell
+/agent/ai/ai
+/agent/ai/aik-sandbox
+/agent/ai/sandbox/aik-sandbox
+/agent/ai/aik-compat
+/agent/ai/aik-gcm
+/agent/ai/apic/aikerneld-api
+/agent/ai/smehttp/smehttp
+/agent/ai/aistreamd/aik-pqdump
+/agent/ai/autocondense/autocondensed
+/agent/ai/autocondense/autocondense-mcp
+/agent/ai/autocondense/autocondense-hook
+
+# ---------------------------------------------------------------------------
+# 六、生成器与测试的运行报告（每次生成/测试都会重写）
+#    冻结基线类生成物（tools.json、tool_catalog.txt 等）不在此列，照常入库。
+# ---------------------------------------------------------------------------
+/agent/ai/tools/tools_report.txt
+/agent/ai/tools_report.txt
+/agent/ai/occ/tests/orch_b2_report.txt
+
+# ---------------------------------------------------------------------------
+# 七、镜像与打包产物
+# ---------------------------------------------------------------------------
 *.iso
 *.raw
 *.qcow2
@@ -58,10 +112,10 @@ __pycache__/
 initramfs/
 initrd*
 rootfs/
-w6i-isodir/
-w6i-rootfs/
 
-# 运行时/本地产物（密钥绝不入库）
+# ---------------------------------------------------------------------------
+# 八、运行时数据、凭据、编辑器残留（密钥绝不入库）
+# ---------------------------------------------------------------------------
 .aikernel/
 model.toml
 api-token
@@ -72,52 +126,16 @@ known_hosts
 *.log
 *.tmp
 *.swp
+*.orig
+*.rej
 *~
 .DS_Store
 Thumbs.db
 
-# 证据/报告/临时工作区（不属于源码基线）
+# ---------------------------------------------------------------------------
+# 九、证据与临时工作区（不属于源码基线）
+# ---------------------------------------------------------------------------
 longterm/
 fix-w*/
 .tmp/
 *.bundle
-
-# C 单元测试/服务二进制（make 产物，不入库）
-/agent/ai/engine/tests/test_engine
-/agent/ai/smeconfig/tests/test_config
-/agent/ai/smehttp/smehttp
-/agent/ai/smehttp/tests/test_http
-/agent/ai/space/tests/test_space
-/agent/ai/space/tests/test_space_load
-/agent/ai/retrieval/tests/test_embed_hash
-/agent/ai/retrieval/tests/test_text
-/agent/ai/retrieval/tests/test_bm25
-/agent/ai/retrieval/tests/test_ranker
-/agent/ai/retrieval/tests/test_ppr
-/agent/ai/retrieval/tests/test_retrieval
-/agent/ai/engine/tests/engine.actual.json
-/agent/ai/store/tests/test_store_json
-/agent/ai/store/tests/test_store_npz
-/agent/ai/store/tests/test_store_snapshot
-/agent/ai/store/tests/test_store_snapshot_write
-/agent/ai/store/tests/test_store_wal
-/agent/ai/store/tests/test_store_sqlite
-/agent/ai/store/tests/test_npz_write
-/agent/ai/engine/tests/test_dynamics
-/agent/ai/engine/tests/test_rebuild
-/agent/ai/engine/tests/test_wal_engine
-/agent/ai/smeconfig/tests/test_config_items
-/agent/ai/tests/engine.actual.json
-
-# T5 autocondense C 产物
-/agent/ai/autocondense/autocondensed
-/agent/ai/autocondense/autocondense-mcp
-/agent/ai/autocondense/autocondense-hook
-/agent/ai/autocondense/libaikautocondense.a
-/agent/ai/autocondense/*.o
-/agent/ai/autocondense/tests/test_acconfig
-/agent/ai/autocondense/tests/test_acdigest
-/agent/ai/autocondense/tests/test_acsignals
-/agent/ai/autocondense/tests/test_acsme
-/agent/ai/autocondense/tests/test_acstate
-/agent/ai/autocondense/tests/test_acmcp
