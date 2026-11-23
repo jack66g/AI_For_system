@@ -30,6 +30,20 @@
  * 临时配置写进 mkdtemp：storage.path=<tmp>/engine-*.json.gz、autosave=false、
  * persistence.enabled=false、api.auth_token 按用例设置。服务器 SIGTERM 必须
  * 干净退出（0）。
+ *
+ * MEM-02a（上游 ed5378a sme/api/server.py::rebuild_engine_with，P3-14；
+ * 回归对应 experiment/regression/test_fix_round2_20261120.py::
+ * test_rebuild_persistence_off_checkpoints_to_disk）：
+ *  17. persistence 开着（WAL fsync）写入 10 条后 PUT /config 关掉
+ *      persistence → 恢复存储路径上立刻有快照；另一台服务器从同一路径
+ *      启动能读回 10 条（重启不回退）。
+ *  18. checkpoint 落盘失败 → PUT /config 回 200 {"ok":false,"errors":
+ *      {"_global":"persistence 关闭模式下 checkpoint 落盘失败，引擎保持
+ *      原配置：…"}}，引擎仍是旧配置、记忆未丢。
+ * 自 MEM-02a 起配置热重建会往 storage.path 写快照，所以：
+ *  - 默认配置那台服务器的子进程先 chdir 到临时目录（默认 storage.path
+ *    是相对路径 data/engine.json），快照落在临时目录里而不是源码树；
+ *  - 结束时递归删除临时目录（快照、NPZ sidecar、WAL 文件）。
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -38,8 +52,10 @@
 #include "smeconfig/config_items.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -112,7 +128,54 @@ static const char *server_bin(void)
 	return "../smehttp";
 }
 
-static int write_config(const char *path, const char *db, const char *token)
+/* server_bin() 的绝对路径（子进程 chdir 之后仍能 execl） */
+static int server_bin_abs(char *out, size_t cap)
+{
+	char *rp = realpath(server_bin(), NULL);
+
+	if (!rp)
+		return -1;
+	if (strlen(rp) >= cap) {
+		free(rp);
+		return -1;
+	}
+	strcpy(out, rp);
+	free(rp);
+	return 0;
+}
+
+/* 递归删除本测试自建的临时目录（失败静默，不影响断言） */
+static void rm_rf(const char *path)
+{
+	DIR *d = opendir(path);
+	struct dirent *ent;
+
+	if (!d) {
+		(void)unlink(path);
+		return;
+	}
+	while ((ent = readdir(d)) != NULL) {
+		char sub[1024];
+
+		if (strcmp(ent->d_name, ".") == 0 ||
+		    strcmp(ent->d_name, "..") == 0)
+			continue;
+		if (snprintf(sub, sizeof(sub), "%s/%s", path,
+			     ent->d_name) >= (int)sizeof(sub))
+			continue;
+		if (unlink(sub) != 0)
+			rm_rf(sub);
+	}
+	closedir(d);
+	(void)rmdir(path);
+}
+
+/*
+ * write_config_ex - 写临时配置；wal 非 0 时 persistence.enabled=true
+ * （file backend + fsync，C 版已接线的 WAL 组合）
+ */
+static int write_config_ex(const char *path, const char *db, const char *token,
+			   int wal)
 {
 	FILE *f = fopen(path, "w");
 	int rc;
@@ -137,20 +200,27 @@ static int write_config(const char *path, const char *db, const char *token)
 		"  \"storage\": {\"path\": \"%s\", \"autosave\": false, "
 		"\"autosave_interval\": 100, \"compress\": true, "
 		"\"backend\": \"json\"},\n"
-		"  \"persistence\": {\"enabled\": false},\n"
+		"  \"persistence\": {\"enabled\": %s},\n"
 		"  \"maintenance\": {\"background\": false},\n"
 		"  \"observability\": {\"enabled\": false},\n"
 		"  \"api\": {\"host\": \"127.0.0.1\", \"port\": 0, "
 		"\"auth_token\": \"%s\"}\n"
 		"}\n",
-		db, token);
+		db, wal ? "true, \"sync_mode\": \"fsync\"" : "false", token);
 	if (fclose(f) != 0)
 		return -1;
 	return rc < 0 ? -1 : 0;
 }
 
-static int start_server(test_server *ts, const char *tmpdir, const char *tag,
-			const char *token)
+/*
+ * start_server_ex - 起一台服务器
+ *
+ * db 为 NULL 时 storage.path = <tmp>/engine-<tag>.json.gz；否则用调用方
+ * 给的恢复存储路径（MEM-02a 用它让两台服务器共用同一路径）。
+ */
+static int start_server_ex(test_server *ts, const char *tmpdir,
+			   const char *tag, const char *token, int wal,
+			   const char *db)
 {
 	int fds[2];
 	char line[256];
@@ -160,9 +230,12 @@ static int start_server(test_server *ts, const char *tmpdir, const char *tag,
 
 	snprintf(ts->cfg_path, sizeof(ts->cfg_path), "%s/sme-%s.json", tmpdir,
 		 tag);
-	snprintf(ts->db_path, sizeof(ts->db_path), "%s/engine-%s.json.gz",
-		 tmpdir, tag);
-	if (write_config(ts->cfg_path, ts->db_path, token) != 0) {
+	if (db)
+		snprintf(ts->db_path, sizeof(ts->db_path), "%s", db);
+	else
+		snprintf(ts->db_path, sizeof(ts->db_path), "%s/engine-%s.json.gz",
+			 tmpdir, tag);
+	if (write_config_ex(ts->cfg_path, ts->db_path, token, wal) != 0) {
 		fprintf(stderr, "test_http: cannot write config\n");
 		return -1;
 	}
@@ -213,6 +286,12 @@ static int start_server(test_server *ts, const char *tmpdir, const char *tag,
 	}
 	ts->port = port;
 	return 0;
+}
+
+static int start_server(test_server *ts, const char *tmpdir, const char *tag,
+			const char *token)
+{
+	return start_server_ex(ts, tmpdir, tag, token, 0, NULL);
 }
 
 /* SIGTERM 后必须 exit 0 */
@@ -1674,6 +1753,7 @@ static int start_server_defaults(test_server *ts, const char *tmpdir)
 {
 	int fds[2];
 	char line[256];
+	char bin[PATH_MAX];
 	size_t used = 0;
 	int port = -1;
 	pid_t pid;
@@ -1684,6 +1764,16 @@ static int start_server_defaults(test_server *ts, const char *tmpdir)
 		 "%s/engine-defaults.json.gz", tmpdir);
 	(void)unlink(ts->cfg_path);
 	(void)unlink(ts->db_path);
+	/*
+	 * MEM-02a：这台服务器用默认配置，storage.path 是相对路径
+	 * data/engine.json。配置热重建现在会往那里写快照，所以子进程先
+	 * chdir 到临时目录（快照落在 <tmp>/data/ 下，不进源码树），
+	 * 可执行文件改用绝对路径（argv[0] 同时决定 static 目录，不变）。
+	 */
+	if (server_bin_abs(bin, sizeof(bin)) != 0) {
+		fprintf(stderr, "test_http: cannot resolve %s\n", server_bin());
+		return -1;
+	}
 	if (pipe(fds) != 0)
 		return -1;
 	pid = fork();
@@ -1697,7 +1787,9 @@ static int start_server_defaults(test_server *ts, const char *tmpdir)
 		if (dup2(fds[1], STDOUT_FILENO) < 0)
 			_exit(127);
 		close(fds[1]);
-		execl(server_bin(), "smehttp", "--config", ts->cfg_path,
+		if (chdir(tmpdir) != 0)
+			_exit(127);
+		execl(bin, bin, "--config", ts->cfg_path,
 		      "--host", "127.0.0.1", "--port", "0", (char *)NULL);
 		_exit(127);
 	}
@@ -2793,6 +2885,155 @@ static void test_dynamics_http(int port)
 }
 
 /* ------------------------------------------------------------------ */
+/* MEM-02a：热重建后持久化关闭 → 立即 checkpoint                         */
+/* ------------------------------------------------------------------ */
+
+/* GET /export 的 memories 条数（请求失败 -1） */
+static long long export_count(int port)
+{
+	int status = -1;
+	aik_json *root = call_json(port, "GET", "/export", NULL, &status,
+				   NULL);
+	long long n = -1;
+
+	if (root && status == 200)
+		n = (long long)aik_json_count(aik_json_get(root, "memories"));
+	aik_json_free(root);
+	return n;
+}
+
+/*
+ * 对应上游 experiment/regression/test_fix_round2_20261120.py::
+ * test_rebuild_persistence_off_checkpoints_to_disk：persistence 开着写入
+ * 10 条（autosave=false，只有 WAL），PUT /config 关掉 persistence 之后，
+ * 磁盘上的恢复存储必须已包含全部记忆——重启后不回退。
+ */
+static void test_mem02a_checkpoint(const char *tmpdir)
+{
+	test_server srv;
+	char db[512];
+	char wal_file[544];
+	char body[128];
+	int status = -1;
+	aik_json *root;
+	int i;
+
+	snprintf(db, sizeof(db), "%s/engine-m02a.json.gz", tmpdir);
+	snprintf(wal_file, sizeof(wal_file), "%s.wal", db);
+
+	/* 1) persistence 开着（file backend / fsync WAL）：写入只进 WAL */
+	if (start_server_ex(&srv, tmpdir, "m02a", "", 1, db) != 0) {
+		check_true(0, "m02a: cannot start server (wal)");
+		return;
+	}
+	for (i = 0; i < 10; i++) {
+		snprintf(body, sizeof(body),
+			 "{\"text\":\"mem02a memory %d content %d\"}", i, i);
+		status = -1;
+		root = call_json(srv.port, "POST", "/memories", body, &status,
+				 NULL);
+		check_int(status, 200, "m02a add status");
+		aik_json_free(root);
+	}
+	check_true(access(wal_file, F_OK) == 0, "m02a: WAL file missing");
+	check_true(access(db, F_OK) != 0,
+		   "m02a: snapshot must not exist before rebuild");
+
+	/* 2) PUT /config 关掉 persistence：迁移后立即 checkpoint */
+	status = -1;
+	root = call_json(srv.port, "PUT", "/config",
+			 "{\"values\":{\"persistence.enabled\":false}}", &status,
+			 NULL);
+	check_int(status, 200, "m02a put status");
+	check_true(root != NULL, "m02a put: body is not JSON");
+	if (root) {
+		expect_applied_count(root, 1, srv.cfg_path, "m02a put");
+		aik_json_free(root);
+	}
+	check_true(access(db, F_OK) == 0,
+		   "m02a: checkpoint missing after rebuild (MEM-02a)");
+	check_int(export_count(srv.port), 10, "m02a export count after put");
+	/* stop_server 会 unlink db_path；快照要留给下面的重启用例 */
+	srv.db_path[0] = '\0';
+	check_true(stop_server(&srv) == 0,
+		   "m02a server did not exit 0 on SIGTERM");
+
+	/* 3) 重启等价：另一台服务器从同一恢复存储路径启动，读回 10 条 */
+	if (start_server_ex(&srv, tmpdir, "m02a-restart", "", 0, db) != 0) {
+		check_true(0, "m02a: cannot start server (restart)");
+		return;
+	}
+	check_int(export_count(srv.port), 10,
+		  "m02a export count after restart");
+	check_true(stop_server(&srv) == 0,
+		   "m02a restart server did not exit 0 on SIGTERM");
+}
+
+/*
+ * checkpoint 落盘失败（storage.path 的父路径是个普通文件）→ PUT /config
+ * 回 200 ok:false + 上游 ConfigApplyError 原文；引擎保持原配置、记忆未丢。
+ */
+static void test_mem02a_blocked(const char *tmpdir)
+{
+	static const char prefix[] =
+		"persistence 关闭模式下 checkpoint 落盘失败，引擎保持原配置：";
+	test_server srv;
+	char blocked[512];
+	char bad_db[544];
+	const aik_json *errors;
+	const aik_json *msg;
+	const char *text;
+	int status = -1;
+	aik_json *root;
+
+	snprintf(blocked, sizeof(blocked), "%s/m02a-blocked", tmpdir);
+	snprintf(bad_db, sizeof(bad_db), "%s/engine.json", blocked);
+	(void)unlink(blocked);
+	{
+		FILE *f = fopen(blocked, "wb");
+
+		check_true(f != NULL, "m02a blocked: cannot create blocker");
+		if (f)
+			fclose(f);
+	}
+	if (start_server_ex(&srv, tmpdir, "m02abad", "", 0, bad_db) != 0) {
+		check_true(0, "m02a blocked: cannot start server");
+		(void)unlink(blocked);
+		return;
+	}
+	root = call_json(srv.port, "POST", "/memories",
+			 "{\"text\":\"mem02a blocked memory\"}", &status, NULL);
+	check_int(status, 200, "m02a blocked add status");
+	aik_json_free(root);
+
+	status = -1;
+	root = call_json(srv.port, "PUT", "/config",
+			 "{\"values\":{\"retrieval.top_k\":\"7\"}}", &status,
+			 NULL);
+	check_int(status, 200, "m02a blocked put status");
+	errors = root ? expect_ok_false(root, "m02a blocked put") : NULL;
+	msg = errors ? aik_json_get(errors, "_global") : NULL;
+	text = msg ? aik_json_str(msg) : NULL;
+	check_true(text != NULL && strncmp(text, prefix, sizeof(prefix) - 1) == 0,
+		   "m02a blocked put: errors._global is '%s'",
+		   text ? text : "(null)");
+	aik_json_free(root);
+
+	/* 引擎保持原配置：top_k 仍是 10；记忆还在 */
+	status = -1;
+	root = call_json(srv.port, "GET", "/config", NULL, &status, NULL);
+	check_int(status, 200, "m02a blocked get status");
+	check_true(root != NULL && payload_is_int(aik_json_get(root, "groups"),
+						  "retrieval.top_k", 10),
+		   "m02a blocked: retrieval.top_k changed despite the failure");
+	aik_json_free(root);
+	check_int(export_count(srv.port), 1, "m02a blocked export count");
+	check_true(stop_server(&srv) == 0,
+		   "m02a blocked server did not exit 0 on SIGTERM");
+	(void)unlink(blocked);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 int main(void)
@@ -2854,9 +3095,12 @@ int main(void)
 	check_true(stop_server(&srv) == 0,
 		   "auth server did not exit 0 on SIGTERM");
 
-	(void)unlink(srv.cfg_path);
-	(void)unlink(srv.db_path);
-	(void)rmdir(tmpdir);
+	/* MEM-02a：热重建后持久化关闭 → 立即 checkpoint；落盘失败整体回滚 */
+	test_mem02a_checkpoint(tmpdir);
+	test_mem02a_blocked(tmpdir);
+
+	/* 快照、NPZ sidecar、WAL 文件、默认配置服务器的 data/ 都在这个目录里 */
+	rm_rf(tmpdir);
 
 	printf("SUMMARY http checks=%zu mismatches=%zu\n", checks, mismatches);
 	return mismatches ? 1 : 0;

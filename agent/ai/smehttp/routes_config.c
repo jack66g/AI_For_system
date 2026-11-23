@@ -21,6 +21,14 @@
  *   - 全部合法且非空 → 当前配置 DOM 深拷贝 → 逐项 set →
  *     aik_config_from_json → aik_engine_rebuild → swap → 释放旧引擎 →
  *     save 时落盘（落盘失败不回滚已生效配置，source 不变）；
+ *   - MEM-02a（有意偏离 e72bc75，依据上游 ed5378a P3-14）：新配置
+ *     persistence.enabled=false 时，aik_engine_rebuild 在迁移后立即把完整
+ *     状态 checkpoint 到 storage.path（出厂默认就是关闭持久化，所以每次
+ *     PUT /config、POST /config/preset、POST /config/reset 成功都会写一份
+ *     快照）；落盘失败 → 引擎保持原配置，200 {"ok":false,"errors":
+ *     {"_global":"persistence 关闭模式下 checkpoint 落盘失败，引擎保持
+ *     原配置：…"}}（上游 ConfigApplyError 原文）。这里「save」（请求体里的
+ *     save=true，写配置文件）与 checkpoint（写快照）是两回事；
  *   - /config/check 的 llm/embedding 探测只做本地判定：C 版本没有内置
  *     LLM HTTP 客户端，ping=true 时明确返回"请求失败：C 版本未内置 LLM
  *     HTTP 客户端"，不伪造连通；
@@ -483,8 +491,12 @@ static int apply_config_dom(aik_http_server *s, aik_json *new_dom, int save,
 	}
 	old = aik_http_server_engine(s);
 	rc = aik_engine_rebuild(old, cfg, &neu, err, sizeof(err));
-	if (rc == 1) {
-		/* embedding 身份闸门：err 是可直接展示的中文提示 */
+	if (rc == 1 || rc == 2) {
+		/*
+		 * rc 1 = embedding 身份闸门；rc 2 = MEM-02a：persistence 关闭模式
+		 * 下 checkpoint 落盘失败。两者的 err 都是可直接展示的中文提示
+		 * （上游两种都原样抛 ConfigApplyError，不套「应用配置失败」前缀）。
+		 */
 		respond_global_error(resp, err);
 		return -1;
 	}
@@ -1401,7 +1413,8 @@ void aik_http_route_config_reset(aik_http_server *s,
 	}
 	old = aik_http_server_engine(s);
 	rc = aik_engine_rebuild(old, cfg, &neu, err, sizeof(err));
-	if (rc == 1) {
+	if (rc == 1 || rc == 2) {
+		/* 同 apply_config_dom：rc 2 = MEM-02a checkpoint 落盘失败，err 可直接展示 */
 		respond_global_error(resp, err);
 		return;
 	}

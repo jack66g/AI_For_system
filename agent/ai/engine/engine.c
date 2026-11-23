@@ -4393,6 +4393,41 @@ int aik_engine_rebuild(aik_engine *old, aik_config *new_cfg,
 	 */
 	neu->wal_seq = old->wal_seq;
 	neu->wal_checkpoint_seq = old->wal_checkpoint_seq;
+	/*
+	 * MEM-02a（有意偏离基线 e72bc75，依据上游 ed5378a
+	 * sme/api/server.py::rebuild_engine_with，2026-11-20 测试战役 P3-14）：
+	 * 新配置 persistence.enabled=false 时，迁移后的完整状态立即 checkpoint
+	 * 到恢复存储路径（storage.path）。
+	 *
+	 * 为什么是「关闭时才存」：persistence 开着时 WAL 兜底——未 checkpoint
+	 * 的写入重启后由 WAL 重放补回，bulk import 本身也已 checkpoint；
+	 * 关闭时重启后不重放 WAL（aik_engine_load 只在启用时 replay），自上次
+	 * checkpoint 以来的写入只活在内存里。上游修的是 True→False 这一刻：
+	 * 旧引擎 WAL 里未 checkpoint 的写入，换到关闭配置后不再有人重放。
+	 * 同一条件也覆盖出厂默认的 False→False：热重建换进来的新引擎
+	 * autosave 计数从 0 起，旧引擎攒下未落盘的写入要多等一个完整的
+	 * autosave 间隔才有机会落盘，重建即 checkpoint 把这个窗口关掉。
+	 *
+	 * 失败即整体失败（上游 ConfigApplyError「重建必须整体成功或整体
+	 * 回滚」）：返回 2，旧引擎不动，新引擎在这里释放。快照在计数器与 WAL
+	 * 序号回填之后写，所以带着旧库的 splits/merges/consolidations/
+	 * compressions 与旧 WAL 序号（上游的 save 在计数器回填之前，快照里的
+	 * counters 是 import 期的值；只影响快照里的 stats 计数，不影响检索与
+	 * 演化）。
+	 */
+	if (!cfg_bool(neu->cfg, "persistence.enabled", 0)) {
+		char serr[512];
+
+		serr[0] = '\0';
+		if (aik_engine_save(neu, NULL, serr, sizeof(serr)) != 0) {
+			set_err(err, errlen,
+				"persistence 关闭模式下 checkpoint 落盘失败，"
+				"引擎保持原配置：%s",
+				serr[0] ? serr : "unknown error");
+			rc = 2;
+			goto done;
+		}
+	}
 	*out = neu;
 	neu = NULL;
 	rc = 0;

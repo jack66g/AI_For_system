@@ -120,6 +120,19 @@ aik_config *aik_engine_config(aik_engine *e);
  *      "应用配置失败，引擎保持原配置：..." 或具体原因；**new_cfg 一律被
  *      接管/释放**（调用方不要 free）。
  * 任何失败都不修改旧引擎。
+ *
+ * MEM-02a（有意偏离 e72bc75，依据上游 ed5378a P3-14）：迁移完成后，若
+ * **新配置** persistence.enabled=false，立即 aik_engine_save(NULL) 把完整
+ * 状态 checkpoint 到 storage.path——关闭持久化时重启后不重放 WAL，不落盘
+ * 就会回退到旧快照、丢掉自上次 checkpoint 以来的全部写入。
+ *   - storage.path 为空或不可写 → 返回 **2**：迁移已完成但 checkpoint
+ *     失败，整体回滚（旧引擎不动、*out 为 NULL），err 为可直接展示的
+ *     「persistence 关闭模式下 checkpoint 落盘失败，引擎保持原配置：…」；
+ *   - persistence.enabled=true 时不额外 save（WAL 续写，bulk import 自带
+ *     checkpoint），与上游一致。
+ * 出厂默认 persistence.enabled=false：此后每次配置热重建都会往
+ * storage.path 写一份快照（daemon 由 AIKD_DATA_DIR 覆写为
+ * <dir>/engine.json）。
  */
 int aik_engine_rebuild(aik_engine *old, aik_config *new_cfg,
 		       aik_engine **out, char *err, size_t errlen);
