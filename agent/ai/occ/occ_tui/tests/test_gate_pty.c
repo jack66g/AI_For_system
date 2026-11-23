@@ -11,6 +11,20 @@
  *   B. LOGIN：错误密码×3 →「尝试过多，冷却」（泵+计数+冷却路径）。
  *   C. 双控制台覆写守卫（q17 覆写探针）：SETUP 提交时凭据文件已存在
  *      → 拒写转 LOGIN（「密码已由其他控制台设置」）。
+ *   D. P-2a 双用户登录（用户名框/逐用户计数/冷却独立/last 预填）。
+ *   E. P-60/D1（CON-02b）凭据「读不了」≠「没有」：gate 路径是目录
+ *      （fopen 成功、读取出错 EISDIR）→ 诚实报错屏（「登录凭据不可读」）、
+ *      零 SETUP 向导文案、等键后以 TUI_GATE_DENIED 退出（与 uid 无关）。
+ *   F. 同上·权限面：属主他人 0600 的凭据文件。root 跑=root 造文件+子进程
+ *      降权 nobody（原型 F1）；非 root 跑=自家只写文件 0200（等价 EACCES，
+ *      F2），原型显式 SKIP 不冒充。各带对照：文件恢复可读 → LOGIN →
+ *      正确密码解锁（证明降权/桩本身没坏，报错确由权限引起）。
+ *   G. P-60 进程内失败计数：凭据「可读不可写」（0644、属主非当前用户；
+ *      root=造文件+降权，非 root=自家只读目录内 0644）→ 连错 3 次触发
+ *      冷却、冷却期内第 4 次「冷却中」；冷却期满计数清零（下一错从
+ *      1/3 起算、正确密码可解锁）；文件字节不动。
+ *   H. D1 SETUP 提交复核：向导进行中凭据文件「出现但读不出」→ 不覆写
+ *      （旧口径 fopen 失败=不在→新建覆写+解锁）、转诚实报错屏（非 root）。
  */
 #define _XOPEN_SOURCE 700	/* posix_openpt/grantpt/unlockpt/ptsname */
 #define _DEFAULT_SOURCE 1
@@ -20,12 +34,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>				/* P-60/D1：setgroups（降权） */
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -41,6 +57,19 @@ static int fails;
 static char acc[65536];
 static size_t acc_n;
 static char g_last[160];			/* P-2a：last-user 隔离桩路径 */
+
+/* P-60/D1：降权/退出码透传（F/G 用例）。g_drop_uid 非 0=gate 子进程
+ * setresuid 降到该裸 uid（只有 root 跑的测试进程有权——「属主他人文件」
+ * 的权限面才成立）；g_raw_exit=子进程以 tui_gate_enter() 原值退出
+ * （区分 TUI_GATE_DENIED 与一般未解锁的 42）。 */
+#define NOBODY_UID 65534		/* 不查 passwd：root 可降到任意裸 uid */
+static uid_t g_drop_uid;
+static int g_raw_exit;
+
+/* ⑨c/H 只写凭据桩（有效 admin 条目形态；哈希体为桩字节，非真密） */
+#define WO_LINE ("admin:$6$wo$" \
+		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly" \
+		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly:1\n")
 
 static int find_tok(const char *tok)
 {
@@ -150,10 +179,83 @@ static int spawn_gate(const char *path, pid_t *pid)
 		setenv("AIK_CONSOLE_GATE", path, 1);
 		setenv("AIK_CONSOLE_GATE_LAST", g_last, 1);
 		unsetenv("AIK_CONSOLE_GATE_SKIP");
-		_exit(tui_gate_enter() == 0 ? 0 : 42);
+		if (g_drop_uid) {
+			/* 降权到 nobody 类裸 uid。顺序：先清补充组（需 root，
+			 * 必须在 setuid 前）→ setresgid → setresuid（real/
+			 * effective/saved 一并降，不可逆）；失败即以专用码退
+			 * （不被当成 gate 行为）。pty 三件已在降权前 dup 好。 */
+			if (setgroups(0, NULL) != 0 ||
+			    setresgid(g_drop_uid, g_drop_uid, g_drop_uid) != 0 ||
+			    setresuid(g_drop_uid, g_drop_uid, g_drop_uid) != 0 ||
+			    geteuid() != g_drop_uid || getegid() != g_drop_uid)
+				_exit(97);
+		}
+		{
+			int grc = tui_gate_enter();
+
+			_exit(g_raw_exit ? grc : (grc == 0 ? 0 : 42));
+		}
 	}
 	ioctl(m, TIOCSWINSZ, &wz);
 	return m;
+}
+
+static void write_file(const char *p, const char *s)
+{
+	FILE *f = fopen(p, "w");
+
+	if (!f) {
+		CHECK(f != NULL);
+		return;
+	}
+	fputs(s, f);
+	fclose(f);
+}
+
+static int file_eq(const char *path, const char *want)
+{
+	char buf[1024];
+	FILE *f = fopen(path, "r");
+	size_t n;
+
+	if (!f)
+		return 0;
+	n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	return strcmp(buf, want) == 0;
+}
+
+/* P-60/D1：凭据不可读报错屏断言——诚实文案在（why=「原因：」行 token，
+ * 可 NULL）、SETUP 向导文案零出现、未按键不退、任意一键后以
+ * TUI_GATE_DENIED 退出。调用方须在 spawn 前 acc_n=0（或提交前清一次
+ * ——SETUP 文案若是此前正当出现的，只认提交后的新字节）。 */
+static void denied_case(int m, pid_t pid, const char *why)
+{
+	int status;
+
+	CHECK(wait_tok(m, "登录凭据不可读", 8));
+	if (why)
+		CHECK(wait_tok(m, why, 8));
+	CHECK(wait_tok(m, "按任意键退出", 8));
+	/* 不得落进 SETUP 向导（标题/首次使用/设置密码/确认密码） */
+	CHECK(!find_tok("首次使用"));
+	CHECK(!find_tok("AIKernel 初始化"));
+	CHECK(!find_tok("设置密码"));
+	CHECK(!find_tok("确认密码"));
+	/* 未按键不退（报错屏可读；不自旋自退） */
+	usleep(600000);
+	CHECK(waitpid(pid, &status, WNOHANG) == 0);
+	/* 任意一键（Enter）后非零退出，且是 DENIED 专属码 */
+	feedraw(m, "\r");
+	CHECK(wait_exit(pid, &status, 15));
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == TUI_GATE_DENIED);
+}
+
+/* 本用例（自 f0 起）是否零失败——分段状态行用 */
+static const char *case_status(int f0)
+{
+	return fails == f0 ? "ok" : "FAIL";
 }
 
 int main(void)
@@ -369,7 +471,203 @@ int main(void)
 		printf("test_gate_pty D (multi-user login): %s\n",
 		       fails ? "FAIL" : "ok");
 	}
-	unlink(path);
+
+	/* E~G（G 含 10s 冷却等待）：重置挂起硬杀线 */
+	alarm(150);
+
+	/* E: P-60/D1——gate 路径是目录（fopen 成功、读取出错 EISDIR）。
+	 * 与 uid 无关（root/非 root 同路）：不得出现 SETUP 向导文案，应出
+	 * 诚实报错，等键后以 TUI_GATE_DENIED 退出；目录本身与邻域不被写动。 */
+	{
+		char dpath[128], tmpchk[160];
+		int f0 = fails;
+
+		snprintf(dpath, sizeof(dpath), "%s.gatedir", tmpl);
+		unlink(dpath);
+		CHECK(mkdir(dpath, 0700) == 0);
+		g_raw_exit = 1;
+		acc_n = 0;
+		m = spawn_gate(dpath, &pid);
+		CHECK(m >= 0);
+		denied_case(m, pid, "原因：凭据文件不是普通文件");
+		close(m);
+		g_raw_exit = 0;
+		snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", dpath);
+		CHECK(access(tmpchk, 0) != 0);	/* 无 tmp 残留 */
+		CHECK(stat(dpath, &st) == 0 && S_ISDIR(st.st_mode));
+		rmdir(dpath);
+		printf("test_gate_pty E (gate path is a directory -> honest "
+		       "screen, no SETUP wizard): %s\n", case_status(f0));
+	}
+
+	/* F: P-60/D1——凭据文件在却读不出（权限）。原型=属主他人 0600：
+	 * 造文件+降权需 root（F1）；非 root 跑等价形态 F2（自家只写 0200：
+	 * owner 无 r 位且无 CAP_DAC_OVERRIDE → open EACCES），原型显式 SKIP
+	 * 不冒充。两路各带对照：文件恢复可读 → LOGIN → 正确密码解锁。 */
+	{
+		char h[128], line[256];
+		int f0 = fails;
+
+		CHECK(tui_gate_hash("own-p60-pw", h) == 0);
+		snprintf(line, sizeof(line), "admin:%s:1700000000\n", h);
+		unlink(g_last);
+		if (geteuid() == 0) {
+			write_file(path, line);
+			CHECK(chmod(path, 0600) == 0);
+			g_drop_uid = NOBODY_UID;
+			g_raw_exit = 1;
+			acc_n = 0;
+			m = spawn_gate(path, &pid);
+			CHECK(m >= 0);
+			denied_case(m, pid, "原因：权限不足");
+			close(m);
+			/* 凭据文件未被 SETUP 路径写动：权限与内容逐字不变 */
+			CHECK(stat(path, &st) == 0 &&
+			      (st.st_mode & 0777) == 0600);
+			CHECK(file_eq(path, line));
+			/* 对照：改 0644 可读 → LOGIN → 正确密码解锁 */
+			CHECK(chmod(path, 0644) == 0);
+			g_raw_exit = 0;
+			acc_n = 0;
+			m = spawn_gate(path, &pid);
+			CHECK(m >= 0);
+			CHECK(wait_tok(m, "Enter 登录", 8));
+			CHECK(!find_tok("登录凭据不可读"));
+			feed(m, "own-p60-pw");
+			CHECK(wait_exit(pid, &status, 15));
+			CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+			close(m);
+			g_drop_uid = 0;
+			printf("test_gate_pty F1 (owner-other 0600 gate, dropped "
+			       "to nobody -> honest screen + readable control "
+			       "logs in): %s\n", case_status(f0));
+		} else {
+			printf("SKIP F1 (root-only: owner-other 0600 gate + "
+			       "setuid drop)\n");
+			write_file(path, line);
+			CHECK(chmod(path, 0200) == 0);
+			g_raw_exit = 1;
+			acc_n = 0;
+			m = spawn_gate(path, &pid);
+			CHECK(m >= 0);
+			denied_case(m, pid, "原因：权限不足");
+			close(m);
+			CHECK(chmod(path, 0600) == 0);
+			CHECK(file_eq(path, line));
+			/* 对照：恢复可读 → LOGIN → 正确密码解锁 */
+			g_raw_exit = 0;
+			acc_n = 0;
+			m = spawn_gate(path, &pid);
+			CHECK(m >= 0);
+			CHECK(wait_tok(m, "Enter 登录", 8));
+			CHECK(!find_tok("登录凭据不可读"));
+			feed(m, "own-p60-pw");
+			CHECK(wait_exit(pid, &status, 15));
+			CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+			close(m);
+			printf("test_gate_pty F2 (write-only 0200 gate, self-owned "
+			       "variant -> honest screen + readable control logs "
+			       "in): %s\n", case_status(f0));
+		}
+		unlink(path);
+	}
+
+	/* G: P-60 进程内失败计数——凭据「可读不可写」（0644、属主非当前
+	 * 用户）。root 跑=root 造文件+子进程降权 nobody；非 root 跑=自家
+	 * 只读目录（0555）内 0644 文件（等价：tmp 建不成→写不进）。文件
+	 * 计数恒 0，内存计数接管：连错 3 次触发冷却、冷却期内「冷却中」；
+	 * 冷却期满计数清零（下一错从 1/3 起算，正确密码可解锁）。 */
+	{
+		char wdir[] = "/tmp/q17gate_ptyw_XXXXXX";
+		char wpath[160], h[128], line[256], tmpchk[200];
+		int f0 = fails;
+
+		CHECK(tui_gate_hash("ro-p60-pw", h) == 0);
+		snprintf(line, sizeof(line), "admin:%s:1700000000\n", h);
+		CHECK(mkdtemp(wdir) != NULL);
+		snprintf(wpath, sizeof(wpath), "%s/gate", wdir);
+		write_file(wpath, line);
+		CHECK(chmod(wpath, 0644) == 0);
+		CHECK(chmod(wdir, 0555) == 0);	/* 目录不可写→tmp 建不成 */
+		if (geteuid() == 0)
+			g_drop_uid = NOBODY_UID;	/* 属主他人（root） */
+		g_raw_exit = 0;
+		unlink(g_last);
+		acc_n = 0;
+		m = spawn_gate(wpath, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 8));	/* 可读=LOGIN 框 */
+		feed(m, "wrong-a");
+		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
+		feed(m, "wrong-b");
+		/* 差分渲染只发变化格：1/3→2/3 仅一个数字格变化，字节流不含
+		 * 完整 token（test D4 同注）；且本形态文件计数写不进无处
+		 * 可查——直接打第 3 错，以冷却文案为内存计数到 3 的证据 */
+		usleep(700000);
+		feed(m, "wrong-c");
+		CHECK(wait_tok(m, "尝试过多，冷却", 8));	/* 第 3 错触发 */
+		feed(m, "wrong-d");
+		CHECK(wait_tok(m, "冷却中", 8));		/* 冷却期内第 4 次 */
+		/* 文件计数写不进：字节逐一动、无 tmp 残留（确为「不可写」） */
+		CHECK(file_eq(wpath, line));
+		snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", wpath);
+		CHECK(access(tmpchk, 0) != 0);
+		/* 冷却期满（GATE_COOLDOWN_SEC=10）：计数清零——下一错从
+		 * 1/3 起算（未清零则再触「尝试过多，冷却」） */
+		sleep(11);
+		acc_n = 0;		/* 旧 1/3 token 在缓冲里：清后再等新字节 */
+		feed(m, "wrong-e");
+		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
+		/* 计数=1（<3）：正确密码即可解锁 */
+		feed(m, "ro-p60-pw");
+		CHECK(wait_exit(pid, &status, 15));
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		close(m);
+		g_drop_uid = 0;
+		printf("test_gate_pty G (in-memory fail counter, readable-"
+		       "unwritable gate%s): %s\n",
+		       geteuid() == 0 ? ", dropped to nobody" :
+		       ", self-owned variant",
+		       case_status(f0));
+		CHECK(chmod(wdir, 0700) == 0);
+		unlink(wpath);
+		rmdir(wdir);
+	}
+
+	/* H: P-60/D1——SETUP 提交复核：向导进行中凭据文件「出现但读不
+	 * 出」（只写 0200；/tmp 可写——旧口径 fopen 失败=不在→新建覆写
+	 * 原文件并以新密码解锁）。新口径：不覆写、转诚实报错屏。非 root
+	 * 前提（root 读得了 0200 文件→走「已由其他控制台设置」路）。 */
+	if (geteuid() == 0) {
+		printf("SKIP H (non-root premise: root reads a 0200 file)\n");
+		unlink(path);
+	} else {
+		int f0 = fails;
+
+		unlink(path);
+		g_raw_exit = 1;
+		acc_n = 0;
+		m = spawn_gate(path, &pid);	/* 文件不在→SETUP（正当） */
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "首次使用", 8));
+		feed(m, "setup-p60-pw");
+		CHECK(wait_tok(m, "再输入一次确认", 8));
+		/* 此刻凭据文件「出现但读不出」 */
+		write_file(path, WO_LINE);
+		CHECK(chmod(path, 0200) == 0);
+		acc_n = 0;		/* SETUP 文案是此前正当出现：只认提交后新字节 */
+		feed(m, "setup-p60-pw");
+		denied_case(m, pid, "原因：权限不足");
+		close(m);
+		g_raw_exit = 0;
+		/* 原文件未被覆写（旧口径此处已被新 admin 行替换） */
+		CHECK(chmod(path, 0600) == 0);
+		CHECK(file_eq(path, WO_LINE));
+		unlink(path);
+		printf("test_gate_pty H (SETUP commit recheck: file appeared "
+		       "but unreadable -> not overwritten, honest screen): "
+		       "%s\n", case_status(f0));
+	}
 	unlink(g_last);
 
 	printf("test_gate_pty: %s (%d fails)\n", fails ? "FAIL" : "all ok",

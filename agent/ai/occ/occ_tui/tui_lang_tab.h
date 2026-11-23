@@ -649,6 +649,13 @@ static const struct {
 	{ "root 密码", "root password" },
 	{ "本机未开 root 门（console-gate 无 root 条目）", "root gate not open on this machine (no root entry in console-gate)" },
 	{ "occ: models 层不可读，已跳过（%s）\\n", "occ: models layer unreadable, skipped (%s)\\n" },
+	/* ---- P-60/D1（CON-02b）gate「凭据不可读」报错屏（手工追加，2026-11-24） ---- */
+	{ "登录凭据不可读——请联系管理员", "Login credentials unreadable -- contact your administrator" },
+	{ "原因：%s", "Reason: %s" },
+	{ "权限不足", "permission denied" },
+	{ "凭据文件不是普通文件", "credentials file is not a regular file" },
+	{ "读取错误", "read error" },
+	{ "按任意键退出", "Press any key to exit" },
 };
 
 #endif /* _TUI_LANG_TAB_H */

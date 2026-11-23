@@ -48,8 +48,37 @@ int tui_gate_write_entry(const char *path, const char *user,
 			 const char *hash, int fails);
 
 /*
+ * P-60/D1（CON-02b）：凭据「读不了」≠「没有」。
+ * 背景：读侧对 fopen 失败一律按「文件不在」上报，UI 把它当首次使用
+ * 进 SETUP 向导——非 root 的 occ 读不了 0600 的 gate 文件时，屏上让
+ * 普通用户「设置 admin 密码」并吞掉后续键入（142 实机抓获）。
+ *
+ * tui_gate_open_class - 凭据文件 open 失败的 errno 分类（纯函数，可单测）：
+ *   ENOENT/ENOTDIR → TUI_GATE_OPEN_ABSENT（文件不在：首次使用/管理员
+ *     删文件=复位——SETUP 向导语义不变）；
+ *   其余（EACCES/EPERM/EISDIR/EIO…）→ TUI_GATE_OPEN_DENIED（文件在却
+ *     读不出——绝不进 SETUP）。
+ * 读侧返回码补充（既有调用方只判 0/非 0；签名与「<0=未找到」契约不变）：
+ *   tui_gate_read / tui_gate_read_user 另返回 TUI_GATE_READ_DENIED = 文件
+ *   在却读不出（权限/非普通文件/IO）；-1 仍=无此用户/坏文件/参数坏。
+ * 写侧：tui_gate_write_entry 在「既有文件读不出」时拒写返回 -1（读不到
+ *   既有条目就无从保留其余行——硬写=整文件覆写丢他人条目）；文件不在
+ *   照旧新建。
+ * UI：tui_gate_enter 命中读不出 → 屏上诚实人话（不进 SETUP）、等按键后
+ *   返回 TUI_GATE_DENIED（非零=未解锁；occ 退出，aik-console 记账后重启
+ *   循环，仍处锁定态）。TUI_GATE_LOCKED=其余未解锁退出（Ctrl-C/Esc/EOF）。
+ */
+#define TUI_GATE_OPEN_ABSENT	0
+#define TUI_GATE_OPEN_DENIED	1
+#define TUI_GATE_READ_DENIED	(-2)
+#define TUI_GATE_LOCKED		1
+#define TUI_GATE_DENIED		2
+int tui_gate_open_class(int err);
+
+/*
  * UI 面：进屏登录门。返回 0=解锁（或旁路）；非 0=未解锁退出
- * （occ 退出——外层包装重启后仍在锁定态）。
+ * （occ 退出——外层包装重启后仍在锁定态）：TUI_GATE_LOCKED=未解锁；
+ * TUI_GATE_DENIED=凭据文件在却读不出（诚实报错屏、按键后退出）。
  * 只应在双 tty 交互形态调用。
  */
 int tui_gate_enter(void);

@@ -68,9 +68,26 @@ int tui_gate_skipboot(void)
  * 内部读函数区分「文件不在」与「文件在无此用户」——UI 面需要
  * （文件消失=复位向导；无此用户=诚实登录失败）。 */
 #define GATE_READ_OK		0
-#define GATE_READ_NO_FILE	-1	/* 文件不存在/不可开 */
+#define GATE_READ_NO_FILE	-1	/* 文件不存在（ENOENT/ENOTDIR） */
 #define GATE_READ_NO_USER	-2	/* 文件在但无此用户（或全坏行） */
 #define GATE_READ_BAD_ARG	-3	/* 参数坏 */
+#define GATE_READ_DENIED	-4	/* P-60/D1：文件在却读不出（权限/非普通文件/IO） */
+
+/* P-60/D1（CON-02b）：「读不了」≠「没有」。fopen 失败的 errno 分类——
+ * 只有 ENOENT/ENOTDIR 才是「文件不在」（首次使用/管理员删文件=复位，
+ * SETUP 向导语义）；EACCES/EPERM（及其它任何读不出）一律 DENIED：
+ * 旧口径把它们也报成 NO_FILE，UI 便让读不了凭据的普通用户「设置
+ * admin 密码」并吞掉后续键入（142 实机：gate 0600 root:root）。 */
+int tui_gate_open_class(int err)
+{
+	if (err == ENOENT || err == ENOTDIR)
+		return TUI_GATE_OPEN_ABSENT;
+	return TUI_GATE_OPEN_DENIED;
+}
+
+/* 最近一次 GATE_READ_DENIED 的 errno（屏上「原因：」行用；gate 只在
+ * 进主 TUI 前的主线程跑——与 gate_term_restore 同款单线程静态） */
+static int gate_denied_errno;
 
 /* 解析一行（就地改写 line）。返回 1=有效条目（name、hash 指入 line，
  * ts、fails 出参）；0=注释/空行（跳过）；-1=坏行（跳过）。 */
@@ -134,8 +151,12 @@ static int gate_read_user_full(const char *path, const char *user,
 	if (!path || !path[0] || !user || !user[0] || !hash_out)
 		return GATE_READ_BAD_ARG;
 	f = fopen(path, "r");
-	if (!f)
-		return GATE_READ_NO_FILE;
+	if (!f) {
+		if (tui_gate_open_class(errno) == TUI_GATE_OPEN_ABSENT)
+			return GATE_READ_NO_FILE;
+		gate_denied_errno = errno;	/* EACCES/EPERM/… */
+		return GATE_READ_DENIED;
+	}
 	while (fgets(line, sizeof(line), f)) {
 		if (gate_parse_entry(line, &name, &hash, &ts, &fails) != 1)
 			continue;
@@ -149,22 +170,39 @@ static int gate_read_user_full(const char *path, const char *user,
 			return GATE_READ_OK;
 		}
 	}
+	if (ferror(f)) {
+		/* fopen 过了但读不出（典型：路径是目录→read EISDIR；或
+		 * IO 错）。P-60/D1：这不是「没有文件」——旧口径此处落到
+		 * NO_USER，向导入口（tui_gate_read!=0）照样当首次使用。 */
+		gate_denied_errno = errno ? errno : EIO;
+		fclose(f);
+		return GATE_READ_DENIED;
+	}
 	fclose(f);
 	return GATE_READ_NO_USER;
+}
+
+/* 内部分类码 → 公开返回值：找到=0；文件在却读不出=TUI_GATE_READ_DENIED；
+ * 其余（无此用户/坏文件/参数坏）=-1（既有调用方只判 0/非 0） */
+static int gate_public_rc(int rd)
+{
+	if (rd == GATE_READ_OK)
+		return 0;
+	return rd == GATE_READ_DENIED ? TUI_GATE_READ_DENIED : -1;
 }
 
 int tui_gate_read_user(const char *path, const char *user,
 		       char hash_out[TUI_GATE_HASH_LEN], int *fails_out)
 {
-	return gate_read_user_full(path, user, hash_out, NULL, fails_out) ==
-	       GATE_READ_OK ? 0 : -1;
+	return gate_public_rc(gate_read_user_full(path, user, hash_out, NULL,
+						  fails_out));
 }
 
 /* 老 API 保留：admin 语义委托新多条目面 */
 int tui_gate_read(const char *path, char hash[128], long long *ts)
 {
-	return gate_read_user_full(path, GATE_USER, hash, ts, NULL) ==
-	       GATE_READ_OK ? 0 : -1;
+	return gate_public_rc(gate_read_user_full(path, GATE_USER, hash, ts,
+						  NULL));
 }
 
 int tui_gate_hash(const char *pw, char out[128])
@@ -264,6 +302,12 @@ int tui_gate_write_entry(const char *path, const char *user,
 		return -1;
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	in = fopen(path, "r");		/* 不在=新建文件（追加语义） */
+	if (!in && tui_gate_open_class(errno) != TUI_GATE_OPEN_ABSENT) {
+		/* P-60/D1：既有文件在却读不出（权限/非普通文件/IO）——拒写。
+		 * 读不到既有条目就无从「其余行原样保留」，硬写=整文件覆写
+		 * 丢他人条目（目录可写时真能写成）。调用方按写失败处理。 */
+		return -1;
+	}
 	out = fopen(tmp, "w");
 	if (!out) {
 		if (in)
@@ -296,6 +340,14 @@ int tui_gate_write_entry(const char *path, const char *user,
 				unlink(tmp);
 				return -1;	/* 无界文件拒写（防截断用户数据） */
 			}
+		}
+		/* P-60/D1：既有文件读一半出错（IO）——半份内容不得写回
+		 * （与上面「读不出拒写」同一口径：宁拒不丢条目） */
+		if (ferror(in)) {
+			fclose(in);
+			fclose(out);
+			unlink(tmp);
+			return -1;
 		}
 		fclose(in);
 	}
@@ -470,6 +522,29 @@ static void box_frame(tui_screen *s, int rows, int cols)
 
 #define GATE_MODE_SETUP 0
 #define GATE_MODE_LOGIN 1
+#define GATE_MODE_DENIED 2	/* P-60/D1：凭据在却读不出——诚实报错屏
+				 * （绝不进 SETUP）；按键后 TUI_GATE_DENIED 退出 */
+
+/* 读不出原因 → 诚实人话（屏上「原因：」行）。按 errno 分类出固定文案
+ * ——不引 strerror（随 locale 漂移，屏宽 44 列也放不下）。 */
+static const char *gate_denied_reason(void)
+{
+	switch (gate_denied_errno) {
+	case EACCES:
+	case EPERM:
+		return L_("权限不足");
+	case EISDIR:
+		return L_("凭据文件不是普通文件");
+	default:
+		return L_("读取错误");
+	}
+}
+
+/* 转「凭据不可读」报错屏前填原因行（入口与中途切换两处共用） */
+static void gate_denied_note(char *note, size_t notelen)
+{
+	snprintf(note, notelen, L_("原因：%s"), gate_denied_reason());
+}
 
 /* 单事件字段编辑（字符/退格/Esc/Ctrl-C）。max_len=字段容量；
  * no_colon=用户名字段禁 ':'（文件格式分隔符）。 */
@@ -684,6 +759,7 @@ static int gate_run_ui(int mode, int *unlocked)
 	struct gate_cd cd_tab[GATE_CD_SLOTS];
 	char hash[TUI_GATE_HASH_LEN];
 	char login_note[160] = "";	/* 一次性状态（SETUP→LOGIN 切换说明） */
+	char denied_note[160] = "";	/* P-60/D1：凭据不可读原因行（报错屏） */
 	int hb_ms;			/* P-41/P-44b：空闲心跳周期（0=禁用） */
 	uint64_t hb_next;		/* 下次心跳探针到点 */
 	tui_attr title_a = tui_thm_attr(TUI_THM_ACCENT, TUI_THM_BG, 0);
@@ -737,6 +813,8 @@ static int gate_run_ui(int mode, int *unlocked)
 	memset(&uf, 0, sizeof(uf));
 	if (mode == GATE_MODE_LOGIN)
 		gate_user_prefill(&uf);
+	if (mode == GATE_MODE_DENIED)
+		gate_denied_note(denied_note, sizeof(denied_note));
 	/* P-41/P-44c：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
 	 * 计时（真机实测：静止 gate strace 12s 零 write）；时间基准每
 	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发体量
@@ -788,7 +866,7 @@ static int gate_run_ui(int mode, int *unlocked)
 				    L_("配置云端模型：解锁后 /models"), mut_a);
 			draw_center(s, rows / 2 + 4, cols,
 				    L_("本地模型：/models 选 ollama"), mut_a);
-		} else {
+		} else if (mode == GATE_MODE_LOGIN) {
 			/* P-2a：用户名框（预填 last）+密码框双字段；
 			 * 布局自上而下：用户标签/用户框/密码标签/掩码框 */
 			draw_center(s, rows / 2 - 4, cols,
@@ -809,6 +887,19 @@ static int gate_run_ui(int mode, int *unlocked)
 				    status[0] ? err_a : txt_a);
 			draw_center(s, rows / 2 + 3, cols,
 				    L_("Enter 登录 · Tab 切换 · Ctrl-C 退出"), mut_a);
+		} else if (mode == GATE_MODE_DENIED) {
+			/* P-60/D1（CON-02b）：凭据在却读不出——绝不进 SETUP
+			 * （旧口径把读失败当「文件不在」，读不了凭据的普通
+			 * 用户被引导「设置 admin 密码」、后续键入被向导吞）。
+			 * 诚实报错；任意一键后非零退出——aik-console 记账后
+			 * 重启循环，控制台仍处锁定态。 */
+			draw_center(s, rows / 2 - 4, cols,
+				    "AIKernel · alpha", title_a);
+			draw_center(s, rows / 2 - 3, cols,
+				    L_("登录凭据不可读——请联系管理员"), err_a);
+			draw_center(s, rows / 2 - 2, cols, denied_note, mut_a);
+			draw_center(s, rows / 2 + 3, cols,
+				    L_("按任意键退出"), mut_a);
 		}
 		{
 			int frc = tui_renderer_flush(ren, rows / 2 - 1,
@@ -821,6 +912,18 @@ static int gate_run_ui(int mode, int *unlocked)
 		if (quit) {
 			rc = 1;
 			break;
+		}
+
+		if (mode == GATE_MODE_DENIED) {
+			tui_event ev;
+
+			/* 报错屏：等任意一键再退（屏可读；不自旋自退——
+			 * 否则 2s 重启循环会把报错刷成闪烁） */
+			if (tui_input_next(&in, &ev) > 0 && ev.type == TUI_EV_KEY) {
+				rc = TUI_GATE_DENIED;
+				break;
+			}
+			continue;
 		}
 
 		if (mode == GATE_MODE_SETUP) {
@@ -851,38 +954,57 @@ static int gate_run_ui(int mode, int *unlocked)
 							memset(&f1, 0, sizeof(f1));
 							memset(&f2, 0, sizeof(f2));
 							stage = 0;
-						} else if (tui_gate_read(tui_gate_path(),
-									 hash, NULL) == 0) {
-							/* q17 覆写探针实机抓获：双
-							 * 控制台并发 SETUP，后到者会
-							 * 静默覆写先设好的密码。提交
-							 * 前重读凭据——已被其他控制
-							 * 台设置则不覆写，转 LOGIN。 */
-							mode = GATE_MODE_LOGIN;
-							memset(&f1, 0, sizeof(f1));
-							memset(&f2, 0, sizeof(f2));
-							gate_user_prefill(&uf);
-							focus_user = 0;
-							stage = 0;
-							snprintf(login_note,
-								 sizeof(login_note),
-								 "%s", L_("密码已由其他控制台设置，请登录"));
-							continue;
-						} else if (tui_gate_hash(f1.buf,
-									 hash) == 0 &&
-							   tui_gate_write(
-								   tui_gate_path(),
-								   hash) == 0) {
-							gate_last_write(GATE_USER);
-							*unlocked = 1;
-							rc = 0;
-							break;
 						} else {
-							snprintf(status_buf,
-								 sizeof(status_buf),
-								 "%s", L_("写入失败（权限？）"));
-							memset(&f2, 0, sizeof(f2));
-						}
+							/* 提交前复核只读这一次（分类与
+							 * 「已被设置」共用同一读——双读留缝） */
+							int rrd = tui_gate_read(tui_gate_path(),
+									 hash, NULL);
+
+							if (rrd == TUI_GATE_READ_DENIED) {
+								/* P-60/D1：凭据在却读不出（如
+								 * 另一控制台刚建好 0600）——不
+								 * 覆写、也不谎称写入失败：转
+								 * 诚实报错屏（写侧对读不出的
+								 * 既有文件同样拒写） */
+								mode = GATE_MODE_DENIED;
+								memset(&f1, 0, sizeof(f1));
+								memset(&f2, 0, sizeof(f2));
+								stage = 0;
+								gate_denied_note(denied_note,
+										 sizeof(denied_note));
+								continue;
+							} else if (rrd == 0) {
+								/* q17 覆写探针实机抓获：双
+								 * 控制台并发 SETUP，后到者会
+								 * 静默覆写先设好的密码。提交
+								 * 前重读凭据——已被其他控制
+								 * 台设置则不覆写，转 LOGIN。 */
+								mode = GATE_MODE_LOGIN;
+								memset(&f1, 0, sizeof(f1));
+								memset(&f2, 0, sizeof(f2));
+								gate_user_prefill(&uf);
+								focus_user = 0;
+								stage = 0;
+								snprintf(login_note,
+									 sizeof(login_note),
+									 "%s", L_("密码已由其他控制台设置，请登录"));
+								continue;
+							} else if (tui_gate_hash(f1.buf,
+										 hash) == 0 &&
+								   tui_gate_write(
+									   tui_gate_path(),
+									   hash) == 0) {
+								gate_last_write(GATE_USER);
+								*unlocked = 1;
+								rc = 0;
+								break;
+							} else {
+								snprintf(status_buf,
+									 sizeof(status_buf),
+									 "%s", L_("写入失败（权限？）"));
+								memset(&f2, 0, sizeof(f2));
+							}
+							}
 					}
 				}
 			continue;
@@ -909,6 +1031,18 @@ static int gate_run_ui(int mode, int *unlocked)
 				memset(&f1, 0, sizeof(f1));
 				stage = 0;
 				status_buf[0] = '\0';	/* q17 audit A-8 */
+				continue;
+			}
+			if (rd == GATE_READ_DENIED) {
+				/* P-60/D1：文件在却读不出（权限/非普通
+				 * 文件/IO）→ 诚实报错屏；绝不转 SETUP
+				 * （CON-02b：读不了≠没有）。清密码框，
+				 * 不留残影。 */
+				mode = GATE_MODE_DENIED;
+				memset(&f1, 0, sizeof(f1));
+				status_buf[0] = '\0';
+				gate_denied_note(denied_note,
+						 sizeof(denied_note));
 				continue;
 			}
 			if (uf.len == 0) {
@@ -1040,8 +1174,16 @@ int tui_gate_enter(void)
 		if (e && e[0] && strcmp(e, "0") != 0)
 			return 0;
 	}
-	/* admin 条目在=LOGIN（多用户框）；不在=SETUP 向导（仍建 admin） */
-	if (tui_gate_read(tui_gate_path(), hash, &ts) != 0)
-		return gate_run_ui(GATE_MODE_SETUP, &unlocked);
+	/* admin 条目在=LOGIN（多用户框）；不在=SETUP 向导（仍建 admin）；
+	 * P-60/D1：文件在却读不出（权限/非普通文件/IO）=诚实报错屏——
+	 * 绝不进 SETUP（旧口径读失败一律当「文件不在」） */
+	{
+		int rd = tui_gate_read(tui_gate_path(), hash, &ts);
+
+		if (rd == TUI_GATE_READ_DENIED)
+			return gate_run_ui(GATE_MODE_DENIED, &unlocked);
+		if (rd != 0)
+			return gate_run_ui(GATE_MODE_SETUP, &unlocked);
+	}
 	return gate_run_ui(GATE_MODE_LOGIN, &unlocked);
 }

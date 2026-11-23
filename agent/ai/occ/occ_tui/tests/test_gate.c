@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* test_gate.c - T4 登录门纯逻辑面单测（凭据文件/哈希/旁路判定） */
+/* test_gate.c - T4 登录门纯逻辑面单测（凭据文件/哈希/旁路判定）
+ * ⑨ P-60/D1（CON-02b）：凭据「读不了」≠「没有」——errno 分类纯函数、
+ *   目录/只写文件读出=TUI_GATE_READ_DENIED、写侧对读不出的既有文件拒写 */
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +27,11 @@ static void write_file(const char *p, const char *s)
 	fputs(s, f);
 	fclose(f);
 }
+
+/* ⑨c 只写凭据桩（有效 admin 条目形态；哈希体为桩字节，非真密） */
+#define WO_LINE ("admin:$6$wo$" \
+		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly" \
+		 "WronlyWronlyWronlyWronlyWronlyWronlyWronly:1\n")
 
 int main(void)
 {
@@ -189,6 +197,89 @@ int main(void)
 		CHECK(tui_gate_read(p, rd, &ts) == 0 && strcmp(rd, hash) == 0);
 		CHECK(tui_gate_read_user(p, "carol", rd, &ff) == 0 && ff == 1);
 		CHECK(tui_gate_read_user(p, "root", rd, &ff) == 0 && ff == 3);
+	}
+
+	/* ⑨ P-60/D1（CON-02b）：凭据「读不了」≠「没有」 */
+	{
+		char dd[256], none[256], wo[256], rd2[128];
+		int ff2 = -1;
+
+		/* errno 分类纯函数：只有 ENOENT/ENOTDIR 才是「文件不在」 */
+		CHECK(tui_gate_open_class(ENOENT) == TUI_GATE_OPEN_ABSENT);
+		CHECK(tui_gate_open_class(ENOTDIR) == TUI_GATE_OPEN_ABSENT);
+		CHECK(tui_gate_open_class(EACCES) == TUI_GATE_OPEN_DENIED);
+		CHECK(tui_gate_open_class(EPERM) == TUI_GATE_OPEN_DENIED);
+		CHECK(tui_gate_open_class(EISDIR) == TUI_GATE_OPEN_DENIED);
+		CHECK(tui_gate_open_class(EIO) == TUI_GATE_OPEN_DENIED);
+		CHECK(tui_gate_open_class(ELOOP) == TUI_GATE_OPEN_DENIED);
+		/* 未知/0 一律不当作「不在」（保守：读不出就报读不出） */
+		CHECK(tui_gate_open_class(0) == TUI_GATE_OPEN_DENIED);
+		CHECK(tui_gate_open_class(-1) == TUI_GATE_OPEN_DENIED);
+
+		/* ⑨a 文件不在（真 ENOENT）=-1（老语义：UI→SETUP 向导不变） */
+		snprintf(none, sizeof(none), "%s/none-gate", dir);
+		CHECK(tui_gate_read(none, rd2, &ts) == -1);
+		CHECK(tui_gate_read_user(none, "admin", rd2, &ff2) == -1);
+
+		/* ⑨b 路径是目录：fopen 成功、读取出错（EISDIR）——与 uid 无关
+		 * （root/非 root 同路）。旧口径落 NO_USER→向导入口当首次使用 */
+		snprintf(dd, sizeof(dd), "%s/gatedir", dir);
+		CHECK(mkdir(dd, 0700) == 0);
+		CHECK(tui_gate_read(dd, rd2, &ts) == TUI_GATE_READ_DENIED);
+		CHECK(tui_gate_read_user(dd, "admin", rd2, &ff2) ==
+		      TUI_GATE_READ_DENIED);
+		/* 向导建密对「目录」写不成（rename 覆盖目录失败）、不留 tmp */
+		CHECK(tui_gate_write(dd, hash) == -1);
+		{
+			char tmpchk[300];
+
+			snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", dd);
+			CHECK(access(tmpchk, 0) != 0);
+		}
+		CHECK(stat(dd, &st) == 0 && S_ISDIR(st.st_mode));
+		rmdir(dd);
+
+		/* ⑨c 文件在却读不出（权限）→ DENIED；写侧拒写、原文件不动。
+		 * 「属主他人 0600」需 root 造文件——非 root 用等价形态：自家
+		 * 只写文件（0200：owner 无 r 位，非 root 无 CAP_DAC_OVERRIDE
+		 * → open EACCES）且目录可写：正是旧口径「 fopen 失败=不在→
+		 * 新建覆写」会丢数据的那条路。root 能读任何文件，本形态不
+		 * 成立→显式 SKIP（root-only 原型见 test_gate_pty F1）。 */
+		snprintf(wo, sizeof(wo), "%s/wronly-gate", dir);
+		write_file(wo, WO_LINE);
+		if (chmod(wo, 0200) == 0 && geteuid() != 0) {
+			char got[200];
+			FILE *lf;
+			size_t n;
+
+			CHECK(tui_gate_read(wo, rd2, &ts) ==
+			      TUI_GATE_READ_DENIED);
+			CHECK(tui_gate_read_user(wo, "admin", rd2, &ff2) ==
+			      TUI_GATE_READ_DENIED);
+			/* 写侧：读不出既有文件→拒写（旧口径会新建覆写） */
+			CHECK(tui_gate_write_entry(wo, "carol", hash, 0) == -1);
+			CHECK(tui_gate_write(wo, hash) == -1);
+			{
+				char tmpchk[300];
+
+				snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", wo);
+				CHECK(access(tmpchk, 0) != 0);	/* 无残留 */
+			}
+			/* 原文件逐字未动 */
+			CHECK(chmod(wo, 0600) == 0);
+			lf = fopen(wo, "r");
+			CHECK(lf != NULL);
+			if (lf) {
+				n = fread(got, 1, sizeof(got) - 1, lf);
+				fclose(lf);
+				got[n] = '\0';
+				CHECK(strcmp(got, WO_LINE) == 0);
+			}
+		} else {
+			printf("SKIP test_gate 9c (root-only premise: root "
+			       "reads any file)\n");
+		}
+		unlink(wo);
 	}
 	unlink(p);
 	unlink(cmdline);
