@@ -40,7 +40,8 @@ Usage
   python3 tools/audit_capabilities.py --markdown matrix
   python3 tools/audit_capabilities.py --markdown gaps
   python3 tools/audit_capabilities.py --check
-  python3 tools/audit_capabilities.py --json --vm-host root@192.168.245.138
+  python3 tools/audit_capabilities.py --json --vm-host root@<出厂测试机地址>
+  （--vm-host 只许指向出厂测试机；绝不指向生产机。）
 
 Exit codes: 0 ok; 1 --check failed; 2 bad invocation.
 """
@@ -841,8 +842,10 @@ def vm_probe(host, files, bins, timeout=8):
         q = shlex.quote(path)
         script.append("if [ -x %s ]; then echo 'B|%s|1'; else echo 'B|%s|0'; fi"
                       % (q, name.replace("|", "_"), name.replace("|", "_")))
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-           "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
+    # 主会话 2026-11-24：去掉 StrictHostKeyChecking=no 与
+    # UserKnownHostsFile=/dev/null——远程节点探测不得放弃主机密钥
+    # 校验；主机不在已知主机表里就让它失败（BatchMode 下不会交互提问）。
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
            host, "bash", "-s"]
     try:
         p = subprocess.run(cmd, input="\n".join(script) + "\n",
@@ -1054,7 +1057,6 @@ def scan_desktop(root):
     candidates = [
         os.path.join(root, "..", "..", "..", "fix-w48gui", "img1"),
         os.path.expanduser("~/fix-w48gui/img1"),
-        "/home/jack66g/fix-w48gui/img1",
     ]
     for p in candidates:
         sp = os.path.join(p, "server.py")

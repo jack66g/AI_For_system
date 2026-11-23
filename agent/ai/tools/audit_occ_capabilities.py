@@ -801,7 +801,7 @@ OLD_DEFECTS = [
     "不是被审系统的属性。",
     "0 处提及 aikctl：user/policy/session/quota/audit 五族对其完全不可见。",
     "`principal:` 记号（/lease list|show）不是 Agent 工具，却按 gated 读面计入 read_gated 并保住 structured 级别（:1193-1196、:1262）。",
-    "`scan_desktop` 写死开发机路径 /home/jack66g/fix-w48gui/img1（:1054-1058）。",
+    "`scan_desktop` 候选路径里写死了一条开发机家目录绝对路径（:1054-1058；主会话 2026-11-24 已删）。",
     "文案与阈值不一致：READ_TARGET=92.0（:64），矩阵文案却写「未达 95% 读覆盖」（:1505-1506）。",
     "docs/CAPABILITY-GAPS.md 没跟上脚本：文档生成时间 2026-10-24，G-024 行仍写「只能 python3 hashlib 逃逸」，"
     "而脚本里的 G-024 已改成「python3 已摘除」（脚本 :258 对文档 :43）。",

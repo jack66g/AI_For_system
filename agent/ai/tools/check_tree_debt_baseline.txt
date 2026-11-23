@@ -3,7 +3,7 @@
 # Columns: path<TAB>total hits<TAB>home-path hits<TAB>lab-net hits
 # Scope: tracked text files (binaries skipped), counted per occurrence, index view.
 # Ratchet only: counts may go down, never up; new debt is never written here.
-# Total: 90 files, 339 hits (home-path 271, lab-net 68)
+# Total: 89 files, 337 hits (home-path 270, lab-net 67)
 AIKernel/ARCHITECTURE.md	1	0	1
 AIKernel/scripts/k10_patch_series.py	2	2	0
 AIKernel/test/perf/k10_matrix.py	4	4	0
@@ -29,7 +29,6 @@ agent/ai/tests/test_range.c	11	0	11
 agent/ai/tests/usage/README.md	2	1	1
 agent/ai/tests/usage/run_usage.py	1	0	1
 agent/ai/tests/usage/workday_session.py	1	0	1
-agent/ai/tools/audit_capabilities.py	2	1	1
 agent/ai/tools/gen_registry.py	2	0	2
 agent/ai/tools/net_range.c	3	0	3
 agent/ai/tools/tools.json	3	0	3
