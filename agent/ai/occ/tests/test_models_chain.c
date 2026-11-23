@@ -8,7 +8,8 @@
  * 后文件覆盖先文件）；其余合并；选择器后层非空覆盖；provider 引用段
  * 同规则；任一层加载失败=跳过该层继续（诚实降级，不整脸崩）；全层
  * 不可读才 -1。无 models.d 目录=现状等价（只走用户层）。
- * 全部走临时目录桩（不碰 /etc、不依赖 env）。
+ * 全部走临时目录桩（不碰 /etc、不依赖 env）；T9 例外——直读仓内
+ * 出厂件 factory/etc/aikernel/models.d（AIK_REPO_ROOT 可显式指仓根）。
  */
 #define _DEFAULT_SOURCE 1		/* mkdtemp（严格 c11 下的 POSIX 面） */
 #include <stdio.h>
@@ -260,6 +261,77 @@ int main(void)
 		occ_provider_config_free(&cfg);
 	}
 
+	/* ---- T9：仓内出厂件 factory/etc/aikernel/models.d（P-60 修复 2）----
+	 * fresh 用户三层链全空 → load_chain -1 硬拒 → occ TUI 槽位解析先于
+	 * gate、rc=1 死循环（17.11 装机台架咬出）；修=出厂落系统层共享槽
+	 * cloud.toml。系统层目录指向仓内出厂件所在目录、用户层传 NULL →
+	 * 链可用（0）且 cloud 槽可解析（base_url 是 resolve 必填项）。
+	 * 定位：AIK_REPO_ROOT 显式优先；否则按 cwd 相对回退（make 自
+	 * agent/ai/occ 跑=./tests/…，三级上=仓根）。找不到=FAIL（出厂件是
+	 * 仓内资产，缺了就该红）。 */
+	{
+		char cand[1024], cl[1100], line[512];
+		const char *root = getenv("AIK_REPO_ROOT");
+		static const char *const rel[] = {
+			"../../../factory/etc/aikernel/models.d",
+			"../../../../factory/etc/aikernel/models.d",
+			"factory/etc/aikernel/models.d",
+			"../factory/etc/aikernel/models.d",
+			NULL
+		};
+		size_t k;
+		int found = 0, saw_base = 0, saw_sec = 0, saw_ptype = 0;
+		FILE *lf;
+		occ_provider p;
+
+		if (root && root[0]) {
+			snprintf(cand, sizeof(cand),
+				 "%s/factory/etc/aikernel/models.d", root);
+			snprintf(cl, sizeof(cl), "%s/cloud.toml", cand);
+			found = access(cl, R_OK) == 0;
+		} else {
+			for (k = 0; rel[k] && !found; k++) {
+				snprintf(cand, sizeof(cand), "%s", rel[k]);
+				snprintf(cl, sizeof(cl), "%s/cloud.toml", cand);
+				found = access(cl, R_OK) == 0;
+			}
+		}
+		if (!found) {
+			printf("FAIL %s:%d factory models.d not found "
+			       "(set AIK_REPO_ROOT)\n", __FILE__, __LINE__);
+			fails++;
+		} else {
+			occ_provider_config_init(&cfg);
+			CHECK(occ_provider_load_user_system(&cfg, NULL, NULL,
+							    cand, NULL) == 0);
+			CHECK(find_slot(&cfg, "cloud") != NULL);
+			CHECK(strcmp(cfg.selector, "cloud") == 0);
+			memset(&p, 0, sizeof(p));
+			CHECK(occ_provider_resolve(&cfg, "cloud", &p) == 0);
+			CHECK(strcmp(p.name, "cloud") == 0);
+			CHECK(p.base_url[0] != '\0');	/* resolve 必填项在 */
+			occ_provider_free(&p);
+			occ_provider_config_free(&cfg);
+			/* 出厂件文本：[models.cloud] 段 + base_url + provider_type */
+			lf = fopen(cl, "r");
+			CHECK(lf != NULL);
+			if (lf) {
+				while (fgets(line, sizeof(line), lf)) {
+					if (strcmp(line, "[models.cloud]\n") == 0)
+						saw_sec = 1;
+					if (strncmp(line, "base_url", 8) == 0)
+						saw_base = 1;
+					if (strncmp(line, "provider_type", 13) == 0)
+						saw_ptype = 1;
+				}
+				fclose(lf);
+			}
+			CHECK(saw_sec);
+			CHECK(saw_base);
+			CHECK(saw_ptype);
+		}
+	}
+
 	/* 清场 */
 	{
 		char cmd[340];
@@ -272,6 +344,6 @@ int main(void)
 		printf("test_models_chain: %d FAIL\n", fails);
 		return 1;
 	}
-	printf("test_models_chain: all ok (8 sections)\n");
+	printf("test_models_chain: all ok (9 sections)\n");
 	return 0;
 }
