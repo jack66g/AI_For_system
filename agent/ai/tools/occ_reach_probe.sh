@@ -317,7 +317,7 @@ for e in "${PROBE_LIST[@]}"; do
 	static="${e%%$'\t'*}"
 	cmd="${e#*$'\t'}"
 	first="${cmd%% *}"
-	if [ -n "$ONLY" ] && [ ",$ONLY," != *",$first,"* ]; then
+	if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$first,"* ]]; then
 		continue
 	fi
 	n=$((n + 1))
