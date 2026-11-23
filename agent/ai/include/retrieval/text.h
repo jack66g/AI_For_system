@@ -5,9 +5,15 @@
  * 复刻 REF-PY sme/utils.py::tokenize：
  *   lowered = str.lower(text)；
  *   按码点匹配 [a-z0-9\u4e00-\u9fff]+ 得到 run；
- *   run 长度 > 1 且含 CJK（仅基本区 U+4E00-U+9FFF）时，逐字符追加，
- *   cjk_bigram 时再追加所有相邻二元组，不追加原 run；
+ *   run 长度 > 1 且含 CJK（仅基本区 U+4E00-U+9FFF）时先按书写系统切段
+ *   （[a-z0-9]+ | [CJK]+）：拉丁/数字段整段追加，CJK 段逐字符追加，
+ *   cjk_bigram 时再追加 CJK 段内所有相邻二元组，不追加原 run；
  *   其余 run 整段追加；空输入返回 0 个 token。
+ *
+ * MEM-01a：自 e72bc75 起混合 run 的切法**有意偏离基线**，依据上游
+ * ed5378a `sme/utils.py::tokenize`（P2-1：拉丁整词不再从 BM25 索引消失）。
+ * 例："GPT模型" bigram → gpt/模/型/模型（基线为 g/p/t/模/型/gp/pt/t模/模型）。
+ * 纯 CJK、纯拉丁输入与基线逐 token 相同。详见 text.c 头注。
  */
 #ifndef _AIK_TEXT_H
 #define _AIK_TEXT_H

@@ -5,8 +5,21 @@
  * 与 REF-PY 的对应关系见 text.h 顶部注释。要点：
  *   - 先做全量 Unicode 小写（含 sigma 上下文），再按码点扫 run；
  *   - CJK 判定只看基本区 U+4E00-U+9FFF（与 Python 正则一致）；
- *   - 混合 run（如 "abc中文123"）也按"长度>1 且含 CJK"走单字 + 二元组，
- *     所以 bigram 会跨 ASCII/CJK 边界（"c中"、"文1"）。
+ *   - 混合 run（拉丁/CJK 连写，如 "gpt模型"、"abc中文123"）按"长度>1 且
+ *     含 CJK"进入切段分支，但**先按书写系统切段**：拉丁/数字段整词
+ *     追加，CJK 段逐字 + 段内二元组（bigram 不再跨 ASCII/CJK 边界）。
+ *
+ * MEM-01a（有意偏离基线）：基线 REF-PY e72bc75 把整个混合 run 逐字符
+ * 打散（"c中"、"文1" 这类跨书写系统 bigram），拉丁整词（gpt/iphone）从
+ * BM25 索引里消失，纯拉丁查询对这些文档的关键词通道恒为 0。自
+ * e72bc75 起在此处有意偏离，依据上游 ed5378a `sme/utils.py::tokenize`
+ * （_RUN_SPLIT_RE = r"[a-z0-9]+|[\u4e00-\u9fff]+"，2026-11-20 测试战役
+ * P2-1）。纯 CJK run 与纯拉丁 run 的行为与基线逐字节相同。
+ *
+ * 分词入口只有这一个：BM25 建索引（aik_bm25_add）、查询侧（_keyword_
+ * scores / aik_bm25_top）与融合公共 token（engine consolidate）都调
+ * aik_tokenize，索引与查询天然同方案。PPR 走记忆图边、8 信号排序不打分
+ * 词，均不经分词。
  */
 #include "retrieval/text.h"
 
@@ -80,7 +93,7 @@ int aik_tokenize(const char *utf8, int cjk_bigram, aik_token_list *out,
 	char *lowered;
 	unsigned int *cps = NULL;
 	size_t *off = NULL;
-	size_t n = 0, i, cap = 0, len;
+	size_t n = 0, i, k, cap = 0, len;
 
 	if (!out) {
 		set_err(err, errlen, "out is NULL");
@@ -112,7 +125,7 @@ int aik_tokenize(const char *utf8, int cjk_bigram, aik_token_list *out,
 
 	i = 0;
 	while (i < n) {
-		size_t j = i, k;
+		size_t j = i;
 		int has_cjk = 0;
 
 		if (!is_token_cp(cps[i])) {
@@ -125,20 +138,45 @@ int aik_tokenize(const char *utf8, int cjk_bigram, aik_token_list *out,
 			j++;
 		}
 		if (j - i > 1 && has_cjk) {
-			for (k = i; k < j; k++) {
-				if (push_token(out, &cap, lowered + off[k],
-					       off[k + 1] - off[k],
-					       err, errlen) != 0)
-					goto fail;
-			}
-			if (cjk_bigram) {
-				for (k = i; k + 1 < j; k++) {
-					if (push_token(out, &cap,
-						       lowered + off[k],
-						       off[k + 2] - off[k],
-						       err, errlen) != 0)
+			/*
+			 * 混合 run 按书写系统切成极大段（等价 _RUN_SPLIT_RE.
+			 * findall(tok)：run 只含 [a-z0-9] 与基本区 CJK 两类
+			 * 码点，两类交替成段）。拉丁/数字段整词追加；CJK 段
+			 * 先逐字追加，cjk_bigram 时再追加段内全部相邻二元组。
+			 */
+			k = i;
+			while (k < j) {
+				size_t e = k;
+				int seg_cjk = is_cjk_cp(cps[k]);
+
+				while (e < j && is_cjk_cp(cps[e]) == seg_cjk)
+					e++;
+				if (!seg_cjk) {
+					if (push_token(out, &cap, lowered + off[k],
+						       off[e] - off[k], err,
+						       errlen) != 0)
 						goto fail;
+				} else {
+					size_t m;
+
+					for (m = k; m < e; m++) {
+						if (push_token(out, &cap,
+							       lowered + off[m],
+							       off[m + 1] - off[m],
+							       err, errlen) != 0)
+							goto fail;
+					}
+					if (cjk_bigram) {
+						for (m = k; m + 1 < e; m++) {
+							if (push_token(out, &cap,
+								       lowered + off[m],
+								       off[m + 2] - off[m],
+								       err, errlen) != 0)
+								goto fail;
+						}
+					}
 				}
+				k = e;
 			}
 		} else {
 			if (push_token(out, &cap, lowered + off[i],
