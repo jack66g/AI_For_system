@@ -119,7 +119,7 @@
 | `autocondense/` | 21 | 上下文压缩守护三件 | 合规 |
 | `apic/` | 13 | aikernel-api 的 C 守护 | 合规 |
 | `aikctl/` | 7 | 控制台 CLI aikctl（Python） | 树内合规；但它装进了出厂镜像，见 5.12 |
-| `aikd/` | 4 | SME 守护的 Python 版（`aikd`、`aikd_lib.py`、安装 Makefile） | 待核：出厂实装的 `/usr/local/sbin/aikd` 是 ELF，本目录疑为陈旧源码 |
+| `aikd/` | 4 | 遥测→Parquet 数据管道的 Python 参考实现（`aikd`、`aikd_lib.py`），已被 `aistreamd/` 的 C 版取代 | 陈旧源码（保留作参考）；**与出厂的 `/usr/local/sbin/aikd`（C 版 SME 守护，`smehttp/` 的第二链接名）同名不同物**，命名整理归 ENG-12 |
 | `aikime/` | 11 | 输入法引擎 aik-ime 源码 | 合规 |
 | `api/` | 1 | `aikernel-api` 的 Python 启动脚本 | 陈旧源码（现役是 `apic/`），待核 |
 | `tools/` | 32 | 注册表生成器、能力审计器、执行器、本门禁 | 合规（生成物有门） |
@@ -179,7 +179,7 @@
 | 5.6 | 语言表生成器不在仓内 | `agent/ai/occ/occ_tui/tui_lang_tab.h` 头注声明由 `gen_lang_tab.py` / `mk_tab_delta.py` / `mk_tab_p2a.py` 生成，三者均未被跟踪 | ENG-04 |
 | 5.7 | 打版机家目录散脚本 | 家目录顶层 `*.sh` / `*.py` 共 103 个 | ENG-13 |
 | 5.8 | 顶层 `MANIFEST.sha256` 失效 | 以 main@ccfc5f8 计：1448 条中 350 条 FAILED（83 条文件不存在、267 条哈希不符）；91 条指向已不再跟踪的路径；544 个被跟踪文件不在清单内。对照：`kernel-overlays/MANIFEST.sha256` 172 条全绿 | ENG-10 |
-| 5.9 | 打版链依赖未入库的构建产物 | `build/w17n_factory_refresh.py:91-92` 与 `build/w17n_build_iso.sh:79-81` 取用 `agent/ai/aistreamd/aik-pqdump`，该件未跟踪 | ENG-07 |
+| 5.9 | 打版链依赖未入库的构建产物 | `build/w17n_factory_refresh.py:91-92` 与 `build/w17n_build_iso.sh:79-81` 取用 `agent/ai/aistreamd/aik-pqdump`，该件未跟踪；`aik-sandbox` 同类且更糟——make 目标把产物输出到 `agent/ai/aik-sandbox`（`agent/ai/Makefile:337-341`），打版链却取 `agent/ai/sandbox/aik-sandbox`（refresh:161-162、build_iso:127-129），两处文件大小不同（1,111,040 对 1,111,080），**出厂件不是由现行配方从工作区编出的**；该锚出库后须从提交历史取回才能打版（主会话 11-24 已取回并核对与出厂树件 sha256 一致） | ENG-07、ENG-14 |
 | 5.10 | 版本号多处定义、`VERSION` 不存在 | 见 1.4 | ENG-04 |
 
 本棒新发现、待主会话编号：
