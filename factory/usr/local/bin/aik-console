@@ -1,4 +1,20 @@
 #!/bin/sh
+# aik-console v11 — CON-02(c) 出厂：非 root 控制台的 fbterm 配置。
+#   v11：fb 链上 fbterm 改以系统配置 HOME（/root——出厂 /root/.fbtermrc：
+#   input-method=aik-ime）起，与 root 控制台同一条路；occ 子进程经
+#   `env HOME=<用户家> USER=<用户>` 前缀拿到用户家目录（setpriv 不改
+#   env——~/.occ ~/.aikernel 依赖不变）。v10 及以前非 root 目标把 HOME
+#   一并给了 fbterm：fbterm 读 /home/<用户>/.fbtermrc（不存在）→出厂
+#   输入法挂不上、字号配置读不到（142 实机）；且该文件用户可写而
+#   fbterm 以 root 跑、照其 input-method= 以 root exec——v11 一并封掉
+#   （fbterm 只读 root 专属的 /root/.fbtermrc）。
+#   /zoom：occ 仍写用户自家 ~/.fbtermrc（occ 侧不动），fbterm 不再读它
+#   ——本脚本从该文件只取「font-size=<档位>」一枚，以 -s 传 fbterm
+#   （命令行覆盖配置文件）；非普通文件/非档位值一律丢弃（用户可控
+#   文件只解析、不外传）。串口链不动（脚本导出的 HOME/USER 本就是
+#   用户的）。root 目标逐字不变。
+#   DRY 面：fb 链 exec 行带上述前缀；AIK_CONSOLE_FBTERM 可指定 fbterm
+#   路径（无 fbterm 的机器上验 fb 链打印面；非 DRY 忽略）。
 # aik-console v10 — P-60 出厂：v9 + per-user 回退工作区 root 预建。
 #   v10：resolve_target 非 root 分支在 setpriv 前（root 代组装时刻）
 #   预建 /var/ai/work/<name>（0700 属 uid:gid；幂等 mkdir -p+chown
@@ -64,9 +80,30 @@ LOGDIR=/var/log/aik-console
 DRY=0
 [ "$AIK_CONSOLE_DRY" = 1 ] && DRY=1
 
+# v11：per-user 字号透传。fbterm 改以系统配置 HOME 起后，用户 /zoom 写
+# 在自家 ~/.fbtermrc 的 font-size 不再被 fbterm 直接读到——这里从该文件
+# 只取「font-size=<数字>」一枚（档位白名单=occ_zoom_sizes），以 -s 传给
+# fbterm。本函数以 root 读用户可控文件，只解析不外传：须是普通文件
+# （FIFO/目录不读，防挂死）、只读前 64KB/256 行、值不在档位表内即丢弃。
+# → stdout："-s N" 或空。
+zoom_font_arg() {
+  zf="$1/.fbtermrc"
+  [ -f "$zf" ] || return 0
+  zv=$(head -c 65536 "$zf" 2>/dev/null | head -n 256 | tr -d '\r' \
+       | sed -n 's/^font-size=\([0-9]\{1,3\}\)[[:space:]]*$/\1/p' \
+       | head -n 1)
+  case "$zv" in
+    12|16|20|24|28|32|40) printf -- '-s %s' "$zv" ;;
+    *) ;;
+  esac
+  return 0
+}
+
 # P-2 Phase A：目标用户解析（每轮循环重解——首启 SETUP 归位/号变动即时
 # 生效，无需重启控制台链）。设：t_user/t_uid/t_gid/t_home/OCC_ARGS/
 # MARKER_RUN/MARKER_TMP/LOGF/ERRF（OCC_ARGS 不加引号=按词拆给 exec 面）。
+# v11 增设 fb 链专用前缀 FB_PRE（fbterm 的 env+选项）与 OCC_PRE（occ 的
+# env 前缀）：仅非 root 目标非空；串口链不用（脚本已导出用户 HOME/USER）。
 resolve_target() {
   t_user=$(cat "$GATE_LAST" 2>/dev/null)
   [ -n "$t_user" ] || t_user=admin
@@ -115,12 +152,24 @@ resolve_target() {
     fi
     LOGF="$LOGDIR/$t_user.log"
     ERRF="$LOGDIR/$t_user.err"
+    # v11 fb 链前缀（见头部 v11 注）：fbterm=root 身份+root 配置
+    # （HOME=/root USER=root——与 root 控制台同路，IME 子进程环境亦同），
+    # 外加 per-user 字号选项 FB_OPT（白名单档位）；occ 经 env 拿回用户
+    # 家目录。FB_PRE 是 env 赋值词、必须紧贴二进制，故字号另设 FB_OPT。
+    FB_PRE="HOME=/root USER=root "
+    zopt=$(zoom_font_arg "$t_home")
+    FB_OPT=
+    [ -n "$zopt" ] && FB_OPT="$zopt "
+    OCC_PRE="env HOME=$t_home USER=$t_user "
   else
     OCC_ARGS="/usr/local/bin/occ"
     MARKER_RUN=/run/aik-occ-exit
     MARKER_TMP=/tmp/aik-occ-exit
     LOGF=/root/aik-console.log
     ERRF=/root/aik-console.err
+    FB_PRE=
+    FB_OPT=
+    OCC_PRE=
   fi
 }
 
@@ -131,7 +180,12 @@ dry_print() {
   echo "DRY tty=$TTY user=$t_user uid=${t_uid:-0} gid=${t_gid:-0} home=${t_home:-/root}"
   echo "DRY log=$LOGF err=$ERRF marker=$MARKER_RUN (fallback $MARKER_TMP)"
   if [ -n "$FBTERM_BIN" ]; then
-    echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FBTERM_BIN -- $OCC_ARGS 2>> $ERRF"
+    # v11：两个 HOME 分家的一览行（仅非 root 目标：fbterm 读系统配置；
+    # occ 用用户家目录）
+    if [ -n "$FB_PRE" ]; then
+      echo "DRY fb: fbterm-home=/root (system .fbtermrc) occ-home=$t_home user=$t_user zoom=${zopt:-none}"
+    fi
+    echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
   else
     echo "DRY exec: OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> $ERRF"
   fi
@@ -143,6 +197,11 @@ case "$TTY" in
     [ "$DRY" = 1 ] || log "chain-start $TTY user=$t_user uid=${t_uid:-0}"
     [ "$DRY" = 1 ] || printf '\033[2J\033[H' # P-38: fbterm 接管前清屏，清历史残影（boot 输出/printk 残条）
     FBTERM_BIN=$(command -v fbterm 2>/dev/null)
+    # v11：DRY 可测面——无 fbterm 的机器上可指定桩路径验 fb 链打印面。
+    # 只在 DRY 生效；真 exec 的二进制一律取 command -v（env 不改 exec 面）
+    if [ "$DRY" = 1 ] && [ -n "${AIK_CONSOLE_FBTERM:-}" ]; then
+      FBTERM_BIN=$AIK_CONSOLE_FBTERM
+    fi
     [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
     n=0
     while :; do
@@ -152,7 +211,8 @@ case "$TTY" in
         exit 0
       fi
       if [ -n "$FBTERM_BIN" ]; then
-        FBTERM=1 OCC_NETCFG_TOOLS=1 "$FBTERM_BIN" -- $OCC_ARGS 2>> "$ERRF"
+        # v11：FB_PRE/FB_OPT/OCC_PRE 仅非 root 目标非空（root 目标命令逐字同 v10）
+        FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE"$FBTERM_BIN" $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> "$ERRF"
       else
         OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
       fi

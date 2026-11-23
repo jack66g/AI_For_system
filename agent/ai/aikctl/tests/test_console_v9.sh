@@ -1,11 +1,17 @@
 #!/bin/sh
-# test_console_v9.sh - aik-console v9 可测面断言（AIK_CONSOLE_DRY=1）。
+# test_console_v9.sh - aik-console v9/v11 可测面断言（AIK_CONSOLE_DRY=1）。
 #
 # v9 的 DRY 面：只打印将 exec 的完整命令与目标/marker/log 解析值，不真
 # exec 不落盘（无 TTY 也可跑；AIK_CONSOLE_DRY_TTY 选分支 tty）。本测试：
 # sh -n 语法门 + root 目标（现 v8 路径逐字）+ 非根目标（setpriv 命令行
 # 逐字——uid/gid 由 id 实取）+ 号不在回落 + gate.last 缺省 admin + fb
 # 分支。需 root（写 /var/lib/aikernel/console-gate.last 桩，测后还原）。
+#
+# v11（CON-02c）增 7~9 节：fb 链上非 root 目标的 fbterm 以系统
+# 配置 HOME（/root）起、occ 经 env HOME=<用户家> 拿用户家目录；/zoom
+# 字号经白名单透传为 fbterm -s；root 目标与串口链 exec 行逐字不变。
+# fbterm 有无都能测：DRY 面用 AIK_CONSOLE_FBTERM 指定桩路径（只影响
+# 打印，不 exec）。
 #
 # 测试号仅作 id/getent 解析桩（v9 降权链的 uid/gid 由此取），不真登录。
 set -u
@@ -38,6 +44,7 @@ cleanup() {
     fi
     rm -f "$SAVED"
     id -u "$U" >/dev/null 2>&1 && userdel -r "$U" 2>/dev/null
+    [ -n "${FBSTUB:-}" ] && rm -f "$FBSTUB"
     true
 }
 trap cleanup EXIT INT TERM
@@ -112,6 +119,73 @@ ck "fb 链 root=现路径（occ 直跑或 fbterm 包裹，无 setpriv）" \
    "case '$out' in *setpriv*) false;; *) true;; esac"
 ck "fb 链 root marker 现名" \
    "case '$out' in *'marker=/run/aik-occ-exit (fallback'*) true;; *) false;; esac"
+
+echo "== 7. v11 fb 链非根目标：fbterm 读系统配置、occ 拿用户家目录 =="
+# fbterm 有无都能测：DRY 面用桩路径指定 fbterm（只影响打印，不 exec）
+FBSTUB=$(mktemp /tmp/p2b-fbterm.XXXXXX)
+printf '#!/bin/sh\nexit 0\n' > "$FBSTUB"
+chmod 755 "$FBSTUB"
+echo "$U" > "$LAST"
+rm -f "$home/.fbtermrc"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "fbterm 以系统配置起：HOME=/root USER=root 紧贴 fbterm" \
+   "case '$out' in *'DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 HOME=/root USER=root $FBSTUB -- '*) true;; *) false;; esac"
+ck "occ 经 env 拿用户家目录（setpriv 前缀）" \
+   "case '$out' in *\"-- env HOME=$home USER=$U $SP\"*) true;; *) false;; esac"
+ck "occ 的 HOME 是用户家目录（无 env HOME=/root）" \
+   "case '$out' in *'env HOME=/root '*) false;; *) true;; esac"
+ck "无 ~/.fbtermrc 不传字号（无 -s）" \
+   "case '$out' in *' -s '*) false;; *) true;; esac"
+ck "fb 一览行：fbterm-home=/root occ-home=用户家目录 zoom=none" \
+   "case '$out' in *\"DRY fb: fbterm-home=/root (system .fbtermrc) occ-home=$home user=$U zoom=none\"*) true;; *) false;; esac"
+
+# /zoom 透传：occ 写在 ~/.fbtermrc 的 font-size（白名单档位）→ fbterm -s
+printf 'font-names=mono\nfont-size=20\n' > "$home/.fbtermrc"
+chown "$U" "$home/.fbtermrc" 2>/dev/null
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "/zoom 字号透传：fbterm -s 20（在 -- 之前）" \
+   "case '$out' in *\"USER=root $FBSTUB -s 20 -- env HOME=$home \"*) true;; *) false;; esac"
+ck "一览行 zoom=-s 20" \
+   "case '$out' in *'zoom=-s 20'*) true;; *) false;; esac"
+# 非档位/注入形态一律不透传（用户可控文件只解析、不外传）
+printf 'font-size=9999\nfont-size=20; rm -rf /\nfont-size=$(id)\nfont-size=abc\n' > "$home/.fbtermrc"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "非档位/注入形态不透传（无 -s）" \
+   "case '$out' in *' -s '*|*'rm -rf'*|*'\$(id)'*) false;; *) true;; esac"
+printf 'font-size=32\r\n' > "$home/.fbtermrc"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "CRLF 容错：fbterm -s 32" \
+   "case '$out' in *\"USER=root $FBSTUB -s 32 -- \"*) true;; *) false;; esac"
+# FIFO：不读、不挂死
+rm -f "$home/.fbtermrc"
+mkfifo "$home/.fbtermrc"
+out=$(timeout 20 env AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+     AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+frc=$?
+ck "FIFO 不读不挂死（rc=0 且无 -s）" \
+   "[ '$frc' = 0 ] && case '$out' in *' -s '*) false;; *) true;; esac"
+rm -f "$home/.fbtermrc"
+
+echo "== 8. v11 fb 链 root 目标：exec 行逐字不变（无 env/HOME=/-s 前缀） =="
+echo root > "$LAST"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
+      AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "root exec 行逐字" \
+   "case '$out' in *'DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FBSTUB -- /usr/local/bin/occ 2>> /root/aik-console.err'*) true;; *) false;; esac"
+ck "root 无 env/HOME=/USER=root/-s/一览行" \
+   "case '$out' in *' env HOME='*|*'HOME=/root USER='*|*'USER=root'*|*' -s '*|*'DRY fb:'*) false;; *) true;; esac"
+
+echo "== 9. v11 串口链非根目标：不套 env（脚本导出的 HOME/USER 即用户） =="
+echo "$U" > "$LAST"
+out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
+ck "串口 exec 行逐字不变（桩 fbterm 不影响串口分支）" \
+   "case '$out' in *'DRY exec: OCC_NETCFG_TOOLS=1 $SP 2>> /var/log/aik-console/$U.err'*) true;; *) false;; esac"
+ck "串口无 env 前缀/无 fb 一览行" \
+   "case '$out' in *' env HOME='*|*'DRY fb:'*|*'DRY exec: FBTERM'*) false;; *) true;; esac"
 
 echo
 echo "RESULT: pass=$pass fail=$fail"
