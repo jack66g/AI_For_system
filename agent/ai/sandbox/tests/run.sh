@@ -132,7 +132,8 @@ st_case "AIF-09 child：exit 127 是命令结果" 127 \
 	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'exit 127'
 st_case "AIF-09 child：子命令被 SIGTERM" 143 \
 	"AIK-SANDBOX-STATUS v1 phase=child rc=143" \
-	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'kill -TERM $$'
+	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c \
+	'sleep 60 & p=$!; kill -TERM $p; wait $p'
 st_case "AIF-09 exec：沙盒内找不到命令" 127 \
 	"AIK-SANDBOX-STATUS v1 phase=exec rc=127" \
 	"$SB" run w64t-st --status-fd 3 -- /no/such/cmd
