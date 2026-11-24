@@ -152,7 +152,11 @@ _RW = "只能写沙箱 tmpfs（/tmp、工作区、产物区），退出即焚"
 SANDBOX_COMMANDS = [
     # ---- 进程/资源 ----
     _C("ps", "ps -eo pid,ppid,stat,comm", "no", "raw", "宿主进程不可见（只见 sh 与 ps 自己）", EV_PIDNS),
-    _C("top", "top -b -n 1", "no", "raw", "同 ps", EV_PIDNS),
+    _C("top", "top -b -n 1", "partial", "raw",
+       "能跑：汇总行（时间/运行时长/负载/CPU/内存/swap）取自 /proc 全局节点，是宿主数据；"
+       "进程表只见沙箱自己（同 ps）；用户数因无 utmp 恒为 0"
+       "（AIF-01b 出厂机实测 rc=0 后更正，原判 no）",
+       EV_PIDNS + "；" + EV_PROC + "；" + EV_NORUN),
     _C("pidof", "pidof systemd", "no", "raw", "同 ps", EV_PIDNS),
     _C("pgrep", "pgrep -a sshd", "no", "raw", "同 ps", EV_PIDNS),
     _C("pkill", "pkill systemd", "no", "raw", "同 ps；且 W2 硬表", EV_PIDNS + "；" + EV_W2),
@@ -173,9 +177,16 @@ SANDBOX_COMMANDS = [
     _C("sysctl", "sysctl -a", "ok", "structured", "/proc/sys 只读可读；写因只读挂载 + 无 CAP_SYS_ADMIN 失败", EV_PROC),
     _C("slabtop", "slabtop -o -s c", "ok", "structured", "/proc/slabinfo（uid 0 属主可读）", EV_INFER),
     _C("lsns", "lsns", "no", "structured", "/proc/<pid>/ns 只见沙箱 pid；/run/netns 缺", EV_PIDNS + "；" + EV_NORUN),
-    _C("lslocks", "lslocks", "ok", "structured", "/proc/locks 全局", EV_PROC),
+    _C("lslocks", "lslocks", "no", "structured",
+       "/proc/locks 按读取端 procfs 所属的 PID 命名空间过滤：属主进程不在本命名空间就不显示 → "
+       "沙箱里列得出的是沙箱自己进程的锁，宿主进程的锁看不见（AIF-01b 出厂机实测 rc=0 零字节后更正，原判 ok）",
+       EV_PIDNS + "；linux-6.18.39 fs/locks.c:2892-2898（locks_show）"),
     _C("lsipc", "lsipc", "ok", "structured", "/proc/sysvipc/*（未隔离 IPC namespace）", SB + ":2832"),
-    _C("lsmem", "lsmem", "ok", "structured", "/sys/devices/system/memory 全局", EV_SYS),
+    _C("lsmem", "lsmem", "no", "structured",
+       "出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory；"
+       "宿主上同样没有，不是沙箱挡的（AIF-01b 出厂机实测 rc=1 后更正，原判 ok）",
+       ".config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile"
+       "（memory.o 仅在该选项下编译）"),
     _C("lslogins", "lslogins", "no", "structured", "/var/log/wtmp、/var/run/utmp 缺", EV_NOVAR + "；" + EV_NORUN),
     _C("strace", "strace -c true", "partial", "raw", "只能跟踪沙箱内自己起的进程", EV_PIDNS),
     # ---- systemd/日志/启动 ----
@@ -224,10 +235,18 @@ SANDBOX_COMMANDS = [
     _C("du", "du -x -d1 /var", "no", "structured", "宿主目录不可见（/var 为空）", EV_NOVAR),
     _C("blkid", "blkid -o export", "no", "structured", "无块设备节点", EV_NODEV),
     _C("dumpe2fs", "dumpe2fs -h /dev/sda1", "no", "structured", "无块设备节点", EV_NODEV),
-    _C("mount", "mount", "no", "structured", "需 CAP_SYS_ADMIN；且 W2 硬表", EV_NOCAP + "；" + EV_W2),
+    _C("mount", "mount", "partial", "structured",
+       "不带参数的 mount 只列挂载表（读操作，不需能力）：只见沙箱自己的挂载表，同 findmnt；"
+       "挂载/卸载动作才需 CAP_SYS_ADMIN；首 token 命中 W2 硬表"
+       "（AIF-01b 出厂机实测 rc=0 后更正，原判 no）",
+       SB + ":2089-2304；" + EV_W2),
     _C("umount", "umount /x", "no", "structured", "需 CAP_SYS_ADMIN；且 W2 硬表", EV_NOCAP + "；" + EV_W2),
     _C("fstrim", "fstrim -v /", "no", "structured", "需设备节点与 CAP_SYS_ADMIN", EV_NODEV + "；" + EV_NOCAP),
-    _C("swapon", "swapon --show", "no", "structured", "需 CAP_SYS_ADMIN；且 W2 硬表", EV_NOCAP + "；" + EV_W2),
+    _C("swapon", "swapon --show", "ok", "structured",
+       "--show 读 /proc/swaps（全局节点）列已启用的 swap，不需能力；swapon/swapoff 动作才需 "
+       "CAP_SYS_ADMIN；首 token 命中 W2 硬表"
+       "（AIF-01b 出厂机实测 rc=0、读到宿主 swap 清单后更正，原判 no）",
+       EV_PROC + "；" + EV_W2),
     _C("swapoff", "swapoff -a", "no", "structured", "需 CAP_SYS_ADMIN；且 W2 硬表", EV_NOCAP + "；" + EV_W2),
     _C("fdisk", "fdisk -l", "no", "structured", "无块设备节点；且 W2 硬表", EV_NODEV + "；" + EV_W2),
     _C("smartctl", "smartctl -a /dev/sda", "no", "structured", "无块设备节点；直读盘还要 CAP_SYS_RAWIO/CAP_SYS_ADMIN", EV_NODEV + "；" + EV_NOCAP),
@@ -1336,7 +1355,24 @@ SB_LIKE = ("sb", "curl", "aikctl")   # 对象读面里走沙箱 / 回环 / aikct
 
 # 静态规则被实测推翻后的更正登记：(命令, 改前, 改后, 凭什么)。
 # 现行静态表若与「改后」不符，--check 失败（防止悄悄改回去）。
-RULE_FIXES = []
+RULE_FIXES = [
+    ("lsmem", "ok", "no",
+     "出厂机实测 rc=1：没有 /sys/devices/system/memory。出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG，"
+     "宿主上同样没有——不是沙箱挡的，是这条命令在出厂内核上本来就跑不了"),
+    ("lslocks", "ok", "no",
+     "出厂机实测 rc=0、零字节。/proc/locks 按读取端 procfs 所属的 PID 命名空间过滤"
+     "（linux-6.18.39 fs/locks.c:2892-2898），沙箱里列得出的是沙箱自己进程的锁——"
+     "原先当成「/proc 全局节点」是错的"),
+    ("mount", "no", "partial",
+     "出厂机实测 rc=0、1515 字节：不带参数的 mount 是列挂载表，读操作、不需要 CAP_SYS_ADMIN；"
+     "列的是沙箱自己的挂载表（同 findmnt）——原先把「挂载动作要能力」错套到了只读的列表上"),
+    ("swapon", "no", "ok",
+     "出厂机实测 rc=0、59 字节（表头 + 1 行）：--show 读 /proc/swaps（全局节点）列出宿主的 swap，"
+     "不需要 CAP_SYS_ADMIN——同上，错把 swapon 动作的前提套到了 --show 上"),
+    ("top", "no", "partial",
+     "出厂机实测 rc=0、603 字节，首行是宿主的运行时长与负载：汇总行是宿主数据，进程表只见沙箱自己"
+     "——原先「同 ps」判成 no，漏了汇总行"),
+]
 
 REACH_M = (
     ("view", "视图探针"),
@@ -1409,12 +1445,12 @@ def _note(when, m=None, data=None, why="", empty=None, todo="", ev=""):
 _V6 = "ls -ld /run /boot /var/log /var/lib/dpkg /etc/passwd /etc/systemd/system"
 REACH_NOTE = {
     # ---- 视图探针：沙箱到底长什么样（给静态表里的「沙箱视图」前提取实证）----
-    ("view", "ls -la /"): _note(None, why="沙箱根是 tmpfs 骨架（usr/proc/sys/etc/tmp/home/var/opt/srv/dev），"
-                                "不是宿主根", ev=SB + ":826-829"),
+    ("view", "ls -la /"): _note(None, why="沙箱根不是宿主根：挂的是 tmpfs 骨架（源码 sb_make_root 建的 usr/proc/sys/etc/tmp/home/var/opt/srv/dev "
+                                "与 bin/sbin/lib 链；首行 total 4）", ev=SB + ":826-829"),
     ("view", "ls -la /etc"): _note(None, why="/etc 是白名单式的，只有几个小文件（首行 total 16）；"
                                    "全文见证据文件", ev=EV_ETCHK),
-    ("view", "ls -la /dev"): _note(None, why="/dev 里只有 4 个字符设备（首行 total 0），"
-                                   "没有块设备与看门狗节点", ev=EV_NODEV),
+    ("view", "ls -la /dev"): _note(None, why="/dev 里只有几个字符设备节点（首行 total 0；源码必挂的只有 null/zero/random/urandom），"
+                                   "没有块设备与看门狗节点——同批 fdisk -l 零输出、wdctl 报没有可用设备", ev=EV_NODEV),
     ("view", _V6): _note(None, why="rc=2，首行是 /run 不存在；347 字节约合 6 行同构报错——"
                          "六条路径都不在沙箱视图【推断：只留了首行】",
                          ev=EV_NORUN + "；" + EV_NOVAR + "；" + EV_NOETC),
@@ -1431,7 +1467,8 @@ REACH_NOTE = {
     # ---- (a) 静态判 ok、实测读不到 ----
     ("ok", "arping -c 1 127.0.0.1"): _note(
         (2, 48), "fail",
-        why="arping 的缺省接口是 eth0，该机网卡叫 enp0s17 → 接口不存在就退出。"
+        why="arping 的缺省接口是 eth0；该机在用的网卡叫 enp0s17（同批 `ls /sys/class/net`、`ifconfig -a` "
+            "的首行），它一上来就报 interface eth0 not found 退出。"
             "规则依据的前提（能力集里有 CAP_NET_RAW）根本没被检验到，判定未定",
         todo="arping -c 1 -I lo 127.0.0.1（清单补测第 1 组）",
         ev="首行 arping: interface eth0 not found；同批 `ls /sys/class/net` 首行 enp0s17"),
@@ -1444,7 +1481,7 @@ REACH_NOTE = {
     ("ok", "ctstat"): _note(
         (137, 0), "timeout",
         why="不带 -c 的 ctstat 不会自己退出，10 秒超时被杀、零输出：数据面没被检验。"
-            "打版机同版本 iproute2 5.15.0 上不带 -c 同样不退出",
+            "打版机上（iproute2 5.15.0）不带 -c 同样不退出；出厂机的版本没采集",
         todo="ctstat -c 1；ls /proc/net/stat"),
     ("ok", "rtstat"): _note(
         (137, 1231), "timeout",
@@ -1454,26 +1491,27 @@ REACH_NOTE = {
     ("ok", "lsmem"): _note(
         (1, 72), "fail",
         why="出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory。"
-            "宿主上同样没有（memory.o 只在该选项下编译），不是沙箱挡的",
+            "宿主上同样没有（memory.o 只在该选项下编译），不是沙箱挡的【推断：出厂内核按仓内 .config 编，"
+            "凭内核版本串一致判断；补测 ls /sys/devices/system 可直接看】",
         ev=".config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile:16"),
     ("ok", "lslocks"): _note(
         (0, 0), "empty",
         why="/proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。"
-            "沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见",
+            "沙箱是独立 PID 命名空间里新挂的 procfs，列得出的是沙箱自己进程的锁，宿主进程的锁看不见",
         empty="blocked", todo="宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁",
         ev="linux-6.18.39 fs/locks.c:2892-2898（locks_show）；" + EV_PIDNS),
     ("ok", "lnstat -c 1"): _note(
         (1, 2163), "ok", "host",
         why="rc=1 却有 2163 字节数据（首行是 nf_conntrack 的表头）：iproute2 的 lnstat -c 采完一次"
-            "就返回 1（打版机同版本复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成"
+            "就返回 1（打版机 iproute2 5.15.0 复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成"
             "「沙箱执行失败」",
         ev=EV_INFER + "；occ_tools/sandbox.c:570-575（AIF-09）"),
-    # ---- (b) 静态判 no、实测 rc=0：读到宿主数据的三条 ----
+    # ---- (b) 静态判 no、实测 rc=0：读到了数据的三条 ----
     ("no", "swapon --show"): _note(
         (0, 59), "ok", "host",
         why="59 字节 = 表头 + 1 行：读到宿主的 swap 清单（一个 swap 文件）。--show 读 /proc/swaps，"
-            "不需要 CAP_SYS_ADMIN【推断：行内容是按打版机同版本 util-linux 2.37.2 的输出格式"
-            "复算出来的（表头 SIZE 后单空格 + 28 字节一行，只有 file 型条目对得上），全文待补测】",
+            "不需要 CAP_SYS_ADMIN【推断：行内容是按打版机 util-linux 2.37.2 的输出格式"
+            "复算出来的（出厂机的版本没采集；表头 SIZE 后单空格 + 28 字节一行，只有 file 型条目对得上），全文待补测】",
         todo="带 --keep 重采一次取全文"),
     ("no", "mount"): _note(
         (0, 1515), "partial", "part",
@@ -1506,18 +1544,20 @@ REACH_NOTE = {
             "无 /etc/passwd、/etc/group"),
     ("no", "lsns"): _note(
         (0, 745), "notdata",
-        why="列出的是沙箱自己进程的命名空间（745 字节），不是宿主的命名空间清单；occ 会显示成功"),
+        why="【推断：只留了表头】lsns 读的是沙箱里看得见的进程的 /proc/<pid>/ns，列出的是沙箱自己进程的命名空间，"
+             "不是宿主的命名空间清单；occ 会显示成功"),
     ("no", "ps -eo pid,ppid,stat,comm"): _note(
         (0, 76), "notdata",
-        why="76 字节 = 表头 + 2 行：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；occ 会显示成功",
+        why="76 字节 = 表头 + 2 行【按字节数推断】：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；"
+             "occ 会显示成功",
         ev=EV_PIDNS),
     ("no", "udevadm info /sys/class/net"): _note(
         (0, 63), "notdata",
         why="只回显 syspath（P: /class/net），没有任何属性：udev 库（/run/udev）不在沙箱视图"),
     ("no", "useradd -D"): _note(
         (0, 83), "notdata",
-        why="打印的是二进制内置缺省值（GROUP=100 …），不是宿主的 /etc/login.defs："
-            "看着像配置，其实与宿主无关"),
+        why="/etc 白名单里没有 login.defs，打印的只能是二进制内置缺省值（首行 GROUP=100），与宿主配置无关："
+            "看着像配置，其实不是"),
     # ---- (c) rc=0 且零字节：occ 显示「成功、无输出」 ----
     ("no", "dpkg-query -W"): _note(
         (0, 0), "empty",
@@ -1559,15 +1599,15 @@ REACH_NOTE = {
             "「时区恒 UTC」这个样例检验不到", todo="date"),
     ("partial", "df -P"): _note(
         (0, 179), "partial", "part",
-        why="179 字节 = 表头 + 2 行：只见沙箱挂载点（/ 与 /usr bind）。宿主根分区的容量/用量"
+        why="179 字节 = 表头 + 2 行【按字节数推断】：只见沙箱挂载点（/ 与 /usr bind）。宿主根分区的容量/用量"
             "看得到，其余挂载看不到"),
     ("partial", "findmnt -J"): _note(
         (0, 4199), "partial", "part", why="沙箱自己的挂载表（JSON，4199 字节）"),
     ("partial", "find /sys/class/net -maxdepth 1"): _note(
         (0, 75), "partial", "part",
-        why="命令能跑；样例路径在 /sys，输出的是宿主网卡名（enp0s17——该机没有 eth0）"),
+        why="命令能跑；样例路径在 /sys，列出的是宿主的网卡目录（首行是 /sys/class/net 自身）"),
     ("partial", "ls /sys/class/net"): _note(
-        (0, 15), "partial", "part", why="命令能跑；输出的是宿主网卡名 enp0s17（该机没有 eth0）"),
+        (0, 15), "partial", "part", why="命令能跑；输出的是宿主的网卡清单，首行 enp0s17（15 字节约合 3 个条目，另两个的名字没留下【推断】）"),
     ("partial", "lsattr /usr/local/bin/occ"): _note(
         (0, 41), "partial", "part", why="命令能跑，对象是 /usr 只读面上的真实宿主文件；宿主其余目录看不到"),
     ("partial", "stat /usr/local/bin/occ"): _note(
@@ -1577,7 +1617,7 @@ REACH_NOTE = {
     ("partial", "strace -c true"): _note(
         (0, 1143), "partial", "part", why="能跑，只能跟踪沙箱里自己起的进程"),
     ("ok", "ifconfig -a"): _note(
-        (0, 1199), why="接口清单是宿主的（共享网络命名空间）；该机网卡名 enp0s17，没有 eth0",
+        (0, 1199), why="接口清单是宿主的（共享网络命名空间）；首行 enp0s17",
         ev=EV_NET),
     ("ok", "dmesg --color=never"): _note(
         (0, 42197), why="42197 字节、首行是内核版本行：整条启动日志都读得到。该机 "
@@ -2511,17 +2551,19 @@ def render_markdown(rep):
 # 主入口
 # ===========================================================================
 def diff_core(a, b, path=""):
+    """a=入库基线，b=现在算出来的。差异行写成「现在=… 基线=…」。
+    （AIF-01b 顺手更正：原先三处提示的「现在 / 基线」标反了。）"""
     out = []
     if isinstance(a, dict) and isinstance(b, dict):
         for k in sorted(set(a) | set(b)):
             if k not in a:
-                out.append("%s.%s：基线多出" % (path, k))
-            elif k not in b:
                 out.append("%s.%s：基线缺" % (path, k))
+            elif k not in b:
+                out.append("%s.%s：基线多出" % (path, k))
             else:
                 out.extend(diff_core(a[k], b[k], "%s.%s" % (path, k)))
     elif a != b:
-        out.append("%s：现在=%r 基线=%r" % (path, a, b))
+        out.append("%s：现在=%r 基线=%r" % (path, b, a))
     return out
 
 

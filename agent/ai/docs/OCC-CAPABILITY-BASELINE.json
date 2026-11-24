@@ -1,6 +1,6 @@
 {
  "schema": "aik-occ-audit/1",
- "generated_at": "2026-11-24T16:38:27+0800",
+ "generated_at": "2026-11-24T17:01:16+0800",
  "core": {
   "params": {
    "admin_sandbox": "no"
@@ -68,9 +68,9 @@
    },
    "registry_exec_whitelist": 99,
    "registry_exec_in_sandbox": {
-    "ok": 30,
-    "partial": 15,
-    "no": 54,
+    "ok": 31,
+    "partial": 16,
+    "no": 52,
     "unclassified": []
    }
   },
@@ -469,7 +469,7 @@
    "conntrack 计数与查询",
    "文件校验和（sha256sum，宿主文件）"
   ],
-  "mapping_sha256": "bc0f373c577090cda30f6fba54d0a697affe1f3afdecbac84bd54dc5d5908aab"
+  "mapping_sha256": "ddb0109c73f1245d95705bab093d6c3d90334b7597046ca8392caff460f35f43"
  },
  "old_view": {
   "objects_total": 97,
@@ -2798,7 +2798,7 @@
      "empty",
      "none",
      [
-      "a",
+      "b2",
       "c"
      ],
      "blocked",
@@ -2818,9 +2818,7 @@
      64,
      "fail",
      "none",
-     [
-      "a"
-     ],
+     [],
      "",
      false,
      false
@@ -2849,9 +2847,7 @@
      67,
      "partial",
      "part",
-     [
-      "b1"
-     ],
+     [],
      "",
      false,
      false
@@ -3136,9 +3132,7 @@
      98,
      "ok",
      "host",
-     [
-      "b1"
-     ],
+     [],
      "",
      false,
      false
@@ -3228,9 +3222,7 @@
      108,
      "partial",
      "part",
-     [
-      "b1"
-     ],
+     [],
      "",
      false,
      false
@@ -3983,16 +3975,10 @@
     "a": [
      17,
      24,
-     62,
-     64,
      68,
      87
     ],
-    "b1": [
-     67,
-     98,
-     108
-    ],
+    "b1": [],
     "b2": [
      13,
      19,
@@ -4006,6 +3992,7 @@
      48,
      51,
      52,
+     62,
      65,
      80,
      110,
@@ -4076,7 +4063,12 @@
     "stale": [],
     "unlisted": [],
     "label_mismatch": [
-     20
+     20,
+     62,
+     64,
+     67,
+     98,
+     108
     ],
     "rc_nonzero_with_data": [
      54
@@ -4307,7 +4299,7 @@
      ]
     }
    },
-   "notes_sha256": "07c7347297c7164d8e28097bf9132ad443d895387f3de53505cc371c12b371cc"
+   "notes_sha256": "c9b53a63429eeefcb9a6e6bdbfab382d3fcc582e7acedc9319dfb53127342ea7"
   }
  }
 }

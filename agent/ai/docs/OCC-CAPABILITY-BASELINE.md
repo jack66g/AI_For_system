@@ -1,7 +1,7 @@
 # 出厂 AI 真实视角能力基线（OCC-CAPABILITY-BASELINE）
 
 > 由 `agent/ai/tools/audit_occ_capabilities.py --markdown` 生成，不手填；对象目录与缺口登记 import 自旧审计 `audit_capabilities.py`。
-> §1–§12 是静态推断（求值规则见 §1）；§13 起是出厂机实测层。
+> §1–§12 是静态推断（求值规则见 §1）；§13 起是出厂机实测层（静态规则已按实测更正 5 条，见 §15.7）。
 
 ## 1. 口径
 
@@ -308,13 +308,13 @@
 | lsblk | `lsblk -J` | ok | structured | /sys/block + /proc/partitions 全局；udev 库 /run/udev 缺 → 少 vendor/serial 等细节 | aik-sandbox.c:2157-2164（/sys 新挂只读，全局节点可见）；aik-sandbox.c:824-859（根骨架无 /run） |
 | lscpu | `lscpu -J` | ok | structured | /sys/devices/system/cpu + /proc/cpuinfo | aik-sandbox.c:2157-2164（/sys 新挂只读，全局节点可见）；aik-sandbox.c:11-12,2301-2304（/proc 新挂只读，全局节点可读） |
 | lsipc | `lsipc` | ok | structured | /proc/sysvipc/*（未隔离 IPC namespace） | aik-sandbox.c:2832 |
-| lslocks | `lslocks` | ok | structured | /proc/locks 全局 | aik-sandbox.c:11-12,2301-2304（/proc 新挂只读，全局节点可读） |
+| lslocks | `lslocks` | no | structured | /proc/locks 按读取端 procfs 所属的 PID 命名空间过滤：属主进程不在本命名空间就不显示 → 沙箱里列得出的是沙箱自己进程的锁，宿主进程的锁看不见（AIF-01b 出厂机实测 rc=0 零字节后更正，原判 ok） | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程）；linux-6.18.39 fs/locks.c:2892-2898（locks_show） |
 | lslogins | `lslogins` | no | structured | /var/log/wtmp、/var/run/utmp 缺 | aik-sandbox.c:826-829（/var、/tmp、/home 为 tmpfs 空目录）；aik-sandbox.c:824-859（根骨架无 /run） |
-| lsmem | `lsmem` | ok | structured | /sys/devices/system/memory 全局 | aik-sandbox.c:2157-2164（/sys 新挂只读，全局节点可见） |
+| lsmem | `lsmem` | no | structured | 出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory；宿主上同样没有，不是沙箱挡的（AIF-01b 出厂机实测 rc=1 后更正，原判 ok） | .config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile（memory.o 仅在该选项下编译） |
 | lsns | `lsns` | no | structured | /proc/<pid>/ns 只见沙箱 pid；/run/netns 缺 | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程）；aik-sandbox.c:824-859（根骨架无 /run） |
 | lvs | `lvs --help` | no | raw | 出厂树 usr/bin、usr/sbin、usr/local/bin 均无此二进制 | 出厂树 usr/bin、usr/sbin 列表 |
 | mkdir | `mkdir -p /tmp/d` | partial | raw | 只能写沙箱 tmpfs（/tmp、工作区、产物区），退出即焚 | aik-sandbox.c:2111-2114 |
-| mount | `mount` | no | structured | 需 CAP_SYS_ADMIN；且 W2 硬表 | aik-sandbox.c:1955-1996（能力裁到 CAP_NET_RAW，NO_NEW_PRIVS）；tools.c:3424-3430（首 token 命中 W2 硬表） |
+| mount | `mount` | partial | structured | 不带参数的 mount 只列挂载表（读操作，不需能力）：只见沙箱自己的挂载表，同 findmnt；挂载/卸载动作才需 CAP_SYS_ADMIN；首 token 命中 W2 硬表（AIF-01b 出厂机实测 rc=0 后更正，原判 no） | aik-sandbox.c:2089-2304；tools.c:3424-3430（首 token 命中 W2 硬表） |
 | mv | `mv /tmp/a /tmp/b` | partial | raw | 只能写沙箱 tmpfs（/tmp、工作区、产物区），退出即焚 | aik-sandbox.c:2111-2114 |
 | nc | `nc -z -w 2 127.0.0.1 22` | ok | raw | TCP 连接探针，无需能力（busybox） | aik-sandbox.c:24-25,92,2397-2414（默认保留宿主网络） |
 | netstat | `netstat -tunl` | ok | structured | /proc/net/*（busybox） | aik-sandbox.c:24-25,92,2397-2414（默认保留宿主网络） |
@@ -350,7 +350,7 @@
 | stat | `stat /usr/local/bin/occ` | partial | structured | 只见沙箱视图（/usr、/etc 白名单、/proc、/sys、工作区）；宿主 /etc /var /root /home 不可见 | aik-sandbox.c:2155（/usr 只读 bind，非递归） |
 | strace | `strace -c true` | partial | raw | 只能跟踪沙箱内自己起的进程 | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） |
 | swapoff | `swapoff -a` | no | structured | 需 CAP_SYS_ADMIN；且 W2 硬表 | aik-sandbox.c:1955-1996（能力裁到 CAP_NET_RAW，NO_NEW_PRIVS）；tools.c:3424-3430（首 token 命中 W2 硬表） |
-| swapon | `swapon --show` | no | structured | 需 CAP_SYS_ADMIN；且 W2 硬表 | aik-sandbox.c:1955-1996（能力裁到 CAP_NET_RAW，NO_NEW_PRIVS）；tools.c:3424-3430（首 token 命中 W2 硬表） |
+| swapon | `swapon --show` | ok | structured | --show 读 /proc/swaps（全局节点）列已启用的 swap，不需能力；swapon/swapoff 动作才需 CAP_SYS_ADMIN；首 token 命中 W2 硬表（AIF-01b 出厂机实测 rc=0、读到宿主 swap 清单后更正，原判 no） | aik-sandbox.c:11-12,2301-2304（/proc 新挂只读，全局节点可读）；tools.c:3424-3430（首 token 命中 W2 硬表） |
 | sync | `sync` | ok | raw | sync(2) 不需能力（全局副作用） | 推断（静态求值，未在沙箱内实测） |
 | sysctl | `sysctl -a` | ok | structured | /proc/sys 只读可读；写因只读挂载 + 无 CAP_SYS_ADMIN 失败 | aik-sandbox.c:11-12,2301-2304（/proc 新挂只读，全局节点可读） |
 | systemctl | `systemctl list-units --no-pager` | no | structured | 走 systemd 私有 socket / D-Bus（/run 缺） | aik-sandbox.c:824-859（根骨架无 /run） |
@@ -363,7 +363,7 @@
 | tc | `tc -j qdisc show` | ok | structured | netlink RTM_GETQDISC 读无需能力；写需 CAP_NET_ADMIN | aik-sandbox.c:24-25,92,2397-2414（默认保留宿主网络）；aik-sandbox.c:1955-1996（能力裁到 CAP_NET_RAW，NO_NEW_PRIVS） |
 | tee | `cat /proc/meminfo \| tee /tmp/m` | ok | raw | 只能写沙箱 tmpfs（/tmp、工作区、产物区），退出即焚 | aik-sandbox.c:2111-2114 |
 | timedatectl | `timedatectl show` | no | structured | 走 systemd 私有 socket / D-Bus（/run 缺） | aik-sandbox.c:824-859（根骨架无 /run） |
-| top | `top -b -n 1` | no | raw | 同 ps | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） |
+| top | `top -b -n 1` | partial | raw | 能跑：汇总行（时间/运行时长/负载/CPU/内存/swap）取自 /proc 全局节点，是宿主数据；进程表只见沙箱自己（同 ps）；用户数因无 utmp 恒为 0（AIF-01b 出厂机实测 rc=0 后更正，原判 no） | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程）；aik-sandbox.c:11-12,2301-2304（/proc 新挂只读，全局节点可读）；aik-sandbox.c:824-859（根骨架无 /run） |
 | touch | `touch /tmp/f` | partial | raw | 只能写沙箱 tmpfs（/tmp、工作区、产物区），退出即焚 | aik-sandbox.c:2111-2114 |
 | traceroute | `traceroute -n -m 5 127.0.0.1` | ok | raw | busybox 版走 UDP 探针，无需能力 | aik-sandbox.c:24-25,92,2397-2414（默认保留宿主网络） |
 | udevadm | `udevadm info /sys/class/net` | no | raw | /run/udev/control 缺 | aik-sandbox.c:824-859（根骨架无 /run） |
@@ -385,7 +385,7 @@
 | which | `which awk` | ok | raw | /etc/alternatives/which 链被单文件 bind 修复 | aik-sandbox.c:2166-2187,2196-2216（/etc 白名单 + /etc/aikernel 整目录 + awk/which 链修复） |
 | who | `who` | no | structured | /var/run/utmp 缺 | aik-sandbox.c:824-859（根骨架无 /run） |
 
-旧注册表 exec 白名单 99 条命令 × 出厂沙箱：ok 30 / partial 15 / no 54。
+旧注册表 exec 白名单 99 条命令 × 出厂沙箱：ok 31 / partial 16 / no 52。
 
 ## 8. aikctl 读类子命令在沙箱内的可达性
 
@@ -490,9 +490,9 @@
 
 | 清单# | 探针 | rc | 字节 | 首行 | 看到了什么 |
 |---:|---|---:|---:|---|---|
-| 0 | `ls -la /` | 0 | 754 | total 4 | 沙箱根是 tmpfs 骨架（usr/proc/sys/etc/tmp/home/var/opt/srv/dev），不是宿主根 |
+| 0 | `ls -la /` | 0 | 754 | total 4 | 沙箱根不是宿主根：挂的是 tmpfs 骨架（源码 sb_make_root 建的 usr/proc/sys/etc/tmp/home/var/opt/srv/dev 与 bin/sbin/lib 链；首行 total 4） |
 | 1 | `ls -la /etc` | 0 | 359 | total 16 | /etc 是白名单式的，只有几个小文件（首行 total 16）；全文见证据文件 |
-| 2 | `ls -la /dev` | 0 | 378 | total 0 | /dev 里只有 4 个字符设备（首行 total 0），没有块设备与看门狗节点 |
+| 2 | `ls -la /dev` | 0 | 378 | total 0 | /dev 里只有几个字符设备节点（首行 total 0；源码必挂的只有 null/zero/random/urandom），没有块设备与看门狗节点——同批 fdisk -l 零输出、wdctl 报没有可用设备 |
 | 3 | `ls -ld /run /boot /var/log /var/lib/dpkg /etc/passwd /etc/systemd/system` | 2 | 347 | ls: cannot access '/run': No such file or directory | rc=2，首行是 /run 不存在；347 字节约合 6 行同构报错——六条路径都不在沙箱视图【推断：只留了首行】 |
 | 4 | `id` | 0 | 20 | uid=0 gid=0 groups=0 | 沙箱内进程是 uid 0；用户名/组名解析不出来（无 /etc/passwd、/etc/group） |
 | 5 | `grep -E '^(CapEff\|CapBnd\|NoNewPrivs):' /proc/self/status` | 0 | 63 | CapEff: 0000000000002000 | CapEff=0000000000002000：有效能力只剩 CAP_NET_RAW |
@@ -559,12 +559,12 @@
 | 59 | `lsblk -J` | ok | 读到宿主数据 |  | 0 | 0.02 | 1280 | ok | { |
 | 60 | `lscpu -J` | ok | 读到宿主数据 |  | 0 | 0.017 | 4430 | ok | { |
 | 61 | `lsipc` | ok | 读到宿主数据 |  | 0 | 0.016 | 1078 | ok | RESOURCE DESCRIPTION                                              LIMIT USED  USE% |
-| 62 | `lslocks` | ok | rc=0·零字节 | a/c | 0 | 0.019 | 0 | ok | （空） |
+| 62 | `lslocks` | ok → **no** | rc=0·零字节 | b2/c | 0 | 0.019 | 0 | ok | （空） |
 | 63 | `lslogins` | no | rc=1/2 |  | 1 | 0.016 | 50 | sb_fail | lslogins: /var/log/wtmp: No such file or directory |
-| 64 | `lsmem` | ok | rc=1/2 | a | 1 | 0.017 | 72 | sb_fail | lsmem: cannot open /sys/devices/system/memory: No such file or directory |
+| 64 | `lsmem` | ok → **no** | rc=1/2 |  | 1 | 0.017 | 72 | sb_fail | lsmem: cannot open /sys/devices/system/memory: No such file or directory |
 | 65 | `lsns` | no | rc=0·不是宿主数据 | b2 | 0 | 0.018 | 745 | ok |         NS TYPE   NPROCS PID USER COMMAND |
 | 66 | `lvs --help` | no | rc=127·没有这个命令 |  | 127 | 0.012 | 65 | tool_error | /bin/sh: 1: lvs: not found |
-| 67 | `mount` | no | 读到一部分 | b1 | 0 | 0.016 | 1515 | ok | tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755) |
+| 67 | `mount` | no → **partial** | 读到一部分 |  | 0 | 0.016 | 1515 | ok | tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755) |
 | 68 | `nc -z -w 2 127.0.0.1 22` | ok | rc=1/2 | a | 1 | 0.017 | 440 | sb_fail | nc: invalid option -- 'z' |
 | 69 | `netstat -tunl` | ok | 读到宿主数据 |  | 0 | 0.015 | 933 | ok | Active Internet connections (only servers) |
 | 70 | `networkctl status` | no | rc=1/2 |  | 1 | 0.016 | 55 | sb_fail | Failed to connect system bus: No such file or directory |
@@ -595,7 +595,7 @@
 | 95 | `sshd -T` | no | rc=1/2 |  | 1 | 0.02 | 47 | sb_fail | /etc/ssh/sshd_config: No such file or directory |
 | 96 | `stat /usr/local/bin/occ` | partial | 读到一部分 |  | 0 | 0.017 | 390 | ok |   File: /usr/local/bin/occ |
 | 97 | `strace -c true` | partial | 读到一部分 |  | 0 | 0.027 | 1143 | ok | % time     seconds  usecs/call     calls    errors syscall |
-| 98 | `swapon --show` | no | 读到宿主数据 | b1 | 0 | 0.019 | 59 | ok | NAME      TYPE SIZE USED PRIO |
+| 98 | `swapon --show` | no → **ok** | 读到宿主数据 |  | 0 | 0.019 | 59 | ok | NAME      TYPE SIZE USED PRIO |
 | 99 | `sysctl -a` | ok | 读到宿主数据（超 8KB 截断） |  | 0 | 0.041 | 42246 | ok | abi.vsyscall32 = 1 |
 | 100 | `systemctl list-units --no-pager` | no | rc=1/2 |  | 1 | 0.016 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
 | 101 | `systemd-analyze time` | no | rc=1/2 |  | 1 | 0.021 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
@@ -605,7 +605,7 @@
 | 105 | `tail -n 5 /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.017 | 139 | ok | Hugepagesize:       2048 kB |
 | 106 | `tc -j qdisc show` | ok | 读到宿主数据 |  | 0 | 0.025 | 290 | ok | [{"kind":"noqueue","handle":"0:","dev":"lo","root":true,"refcnt":2,"options":{}},{"kind":"fq_codel","handle":"0:","dev": |
 | 107 | `timedatectl show` | no | rc=1/2 |  | 1 | 0.027 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
-| 108 | `top -b -n 1` | no | 读到一部分 | b1 | 0 | 0.168 | 603 | ok | top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 |
+| 108 | `top -b -n 1` | no → **partial** | 读到一部分 |  | 0 | 0.168 | 603 | ok | top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 |
 | 109 | `traceroute -n -m 5 127.0.0.1` | ok | 读到宿主数据 |  | 0 | 0.014 | 108 | ok | traceroute to 127.0.0.1 (127.0.0.1), 5 hops max, 46 byte packets |
 | 110 | `udevadm info /sys/class/net` | no | rc=0·不是宿主数据 | b2 | 0 | 0.016 | 63 | ok | P: /class/net |
 | 111 | `uname -r` | ok | 读到宿主数据 |  | 0 | 0.016 | 7 | ok | 6.18.39 |
@@ -633,10 +633,8 @@
 
 | 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 原因与证据 | 补测 |
 |---:|---|---|---|---:|---:|---|---|---|
-| 17 | `arping -c 1 127.0.0.1` | ok | rc=1/2 | 2 | 48 | arping: interface eth0 not found: No such device | arping 的缺省接口是 eth0，该机网卡叫 enp0s17 → 接口不存在就退出。规则依据的前提（能力集里有 CAP_NET_RAW）根本没被检验到，判定未定 依据：首行 arping: interface eth0 not found；同批 `ls /sys/class/net` 首行 enp0s17 | arping -c 1 -I lo 127.0.0.1（清单补测第 1 组） |
-| 24 | `ctstat` | ok | 超时被杀 | 137 | 0 | （空） | 不带 -c 的 ctstat 不会自己退出，10 秒超时被杀、零输出：数据面没被检验。打版机同版本 iproute2 5.15.0 上不带 -c 同样不退出 | ctstat -c 1；ls /proc/net/stat |
-| 62 | `lslocks` | ok | rc=0·零字节 | 0 | 0 | （空） | /proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见 依据：linux-6.18.39 fs/locks.c:2892-2898（locks_show）；aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁 |
-| 64 | `lsmem` | ok | rc=1/2 | 1 | 72 | lsmem: cannot open /sys/devices/system/memory: No such file or directory | 出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory。宿主上同样没有（memory.o 只在该选项下编译），不是沙箱挡的 依据：.config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile:16 | — |
+| 17 | `arping -c 1 127.0.0.1` | ok | rc=1/2 | 2 | 48 | arping: interface eth0 not found: No such device | arping 的缺省接口是 eth0；该机在用的网卡叫 enp0s17（同批 `ls /sys/class/net`、`ifconfig -a` 的首行），它一上来就报 interface eth0 not found 退出。规则依据的前提（能力集里有 CAP_NET_RAW）根本没被检验到，判定未定 依据：首行 arping: interface eth0 not found；同批 `ls /sys/class/net` 首行 enp0s17 | arping -c 1 -I lo 127.0.0.1（清单补测第 1 组） |
+| 24 | `ctstat` | ok | 超时被杀 | 137 | 0 | （空） | 不带 -c 的 ctstat 不会自己退出，10 秒超时被杀、零输出：数据面没被检验。打版机上（iproute2 5.15.0）不带 -c 同样不退出；出厂机的版本没采集 | ctstat -c 1；ls /proc/net/stat |
 | 68 | `nc -z -w 2 127.0.0.1 22` | ok | rc=1/2 | 1 | 440 | nc: invalid option -- 'z' | 该机的 nc 不支持 -z（首行 nc: invalid option -- 'z'）：样例命令本身跑不起来。TCP 连接能力没被检验——同批 curl/wget 连回环端口都成功 依据：occ_tools/sandbox.c:576-582（非 0/1/2 的退出码原样写进结果） | nc -h（看是哪一版 nc）；nc -w 2 127.0.0.1 8000 </dev/null |
 | 87 | `rtstat` | ok | 超时被杀 | 137 | 1231 | rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_ | 同 ctstat，不会自己退出；被杀前已输出 1231 字节，首行是 rt_cache 的表头——数据面是通的，坏的是样例写法 | rtstat -c 1 |
 
@@ -644,11 +642,7 @@
 
 **(b1) 实测读到了数据（全部或一部分）——静态规则错了**（已更正的见 §15.7）：
 
-| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 原因与证据 | 补测 |
-|---:|---|---|---|---:|---:|---|---|---|
-| 67 | `mount` | no | 读到一部分 | 0 | 1515 | tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755) | 不带参数的 mount 是列挂载表，是读操作、不需要 CAP_SYS_ADMIN；列出的是沙箱自己的挂载表（首行 tmpfs on /），同 findmnt | — |
-| 98 | `swapon --show` | no | 读到宿主数据 | 0 | 59 | NAME      TYPE SIZE USED PRIO | 59 字节 = 表头 + 1 行：读到宿主的 swap 清单（一个 swap 文件）。--show 读 /proc/swaps，不需要 CAP_SYS_ADMIN【推断：行内容是按打版机同版本 util-linux 2.37.2 的输出格式复算出来的（表头 SIZE 后单空格 + 28 字节一行，只有 file 型条目对得上），全文待补测】 | 带 --keep 重采一次取全文 |
-| 108 | `top -b -n 1` | no | 读到一部分 | 0 | 603 | top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 | 汇总行取自 /proc 全局节点，是宿主数据（首行 top - … up 1 day,  9:51,  0 users, load average: …）；进程表只有沙箱自己，用户数因无 utmp 恒为 0 | — |
+（无）
 
 **(b2) 跑成功了，但没读到宿主数据**——输出是沙箱自己的影子，或者干脆是空的。判「拿不到宿主数据」没错，可 occ 会显示成功，模型会把沙箱的影子当成宿主的现状（零字节的另见 §15.3）：
 
@@ -666,10 +660,11 @@
 | 48 | `id` | no | rc=0·不是宿主数据 | 0 | 20 | uid=0 gid=0 groups=0 | 打印的是沙箱自己的身份（uid=0 gid=0 groups=0），用户名/组名解析不出来：无 /etc/passwd、/etc/group |
 | 51 | `journalctl -n 20 --no-pager` | no | rc=0·不是宿主数据 | 0 | 45 | No journal files were found. | rc=0，但只有一句「No journal files were found.」：/var/log/journal、/run/journal 都不在沙箱视图 |
 | 52 | `kill -0 1` | no | rc=0·零字节 | 0 | 0 | （空） | 信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功 |
-| 65 | `lsns` | no | rc=0·不是宿主数据 | 0 | 745 |         NS TYPE   NPROCS PID USER COMMAND | 列出的是沙箱自己进程的命名空间（745 字节），不是宿主的命名空间清单；occ 会显示成功 |
-| 80 | `ps -eo pid,ppid,stat,comm` | no | rc=0·不是宿主数据 | 0 | 76 |     PID    PPID STAT COMMAND | 76 字节 = 表头 + 2 行：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；occ 会显示成功 |
+| 62 | `lslocks` | no | rc=0·零字节 | 0 | 0 | （空） | /proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，列得出的是沙箱自己进程的锁，宿主进程的锁看不见 |
+| 65 | `lsns` | no | rc=0·不是宿主数据 | 0 | 745 |         NS TYPE   NPROCS PID USER COMMAND | 【推断：只留了表头】lsns 读的是沙箱里看得见的进程的 /proc/<pid>/ns，列出的是沙箱自己进程的命名空间，不是宿主的命名空间清单；occ 会显示成功 |
+| 80 | `ps -eo pid,ppid,stat,comm` | no | rc=0·不是宿主数据 | 0 | 76 |     PID    PPID STAT COMMAND | 76 字节 = 表头 + 2 行【按字节数推断】：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；occ 会显示成功 |
 | 110 | `udevadm info /sys/class/net` | no | rc=0·不是宿主数据 | 0 | 63 | P: /class/net | 只回显 syspath（P: /class/net），没有任何属性：udev 库（/run/udev）不在沙箱视图 |
-| 114 | `useradd -D` | no | rc=0·不是宿主数据 | 0 | 83 | GROUP=100 | 打印的是二进制内置缺省值（GROUP=100 …），不是宿主的 /etc/login.defs：看着像配置，其实与宿主无关 |
+| 114 | `useradd -D` | no | rc=0·不是宿主数据 | 0 | 83 | GROUP=100 | /etc 白名单里没有 login.defs，打印的只能是二进制内置缺省值（首行 GROUP=100），与宿主配置无关：看着像配置，其实不是 |
 | 118 | `w -h` | no | rc=0·零字节 | 0 | 0 | （空） | 同 who：读不到 /var/run/utmp，恒为空、rc=0 |
 | 124 | `who` | no | rc=0·零字节 | 0 | 0 | （空） | /run 不在沙箱视图 → 读不到 /var/run/utmp，恒为空、rc=0；AI 分不清「没人登录」与「看不见」。宿主当时有没有登录会话没采集 |
 
@@ -686,7 +681,7 @@
 | 38 | `fdisk -l` | no | **被沙箱视图挡了**：/dev 里没有块设备节点（视图探针 ls -la /dev：total 0）→ 什么都不列、rc=0；宿主上明明有盘，AI 分不清「没有盘」与「看不见」 | aik-sandbox.c:283-288（/dev 仅 null/zero/random/urandom[+full/tty/console]） | — |
 | 43 | `getent passwd` | no | **被沙箱视图挡了**：/etc/passwd 不在白名单 → 一条也查不到、rc=0；AI 分不清「没有用户」与「看不见」 | aik-sandbox.c:274-281（/etc 白名单仅 4 文件；passwd/group/sudoers 不挂） | — |
 | 52 | `kill -0 1` | no | **不适用：成功本来就没有输出**：信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功 | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | — |
-| 62 | `lslocks` | ok | **被沙箱视图挡了**：/proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见 | linux-6.18.39 fs/locks.c:2892-2898（locks_show）；aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁 |
+| 62 | `lslocks` | no | **被沙箱视图挡了**：/proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，列得出的是沙箱自己进程的锁，宿主进程的锁看不见 | linux-6.18.39 fs/locks.c:2892-2898（locks_show）；aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁 |
 | 118 | `w -h` | no | **被沙箱视图挡了**：同 who：读不到 /var/run/utmp，恒为空、rc=0 | aik-sandbox.c:824-859（根骨架无 /run） | 宿主侧对照：同一时刻在宿主上跑 who / w |
 | 124 | `who` | no | **被沙箱视图挡了**：/run 不在沙箱视图 → 读不到 /var/run/utmp，恒为空、rc=0；AI 分不清「没人登录」与「看不见」。宿主当时有没有登录会话没采集 | aik-sandbox.c:824-859（根骨架无 /run） | 宿主侧对照：同一时刻在宿主上跑 who / w |
 
@@ -696,7 +691,7 @@ occ 会把这些标成「沙箱执行失败」或「命令超时」，可输出�
 
 | 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 说明 |
 |---:|---|---|---|---:|---:|---|---|
-| 54 | `lnstat -c 1` | ok | 读到宿主数据 | 1 | 2163 | nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_ | rc=1 却有 2163 字节数据（首行是 nf_conntrack 的表头）：iproute2 的 lnstat -c 采完一次就返回 1（打版机同版本复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成「沙箱执行失败」 |
+| 54 | `lnstat -c 1` | ok | 读到宿主数据 | 1 | 2163 | nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_ | rc=1 却有 2163 字节数据（首行是 nf_conntrack 的表头）：iproute2 的 lnstat -c 采完一次就返回 1（打版机 iproute2 5.15.0 复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成「沙箱执行失败」 |
 | 87 | `rtstat` | ok | 超时被杀 | 137 | 1231 | rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_ | 同 ctstat，不会自己退出；被杀前已输出 1231 字节，首行是 rt_cache 的表头——数据面是通的，坏的是样例写法 |
 
 ### 15.5 输出超过 8KB，被 occ 截断
@@ -714,13 +709,19 @@ occ 会把这些标成「沙箱执行失败」或「命令超时」，可输出�
 
 - 注记失效（实测结果与判读所依据的那一行不同，要人重看）：无。
 - 清单里有、静态表里没有的命令：无。
-- 采集时清单上标的判定与现行静态判定不同的条目：#20（§14 里写成「采集时 → 现值」）。
+- 采集时清单上标的判定与现行静态判定不同的条目：#20、#62、#64、#67、#98、#108（§14 里写成「采集时 → 现值」）。
 
 ### 15.7 已按实测更正的静态规则
 
 只有实测给出了明确正确判定的才改静态表；只证明了「样例跑不起来」、没证明正确判定是什么的不改（留在 §15.1，挂补测）。
 
-（本轮没有改静态表。）
+| 命令 | 改前 | 改后 | 凭什么 |
+|---|---|---|---|
+| `lsmem` | ok | **no** | 出厂机实测 rc=1：没有 /sys/devices/system/memory。出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG，宿主上同样没有——不是沙箱挡的，是这条命令在出厂内核上本来就跑不了 |
+| `lslocks` | ok | **no** | 出厂机实测 rc=0、零字节。/proc/locks 按读取端 procfs 所属的 PID 命名空间过滤（linux-6.18.39 fs/locks.c:2892-2898），沙箱里列得出的是沙箱自己进程的锁——原先当成「/proc 全局节点」是错的 |
+| `mount` | no | **partial** | 出厂机实测 rc=0、1515 字节：不带参数的 mount 是列挂载表，读操作、不需要 CAP_SYS_ADMIN；列的是沙箱自己的挂载表（同 findmnt）——原先把「挂载动作要能力」错套到了只读的列表上 |
+| `swapon` | no | **ok** | 出厂机实测 rc=0、59 字节（表头 + 1 行）：--show 读 /proc/swaps（全局节点）列出宿主的 swap，不需要 CAP_SYS_ADMIN——同上，错把 swapon 动作的前提套到了 --show 上 |
+| `top` | no | **partial** | 出厂机实测 rc=0、603 字节，首行是宿主的运行时长与负载：汇总行是宿主数据，进程表只见沙箱自己——原先「同 ps」判成 no，漏了汇总行 |
 
 ## 16. 对象级实测判定（出厂 root，分母 90）
 
@@ -917,4 +918,4 @@ no	cat /sys/kernel/debug/kunit/results
 - 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁
 - 宿主侧对照：同一时刻在宿主上跑 who / w
 
-<!-- MAPPING_SHA256: bc0f373c577090cda30f6fba54d0a697affe1f3afdecbac84bd54dc5d5908aab -->
+<!-- MAPPING_SHA256: ddb0109c73f1245d95705bab093d6c3d90334b7597046ca8392caff460f35f43 -->

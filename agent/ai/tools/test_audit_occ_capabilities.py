@@ -9,7 +9,8 @@ test_audit_occ_capabilities.py - audit_occ_capabilities.py 的最小自检（AIF
   1. 探测清单解析：注释行、空行跳过；格式不对要报错
   2. 实测 TSV 解析：元信息与数据行；MAC、非回环 IPv4 入库前掩掉；格式不对要报错
   3. 清单对行：同文重复的条目按先后各归各的；子集能对；顺序不对、清单里没有的要报错
-  4. 现行静态判定的解析：cat 按路径、aikctl 按子命令，与对象读面同一种解析
+  4. 现行静态判定的解析：cat 按路径、aikctl 按子命令，与对象读面同一种解析；
+     实测更正登记（RULE_FIXES）与现行静态表一致
   5. 逐行判读：九种判定；(a)(b1)(b2)(c) 标记；注记钉住的结果变了，注记要自动失效
   6. 多份 TSV 并库：来源按采集时间排新旧，同一条目取最新一次；结果过 JSON 往返不变
 依赖树内文件（探测清单、入库基线 JSON/MD）：
@@ -195,6 +196,16 @@ try:
           repr([sv(x) for x in ("aikctl session list", "aikctl policy get --json",
                                 "aikctl policy get sudoers")]))
     check("4d 静态表里没有的命令", sv("no-such-command --x")[0] is None)
+    fixes_ok = bool(mod.RULE_FIXES)
+    for n, before, after, _why in mod.RULE_FIXES:
+        note = mod.REACH_NOTE.get((before, mod.SBX[n]["sample"]))     # 改前判定下的那条实测
+        fixes_ok = fixes_ok and (mod.SBX[n]["verdict"] == after and before != after
+                                 and note is not None and note.get("when") is not None)
+    check("4e 实测更正登记（RULE_FIXES）：改后就是现行判定、改前确实不同、"
+          "每条更正背后都有钉住了实测结果的判读",
+          fixes_ok,
+          repr([(n, before, after, mod.SBX.get(n, {}).get("verdict"))
+                for n, before, after, _why in mod.RULE_FIXES]))
 
     # ---- 5. 逐行判读（换上小号的静态表与判读注记，结论不随真表变动）----
     saved = mod.SBX, mod.REACH_NOTE
