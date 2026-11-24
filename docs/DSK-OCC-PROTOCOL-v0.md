@@ -82,7 +82,7 @@
 | `setup.status` / `setup.begin` | `{}` / `{model_id}` | `{model_configured,missing_fields,probe_state}` / `{setup_id,required_fields}` | 已有：`occ.c:1641–1655,2134,3645–3654`；只有可信端可发起 begin，密钥由独立可信配置入口处理，结果发事件 |
 | `action.propose` | `{sid,canvas_id,action_id,target,args,op_id}` | `{op,confirm_id}` | 需 DSK-03 补；后续画布能力，见画布协议，拒绝任意未登记目标 |
 
-`model.select` 无 sid 只设用户默认，有 sid 只改目标会话且需空闲；`session.create`、`turn.submit` 的 cwd 只接受服务按 UID 校验已存在的工作树。列表 limit 默认 50、最大 200。驱动者获得的 `driver` 是状态提示，不是可转赠令牌。会话侧栏的显示策略由服务按身份返回，日志和观察接口不得为诊断旁路带出会话标题。
+`model.select` 无 sid 只设用户默认，有 sid 只改目标会话且需空闲；`session.create` 的 cwd 只接受服务按 UID 校验已存在的工作树。每轮 `turn.submit` 沿用会话已登记的 cwd。列表 limit 默认 50、最大 200。驱动者获得的 `driver` 是状态提示，不是可转赠令牌。会话侧栏的显示策略由服务按身份返回，日志和观察接口不得为诊断旁路带出会话标题。
 
 | 事件 | body | 何时发送 / 来源 |
 |---|---|---|

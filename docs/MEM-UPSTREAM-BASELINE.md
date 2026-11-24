@@ -42,9 +42,9 @@ MEM-10 提交号为施工工树来源，主仓合入以审核记录为准。
 | MEM-01c 配置层补 4 键 | `sme/config.py`、`sme/config_items.py` | `71f85b0` | `smeconfig/tests/test_config*.c`、`engine/tests/test_engine.c` 段 4 |
 | MEM-02a 热重建后立即存盘 | `sme/api/server.py::rebuild_engine_with` | `5358978` | `engine/tests/test_rebuild.c`、`smehttp/tests/test_http.c` 17–18 |
 | MEM-02b 导入数值校验 | `sme/models.py::_validate_memory_numbers` | `12ac54b` + `f7ffa5a` | `engine/tests/test_engine.c` 段 5、`smehttp/tests/test_http.c` 19、`retrieval/tests/test_ranker.c` 段 5 |
-| MEM-10 更新拒绝空白文本 | `sme/memory_manager.py::update_memory` | `278e29a` | `engine/tests/test_engine.c` 段 3a |
-| MEM-10 写入拒绝非法 UTF-8 | `sme/memory_manager.py::_check_encodable_text` | `ef928ed` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 写入用例 |
-| MEM-10 写入数值校验 | `sme/memory_manager.py::_clamp01`、`sme/api/server.py` 的写入请求模型 | `03ba23d` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 单条、批量、PATCH |
+| MEM-10 更新拒绝空白文本 | `sme/memory_manager.py::update_memory` | `24c8ddb` | `engine/tests/test_engine.c` 段 3a |
+| MEM-10 写入拒绝非法 UTF-8 | `sme/memory_manager.py::_check_encodable_text` | `f2dd552` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 写入用例 |
+| MEM-10 写入数值校验 | `sme/memory_manager.py::_clamp01`、`sme/api/server.py` 的写入请求模型 | `1167ac8` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 单条、批量、PATCH |
 
 ## 4. 上游差异逐项审计（MEM-10）
 
@@ -54,8 +54,8 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 
 | 上游依据 | 行为变更 | 归类与 C 版处置 |
 |---|---|---|
-| `api/server.py:91–104` `AddMemoryRequest` | 单条和批量新增的 importance 必须有限且在 [0,1] | a · `03ba23d`，`smehttp/routes.c::validate_add` 一并覆盖单条和批量 |
-| `api/server.py:117–125` `UpdateMemoryRequest` | PATCH 的 importance 同界，weight 必须有限且非负，null 保留原值 | a · `03ba23d`，`smehttp/routes.c::validate_update` |
+| `api/server.py:91–104` `AddMemoryRequest` | 单条和批量新增的 importance 必须有限且在 [0,1] | a · `1167ac8`，`smehttp/routes.c::validate_add` 一并覆盖单条和批量 |
+| `api/server.py:117–125` `UpdateMemoryRequest` | PATCH 的 importance 同界，weight 必须有限且非负，null 保留原值 | a · `1167ac8`，`smehttp/routes.c::validate_update` |
 | `api/server.py:92–94,118,455–477` `create_app` | Python 校验详情中的 NaN、无限值转可序列化形式，保证 422 能送达 | c · Python 全局异常包装不移植。C 的 JSON parser 先拒裸字面量，写入数值错误复用 MEM-02b 的 `field_input`，指数溢出的输入值以字符串回填 |
 | `api/server.py:254–259,325–334` `_embedding_identity` | 非空库的热重建身份闸门纳入 mrl_dim | a · C 在 `8ec4de4` 的热重建已纳入，`engine/tests/test_rebuild.c` 有 mrl_dim 拒绝且旧库保留回归 |
 | `api/server.py:349–359` `rebuild_engine_with` | 关闭 WAL 的热重建迁移后立即存盘，失败不发布新引擎 | a · MEM-02a `5358978` |
@@ -75,11 +75,11 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 | `engine.py:1047` `_load_locked`（旧版 1000） | 恢复后把 query_prefix 赋给 embedding 实例的原有语句随缩进搬移 | c · 上游无新行为，C 的配置键已补，hashing 保持忽略前缀。真模型供应方接入时另验（MEM-05） |
 | `engine.py:675–680` `search` | top_k 拒绝 bool、字符串和非整数浮点，整数值浮点归一为 int | a · C SDK 参数就是 int，HTTP 的 `json_as_int` 在现役基线已接受整数值浮点并拒绝另外三类，未改入口 |
 | `mcp_server.py:41–45` | 配置的 SME_MCP_PORT 不是整数时改用清晰的启动错误 | c · C MCP 客户端/服务另有传输契约，按 §7.3 不跟 Python MCP 入口 |
-| `memory_manager.py:39–48,102` `_check_encodable_text/add_memory` | 写入前拒绝不可转成 UTF-8 的孤立代理码位 | a · `ef928ed`，C 新增、批量新增、更新共用严格 UTF-8 检查，非法文本不会被回显到 HTTP 错误 |
-| `memory_manager.py:78–83,111` `_clamp01/add_memory` | SDK 新增先拒绝非有限 importance，再把有限值夹取至 [0,1] | a · `03ba23d`，保留 C SDK 有限越界值夹取语义 |
+| `memory_manager.py:39–48,102` `_check_encodable_text/add_memory` | 写入前拒绝不可转成 UTF-8 的孤立代理码位 | a · `f2dd552`，C 新增、批量新增、更新共用严格 UTF-8 检查，非法文本不会被回显到 HTTP 错误 |
+| `memory_manager.py:78–83,111` `_clamp01/add_memory` | SDK 新增先拒绝非有限 importance，再把有限值夹取至 [0,1] | a · `1167ac8`，保留 C SDK 有限越界值夹取语义 |
 | `memory_manager.py:129` `add_many` | SDK 批量新增也先拒绝非有限值，再夹取 importance | a · C 批量 HTTP 共用单条校验与写入函数，整批先验证。C 无独立 Python 式 add_many SDK |
-| `memory_manager.py:160–165` `update_memory` | SDK 不允许用空白或不可编码文本覆盖旧内容 | a · `278e29a`、`ef928ed`，旧内容与版本保持 |
-| `memory_manager.py:188–193` `update_memory` | 更新 importance、weight 拒绝非有限值，有限值原夹取不变 | a · `03ba23d`，分配阶段校验，提交前不改字段或版本 |
+| `memory_manager.py:160–165` `update_memory` | SDK 不允许用空白或不可编码文本覆盖旧内容 | a · `24c8ddb`、`f2dd552`，旧内容与版本保持 |
+| `memory_manager.py:188–193` `update_memory` | 更新 importance、weight 拒绝非有限值，有限值原夹取不变 | a · `1167ac8`，分配阶段校验，提交前不改字段或版本 |
 | `memory_manager.py:291–293` `require` | SDK 缺失 ID 由 KeyError 改成 ValueError | c · C 用稳定的返回码区分缺失和内部失败，HTTP 仍返回 404。错误正文与旧向量保持一致 |
 | `models.py:22–41,143` `_validate_memory_numbers` | 反序列化拒绝负 hit_count、负或非有限 weight、非法 importance 及非有限热度字段和时间戳 | a · MEM-02b `12ac54b`、`f7ffa5a`。C 导入整批校验，快照与 WAL 同走反序列化口 |
 | `models.py:29–30,128` `_validate_memory_numbers` | hit_count 须是原生整数，bool、分数及字符串类型也拒绝 | d · MEM-02b 的 C 兼容分支目前允许有限的小数截断，非数值按默认。方案一只收严新导入，须验证旧导出与 MEM-08。方案二连快照/WAL 一起收严，需要对照向量、旧库兼容和失败恢复测试 |
