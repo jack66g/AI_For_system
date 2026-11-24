@@ -30,15 +30,34 @@ say() { echo; echo "== $* =="; }
 
 NAMES="w64t-o8 w64t-o8w w64t-create w64t-cpu w64t-mem w64t-pids w64t-net w64t-net0 \
 w64t-crash w64t-orphan w64t-stale w64t-stale2 w64t-destroy \
-w64t-destroy-live w64t-export w64t-export2 w64t-degrade w64t-nocg w71t-iso"
+w64t-destroy-live w64t-export w64t-export2 w64t-degrade w64t-nocg w71t-iso \
+w64t-st"
+
+STF="${TMPDIR:-/tmp}/aif09-status.$$"
 
 cleanup() {
 	for n in $NAMES; do
 		"$SB" destroy "$n" >/dev/null 2>&1
 	done
 	rm -rf "$ART"
+	rm -f "$STF"
 }
 trap cleanup EXIT
+
+# AIF-09：跑一次并断言「退出码 + 状态通道整行」。$1=名字 $2=期望退出码
+# $3=期望状态行；余下为命令。状态 fd 3 落 $STF，stdout/stderr 丢弃。
+st_case() {
+	local name=$1 wrc=$2 wst=$3 rc
+	shift 3
+	: >"$STF"
+	"$@" 3>"$STF" >/dev/null 2>&1
+	rc=$?
+	if [ "$rc" = "$wrc" ] && [ "$(cat "$STF")" = "$wst" ]; then
+		ok "$name"
+	else
+		bad "$name（rc=$rc 期望 $wrc；状态=$(cat "$STF") 期望 $wst）"
+	fi
+}
 
 [ -x "$SB" ] || { echo "FAIL: 缺少可执行文件 $SB（先 make）"; exit 1; }
 
@@ -55,6 +74,41 @@ if [ "$(id -u)" != 0 ]; then
 	[ $? != 0 ]; ck $? "export 越界 src 拒绝"
 	"$SB" run w64t-none >/dev/null 2>&1
 	[ $? != 0 ]; ck $? "run 缺 -- 拒绝"
+
+	# AIF-09：状态通道的 usage/setup 相位（无需 root 即可测）
+	say "AIF-09 状态通道（usage/setup）"
+	st_case "AIF-09 usage：非法区名" 1 \
+		"AIK-SANDBOX-STATUS v1 phase=usage rc=1" \
+		"$SB" run '../escape' --status-fd 3 -- true
+	st_case "AIF-09 usage：缺 --" 1 \
+		"AIK-SANDBOX-STATUS v1 phase=usage rc=1" \
+		"$SB" run w64t-none --status-fd 3
+	st_case "AIF-09 usage：非法选项值" 1 \
+		"AIK-SANDBOX-STATUS v1 phase=usage rc=1" \
+		"$SB" run w64t-none --cpus nope --status-fd 3 -- true
+	st_case "AIF-09 setup：基目录不可建" 2 \
+		"AIK-SANDBOX-STATUS v1 phase=setup rc=2" \
+		env AIKERNEL_SANDBOX_BASE=/dev/null/aif09 "$SB" run w64t-x \
+		--status-fd 3 -- true
+	# 关闭的 fd：通道静默禁用，退出码一字不变（仍是 setup 2）
+	: >"$STF"
+	env AIKERNEL_SANDBOX_BASE=/dev/null/aif09 "$SB" run w64t-x \
+		--status-fd 999 -- true 3>"$STF" >/dev/null 2>&1
+	[ $? = 2 ] && [ ! -s "$STF" ]; ck $? "AIF-09 无效 fd：无状态、退出码不变"
+	# 两条通道互不污染：stdout/stderr 无状态行，状态 fd 无命令输出
+	out=$(env AIKERNEL_SANDBOX_BASE=/dev/null/aif09 "$SB" run w64t-x \
+		--status-fd 3 -- true 3>"$STF" 2>&1)
+	if printf '%s' "$out" | grep -q 'AIK-SANDBOX-STATUS'; then
+		bad "AIF-09 状态行漏进 stdio"
+	elif grep -q 'aik-sandbox' "$STF"; then
+		bad "AIF-09 包装器输出漏进状态 fd"
+	else
+		ok "AIF-09 两条通道互不污染"
+	fi
+	# create 不接受 --status-fd（不静默吞）
+	"$SB" create w64t-x --status-fd 3 >/dev/null 2>&1
+	[ $? = 1 ]; ck $? "AIF-09 create 拒绝 --status-fd"
+
 	echo "SKIP: 非 root，跳过 namespace/cgroup 用例"
 	SKIP=$((SKIP + 1))
 	echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
@@ -64,6 +118,29 @@ fi
 
 cleanup
 mkdir -p "$BASE"
+
+# ---------------------------------------------------------------- AIF-09
+say "AIF-09 状态通道（child/exec 相位；需 root）"
+st_case "AIF-09 child：exit 1 是命令结果" 1 \
+	"AIK-SANDBOX-STATUS v1 phase=child rc=1" \
+	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'exit 1'
+st_case "AIF-09 child：exit 2 是命令结果" 2 \
+	"AIK-SANDBOX-STATUS v1 phase=child rc=2" \
+	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'exit 2'
+st_case "AIF-09 child：exit 127 是命令结果" 127 \
+	"AIK-SANDBOX-STATUS v1 phase=child rc=127" \
+	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'exit 127'
+st_case "AIF-09 child：子命令被 SIGTERM" 143 \
+	"AIK-SANDBOX-STATUS v1 phase=child rc=143" \
+	"$SB" run w64t-st --status-fd 3 -- /bin/sh -c 'kill -TERM $$'
+st_case "AIF-09 exec：沙盒内找不到命令" 127 \
+	"AIK-SANDBOX-STATUS v1 phase=exec rc=127" \
+	"$SB" run w64t-st --status-fd 3 -- /no/such/cmd
+# 状态 fd 不进入沙盒（CLOEXEC）：沙盒内看不到 fd 3，无法伪造状态行
+out=$("$SB" run w64t-st -- /bin/sh -c \
+	'test -e /proc/self/fd/3 && echo leak || echo clean' 2>&1)
+echo "$out" | grep -qx clean; ck $? "AIF-09 状态 fd 不进沙盒"
+"$SB" destroy w64t-st >/dev/null 2>&1
 
 # ---------------------------------------------------------------- T1
 # ---------------------------------------------------------------- TO8
