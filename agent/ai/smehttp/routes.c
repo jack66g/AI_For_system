@@ -602,24 +602,45 @@ static void v_opt_str(vctx *v, const aik_json *obj, const char *field,
 }
 
 /*
- * Optional[float]：缺失或 null → 不改；INT/NUM 均接受（Pydantic lax 的
- * int → float）；其他类型 float_type。
+ * 自 e72bc75 起在此处有意偏离，依据上游 ed5378a 的 REST 写入模型：
+ * importance 取 [0,1]，weight 非负，两者均须有限。缺失保留默认值，
+ * PATCH 额外接受 null（不更新）。SDK 层保留有限越界值的夹取语义。
  */
-static void v_opt_num(vctx *v, const aik_json *obj, const char *field,
-		      const vloc *base)
+static void v_memory_num(vctx *v, const aik_json *obj, const char *field,
+			 const vloc *base, int allow_null, double *out)
 {
 	const aik_json *j = aik_json_get(obj, field);
 	vloc loc = *base;
-	aik_json_type t;
+	aik_json_type t = aik_json_typeof(j);
+	int importance = strcmp(field, "importance") == 0;
+	double x;
 
 	loc.field = field;
 	loc.elem = -1;
-	if (!j)
+	if (!j || (allow_null && t == AIK_JSON_NULL))
 		return;
-	t = aik_json_typeof(j);
-	if (t == AIK_JSON_NULL || t == AIK_JSON_NUM || t == AIK_JSON_INT)
+	if (t != AIK_JSON_NUM && t != AIK_JSON_INT) {
+		v_add(v, "float_type", V_MSG_FLOAT, j, &loc, 0);
 		return;
-	v_add(v, "float_type", V_MSG_FLOAT, j, &loc, 0);
+	}
+	x = aik_json_num(j);
+	if (!isfinite(x) || x < 0.0 || (importance && x > 1.0)) {
+		const char *msg = importance ?
+			"Value error, importance must be finite in [0,1]" :
+			"Value error, weight must be a finite non-negative number";
+		int bad = 0;
+		aik_json *input = field_input(obj, field, &bad);
+
+		if (bad || !input) {
+			aik_json_free(input);
+			v->oom = 1;
+			return;
+		}
+		v_add_owned(v, "value_error", msg, input, &loc, 1);
+		return;
+	}
+	if (out)
+		*out = x;
 }
 
 /* 必填 str（Nullable 由调用方另行处理） */
@@ -803,20 +824,9 @@ static int validate_add(vctx *v, const aik_json *obj, const vloc *base,
 		(void)n_tags;
 	}
 
-	/* importance: float（默认 0.5；INT/NUM 均接受） */
-	loc = *base;
-	loc.field = "importance";
-	loc.elem = -1;
+	/* importance: 0..1（默认 0.5） */
 	out->importance = 0.5;
-	j = aik_json_get(obj, "importance");
-	if (j) {
-		if (aik_json_typeof(j) == AIK_JSON_INT)
-			out->importance = (double)aik_json_int(j);
-		else if (aik_json_typeof(j) == AIK_JSON_NUM)
-			out->importance = aik_json_num(j);
-		else
-			v_add(v, "float_type", V_MSG_FLOAT, j, &loc, 0);
-	}
+	v_memory_num(v, obj, "importance", base, 0, &out->importance);
 
 	/* source: str（默认 "user"） */
 	v_str(v, obj, "source", base, "user", &out->source);
@@ -1676,9 +1686,8 @@ static int validate_update(vctx *v, const aik_json *obj, const vloc *base)
 		v_str_list(v, obj, "tags", base, 1, &tags, &n_tags);
 	}
 
-	/* importance / weight: Optional[float] */
-	v_opt_num(v, obj, "importance", base);
-	v_opt_num(v, obj, "weight", base);
+	v_memory_num(v, obj, "importance", base, 1, NULL);
+	v_memory_num(v, obj, "weight", base, 1, NULL);
 
 	/* summary: Optional[str] */
 	{

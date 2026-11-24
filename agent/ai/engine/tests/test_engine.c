@@ -1958,6 +1958,35 @@ static void run_update_tests(void)
 	check_int("add.valid_supplementary_utf8",
 		  aik_memory_text_is_utf8("ok\xf0\x9f\x98\x80"), 1);
 
+	/* ed5378a test_add/update_importance_nan_rejected 等写入校验。 */
+	check_int("add.nan_importance.rc",
+		  add_mem(e, "example", NULL, NULL, 0, NAN, "user", NULL,
+			  err, sizeof(err)) == NULL, 1);
+	check_str("add.nan_importance.err", err,
+		  "importance must be a finite number");
+	check_int("add.inf_importance.rc",
+		  add_mem(e, "example", NULL, NULL, 0, INFINITY, "user", NULL,
+			  err, sizeof(err)) == NULL, 1);
+	check_int("add.nonfinite.keep_count", aik_engine_memory_count(e), 1);
+	patch = jobj();
+	jput(patch, "importance", jnum(NAN));
+	check_int("update.nan_importance.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), -1);
+	aik_json_free(patch);
+	check_str("update.nan_importance.err", err,
+		  "importance must be a finite number");
+	patch = jobj();
+	jput(patch, "text", jstr("must not replace text"));
+	jput(patch, "weight", jnum(-INFINITY));
+	check_int("update.inf_weight.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), -1);
+	aik_json_free(patch);
+	check_str("update.inf_weight.err", err, "weight must be a finite number");
+	check_str("update.nonfinite.keep_text", m->text, "gamma delta");
+	check_int("update.nonfinite.keep_version", m->version, old_version);
+	check_num("update.nonfinite.keep_importance", m->importance, 0.5, 1e-9);
+	check_num("update.nonfinite.keep_weight", m->weight, 1.0, 1e-9);
+
 	/* metadata-only：不 touched，但 ns 保留 */
 	old_version = m->version;
 	old_last_hit = m->last_hit;

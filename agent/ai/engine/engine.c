@@ -48,8 +48,8 @@
  *
  * 单线程；无全局状态。错误一律写 err 并返回 -1。
  * 自 e72bc75 起在此处有意偏离，依据上游 ed5378a：
- * update 入口拒绝空白文本，add/update 拒绝非法 UTF-8
- * （sme/memory_manager.py::update_memory / _check_encodable_text）。
+ * update 入口拒绝空白文本，add/update 拒绝非法 UTF-8 和非有限写入数值
+ * （sme/memory_manager.py::update_memory / _check_encodable_text / _clamp01）。
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -1961,6 +1961,10 @@ static aik_memory *engine_add_core(aik_engine *e, const char *text,
 		set_err(err, errlen, "text contains invalid unicode");
 		return NULL;
 	}
+	if (!isfinite(importance)) {
+		set_err(err, errlen, "importance must be a finite number");
+		return NULL;
+	}
 	m = aik_memory__new();
 	if (!m)
 		goto oom;
@@ -3275,6 +3279,10 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 
 	j = aik_json_get(patch, "importance");
 	if (json_is_numeric(j)) {
+		if (!isfinite(json_numeric(j))) {
+			set_err(err, errlen, "importance must be a finite number");
+			goto out;
+		}
 		has_importance = 1;
 	} else if (j && aik_json_typeof(j) != AIK_JSON_NULL) {
 		set_err(err, errlen, "engine: importance must be a number");
@@ -3283,6 +3291,10 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 
 	j = aik_json_get(patch, "weight");
 	if (json_is_numeric(j)) {
+		if (!isfinite(json_numeric(j))) {
+			set_err(err, errlen, "weight must be a finite number");
+			goto out;
+		}
 		has_weight = 1;
 	} else if (j && aik_json_typeof(j) != AIK_JSON_NULL) {
 		set_err(err, errlen, "engine: weight must be a number");

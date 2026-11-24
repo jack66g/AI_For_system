@@ -993,6 +993,29 @@ static void test_patch(int port)
 	}
 	aik_json_free(root);
 
+	/* ed5378a 的 PATCH 数值约束与非有限错误响应。 */
+	check_true(http_call(port, "PATCH", path,
+			     "{\"importance\":1.5,\"weight\":-1}",
+			     NULL, &status, &body) == 0,
+		   "patch numeric bounds: request failed");
+	check_int(status, 422, "patch numeric bounds status");
+	root = parse_json(body);
+	free(body);
+	body = NULL;
+	check_int(aik_json_count(aik_json_get(root, "detail")), 2,
+		  "patch numeric bounds error count");
+	aik_json_free(root);
+	check_true(http_call(port, "PATCH", path, "{\"weight\":1e999}",
+			     NULL, &status, &body) == 0,
+		   "patch nonfinite weight: request failed");
+	check_int(status, 422, "patch nonfinite weight status");
+	root = parse_json(body);
+	free(body);
+	body = NULL;
+	check_int(aik_json_count(aik_json_get(root, "detail")), 1,
+		  "patch nonfinite weight readable error");
+	aik_json_free(root);
+
 	/* 其余 Optional 字段：importance / summary 生效 */
 	check_true(http_call(port, "PATCH", path,
 			     "{\"importance\":0.9,\"summary\":\"T4d 摘要\"}",
@@ -3253,6 +3276,28 @@ static long long export_count(int port)
 	return n;
 }
 
+/* ed5378a test_rest_add_importance_nan_rejected：写入前拒绝，批量不留半批。 */
+static void test_write_numbers(int port)
+{
+	int status = -1;
+	aik_json *root;
+	long long before = export_count(port);
+
+	root = call_json(port, "POST", "/memories",
+			    "{\"text\":\"example\",\"importance\":1e999}", &status, NULL);
+	check_int(status, 422, "add nonfinite importance status");
+	check_int(aik_json_count(aik_json_get(root, "detail")), 1,
+		  "add nonfinite importance readable error");
+	aik_json_free(root);
+	root = call_json(port, "POST", "/memories/batch",
+			    "{\"memories\":[{\"text\":\"example\"},"
+			    "{\"text\":\"bad importance\",\"importance\":-0.5}]}",
+			    &status, NULL);
+	check_int(status, 422, "batch invalid importance status");
+	aik_json_free(root);
+	check_int(export_count(port), before, "write rejects leave count unchanged");
+}
+
 /*
  * 对应上游 experiment/regression/test_fix_round2_20261120.py::
  * test_rebuild_persistence_off_checkpoints_to_disk：persistence 开着写入
@@ -3418,6 +3463,7 @@ int main(void)
 		aik_json_free(root);
 	}
 	test_missing_text(srv.port);
+	test_write_numbers(srv.port);
 	test_get_missing(srv.port);
 	test_search(srv.port, text);
 	test_unknown_route(srv.port);
