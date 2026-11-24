@@ -1931,6 +1931,18 @@ static void run_update_tests(void)
 	check_str("update.text.ns_kept",
 		  aik_json_str(aik_json_get(m->metadata, "ns")), "bench");
 
+	/* ed5378a test_update_blank_text_rejected：拒绝空白且保留旧记录。 */
+	old_version = m->version;
+	patch = jobj();
+	jput(patch, "text", jstr("   "));
+	check_int("update.blank.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), -1);
+	aik_json_free(patch);
+	check_str("update.blank.error", err, "memory text must not be empty");
+	m = aik_engine_get(e, mid);
+	check_str("update.blank.keep_text", m->text, "gamma delta");
+	check_int("update.blank.keep_version", m->version, old_version);
+
 	/* metadata-only：不 touched，但 ns 保留 */
 	old_version = m->version;
 	old_last_hit = m->last_hit;

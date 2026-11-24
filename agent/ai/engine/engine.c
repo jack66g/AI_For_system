@@ -47,6 +47,8 @@
  * 其它 provider 用 config.model（T4a 只支持 hashing，见 new 的拒绝）。
  *
  * 单线程；无全局状态。错误一律写 err 并返回 -1。
+ * 自 e72bc75 起在此处有意偏离，依据上游 ed5378a：
+ * update 入口拒绝空白文本（sme/memory_manager.py::update_memory）。
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -3211,6 +3213,10 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 	if (aik_json_typeof(j) == AIK_JSON_STR) {
 		const char *text = aik_json_str(j);
 
+		if (aik_text__is_blank(text)) {
+			set_err(err, errlen, "memory text must not be empty");
+			goto out;
+		}
 		if (!text_strip_equals(text, m->text)) {
 			new_text = aik_engine__dup(text);
 			if (!new_text) {
