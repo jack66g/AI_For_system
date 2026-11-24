@@ -144,6 +144,17 @@ else
     failed+=("audit_capabilities")
 fi
 
+# Check the factory occ baseline independently of the legacy registry audit.
+# The checked-in baseline supplies the evidence needed on a clean host.
+if timeout 60 python3 tools/audit_occ_capabilities.py --check > /tmp/aik-audit-occ.log 2>&1; then
+    echo "PASS audit_occ_capabilities --check"
+    pass=$((pass + 1))
+else
+    echo "FAIL audit_occ_capabilities --check (see /tmp/aik-audit-occ.log)"
+    fail=$((fail + 1))
+    failed+=("audit_occ_capabilities")
+fi
+
 echo "== ORCH-E9 orch loop drill (回路自动化: 派发-验收-回炉-压缩-蒸馏) =="
 # make target 自带 occ/test_orch 依赖构建（首次较慢）；演练全在
 # /tmp 夹具（OCC_DB/OCC_SESSIONS_DIR/OCC_SNAPROOT 指临时目录）。
