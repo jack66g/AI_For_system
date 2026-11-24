@@ -13,7 +13,7 @@
 | 提交 | 日期 | 内容 | 与本仓的关系 |
 |---|---|---|---|
 | `5a6604d`（+未提交改动） | 2026-09-28 | 出厂树 `/opt/sme` 的来源：配置中心 97 项 / 5 预设 | 配置层注册表与默认值的原始 pin |
-| `1f635e7` | 2026-10-10 | namespaces 全链路对齐；两项帮助文案 | 出厂树保留的是这一版的文案 |
+| `1f635e7` | 2026-10-10 | namespaces 全链路对齐；新增两项帮助文案的现有措辞 | 旧出厂树是此提交前的措辞。MEM-02c 按 C 能力改写 |
 | `98071d9` | 2026-11-01 | 配置层新增 4 个键；scoped memory 加固 | 4 键 → MEM-01c 已补 |
 | `e72bc75` | 2026-11-01 | 全量对拍（T4）时钉的基线 | 多数模块仍钉在这里 |
 | `ed5378a` | 2026-11-20 | 大型测试战役、28 项修复、跨进程写锁、预设扩充。`sme/` 下 14 个文件 +680/−221 | 已移植小项见 §3，逐项审计见 §4 |
@@ -26,7 +26,7 @@
 | `retrieval/text.c` 分词 | `ed5378a`（MEM-01a） | 混合书写系统的 run 切法不同；纯 CJK / 纯拉丁 / 空输入与 `e72bc75` 逐 token 相同 | `text/` 已重录到 `ed5378a` |
 | `retrieval` 其余（BM25 / 排序 / PPR / 嵌入） | `e72bc75` | — | 未动 |
 | `space/space.c` | `ed5378a`（MEM-01b） | 演化候选结转、merge 后剪边；既有 38 步重放结果不变 | 未动 |
-| `smeconfig`（白名单 / 默认值 / 注册表） | `e72bc75` + 出厂树 | 4 个键已补（MEM-01c）；namespaces 两项帮助文案保留出厂树旧措辞；预设仍是 5 个 | `config/` 三个文件已重录（恰多 4 键） |
+| `smeconfig`（白名单 / 默认值 / 注册表） | `e72bc75` + MEM-01c / 02c | 101 项、6 预设；02、03 和新增 06 取 `ed5378a`；两项 namespaces 说明按 C 能力显示。LLM 默认值维持原配置口径 | MEM-02c 对照见 §5 |
 | `engine` | `e72bc75` + MEM-02a / 02b / 10 | 热重建后立即存盘；反序列化入口数值校验；新增与更新文本、数值校验 | 未动 |
 | `smehttp` | 同 `engine` | `/import`、`/import/file` 先整批校验；单条新增、批量新增、PATCH 的非法写入字段返回 422 | 未动 |
 | `storage` / `wal` / `sqlite` / `embed` / `api` / `ac` / `mcp` | `e72bc75`（T4） | — | 未动 |
@@ -42,6 +42,7 @@ MEM-10 提交号为施工工树来源，主仓合入以审核记录为准。
 | MEM-01c 配置层补 4 键 | `sme/config.py`、`sme/config_items.py` | `71f85b0` | `smeconfig/tests/test_config*.c`、`engine/tests/test_engine.c` 段 4 |
 | MEM-02a 热重建后立即存盘 | `sme/api/server.py::rebuild_engine_with` | `5358978` | `engine/tests/test_rebuild.c`、`smehttp/tests/test_http.c` 17–18 |
 | MEM-02b 导入数值校验 | `sme/models.py::_validate_memory_numbers` | `12ac54b` + `f7ffa5a` | `engine/tests/test_engine.c` 段 5、`smehttp/tests/test_http.c` 19、`retrieval/tests/test_ranker.c` 段 5 |
+| MEM-02c 知识库预设归一、预设 06、namespaces 说明 | `ed5378a:sme/config_items.py` 的 `PRESETS`；`1f635e7` 两处说明 | MEM-02c | `smeconfig/tests/test_config_items.c`；`smehttp/tests/test_http.c::test_mem02c_presets` |
 | MEM-10 更新拒绝空白文本 | `sme/memory_manager.py::update_memory` | `24c8ddb` | `engine/tests/test_engine.c` 段 3a |
 | MEM-10 写入拒绝非法 UTF-8 | `sme/memory_manager.py::_check_encodable_text` | `f2dd552` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 写入用例 |
 | MEM-10 写入数值校验 | `sme/memory_manager.py::_clamp01`、`sme/api/server.py` 的写入请求模型 | `1167ac8` | `engine/tests/test_engine.c` 段 3a、`smehttp/tests/test_http.c` 单条、批量、PATCH |
@@ -64,9 +65,9 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 | `config_items.py:72` `ITEMS` | LLM 模型的注册表默认值由空字符串改为 `gpt-4o-mini`。Python dataclass 在 `e72bc75` 已是此值 | d · MEM-02d。保留 C 出厂空模型，或只对显式启用的模型配置采用上游默认，后者要一起验证离线启停与配置对照 |
 | `config_items.py:81` `ITEMS` | 温度的注册表默认值由 0.6 改为 0.3。Python dataclass 在 `e72bc75` 已是 0.3 | d · MEM-02d。保留当前配置，或单独统一温度默认值并重录配置对照 |
 | `config_items.py:517–528`（旧版 517、528 各一份 `_is_blank`） | 删除重复的等价 Python 绑定 | c · C 配置层无该重复定义，配置语义不变 |
-| `config_items.py:690–714` `kb_dynamic` | 八项排序权重全部显式设置，合计 1.0，预设 20 → 25 个键 | b · MEM-02c，配置和排序分数对照一起换 |
-| `config_items.py:725–749` `kb_static` | 静态知识库预设应用同一权重归一，20 → 25 个键 | b · MEM-02c，同上，单独验预设 |
-| `config_items.py:804–843` `united_static` | 预设 06 停用动力学，采用 BM25 主导候选及纯语义排序权重。共 29 键 | b · MEM-02c，需要更新预设与检索对照 |
+| `config_items.py:690–714` `kb_dynamic` | 八项排序权重全部显式设置，合计 1.0，预设 20 → 25 个键 | a · MEM-02c，配置中心套用并实测排序 |
+| `config_items.py:725–749` `kb_static` | 静态知识库预设应用同一权重归一，20 → 25 个键 | a · MEM-02c，单独套用并实测排序 |
+| `config_items.py:804–843` `united_static` | 预设 06 停用动力学，采用 BM25 主导候选及纯语义排序权重。共 29 键 | a · MEM-02c，校验有效检索参数及实测排序 |
 | `config_items.py:844–880` `semantic_first` | 预设 07 为真 embedding 的 minmax 融合口径调参。共 26 键 | c · 现役 C 只有 hashing，维持既定决定 |
 | `engine.py:143–145,867–894` `save` | 保存按路径跨进程加锁，恢复库检查上次同步的谱系后才发布并推进谱系 | c · C 出厂架构采用单进程单写者，沿承 §7.3 |
 | `engine.py:897–899` `_recovery_path` | 绝对路径、平台大小写规则与 .json/.json.gz 归一化用于写者谱系匹配 | c · 新函数服务上行谱系。C 保留现役快照/WAL 路径语义 |
@@ -95,8 +96,9 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 
 相关任务的证据：
 
-- MEM-02c 的 namespaces 两项帮助文案来自更早的 `98071d9`，本段 diff 中无
-  改动。与两套知识库预设及 06 一起改配置对照。
+- 两项 namespaces 帮助文案由 `1f635e7` 修改，`e72bc75` 和 `ed5378a`
+  内容一致。上游描述的视图管理与按 ns 统计缺少 C 实现，MEM-02c 改写文案：
+  新增和检索接受显式 ns，两个注册项保留给视图管理，既有数据和权限不变。
 - MEM-04 的鉴权入口在 `api/server.py` 的本段 diff 中无变更。
 - MEM-08/09 的线索：上游 load 的几何恢复并行化在 `e72bc75` 已有，改名搬移
   无法解释 C 版超线性。C 的 `aik_engine_load` 仍逐条调 `npz_row`，后者逐 ID
@@ -114,8 +116,8 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 | 向量 | 钉在 | 录制器 | 上次重录 |
 |---|---|---|---|
 | `text/text.vectors.json` | `ed5378a` | `parity/rec/record_text.py` | 2026-11-24（sha256 `984978e9…`） |
-| `config/groups_default.json`、`groups_mutated.json`、`config_file.expected.txt` | `e72bc75` + 4 键；namespaces 文案 = 出厂树 | `parity/rec/record_config.py`（参考树须参数化） | 2026-11-24 |
-| `config/presets.json` | 5 预设 | 同上 | 未动 |
+| `config/groups_default.json`、`groups_mutated.json`、`config_file.expected.txt` | `e72bc75` 的 101 项，加 MEM-02c 的两处 C 版帮助文案 | `parity/rec/record_config.py`（参数化参考树） | MEM-02c 候选，随代码并入更新共享树 |
+| `config/presets.json` | 6 预设，02、03、06 对齐 `ed5378a`，07 不随 C 版 | 同上 | 同上 |
 | 其余目录 | `e72bc75` / T4 | 各自录制器 | 未动 |
 
 独立复核（2026-11-24，主会话，不由施工智能体自证）：
@@ -126,6 +128,20 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
   的输出只差两处 namespaces 帮助文案（出厂树旧措辞）。
 - 与上游 `ed5378a` 的输出相比另有两处默认值不同（`llm.model`、`llm.temperature`）
   ——即 §4 的 MEM-02d。
+
+MEM-02c 对照边界（2026-11-25）：
+
+- 先从 `e72bc75` 物化代码，以 `1f635e7` 前的两条文案复现现役生成头及
+  四份现役配置向量。候选在同一参考上只更换两条 C 版文案，以及从
+  `ed5378a` 取 02、03、06。配置分组和落盘样例仅帮助文案变化；预设摘要
+  只有 02、03 的项数和新增 06。其余共享检索、存储和配置向量无需换。
+- HTTP 应用与排序由 C 集成测试复核。固定 `ed5378a` 的单记忆、同文查询
+  给出 02、03 的 `breakdown.final=0.5885`，06 给出 `0.5`。旧版 02、03
+  此用例为 `0.559`。旧的独立 `config_api.vectors.json` 回放在 MEM-02c
+  改前已有失配，本轮仍使用现役 C 门禁与上述独立回归。
+- 现有配置文件继续读原有值。重新套用 02 或 03 才会覆盖八个权重。选 06
+  会套用其 29 项值，关闭增量 WAL 时沿用热重建的存盘机制。已有文件的
+  `_help` 在下次正常保存时更新，配置默认值和持久化格式保持原样。
 
 ## 6. 移植前先读什么
 

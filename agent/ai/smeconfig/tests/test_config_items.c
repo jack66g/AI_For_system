@@ -262,7 +262,7 @@ static void test_registry(void)
 	 */
 	check(aik_config_item_count == 101, "registry: %zu items != 101",
 	      aik_config_item_count);
-	check(aik_config_preset_count == 5, "registry: %zu presets != 5",
+	check(aik_config_preset_count == 6, "registry: %zu presets != 6",
 	      aik_config_preset_count);
 	check(aik_config_group_count == 10, "registry: %zu groups != 10",
 	      aik_config_group_count);
@@ -388,13 +388,17 @@ static void test_registry(void)
 	check(p && strncmp(p->desc, "动态记忆", strlen("动态记忆")) == 0,
 	      "registry: preset chat desc");
 	p = aik_config_preset_find("kb_dynamic");
-	check(p != NULL && p->n_values == 20, "registry: preset kb_dynamic");
+	check(p != NULL && p->n_values == 25, "registry: preset kb_dynamic");
 	p = aik_config_preset_find("kb_static");
-	check(p != NULL && p->n_values == 20, "registry: preset kb_static");
+	check(p != NULL && p->n_values == 25, "registry: preset kb_static");
 	p = aik_config_preset_find("robot");
 	check(p != NULL && p->n_values == 18, "registry: preset robot");
 	p = aik_config_preset_find("minimal");
 	check(p != NULL && p->n_values == 17, "registry: preset minimal");
+	p = aik_config_preset_find("united_static");
+	check(p != NULL && p->n_values == 29, "registry: preset united_static");
+	check(aik_config_preset_find("semantic_first") == NULL,
+	      "registry: true-model preset must be absent");
 	check(aik_config_preset_find("nope") == NULL,
 	      "registry: unknown preset must be NULL");
 
@@ -685,9 +689,8 @@ static void test_save_load(const aik_json *cdef)
 		check(!has_crlf, "save: output must be LF-only");
 		check(rawlen > 0 && raw[rawlen - 1] != '\n',
 		      "save: output must not end with newline");
-		/* MEM-01c：注册表 97 → 101，complete 多补 4 个键、_help 多 4 条
-		 * （每条一行 help + 一行取值），14240 → 14907 字节 */
-		check(rawlen == 14907, "save: %zu bytes != 14907", rawlen);
+		/* MEM-02c：两条 namespaces 帮助文案增加 213 字节。 */
+		check(rawlen == 15120, "save: %zu bytes != 15120", rawlen);
 		check(strstr(raw, "\"half_life_days\": 30.0") != NULL,
 		      "save: 30.0 must stay NUM");
 		check(strstr(raw, "\"max_density\": 120.0") != NULL,

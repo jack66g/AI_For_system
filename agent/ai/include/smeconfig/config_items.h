@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * config_items.h - T4e 配置注册表（101 可调项 / 5 预设 / 10 分组）
+ * config_items.h - T4e 配置注册表（101 可调项 / 6 预设 / 10 分组）
  *
  * 对齐 REF-PY e72bc75：
  *   - sme/config_items.py：ConfigItem / ITEMS / PRESETS / parse_value /
@@ -21,11 +21,12 @@
  *   出厂树没有的 4 项（上游 98071d9 新增）：embedding.query_prefix /
  *   retrieval.keyword_candidates / retrieval.min_similarity /
  *   retrieval.query_cache_size。参考树 = 出厂树 + 上游 e72bc75 的这 4 项
- *   （用同一生成器对「e72bc75 减去这 4 项、再退回 1f635e7 的两处
+ *   （用同一生成器对「e72bc75 减去这 4 项、再退回 1f635e7 前的两处
  *   namespaces 文案」的树重生成，与补录前的生成头逐字节相同）。
- *   注意：namespaces.enabled / default_ns 的 help 文案仍停留在出厂树的
- *   旧措辞，与上游 e72bc75（1f635e7「文案诚实化」之后）不同，未在本次
- *   范围内。
+ *
+ *   【MEM-02c】自 e72bc75 起在此处有意偏离：依据上游 ed5378a，
+ *   更新两套知识库预设的排序权重并增加 06 静态检索·UNITED。
+ *   namespaces 两处措辞以 1f635e7 为依据，按 C 版实际支持范围改写。
  *
  *   - 取值/设值作用在**完整配置 DOM**（aik_config_defaults / _load /
  *     engine.config.to_dict 形状，137 键）上，路径不存在时 get 返回 NULL；

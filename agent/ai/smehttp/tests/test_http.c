@@ -1764,7 +1764,7 @@ static void test_modules(int port)
  *   - GET /config 的 groups/presets 与 parity/vectors/config 逐字节；
  *   - PUT /config 成功 / 未知项 / 非法值 / api_key 掩码跳过 / save 落盘；
  *   - mrl_dim 闸门（非空库改 embedding 身份 → ok:false，引擎保持原配置）；
- *   - POST /config/preset（未知 key 400、minimal 应用）；
+ *   - POST /config/preset（未知 key 400、minimal 应用、MEM-02c 三预设排序）；
  *   - POST /config/check 的形状与 llm/embedding 探测文案；
  *   - POST /config/reset 删文件 + 回默认 + 向量复现；
  *   - POST /consolidate / /compress 的 {"created":[...]} 形状。
@@ -2622,7 +2622,7 @@ static void test_config_preset(int port, const char *cfg_path)
 	if (root)
 		check_str(aik_json_str(detail_of(root)),
 			  "未知预设 key：nope（可选：chat、kb_dynamic、"
-			  "kb_static、robot、minimal）",
+			  "kb_static、robot、minimal、united_static）",
 			  "config.preset unknown detail");
 	aik_json_free(root);
 
@@ -2725,6 +2725,102 @@ static void test_config_preset(int port, const char *cfg_path)
 				   "config.preset file memory.consolidate_every");
 		}
 		aik_json_free(filecfg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* MEM-02c: 套用预设后从配置中心读权重，并用实际搜索复核。             */
+/* ------------------------------------------------------------------ */
+static void test_mem02c_presets(int port, const char *cfg_path)
+{
+	static const struct {
+		const char *path;
+		double kb;
+		double united;
+	} weights[] = {
+		{ "ranking.semantic", 0.4736, 1.0 },
+		{ "ranking.importance", 0.1263, 0.0 },
+		{ "ranking.freshness", 0.0421, 0.0 },
+		{ "ranking.weight", 0.1053, 0.0 },
+		{ "ranking.decay", 0.0842, 0.0 },
+		{ "ranking.hit_count", 0.0842, 0.0 },
+		{ "ranking.recency", 0.0211, 0.0 },
+		{ "ranking.region", 0.0632, 0.0 },
+	};
+	static const struct {
+		const char *key;
+		int count;
+		int reinforce;
+		double final;
+	} presets[] = {
+		/* ed5378a 用 hashing 的同文单例实际输出，旧版 KB 为 0.559。 */
+		{ "kb_dynamic", 25, 1, 0.5885 },
+		{ "kb_static", 25, 0, 0.5885 },
+		{ "united_static", 29, 0, 0.5 },
+	};
+	int status = -1;
+	aik_json *root;
+	size_t i, j;
+
+	root = call_json(port, "POST", "/memories",
+			    "{\"text\":\"apple orange fruit\",\"importance\":0.7}",
+			    &status, NULL);
+	check_int(status, 200, "mem02c seed status");
+	aik_json_free(root);
+	for (i = 0; i < sizeof(presets) / sizeof(presets[0]); i++) {
+		char body[80], err[256];
+		const aik_json *groups, *saved_reinforce, *hit, *final;
+		const aik_config_item *reinforce;
+		aik_json *saved;
+		int united = strcmp(presets[i].key, "united_static") == 0;
+
+		snprintf(body, sizeof(body), "{\"key\":\"%s\"}", presets[i].key);
+		root = call_json(port, "POST", "/config/preset", body, &status, NULL);
+		check_int(status, 200, "mem02c preset status");
+		check_true(aik_json_bool(aik_json_get(root, "ok")),
+			   "mem02c %s apply ok", presets[i].key);
+		check_int((long long)aik_json_count(aik_json_get(root, "applied")),
+			  presets[i].count, "mem02c applied count");
+		aik_json_free(root);
+
+		root = call_json(port, "GET", "/config", NULL, &status, NULL);
+		check_int(status, 200, "mem02c config status");
+		groups = aik_json_get(root, "groups");
+		for (j = 0; j < sizeof(weights) / sizeof(weights[0]); j++)
+			check_true(payload_is_num(groups, weights[j].path,
+						  united ? weights[j].united : weights[j].kb),
+				   "mem02c %s config %s", presets[i].key, weights[j].path);
+		if (united) {
+			check_true(payload_is_int(groups, "retrieval.keyword_candidates", 20),
+				   "mem02c united keyword_candidates");
+			check_true(payload_is_int(groups, "retrieval.top_regions", 1),
+				   "mem02c united top_regions");
+			check_true(payload_is_num(groups, "retrieval.vector_weight", 0.0),
+				   "mem02c united vector_weight");
+		}
+		aik_json_free(root);
+
+		/* memory.* 属于会话配置，套用后检查落盘。 */
+		saved = aik_config_load_file(cfg_path, err, sizeof(err));
+		reinforce = aik_config_item_find("memory.reinforce_on");
+		saved_reinforce = aik_config_item_get(saved, reinforce);
+		check_true(aik_json_typeof(saved_reinforce) == AIK_JSON_BOOL &&
+				   aik_json_bool(saved_reinforce) == presets[i].reinforce,
+			   "mem02c %s saved reinforce flag", presets[i].key);
+		aik_json_free(saved);
+		root = call_json(port, "POST", "/memories/search",
+				 "{\"text\":\"apple orange fruit\",\"top_k\":1}",
+				 &status, NULL);
+		check_int(status, 200, "mem02c search status");
+		check_int(aik_json_int(aik_json_get(root, "count")), 1,
+			  "mem02c search result count");
+		hit = aik_json_at(aik_json_get(root, "results"), 0);
+		final = aik_json_get(aik_json_get(hit, "breakdown"), "final");
+		check_true(aik_json_typeof(final) == AIK_JSON_NUM &&
+				   aik_json_num(final) == presets[i].final,
+			   "mem02c %s final %.4f expected %.4f", presets[i].key,
+			   aik_json_num(final), presets[i].final);
+		aik_json_free(root);
 	}
 }
 
@@ -3492,6 +3588,15 @@ int main(void)
 	test_config_reset(srv.port, srv.cfg_path);
 	check_true(stop_server(&srv) == 0,
 		   "defaults server did not exit 0 on SIGTERM");
+
+	if (start_server(&srv, tmpdir, "mem02c", "") != 0) {
+		fprintf(stderr, "test_http: cannot start server (mem02c)\n");
+		rm_rf(tmpdir);
+		return 1;
+	}
+	test_mem02c_presets(srv.port, srv.cfg_path);
+	check_true(stop_server(&srv) == 0,
+		   "mem02c server did not exit 0 on SIGTERM");
 
 	if (start_server(&srv, tmpdir, "auth", "secret") != 0) {
 		fprintf(stderr, "test_http: cannot start server (auth)\n");
