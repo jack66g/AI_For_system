@@ -1,6 +1,6 @@
 {
  "schema": "aik-occ-audit/1",
- "generated_at": "2026-11-24T17:01:16+0800",
+ "generated_at": "2026-11-24T19:40:57+0800",
  "core": {
   "params": {
    "admin_sandbox": "no"
@@ -678,8 +678,8 @@
  "reach": {
   "schema": "aik-occ-reach/1",
   "probe_list": {
-   "entries": 199,
-   "sha256": "2a0be86a6bcd12891f25117da86131b87c9a11536b3b12b3ec05c55860602187"
+   "entries": 198,
+   "sha256": "c14d830d3710792eab3b9e1b6a1961870b6048994afaceae1034676b6e1e1046"
   },
   "sources": [
    {
@@ -2330,8 +2330,8 @@
     ],
     [
      14,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2444,8 +2444,8 @@
     ],
     [
      26,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2548,8 +2548,8 @@
     ],
     [
      36,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2626,8 +2626,8 @@
     ],
     [
      44,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2635,8 +2635,8 @@
     ],
     [
      45,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2768,8 +2768,8 @@
     ],
     [
      59,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2777,8 +2777,8 @@
     ],
     [
      60,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2786,8 +2786,8 @@
     ],
     [
      61,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2865,8 +2865,8 @@
     ],
     [
      69,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2892,7 +2892,7 @@
     ],
     [
      72,
-     "ok",
+     "partial",
      "host",
      [],
      "",
@@ -2901,12 +2901,12 @@
     ],
     [
      73,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
-     true
+     false
     ],
     [
      74,
@@ -2946,8 +2946,8 @@
     ],
     [
      78,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2955,8 +2955,8 @@
     ],
     [
      79,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -2984,8 +2984,8 @@
     ],
     [
      82,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3020,8 +3020,8 @@
     ],
     [
      86,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3040,8 +3040,8 @@
     ],
     [
      88,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3067,12 +3067,12 @@
     ],
     [
      91,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
-     true
+     false
     ],
     [
      92,
@@ -3085,8 +3085,8 @@
     ],
     [
      93,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3139,12 +3139,12 @@
     ],
     [
      99,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
-     true
+     false
     ],
     [
      100,
@@ -3184,8 +3184,8 @@
     ],
     [
      104,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3193,8 +3193,8 @@
     ],
     [
      105,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3202,8 +3202,8 @@
     ],
     [
      106,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3229,8 +3229,8 @@
     ],
     [
      109,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3258,8 +3258,8 @@
     ],
     [
      112,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3326,8 +3326,8 @@
     ],
     [
      119,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3344,8 +3344,8 @@
     ],
     [
      121,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3353,8 +3353,8 @@
     ],
     [
      122,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3362,8 +3362,8 @@
     ],
     [
      123,
-     "ok",
-     "host",
+     "unreviewed",
+     "none",
      [],
      "",
      false,
@@ -3958,14 +3958,14 @@
      194,
      195,
      196,
-     197,
-     198
+     197
     ],
     "n_view": 9,
     "m": {
-     "ok": 42,
-     "partial": 12,
+     "ok": 14,
+     "partial": 13,
      "notdata": 9,
+     "unreviewed": 27,
      "empty": 10,
      "fail": 25,
      "missing": 15,
@@ -4055,10 +4055,7 @@
      ]
     ],
     "truncated": [
-     29,
-     73,
-     91,
-     99
+     29
     ],
     "stale": [],
     "unlisted": [],
@@ -4078,17 +4075,10 @@
      "static_reachable": 81,
      "read": [
       "AI-08",
-      "DISK-01",
-      "DISK-04",
-      "DISK-06",
-      "HW-01",
-      "ID-05",
       "MEM-01",
       "NET-02",
       "NET-03",
-      "NET-05",
       "PKG-05",
-      "RES-01",
       "RES-02",
       "RES-04",
       "RES-06",
@@ -4098,10 +4088,17 @@
       "DISK-05",
       "FS-03",
       "FS-08",
-      "TIME-01"
+      "NET-05"
      ],
      "unreadable": [],
-     "unresolved": [],
+     "unresolved": [
+      "DISK-01",
+      "DISK-04",
+      "DISK-06",
+      "HW-01",
+      "ID-05",
+      "RES-01"
+     ],
      "untested": [
       "AI-01",
       "AI-02",
@@ -4163,6 +4160,7 @@
       "SYS-05",
       "SYS-07",
       "SYS-08",
+      "TIME-01",
       "TIME-03"
      ],
      "confirmed": [
@@ -4251,7 +4249,8 @@
       "RES-03",
       "RES-05",
       "RES-07",
-      "SYS-05"
+      "SYS-05",
+      "TIME-01"
      ],
      "untested_family_ok": [
       "AI-01",
@@ -4284,7 +4283,8 @@
       "RES-03",
       "RES-05",
       "RES-07",
-      "SYS-05"
+      "SYS-05",
+      "TIME-01"
      ],
      "zero_byte_objects": [
       "ID-01",
@@ -4299,7 +4299,7 @@
      ]
     }
    },
-   "notes_sha256": "c9b53a63429eeefcb9a6e6bdbfab382d3fcc582e7acedc9319dfb53127342ea7"
+   "notes_sha256": "6bfcdb57176476ca2fd6f06eec0436f9fcfe580d793326e734f9dba2b8646c4a"
   }
  }
 }

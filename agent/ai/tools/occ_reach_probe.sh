@@ -233,7 +233,7 @@ PROBE_LIST=(
 	"ok"$'\t'"cat /proc/ai/control"
 	"ok"$'\t'"cat /proc/ai/decisions"
 	"ok"$'\t'"cat /proc/ai/chains"
-	"ok"$'\t'"cat /proc/ai/telemetry"
+	# /proc/ai/telemetry 的 read 会消费内核事件环，不能采。
 	"ok"$'\t'"cat /proc/ai/hitrate"
 	"ok"$'\t'"cat /proc/ai/latency"
 	"ok"$'\t'"cat /sys/kernel/ai/stats/telemetry_emitted"

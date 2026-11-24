@@ -1345,6 +1345,7 @@ def core_of(rep):
 # ===========================================================================
 P_PROBE = os.path.join("agent", "ai", "tools", "occ_reach_probe.sh")
 REACH_SCHEMA = "aik-occ-reach/1"
+REVIEWED_CAPTURE_SHA256 = "00c0c8d274e6a7b7f64ca92a68def46ddb283e8227bc81eb8b27805c5b274a90"
 OCC_OUT_MAX = 8192                   # occ_tools.h:85（bash 结果截断上限）
 REACH_LABELS = ("view", "ok", "partial", "no")
 OCC_VIEWS = ("ok", "sb_fail", "tool_error")
@@ -1379,6 +1380,7 @@ REACH_M = (
     ("ok", "读到宿主数据"),
     ("partial", "读到一部分"),
     ("notdata", "rc=0·不是宿主数据"),
+    ("unreviewed", "rc=0·有输出，尚未判读"),
     ("empty", "rc=0·零字节"),
     ("fail", "rc=1/2"),
     ("missing", "rc=127·没有这个命令"),
@@ -1403,7 +1405,7 @@ OBJ_V = (
     ("read", "实测读到"),
     ("partial", "实测读到（仅一部分）"),
     ("unreadable", "实测读不到"),
-    ("unresolved", "未定：已测的读不到，另有未测"),
+    ("unresolved", "未定：另有未测或未判读的路径"),
     ("untested", "未测"),
     ("confirmed", "不可达·实测确认"),
     ("orphan", "不可达·未测"),
@@ -1587,9 +1589,21 @@ REACH_NOTE = {
         (0, 0), "empty",
         why="信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功",
         empty="na", ev=EV_PIDNS),
+    # ---- 首批人工复核：源代码确认为宿主视图，首行确认为所需输出 ----
+    ("ok", "free -b"): _note((0, 206), "ok", why="全局 /proc/meminfo 的内存表头"),
+    ("ok", "uptime"): _note((0, 68), "ok", why="全局运行时长与负载"),
+    ("ok", "vmstat 1 2"): _note((0, 325), "ok", why="全局虚拟内存统计表头"),
+    ("ok", "vmstat -d"): _note((0, 959), "ok", why="全局磁盘 IO 统计表头"),
+    ("ok", "ip -j addr"): _note((0, 1335), "ok", why="共享网络命名空间的地址 JSON 数组"),
+    ("ok", "ss -tunl"): _note((0, 813), "ok", why="共享网络命名空间的监听表"),
+    ("ok", "uname -r"): _note((0, 7), "ok", why="首行与宿主内核版本一致"),
+    ("ok", "curl -s -m 5 http://127.0.0.1:8000/health"): _note(
+        (0, 31), "ok", why="SME 回环健康接口返回 status=ok 与记忆条数"),
+    ("ok", "nslookup 127.0.0.1"): _note(
+        (0, 83), "partial", why="首行确认了应答解析器，未确认宿主 DNS 配置全貌"),
     # ---- 静态 partial / ok：实测一致，补一句读到的到底是什么 ----
     ("partial", "cat /proc/meminfo"): _note(
-        (0, 1446), why="清单上的 partial 是命令表对 cat 这个通用工具的判定；按路径求值 /proc/* "
+        (0, 1446), "ok", why="清单上的 partial 是命令表对 cat 这个通用工具的判定；按路径求值 /proc/* "
                        "为 ok（对象矩阵 RES-04 标的就是 [ok]）。实测 1446 字节宿主内存数据"),
     ("partial", "hostname"): _note(
         (0, 13), "partial", "part", why="输出的是隔离区名（UTS 隔离），不是宿主名"),
@@ -1617,13 +1631,13 @@ REACH_NOTE = {
     ("partial", "strace -c true"): _note(
         (0, 1143), "partial", "part", why="能跑，只能跟踪沙箱里自己起的进程"),
     ("ok", "ifconfig -a"): _note(
-        (0, 1199), why="接口清单是宿主的（共享网络命名空间）；首行 enp0s17",
+        (0, 1199), "ok", why="接口清单是宿主的（共享网络命名空间）；首行 enp0s17",
         ev=EV_NET),
     ("ok", "dmesg --color=never"): _note(
-        (0, 42197), why="42197 字节、首行是内核版本行：整条启动日志都读得到。该机 "
+        (0, 42197), "ok", why="42197 字节、首行是内核版本行：整条启动日志都读得到。该机 "
                         "kernel.dmesg_restrict=0，静态标的「依赖运行态」在该机成立"),
     ("ok", "ollama list"): _note(
-        (0, 31), why="表头 + 空表：服务在跑（127.0.0.1:11434 可达），该机没有拉模型。"
+        (0, 31), "ok", why="表头 + 空表：服务在跑（127.0.0.1:11434 可达），该机没有拉模型。"
                      "空列表带表头，可与失败区分"),
     ("no", "nft list ruleset"): _note((1, 42), why="Operation not permitted (you must be root)："
                                                   "uid 是 0 但没有 CAP_NET_ADMIN",
@@ -1738,7 +1752,8 @@ def align_reach(entries, trows, fname):
     out, cur = [], 0
     for i, r in enumerate(trows, 1):
         j = cur
-        while j < len(entries) and entries[j]["cmd"] != r["cmd"]:
+        while j < len(entries) and (entries[j]["cmd"], entries[j]["label"]) != (
+                r["cmd"], r["static_at_capture"]):
             j += 1
         if j >= len(entries):
             raise ReachError("%s 第 %d 条（%r）对不上探测清单：清单里没有这条命令，"
@@ -1818,14 +1833,14 @@ def static_verdict_of(cmd):
     return verdict, ""
 
 
-def judge_reach(r):
+def judge_reach(r, reviewed_capture):
     """一行实测 → 判读。退出码与字节数只定得出「跑没跑、有没有输出」；读到的
     是不是宿主数据，看 REACH_NOTE 里钉住的那条人工判读（结果变了就作废）。"""
     label, cmd, rc, nb = r["label"], r["cmd"], r["rc"], r["out_bytes"]
     if label == "view":
         m, data = "view", "none"
     elif rc == 0 and nb > 0:
-        m, data = "ok", "host"
+        m, data = "unreviewed", "none"
     elif rc == 0:
         m, data = "empty", "none"
     elif rc in (1, 2):
@@ -1841,7 +1856,7 @@ def judge_reach(r):
     stale = False
     note = REACH_NOTE.get((label, cmd))
     if note:
-        if note["when"] is None or note["when"] == (rc, nb):
+        if reviewed_capture and (note["when"] is None or note["when"] == (rc, nb)):
             if "m" in note:                      # 判读改了判定，数据性质跟着改
                 m = note["m"]
                 data = note.get("data") or ("host" if m in READABLE else "none")
@@ -1849,14 +1864,13 @@ def judge_reach(r):
             why, todo, ev = note["why"], note.get("todo", ""), note.get("ev", "")
         else:
             stale = True
-            why = ("判读注记是按另一次结果（rc=%s、%s 字节）写的，对不上这一次，没有套用——要人重看"
-                   % note["when"])
+            why = "现有注记属于另一份采集或不同输出；当前行需要复核。"
     snow, snote = (None, "") if label == "view" else static_verdict_of(cmd)
     cls = []
     if label != "view":
-        if snow in ("ok", "partial") and m not in READABLE:
+        if snow in ("ok", "partial") and m not in (*READABLE, "unreviewed"):
             cls.append("a")                                # 静态判可读，实测读不到
-        if snow == "no" and rc == 0:
+        if snow == "no" and rc == 0 and m != "unreviewed":
             cls.append("b1" if m in READABLE else "b2")    # 静态判 no，实测 rc=0：读到了 / 没读到
         if rc == 0 and nb == 0:
             cls.append("c")                                # rc=0 且零字节
@@ -1881,7 +1895,8 @@ def derive_reach(reach, objects_root):
     同样的结果（--check 就靠这一点，在没有 TSV 的机器上核基线里的实测层）。"""
     rows = reach["rows"]
     try:
-        drows = [judge_reach(r) for r in rows]
+        drows = [judge_reach(r, reach["sources"][r["src"]]["sha256"] == REVIEWED_CAPTURE_SHA256)
+                 for r in rows]
     except (KeyError, TypeError, ValueError) as exc:
         raise ReachError("实测层原始行有缺字段或类型不对：%r" % (exc,))
     latest = {}
@@ -1896,6 +1911,8 @@ def derive_reach(reach, objects_root):
 
     by_key, by_fam = {}, {}
     for i, r in enumerate(rows):
+        if r["label"] == "view":
+            continue
         by_key.setdefault(_path_key(r["cmd"]), []).append(i)
         by_fam.setdefault(r["cmd"].split()[0], []).append(i)
 
@@ -1904,10 +1921,6 @@ def derive_reach(reach, objects_root):
         ids = by_key.get(_path_key(target))
         if ids:
             return pick(ids), "key"
-        if target.split()[0] != "aikctl":       # aikctl 的子命令语义不同，不做前缀匹配
-            pre = [i for i, r in enumerate(rows) if r["cmd"].startswith(target + " ")]
-            if pre:
-                return pick(pre), "prefix"
         return None, ""
 
     objects = {}
@@ -1925,14 +1938,15 @@ def derive_reach(reach, objects_root):
                 fam = by_fam.get(p["target"].split()[0])
                 untested.append([p["target"], drows[pick(fam)]["m"] if fam else ""])
         good = [h for h in hits if h[2] and h[3] in READABLE]
-        bad = [h for h in hits if h[2] and h[3] not in READABLE]
+        bad = [h for h in hits if h[2] and h[3] not in (*READABLE, "unreviewed")]
+        pending_review = any(h[3] == "unreviewed" for h in hits)
         n_host = sum(1 for p in o["paths"] if p["reach"] and p["kind"] not in SB_LIKE)
         if o["status"] == "n/a":
             v = "na"
         elif not any(p["reach"] for p in o["paths"]):   # 静态不可达：看实测是不是印证
             if any(h[3] in READABLE for h in hits):
                 v = "reopened"
-            elif hits:
+            elif hits and not pending_review:
                 v = "confirmed"
             else:
                 v = "orphan"
@@ -1940,9 +1954,9 @@ def derive_reach(reach, objects_root):
             v = "read"
         elif good:
             v = "partial"
-        elif bad and not untested and not n_host:
+        elif bad and not untested and not n_host and not pending_review:
             v = "unreadable"                   # 可达读面全部测过，全部读不到
-        elif bad:
+        elif bad or pending_review:
             v = "unresolved"                   # 已测的读不到，还有没测的
         else:
             v = "untested"
@@ -2086,7 +2100,7 @@ def render_reach(rep):
         % (OCC_OUT_MAX, OCC_OUT_MAX),
         "- **身份**：只在 root 身份下采过；admin 缺省没有沙箱，实测层对它不适用。",
         "- **判读怎么来的**：退出码和字节数定不了「读到的是不是宿主数据」。§15 的判读是逐条人工看过的，"
-        "注记写在工具里（`REACH_NOTE`）并钉住了当时那一行结果；再次采集结果变了，注记自动作废并标出来。",
+        "注记绑定已复核的采集摘要及记录形态。没有适用注记的非空成功输出显示为未判读，不计入已读对象。",
         "",
         "### 13.1 视图探针：沙箱到底长什么样", "",
         "| 清单# | 探针 | rc | 字节 | 首行 | 看到了什么 |",
@@ -2203,11 +2217,10 @@ def render_reach(rep):
     rd, pt = len(O["read"]), len(O["partial"])
     L += ["## 16. 对象级实测判定（出厂 root，分母 %d）" % O["applicable"], ""]
     L += [
-        "- **实测直接确认读到数据 %d/%d**（读到宿主数据 %d + 读到但仅一部分 %d），全部落在静态可读的 %d 个之内。"
-        "**没有出现「静态说能读、实测读不到」的对象**（实测读不到 %d、未定 %d、静态不可达却读到 %d）。"
-        % (rd + pt, O["applicable"], rd, pt, O["static_reachable"],
-           len(O["unreadable"]), len(O["unresolved"]), len(O["reopened"])),
-        "- 与静态口径 %d/%d 的差 %d 个是**未测**，不是否定：其中 %d 个的可达读面只有宿主工具"
+        "- **在静态可读对象中已确认 %d/%d**（完整 %d、部分 %d）。另有实测不可读 %d 个、未定 %d 个、"
+        "静态判不可达但实测可读 %d 个。"
+        % (rd + pt, O["applicable"], rd, pt, len(O["unreadable"]), len(O["unresolved"]), len(O["reopened"])),
+        "- 静态判可读 %d/%d，其中完全未测 %d 个；其中 %d 个的可达读面只有宿主工具"
         "（occ read / glob / config_write_network），本批探测不经过那条通道；另 %d 个还有没采到的沙箱/回环路径"
         "（其中 %d 个已有同命令样例读到数据的旁证）。待采条目见 §17。"
         % (O["static_reachable"], O["applicable"], len(O["untested"]),
@@ -2222,7 +2235,7 @@ def render_reach(rep):
            len(O["zero_byte_objects"]), "、".join(O["zero_byte_objects"]) or "无"),
         "- **rc=0 但输出不是宿主数据**（误导性成功）：涉及 %d 个对象（%s）。"
         % (len(O["misleading_objects"]), "、".join(O["misleading_objects"]) or "无"),
-        "- 「已测读面」只算与路径同一条命令（或同一命令多带参数）的实测；「没测到」里括号内的同命令旁证不计入。",
+        "- 「已测读面」只算与路径匹配的实测（仅归并回环超时选项和同义 aikctl 子命令）；「没测到」里括号内的同命令旁证不计入。",
         "",
         "| 对象 | 静态（root） | 实测判定 | 已测读面 → 实测 | 没测到的可达读面 |",
         "|---|---|---|---|---|",

@@ -171,7 +171,17 @@ try:
                  "读不了")
 
     # ---- 3. 清单对行 ----
-    al = mod.align_reach
+    def al(entries, rows, filename):
+        defaults = {entry["cmd"]: entry["label"] for entry in entries}
+        return mod.align_reach(entries, [
+            dict(row, static_at_capture=row.get("static_at_capture", defaults.get(row["cmd"])))
+            for row in rows
+        ], filename)
+
+    duplicate = [{"cmd": "cat /proc/swaps", "label": label, "n": n}
+                 for n, label in enumerate(("view", "ok"))]
+    check("3b2 同命令不同标签按采集标签匹配",
+          al(duplicate, [{"cmd": "cat /proc/swaps", "static_at_capture": "ok"}], "f")[0][0]["n"] == 1)
     check("3a 对行：同文重复条目按先后各归各的",
           [e["n"] for e, _ in al(ents, [{"cmd": "echo ok"}, {"cmd": "dpkg-query -W"},
                                         {"cmd": "dpkg-query -W"}, {"cmd": "ls -la /"}], "f")]
@@ -218,19 +228,22 @@ try:
         }
 
         def J(label, cmd, rc, nb):
-            return mod.judge_reach(row(label, cmd, rc, nb))
+            return mod.judge_reach(row(label, cmd, rc, nb), reviewed_capture=True)
 
         j = J("ok", "echo ok", 0, 2)
-        check("5a 读到宿主数据", (j["m"], j["data"], j["cls"], j["trunc"])
-              == ("ok", "host", [], False), repr(j))
-        check("5b 读到但超 8KB", J("ok", "echo ok", 0, 9000)["trunc"] is True)
+        check("5a 非空成功输出仍须判读", (j["m"], j["data"], j["cls"], j["trunc"])
+              == ("unreviewed", "none", [], False), repr(j))
+        mod.REACH_NOTE[("ok", "echo ok")] = mod._note((0, 9000), "ok", "host")
+        check("5b 已判读且超 8KB", J("ok", "echo ok", 0, 9000)["trunc"] is True)
+        recent = mod.judge_reach(row("no", "who", 0, 5), reviewed_capture=False)
+        check("5b2 新采集同字节数也不沿用历史注记", recent["m"] == "unreviewed")
         check("5c rc=1 → fail，静态 ok → 类 a",
               (lambda d: (d["m"], d["cls"]))(J("ok", "echo ok", 1, 40)) == ("fail", ["a"]))
         check("5d rc=2 → fail", J("ok", "echo ok", 2, 0)["m"] == "fail")
         check("5e rc=127 → missing", J("no", "ethtool eth0", 127, 70)["m"] == "missing")
         check("5f rc=137 → timeout", J("ok", "echo ok", 137, 0)["m"] == "timeout")
         check("5g rc=100 → error", J("ok", "echo ok", 100, 584)["m"] == "error")
-        j = J("no", "who", 0, 5)
+        j = J("ok", "who", 0, 5)
         check("5h 注记生效：静态 no、实测读到 → b1", (j["m"], j["data"], j["cls"])
               == ("ok", "host", ["b1"]), repr(j))
         j = J("no", "who", 0, 0)
@@ -244,7 +257,7 @@ try:
               == ("empty", "undetermined", ["b2", "c"]), repr(j))
         j = J("ok", "who", 0, 9)
         check("5l 结果与注记钉的不一样 → 注记失效、不套用",
-              (j["stale"], j["m"], j["empty"], j["why"] != "") == (True, "ok", "", True),
+              (j["stale"], j["m"], j["empty"], j["why"] != "") == (True, "unreviewed", "", True),
               repr(j))
         j = J("view", "ls -la /", 0, 754)
         check("5m 视图探针不参与分类", (j["m"], j["cls"], j["snow"]) == ("view", [], None), repr(j))
@@ -310,17 +323,17 @@ try:
               S["c"] == zero and sorted(n for n, _ in S["empty"]) == zero
               and all(code for _, code in S["empty"]), repr((S["c"], S["empty"])))
         all_m = set(mod.M_OF) - {"view"}
-        check("7d 九种判定的计数 = 已采的命令条目数（视图探针另计）",
+        check("7d 所有判定的计数 = 已采的命令条目数（视图探针另计）",
               sum(S["m"].values()) + S["n_view"] == len(lat)
               and set(S["m"]) == all_m, repr((S["m"], S["n_view"], len(lat))))
-        rc0 = sorted(n for n in lat if drows[lat[n]]["snow"] == "no" and rows[lat[n]]["rc"] == 0)
+        rc0 = sorted(n for n in lat if drows[lat[n]]["snow"] == "no" and rows[lat[n]]["rc"] == 0 and m_of[n] != "unreviewed")
         check("7e 类 b 恰为「静态判 no 且 rc=0」的条目，读到的归 b1、没读到的归 b2",
               sorted(S["b1"] + S["b2"]) == rc0
               and all(m_of[n] in mod.READABLE for n in S["b1"])
               and all(m_of[n] not in mod.READABLE for n in S["b2"])
               and S["a"] == sorted(n for n in lat
                                    if drows[lat[n]]["snow"] in ("ok", "partial")
-                                   and m_of[n] not in mod.READABLE),
+                                   and m_of[n] not in (*mod.READABLE, "unreviewed")),
               repr((S["a"], S["b1"], S["b2"])))
         undetermined = [n for n, code in S["empty"] if code == "undetermined"]
         check("7f 零字节里标「未定」的都带了补测动作",
