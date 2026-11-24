@@ -31,6 +31,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -123,7 +124,8 @@ try:
                  raises(mod.parse_probe_list, 'PROBE_LIST=(\n\t"ok"\t"x"\n)\n'), "解析不了")
     expect_error("1c 清单解析：找不到清单要报错",
                  raises(mod.parse_probe_list, "# nothing here\n"), "找不到")
-    with open(os.path.join(HERE, "occ_reach_probe.sh"), encoding="utf-8") as f:
+    probe = os.path.join(HERE, "occ_reach_probe.sh")
+    with open(probe, encoding="utf-8") as f:
         real = mod.parse_probe_list(f.read())
     check("1d 真实清单：判定只取四种、命令非空、序号连续",
           all(e["label"] in mod.REACH_LABELS and e["cmd"] for e in real)
@@ -131,6 +133,22 @@ try:
     n_of = {}
     for e in real:
         n_of.setdefault(e["cmd"], e["n"])
+    historical_only = {
+        "curl -s -m 5 http://127.0.0.1:8091/api/stats",
+        "curl -s -m 5 http://127.0.0.1:8091/api/theme",
+        "aikctl session list", "cat /proc/ai/decisions", "cat /proc/ai/chains",
+        "cat /sys/kernel/ai/model_out",
+    }
+    candidates = [e for e in real if e["cmd"] not in historical_only]
+    listing = subprocess.check_output(["bash", probe, "--list"], text=True).splitlines()
+    check("1e 可执行清单只排除历史六条，顺序保持",
+          len(real) - len(candidates) == 6
+          and listing == [e["label"] + "\t" + e["cmd"] for e in candidates])
+    only = subprocess.check_output(
+        ["bash", probe, "--only", "cat,curl,aikctl", "--list"], text=True).splitlines()
+    check("1f --only 只在可执行集合内选择首 token",
+          only == [entry for entry in listing
+                   if entry.split("\t", 1)[1].split()[0] in {"cat", "curl", "aikctl"}])
 
     # ---- 2. TSV 解析 ----
     p = os.path.join(tmp, "a.tsv")
@@ -169,6 +187,14 @@ try:
         expect_error(name, raises(mod.parse_reach_tsv, bad), needle)
     expect_error("2k 文件不存在", raises(mod.parse_reach_tsv, os.path.join(tmp, "missing.tsv")),
                  "读不了")
+    marker = "fixture-sensitive-not-real"
+    for column in (0, 5):
+        malformed = list(ECHO)
+        malformed[column] = marker
+        write(bad, tsv_text([malformed]))
+        err = raises(mod.parse_reach_tsv, bad)
+        check("2l 未知标签报错不回显列 %d" % column,
+              bool(err) and "bad.tsv" in err and "第 7 行" in err and marker not in err)
 
     # ---- 3. 清单对行 ----
     def al(entries, rows, filename):
@@ -193,6 +219,10 @@ try:
                  raises(al, ents, [{"cmd": "echo ok"}, {"cmd": "reboot"}], "f"), "对不上")
     expect_error("3d 对行：顺序与清单不一致要报错",
                  raises(al, ents, [{"cmd": "ls -la /"}, {"cmd": "echo ok"}], "f"), "对不上")
+    write(bad, tsv_text([("ok", marker, 0, "0.01", 2, "ok", "")]))
+    err = raises(mod.collect_reach, REPO, [bad])
+    check("3e 不匹配的命令只报来源与条号",
+          bool(err) and "bad.tsv" in err and "第 1 条数据" in err and marker not in err)
 
     # ---- 4. 现行静态判定 ----
     sv = mod.static_verdict_of

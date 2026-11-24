@@ -1877,8 +1877,7 @@ def parse_reach_tsv(path):
         except ValueError:
             raise ReachError("%s 第 %d 行的 rc / seconds / out_bytes 不是有效计数" % (fname, lineno))
         if f[0] not in REACH_LABELS or f[5] not in OCC_VIEWS:
-            raise ReachError("%s 第 %d 行的判定或 occ_view 不认识：%r / %r"
-                             % (fname, lineno, f[0], f[5]))
+            raise ReachError("%s 第 %d 行的判定或 occ_view 不认识" % (fname, lineno))
         rows.append({"cmd": f[1], "static_at_capture": f[0], "rc": rc, "seconds": secs,
                      "out_bytes": nb, "occ_view": f[5]})
     if not rows:
@@ -1897,8 +1896,8 @@ def align_reach(entries, trows, fname):
                 r["cmd"], r["static_at_capture"]):
             j += 1
         if j >= len(entries):
-            raise ReachError("%s 第 %d 条（%r）对不上探测清单：清单里没有这条命令，"
-                             "或顺序与清单不一致" % (fname, i, r["cmd"]))
+            raise ReachError("%s 第 %d 条数据对不上历史探测清单（条目或顺序不一致）"
+                             % (fname, i))
         out.append((entries[j], r))
         cur = j + 1
     return out
@@ -2332,10 +2331,12 @@ def render_reach(rep):
 
     pending = derived["pending"]
     L += ["", "## 17. 跨批清单覆盖", "",
-          "两批编号并集 %d/%d。此处只统计命令覆盖，不生成跨版本对象结论。"
-          % (len(entries) - len(pending), len(entries)), ""]
+          "历史清单编号并集 %d/%d。此处只统计命令覆盖，不生成跨版本对象结论。"
+          % (len(entries) - len(pending), len(entries)), "",
+          "当前执行集合见 `occ_reach_probe.sh --list`。桌面 `/api/stats` 与 `/api/theme` 因副作用停用，"
+          "既有结果保留供复算。会话清单、内核决策、因果链及模型原始输出也已排除。", ""]
     if pending:
-        L += ["| 清单# | 留待核对 |", "|---:|---|"]
+        L += ["| 历史清单# | 未采条目 |", "|---:|---|"]
         for n in pending:
             L.append("| %d | %s |" % (n, _code(entries[n][1])))
     L.append("")

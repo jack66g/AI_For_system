@@ -3,8 +3,8 @@
 # occ_reach_probe.sh - 出厂 AI「沙箱可达面」实测探测（AIF-01）
 #
 # 干什么
-#   把一份只读命令清单逐条放进 aik-sandbox 里执行，记录退出码、耗时、输出
-#   字节数与输出首行，产出 TSV。用来回填/校正 audit_occ_capabilities.py 里
+#   把筛选好的探针逐条放进 aik-sandbox 里执行，记录退出码、耗时、输出
+#   长度与输出首行，产出 TSV。用来回填/校正 audit_occ_capabilities.py 里
 #   「沙箱内命令可达表」的静态推断（那张表的判定列原样带进来对照）。
 #
 # 调用方式与 occ 的 bash 工具逐字对齐
@@ -12,21 +12,21 @@
 #     aik-sandbox create <zone>
 #     aik-sandbox run <zone> --rw-path <workdir> -- /bin/sh -c "cd <workdir> && { <cmd> ; }"
 #     aik-sandbox destroy <zone>            （幂等；脚本退出时必做）
-#   aik-sandbox 退出码：0 成功；1 用法；2 组装失败；127 exec 失败；其余是
-#   沙箱内命令自己的退出码原样透传。
+#   aik-sandbox 透传命令退出码，部分值与包装器自身失败重叠。
 #
 # 纪律
 #   * 组装 namespace 需要特权：本脚本只认 euid 0，自己绝不调 sudo；非 root 退出 2。
-#   * 清单里全是只读探测（写文件、发信号、可能伤到宿主的一律不收）。
+#   * PROBE_LIST 保留历史顺序供审计复算；执行前排除下方列出的副作用和敏感内容探针。
 #   * 工作目录缺省是 mktemp -d 的私有目录（不碰 /var/ai/work），退出即删。
 #   * 不启停服务、不连外机、不读凭据文件。
 #
 # 用法
-#   bash occ_reach_probe.sh --list                         只打印清单
-#   bash occ_reach_probe.sh                               全量，TSV 打到标准输出
+#   bash occ_reach_probe.sh --list                         只打印实际可执行集合
+#   bash occ_reach_probe.sh                               跑当前可执行集合，TSV 打到标准输出
 #   bash occ_reach_probe.sh --only "systemctl,ps,ip" --timeout 10 --out /tmp/reach.tsv
 # 选项
-#   --only a,b,c     只跑首 token 命中的条目
+#   --list           仅列当前可执行集合（应用 --only，不启动沙箱）；历史全表见 PROBE_LIST
+#   --only a,b,c     只选择执行集合中首 token 命中的条目
 #   --timeout N      单条命令超时秒数（缺省 10；超时 SIGKILL 整个进程组）
 #   --out FILE       TSV 输出文件（缺省标准输出）
 #   --workdir DIR    挂进沙箱的读写工作目录（缺省 mktemp）
@@ -46,7 +46,7 @@
 #   注意 occ_tools/sandbox.c:570-575 把 exit=1/2 一律报成「bash 沙箱执行失败」，
 #   而沙箱内命令自己的退出码 1/2 也原样透传——两者在 occ 侧无法区分。
 #
-# 清单维护：改下面的 PROBE_LIST 即可。每条是「判定<TAB>命令」，判定取
+# 历史全表：已取证的条目文本及顺序用于后续对账。每条是「判定<TAB>命令」，判定取
 # ok/partial/no（与 audit_occ_capabilities.py 的沙箱命令表同一口径）。
 # 顺序执行，一区复用（create 一次、run 多次、destroy 一次）。
 PROBE_LIST=(
@@ -305,9 +305,31 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
+# 执行集合与 --list 取同一个结果；--only 只能在通过排除规则之后缩小范围。
+RUN_LIST=()
+for e in "${PROBE_LIST[@]}"; do
+	cmd="${e#*$'\t'}"
+	case "$cmd" in
+	# 这两个 GET 会更新服务状态：desktopd.c:361 追加内存历史，
+	# dttheme.c:90,163-181 可能补默认主题并写回。
+	"curl -s -m 5 http://127.0.0.1:8091/api/stats"|\
+	"curl -s -m 5 http://127.0.0.1:8091/api/theme")
+		continue ;;
+	# 以下输出可能包含用户会话或内核决策、因果链及模型原始数据。
+	"aikctl session list"|"cat /proc/ai/decisions"|"cat /proc/ai/chains"|\
+	"cat /sys/kernel/ai/model_out")
+		continue ;;
+	esac
+	first="${cmd%% *}"
+	if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$first,"* ]]; then
+		continue
+	fi
+	RUN_LIST+=("$e")
+done
+
 if [ "$LIST_ONLY" = 1 ]; then
-	for e in "${PROBE_LIST[@]}"; do
-		printf '%s\t%s\n' "${e%%$'\t'*}" "${e#*$'\t'}"
+	for e in "${RUN_LIST[@]}"; do
+		printf '%s\n' "$e"
 	done
 	exit 0
 fi
@@ -405,13 +427,9 @@ fi
 n=0
 c_ok_rc0=0; c_ok_rcnz=0; c_partial_rc0=0; c_partial_rcnz=0
 c_no_rc0=0; c_no_rcnz=0
-for e in "${PROBE_LIST[@]}"; do
+for e in "${RUN_LIST[@]}"; do
 	static="${e%%$'\t'*}"
 	cmd="${e#*$'\t'}"
-	first="${cmd%% *}"
-	if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$first,"* ]]; then
-		continue
-	fi
 	n=$((n + 1))
 	t0=$(date +%s%N)
 	out="$(timeout -s KILL "$TIMEOUT" "$BIN" run "$ZONE" --rw-path "$WORKDIR" -- \
