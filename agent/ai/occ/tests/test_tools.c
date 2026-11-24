@@ -921,12 +921,13 @@ int main(void)
 		occ_sandbox_probe_cache_reset();
 		s = (char *)exec_tool("bash",
 		      "{\"command\":\"echo legacy-out; exit 1\"}");
-		OK(exec_rc() == 0 && s && strstr(s, "legacy-out") &&
-		   strstr(s, "[exit=1]（来源未定）") &&
-		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit1");
+		OK(exec_rc() != 0 && s && strstr(s, "legacy-out") &&
+		   strstr(s, "来源未定") && strstr(s, "沙箱执行失败") &&
+		   !strstr(s, "[exit=1]"), "bash11-legacy-unknown-exit1");
 		s = (char *)exec_tool("bash", "{\"command\":\"exit 2\"}");
-		OK(exec_rc() == 0 && s && strstr(s, "[exit=2]（来源未定）") &&
-		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit2");
+		OK(exec_rc() != 0 && s && strstr(s, "来源未定") &&
+		   strstr(s, "沙箱执行失败") &&
+		   !strstr(s, "[exit=2]"), "bash11-legacy-unknown-exit2");
 
 		/* B12 状态伪造/截断 → 来源未定（不得当成功或沙箱失败） */
 		setenv("OCC_SANDBOX_BIN", stub, 1);
@@ -937,8 +938,8 @@ int main(void)
 		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
 		unsetenv("OCC_STUB_RAW");
 		unsetenv("OCC_STUB_RAW_RC");
-		OK(exec_rc() == 0 && s && strstr(s, "来源未定") &&
-		   !strstr(s, "[exit=0]") && !strstr(s, "沙箱执行失败"),
+		OK(exec_rc() != 0 && s && strstr(s, "来源未定") &&
+		   strstr(s, "沙箱执行失败") && !strstr(s, "[exit=0]"),
 		   "bash12-forged-rc-mismatch");
 		setenv("OCC_STUB_RAW",
 		       "AIK-SANDBOX-STATUS v1 phase=child rc=1", 1);
@@ -946,7 +947,7 @@ int main(void)
 		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
 		unsetenv("OCC_STUB_RAW");
 		unsetenv("OCC_STUB_RAW_RC");
-		OK(exec_rc() == 0 && s && strstr(s, "来源未定"),
+		OK(exec_rc() != 0 && s && strstr(s, "来源未定"),
 		   "bash12-truncated-line");
 		setenv("OCC_STUB_RAW",
 		       "AIK-SANDBOX-STATUS v1 phase=nonsense rc=0\n", 1);

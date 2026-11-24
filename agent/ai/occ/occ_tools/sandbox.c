@@ -778,12 +778,20 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 			case SB_ST_UNKNOWN:
 			default:
 				/* 旧包装器 / sudo 关 fd / 写失败 / 截断 / 伪造：
-				 * 来源未定——原样保留输出并标出来，不静默当成功
-				 * 也不当沙箱失败（退出码照实给出）。[exit=N]
-				 * 形态保持原样（现役调用方按它取退出码）。 */
+				 * 来源未定——原样保留输出。旧包装器的 1/2 曾
+				 * 一律是沙箱面故障（S1 红线：不得当成功），
+				 * 保守沿用错误语义并标「来源未定」；其余退出码
+				 * 仍是命令结果（[exit=N] 形态不变）。 */
 				occ_ob_puts(o, rr.out ? rr.out : "");
-				ob_num(o, "\n[exit=", rr.exit_code,
-				       L_("]（来源未定）"));
+				if (rr.exit_code == 1 || rr.exit_code == 2) {
+					occ_ob_puts(o, L_("\nERROR: bash 沙箱执行失败（来源未定，aik-sandbox"));
+					ob_num(o, " exit=", rr.exit_code,
+					       L_("）：无法区分组装失败与命令非零退出"));
+					rc = -1;
+				} else {
+					ob_num(o, "\n[exit=", rr.exit_code,
+					       L_("]（来源未定）"));
+				}
 				break;
 			}
 		}
