@@ -40,6 +40,12 @@
  *  18. checkpoint 落盘失败 → PUT /config 回 200 {"ok":false,"errors":
  *      {"_global":"persistence 关闭模式下 checkpoint 落盘失败，引擎保持
  *      原配置：…"}}，引擎仍是旧配置、记忆未丢。
+ *
+ * MEM-02b（上游 ed5378a sme/models.py::_validate_memory_numbers，P2-4）：
+ *  19. POST /import、/import/file：hit_count < 0、weight < 0、数值字段非
+ *      有限（1e999 溢出的 ±inf）→ 整批 422（value_error，loc 指到条目与
+ *      字段，与空白 text 的 422 同款），什么都没入库；importance 越界
+ *      （7.5）仍按既有行为放行；边界值放行后检索分数有限。
  * 自 MEM-02a 起配置热重建会往 storage.path 写快照，所以：
  *  - 默认配置那台服务器的子进程先 chdir 到临时目录（默认 storage.path
  *    是相对路径 data/engine.json），快照落在临时目录里而不是源码树；
@@ -56,6 +62,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -70,6 +77,9 @@
 
 static size_t checks;
 static size_t mismatches;
+
+/* 请求 Content-Type 覆盖（NULL = application/json；/import/file 用 multipart） */
+static const char *g_req_content_type;
 
 static void check_true(int cond, const char *fmt, ...)
 {
@@ -401,12 +411,15 @@ static int http_call(int port, const char *method, const char *path,
 		      "%s %s HTTP/1.1\r\n"
 		      "Host: 127.0.0.1\r\n"
 		      "Connection: close\r\n"
-		      "Content-Type: application/json\r\n"
+		      "Content-Type: %s\r\n"
 		      "%s"
 		      "Content-Length: %zu\r\n"
 		      "\r\n"
 		      "%s",
-		      method, path, authhdr, body_len, body ? body : "");
+		      method, path,
+		      g_req_content_type ? g_req_content_type
+					  : "application/json",
+		      authhdr, body_len, body ? body : "");
 	if (rl <= 0 || (size_t)rl >= sizeof(req)) {
 		fprintf(stderr, "test_http: request too large\n");
 		return -1;
@@ -2885,6 +2898,319 @@ static void test_dynamics_http(int port)
 }
 
 /* ------------------------------------------------------------------ */
+/* MEM-02b：导入数值校验 → 422                                           */
+/*                                                                     */
+/* 上游 ed5378a sme/models.py::_validate_memory_numbers（P2-4）；回归 */
+/* experiment/regression/test_fix_round_20261120.py::test_import_      */
+/* negative_hit_count_rejected / _negative_weight_rejected /           */
+/* _nan_importance_rejected / _valid_items_still_work。上游 HEAD 的    */
+/* POST /import 对这类数据是未捕获 ValueError → 500；C 版按任务书回 422 */
+/* （value_error，与空白 text 的 422 同款），并且先整体校验、整批原子拒绝。 */
+/* importance 越界（7.5）不在拒绝范围内：C 版既有行为不变。              */
+/* ------------------------------------------------------------------ */
+static long long export_count(int port);
+
+static int json_str_is(const aik_json *v, const char *s)
+{
+	return aik_json_typeof(v) == AIK_JSON_STR &&
+	       strcmp(aik_json_str(v), s) == 0;
+}
+
+/* loc == ["body", ("memories",) idx, field] */
+static int loc_is_item_field(const aik_json *loc, int in_memories,
+			     long long idx, const char *field)
+{
+	size_t at = 0;
+
+	if (aik_json_typeof(loc) != AIK_JSON_ARR)
+		return 0;
+	if (aik_json_count(loc) != (in_memories ? 4u : 3u))
+		return 0;
+	if (!json_str_is(aik_json_at(loc, at++), "body"))
+		return 0;
+	if (in_memories &&
+	    !json_str_is(aik_json_at(loc, at++), "memories"))
+		return 0;
+	if (aik_json_typeof(aik_json_at(loc, at)) != AIK_JSON_INT ||
+	    aik_json_int(aik_json_at(loc, at)) != idx)
+		return 0;
+	at++;
+	return json_str_is(aik_json_at(loc, at), field);
+}
+
+/*
+ * 一条 value_error 详情：键序 type/loc/msg/input/ctx、type、loc、msg、
+ * ctx 为对象；input_kind：0 = 不比对 input，1 = 整数 input_int，
+ * 2 = 字符串 input_str（非有限值的 repr，"inf" / "-inf" / "nan"）。
+ */
+static void check_value_error(const aik_json *detail, int in_memories,
+			      long long idx, const char *field,
+			      const char *why, int input_kind,
+			      long long input_int, const char *input_str,
+			      const char *what)
+{
+	static const char *const keys[] = {
+		"type", "loc", "msg", "input", "ctx"
+	};
+	char msg[160];
+	const aik_json *input;
+
+	snprintf(msg, sizeof(msg), "Value error, %s", why);
+	check_keys(detail, keys, 5, what);
+	check_true(json_str_is(aik_json_get(detail, "type"), "value_error"),
+		   "%s: type", what);
+	check_true(loc_is_item_field(aik_json_get(detail, "loc"), in_memories,
+				     idx, field), "%s: loc", what);
+	check_str(aik_json_str(aik_json_get(detail, "msg")), msg, what);
+	check_true(aik_json_typeof(aik_json_get(detail, "ctx")) ==
+			   AIK_JSON_OBJ, "%s: ctx", what);
+	input = aik_json_get(detail, "input");
+	if (input_kind == 2)
+		check_true(json_str_is(input, input_str),
+			   "%s: input is not the string '%s'", what,
+			   input_str);
+	else if (input_kind == 1)
+		check_true(aik_json_typeof(input) == AIK_JSON_INT &&
+				   aik_json_int(input) == input_int,
+			   "%s: input", what);
+}
+
+/* POST /import/file：把 json 当作 multipart 的 file 字段上传，返回解析后的响应体 */
+static aik_json *call_import_file(int port, const char *json, int *status)
+{
+	static const char bnd[] = "aikmem02bboundary";
+	char ct[96];
+	char *mp;
+	char *resp = NULL;
+	aik_json *root = NULL;
+	size_t n = strlen(json) + 256;
+
+	mp = malloc(n);
+	if (!mp)
+		return NULL;
+	snprintf(mp, n,
+		 "--%s\r\n"
+		 "Content-Disposition: form-data; name=\"file\"; "
+		 "filename=\"a.json\"\r\n"
+		 "Content-Type: application/json\r\n\r\n"
+		 "%s\r\n"
+		 "--%s--\r\n",
+		 bnd, json, bnd);
+	snprintf(ct, sizeof(ct), "multipart/form-data; boundary=%s", bnd);
+	g_req_content_type = ct;
+	if (http_call(port, "POST", "/import/file", mp, NULL, status,
+		      &resp) == 0)
+		root = parse_json(resp);
+	g_req_content_type = NULL;
+	free(resp);
+	free(mp);
+	return root;
+}
+
+static void test_mem02b_import(int port)
+{
+	/* 会污染排序信号的非法值 → 422（input_kind 见 check_value_error） */
+	static const struct {
+		const char *json;	/* memories 数组 */
+		const char *field;
+		const char *why;
+		int input_kind;
+		long long input_int;
+		const char *input_str;
+	} cases[] = {
+		{ "[{\"id\":\"p1\",\"text\":\"poison one\",\"hit_count\":-1,"
+		  "\"weight\":1.0}]",
+		  "hit_count", "hit_count must be a non-negative integer",
+		  1, -1, NULL },
+		/* -1.0 解析成 NUM：input 是原值，不比对 */
+		{ "[{\"id\":\"p2\",\"text\":\"poison two\",\"hit_count\":2,"
+		  "\"weight\":-1.0}]",
+		  "weight", "weight must be a finite non-negative number",
+		  0, 0, NULL },
+		{ "[{\"id\":\"p3\",\"text\":\"poison three\",\"freshness\":1e999}]",
+		  "freshness", "freshness must be finite", 2, 0, "inf" },
+		{ "[{\"id\":\"p4\",\"text\":\"poison four\",\"created_at\":-1e999}]",
+		  "created_at", "created_at must be finite", 2, 0, "-inf" },
+		{ "[{\"id\":\"p5\",\"text\":\"poison five\",\"last_hit\":1e999}]",
+		  "last_hit", "last_hit must be finite", 2, 0, "inf" },
+		{ "[{\"id\":\"p6\",\"text\":\"poison six\",\"decay_factor\":1e999}]",
+		  "decay_factor", "decay_factor must be finite", 2, 0, "inf" },
+		{ "[{\"id\":\"p7\",\"text\":\"poison seven\",\"importance\":1e999}]",
+		  "importance", "importance must be finite in [0,1]", 2, 0,
+		  "inf" },
+		/* 1e300 超出 int64：转 long long 是未定义行为，同样拒 */
+		{ "[{\"id\":\"p8\",\"text\":\"poison eight\",\"hit_count\":1e300}]",
+		  "hit_count", "hit_count must be a non-negative integer",
+		  0, 0, NULL },
+	};
+	char body[1024];
+	int status = -1;
+	aik_json *root;
+	const aik_json *detail;
+	const aik_json *arr;
+	size_t i;
+	int finite = 1;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		snprintf(body, sizeof(body), "{\"memories\":%s}",
+			 cases[i].json);
+		status = -1;
+		char tag[64];
+
+		snprintf(tag, sizeof(tag), "m02b case %zu", i);
+		root = call_json(port, "POST", "/import", body, &status, NULL);
+		check_int(status, 422, tag);
+		detail = root ? first_detail(root, tag) : NULL;
+		if (detail)
+			check_value_error(detail, 1, 0, cases[i].field,
+					  cases[i].why, cases[i].input_kind,
+					  cases[i].input_int,
+					  cases[i].input_str, tag);
+		aik_json_free(root);
+	}
+	/* 整批拒绝：没有任何一条入库 */
+	check_int(export_count(port), 0, "m02b export count after rejects");
+
+	/* NaN 字面量不是合法 JSON：解析期就拒（既有 json_invalid 422） */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"text\":\"x\",\"weight\":NaN}]}",
+			 &status, NULL);
+	check_int(status, 422, "m02b NaN literal status");
+	detail = root ? first_detail(root, "m02b NaN literal") : NULL;
+	check_true(detail && json_str_is(aik_json_get(detail, "type"),
+					 "json_invalid"),
+		   "m02b NaN literal type");
+	aik_json_free(root);
+
+	/* importance 越界：既有行为不变（放行；上游 HEAD 是 422，留给主会话） */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"id\":\"ok1\",\"text\":\"mem02b valid "
+			 "memory\",\"hit_count\":3,\"weight\":1.4,"
+			 "\"importance\":7.5}]}",
+			 &status, NULL);
+	check_int(status, 200,
+		  "m02b importance out of range status (existing behaviour)");
+	check_int(root ? aik_json_int(aik_json_get(root, "imported")) : -99, 1,
+		  "m02b importance out of range imported");
+	aik_json_free(root);
+	check_int(export_count(port), 1, "m02b export count after valid");
+
+	/* 混批：合法 + 毒数据 → 整批 422，合法那条也没入库 */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"text\":\"would be valid\"},"
+			 "{\"text\":\"poison\",\"hit_count\":-5}]}", &status,
+			 NULL);
+	check_int(status, 422, "m02b mixed status");
+	detail = root ? first_detail(root, "m02b mixed") : NULL;
+	if (detail)
+		check_value_error(detail, 1, 1, "hit_count",
+				  "hit_count must be a non-negative integer",
+				  1, -5, NULL, "m02b mixed");
+	aik_json_free(root);
+	check_int(export_count(port), 1, "m02b mixed export count (atomic)");
+
+	/* 两条毒数据 → 两条详情（各报第一个非法字段，合法条目不报） */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"text\":\"a\",\"hit_count\":-1,"
+			 "\"weight\":-2},{\"text\":\"b\"},"
+			 "{\"text\":\"c\",\"weight\":-1}]}", &status, NULL);
+	check_int(status, 422, "m02b two-poisons status");
+	arr = root ? aik_json_get(root, "detail") : NULL;
+	check_int(arr ? (long long)aik_json_count(arr) : -99, 2,
+		  "m02b two-poisons detail count");
+	if (arr && aik_json_count(arr) == 2) {
+		check_value_error(aik_json_at(arr, 0), 1, 0, "hit_count",
+				  "hit_count must be a non-negative integer",
+				  1, -1, NULL, "m02b two-poisons[0]");
+		check_value_error(aik_json_at(arr, 1), 1, 2, "weight",
+				  "weight must be a finite non-negative number",
+				  1, -1, NULL, "m02b two-poisons[1]");
+	}
+	aik_json_free(root);
+
+	/* 空文本条目引擎本就跳过：带毒也不校验 */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"text\":\"\",\"hit_count\":-1}]}",
+			 &status, NULL);
+	check_int(status, 200, "m02b empty-text status");
+	check_int(root ? aik_json_int(aik_json_get(root, "imported")) : -99, 0,
+		  "m02b empty-text imported");
+	aik_json_free(root);
+
+	/* 边界与合法值放行；之后检索的分数都是有限值（不再除零） */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":["
+			 "{\"text\":\"mem02b zero values\",\"hit_count\":0,"
+			 "\"weight\":0},"
+			 "{\"text\":\"mem02b big count\","
+			 "\"hit_count\":9223372036854775807,\"weight\":2.5}]}",
+			 &status, NULL);
+	check_int(status, 200, "m02b boundary status");
+	check_int(root ? aik_json_int(aik_json_get(root, "imported")) : -99, 2,
+		  "m02b boundary imported");
+	aik_json_free(root);
+	check_int(export_count(port), 3, "m02b boundary export count");
+	status = -1;
+	root = call_json(port, "POST", "/memories/search",
+			 "{\"text\":\"mem02b\",\"top_k\":5}", &status, NULL);
+	check_int(status, 200, "m02b search status");
+	arr = root ? aik_json_get(root, "results") : NULL;
+	check_int(arr ? (long long)aik_json_count(arr) : -99, 3,
+		  "m02b search count");
+	for (i = 0; arr && i < aik_json_count(arr); i++) {
+		const aik_json *score = aik_json_get(aik_json_at(arr, i),
+						     "score");
+
+		if (aik_json_typeof(score) != AIK_JSON_NUM ||
+		    !(fabs(aik_json_num(score)) < 1e300))
+			finite = 0;
+	}
+	check_int(finite, 1, "m02b search scores are finite");
+	aik_json_free(root);
+
+	/* /import/file：同一套校验；loc 形状与 /import 对齐 */
+	status = -1;
+	root = call_import_file(port,
+				"{\"memories\":[{\"text\":\"file poison\","
+				"\"hit_count\":-1}]}", &status);
+	check_int(status, 422, "m02b import/file poison status");
+	detail = root ? first_detail(root, "m02b import/file poison") : NULL;
+	if (detail)
+		check_value_error(detail, 1, 0, "hit_count",
+				  "hit_count must be a non-negative integer",
+				  1, -1, NULL, "m02b import/file poison");
+	aik_json_free(root);
+	check_int(export_count(port), 3,
+		  "m02b import/file poison export count");
+	status = -1;
+	root = call_import_file(port,
+				"[{\"text\":\"file poison\",\"weight\":-3}]",
+				&status);
+	check_int(status, 422, "m02b import/file array poison status");
+	detail = root ? first_detail(root, "m02b import/file array") : NULL;
+	if (detail)
+		check_value_error(detail, 0, 0, "weight",
+				  "weight must be a finite non-negative number",
+				  1, -3, NULL, "m02b import/file array");
+	aik_json_free(root);
+	status = -1;
+	root = call_import_file(port,
+				"[{\"text\":\"file valid\",\"hit_count\":2,"
+				"\"weight\":1.5}]", &status);
+	check_int(status, 200, "m02b import/file valid status");
+	check_int(root ? aik_json_int(aik_json_get(root, "imported")) : -99, 1,
+		  "m02b import/file valid imported");
+	aik_json_free(root);
+	check_int(export_count(port), 4, "m02b import/file valid export count");
+}
+
+/* ------------------------------------------------------------------ */
 /* MEM-02a：热重建后持久化关闭 → 立即 checkpoint                         */
 /* ------------------------------------------------------------------ */
 
@@ -3098,6 +3424,16 @@ int main(void)
 	/* MEM-02a：热重建后持久化关闭 → 立即 checkpoint；落盘失败整体回滚 */
 	test_mem02a_checkpoint(tmpdir);
 	test_mem02a_blocked(tmpdir);
+
+	/* MEM-02b：导入数值校验 → 422（独立服务器，不动前面用例的记忆集） */
+	if (start_server(&srv, tmpdir, "m02b", "") != 0) {
+		fprintf(stderr, "test_http: cannot start server (m02b)\n");
+		rm_rf(tmpdir);
+		return 1;
+	}
+	test_mem02b_import(srv.port);
+	check_true(stop_server(&srv) == 0,
+		   "m02b server did not exit 0 on SIGTERM");
 
 	/* 快照、NPZ sidecar、WAL 文件、默认配置服务器的 data/ 都在这个目录里 */
 	rm_rf(tmpdir);

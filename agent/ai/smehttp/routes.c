@@ -45,6 +45,14 @@
  * 转换（数值字符串、bool→int、非整 float 的 int_from_float 等）不在本轮
  * 契约内（见 T4B-DESIGN §6）。
  *
+ * MEM-02b（依据上游 ed5378a sme/models.py::_validate_memory_numbers，P2-4）：
+ * POST /import 先整体过数值校验（aik_http_import_check_numbers，与
+ * /import/file 共用）：hit_count < 0、weight < 0、数值字段非有限（1e999
+ * 溢出成的 ±inf）会污染排序信号 → 整批拒绝 422（value_error，与空白 text
+ * 的 422 同款）。importance 越界仍按既有行为放行（上游 HEAD 会拒绝，留给
+ * 主会话决定）。上游 HEAD 对这类导入是未捕获的 ValueError → 500；422 是
+ * C 侧的决定。
+ *
  * 引擎失败（非校验）统一 500 {"detail":"Internal Server Error"}；batch 中途
  * 失败返回参考的详细 detail（error/failed_index/committed_ids/...）。
  */
@@ -52,6 +60,7 @@
 
 #include "smehttp/http.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -246,10 +255,15 @@ typedef struct {
 	size_t item;
 	const char *field;	/* NULL 表示不追加字段 */
 	long long elem;		/* >=0 表示追加数组下标 */
+	int has_item;		/* 1 = in_item 为 0 时也追加 <item>（无 "memories" 段） */
 } vloc;
 
-static int v_add(vctx *v, const char *type, const char *msg,
-		 const aik_json *input, const vloc *loc, int with_ctx)
+/*
+ * v_add_owned - 追加一条 Pydantic error；input_node 的所有权被接管
+ * （没能入表时在本函数内释放）
+ */
+static int v_add_owned(vctx *v, const char *type, const char *msg,
+		       aik_json *input_node, const vloc *loc, int with_ctx)
 {
 	int bad = 0;
 	aik_json *item = jb_obj(&bad);
@@ -259,6 +273,8 @@ static int v_add(vctx *v, const char *type, const char *msg,
 	if (loc->in_item) {
 		jb_push(l, jb_str("memories", &bad), &bad);
 		jb_push(l, jb_int((long long)loc->item, &bad), &bad);
+	} else if (loc->has_item) {
+		jb_push(l, jb_int((long long)loc->item, &bad), &bad);
 	}
 	if (loc->field)
 		jb_push(l, jb_str(loc->field, &bad), &bad);
@@ -267,7 +283,7 @@ static int v_add(vctx *v, const char *type, const char *msg,
 	jb_put(item, "type", jb_str(type, &bad), &bad);
 	jb_put(item, "loc", l, &bad);
 	jb_put(item, "msg", jb_str(msg, &bad), &bad);
-	jb_put(item, "input", jclone(input, &bad), &bad);
+	jb_put(item, "input", input_node, &bad);
 	if (with_ctx) {
 		aik_json *ctx = jb_obj(&bad);
 
@@ -285,6 +301,15 @@ static int v_add(vctx *v, const char *type, const char *msg,
 		return -1;
 	}
 	return 0;
+}
+
+/* v_add - input 为借用的请求 DOM 节点（深拷贝进错误体） */
+static int v_add(vctx *v, const char *type, const char *msg,
+		 const aik_json *input, const vloc *loc, int with_ctx)
+{
+	int bad = 0;
+
+	return v_add_owned(v, type, msg, jclone(input, &bad), loc, with_ctx);
 }
 
 static void respond_validation(aik_http_response *resp, vctx *v)
@@ -307,6 +332,81 @@ static void respond_validation(aik_http_response *resp, vctx *v)
 	}
 	v->errors = NULL;
 	aik_http_response_json(resp, 422, top);
+}
+
+/* ------------------------------------------------------------------ */
+/* MEM-02b：导入数值校验（POST /import 与 /import/file 共用）            */
+/* ------------------------------------------------------------------ */
+
+/* value_error 的 input：字段原值；非有限值用字符串 repr（见 http.h） */
+static aik_json *field_input(const aik_json *item, const char *field,
+			     int *bad)
+{
+	const aik_json *fv = aik_json_get(item, field);
+	double d;
+
+	if (fv && aik_json_typeof(fv) == AIK_JSON_NUM) {
+		d = aik_json_num(fv);
+		if (isnan(d))
+			return aik_json_new_str("nan");
+		if (isinf(d))
+			return aik_json_new_str(d < 0.0 ? "-inf" : "inf");
+	}
+	return jclone(fv, bad);
+}
+
+int aik_http_import_check_numbers(const aik_json *items, int in_memories,
+				  aik_http_response *resp)
+{
+	vctx v;
+	size_t i;
+	size_t n;
+
+	memset(&v, 0, sizeof(v));
+	v.errors = aik_json_new_arr();
+	if (!v.errors) {
+		aik_http_response_detail(resp, 500, "Internal Server Error");
+		return -1;
+	}
+	n = (items && aik_json_typeof(items) == AIK_JSON_ARR) ?
+	    aik_json_count(items) : 0;
+	for (i = 0; i < n && !v.oom; i++) {
+		const aik_json *item = aik_json_at(items, i);
+		const aik_json *text = aik_json_get(item, "text");
+		const char *field = NULL;
+		const char *why = NULL;
+		char msg[160];
+		vloc loc;
+
+		/* 空文本的条目引擎本就跳过（Python: if not item.get("text")） */
+		if (!text || aik_json_typeof(text) != AIK_JSON_STR ||
+		    !*aik_json_str(text))
+			continue;
+		if (aik_memory_numbers_check(item, &field, &why) != 1)
+			continue;
+		memset(&loc, 0, sizeof(loc));
+		loc.in_item = in_memories ? 1 : 0;
+		loc.has_item = 1;
+		loc.item = i;
+		loc.field = field;
+		loc.elem = -1;
+		snprintf(msg, sizeof(msg), "Value error, %s", why);
+		{
+			int bad = 0;
+
+			(void)v_add_owned(&v, "value_error", msg,
+					 field_input(item, field, &bad),
+					 &loc, 1);
+		}
+	}
+	if (v.oom || aik_json_count(v.errors) > 0) {
+		int rc = v.oom ? -1 : 1;
+
+		respond_validation(resp, &v);
+		return rc;
+	}
+	aik_json_free(v.errors);
+	return 0;
 }
 
 /* JSON 解析失败：DESIGN §3 的 json_invalid 形状（尽力而为） */
@@ -1370,6 +1470,16 @@ void aik_http_route_import(aik_http_server *s, const aik_http_request *req,
 	}
 	if (v.errors && aik_json_count(v.errors) > 0) {
 		respond_validation(resp, &v);
+		aik_json_free(body);
+		return;
+	}
+	/*
+	 * MEM-02b：先整体过数值校验——有任何会污染排序信号的非法值就整批
+	 * 拒绝（422），不留给引擎半途失败、留下半批已入库的记忆。
+	 */
+	if (aik_http_import_check_numbers(mems, 1, resp) != 0) {
+		aik_json_free(v.errors);
+		v.errors = NULL;
 		aik_json_free(body);
 		return;
 	}

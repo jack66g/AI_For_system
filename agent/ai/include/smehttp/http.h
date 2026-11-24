@@ -223,4 +223,24 @@ void aik_http_route_index(aik_http_server *s, const aik_http_request *req,
 void aik_http_route_static(aik_http_server *s, const aik_http_request *req,
 			   aik_http_response *resp);
 
+/*
+ * aik_http_import_check_numbers - 导入前的数值校验（MEM-02b）
+ *
+ * POST /import 与 POST /import/file 共用（routes.c 实现）。按
+ * aik_memory_numbers_check 逐条检查 items 里会被导入的条目（空文本的
+ * 条目引擎本就跳过）；有任何非法值就**整批拒绝**并写 422——Pydantic v2
+ * 的 value_error 形状，与空白 text 的 422 同款：
+ *   {"detail":[{"type":"value_error","loc":[...],"msg":"Value error, <why>",
+ *               "input":<字段原值>,"ctx":{"error":{}}}]}
+ * loc = ["body", ("memories",) <条目下标>, "<字段>"]：in_memories 非 0 时
+ * 带 "memories" 一段。input 遇到非有限值（1e999 溢出成的 ±inf）用字符串
+ * "inf" / "-inf" / "nan" 代替，避免响应体出现非法 JSON 字面量。
+ * 这是 C 侧的决定：上游 HEAD 对这类导入是未捕获的 ValueError → 500。
+ *
+ * 返回 0 = 全部合法（resp 未动）；1 = 有非法值（resp 已写 422）；
+ * -1 = 内部错误（resp 已写 500）。
+ */
+int aik_http_import_check_numbers(const aik_json *items, int in_memories,
+				  aik_http_response *resp);
+
 #endif /* _AIK_SMEHTTP_HTTP_H */

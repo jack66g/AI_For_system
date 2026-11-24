@@ -15,6 +15,8 @@
  *   3. detailed=0 的用例额外断言 8 个信号字段精确为 0。
  *   4. 直接验证 aik_round_half_even4：期望值由 CPython
  *      round(x, 4) 实测得到（不是任务书里的三个假设值，见下方注释）。
+ *   5. MEM-02b（自包含）：int64 范围内的合法 hit_count 不得被截成 int
+ *      （见 run_big_hit_counts）。
  *
  * 输出：SUMMARY ranker checks=<n> mismatches=<m>；有失配 exit 1。
  */
@@ -156,6 +158,69 @@ static double num_or(const aik_json *obj, const char *key, double def)
 	return v ? aik_json_num(v) : def;
 }
 
+/*
+ * MEM-02b（自包含）：aik_memory_view.hit_count 曾是 int，engine 的
+ * fill_views 把 int64 的计数截成 int——2147483648 → -2147483648、
+ * 4294967294 → -2（hc/(1+hc) = 2.0 的假信号）、4294967295 → -1（除零得
+ * -inf，final 变 -Infinity）。这里直接喂 int64 范围内的合法计数：
+ * hit_count 信号 = round(hc/(1+hc), 4)，final 有限且等于手算值。
+ * 输入取 age=0、importance=0.5、weight=1、freshness=1、无语义/region 分：
+ * final = 0.5·w.importance + w.freshness + 0.5·w.weight + w.decay
+ *         + sig·w.hit_count + w.recency
+ */
+static void run_big_hit_counts(const aik_ranking_weights *w,
+			       const aik_decay_config *dc, double reference)
+{
+	static const long long counts[] = {
+		0, 1, 2147483647LL, 2147483648LL, 4294967294LL,
+		4294967295LL, 4294967296LL, 9223372036854775807LL,
+	};
+	aik_memory_view mem;
+	aik_rank_result res;
+	size_t i;
+	double rest;
+
+	memset(&mem, 0, sizeof(mem));
+	mem.id = "m_big";
+	mem.text = "";
+	mem.source = "test";
+	mem.importance = 0.5;
+	mem.weight = 1.0;
+	mem.freshness = 1.0;
+	mem.last_hit = reference;
+	rest = 0.5 * w->importance + w->freshness + 0.5 * w->weight +
+	       w->decay + w->recency;
+	for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+		double hc = (double)counts[i];
+		double sig = hc / (1.0 + hc);
+		char what[96];
+
+		mem.hit_count = counts[i];
+		if (aik_rank_score(w, dc, &mem, 0.0, reference, 0, 0.0, 1,
+				   &res) != 0) {
+			checked++;
+			mismatched++;
+			printf("MISMATCH big_hit_count[%lld]: rc != 0\n",
+			       counts[i]);
+			continue;
+		}
+		snprintf(what, sizeof(what), "big_hit_count[%lld].signal",
+			 counts[i]);
+		check_num(what, res.breakdown.hit_count,
+			  aik_round_half_even4(sig));
+		snprintf(what, sizeof(what), "big_hit_count[%lld].finite",
+			 counts[i]);
+		checked++;
+		if (!(fabs(res.score) < 1e300)) {
+			mismatched++;
+			printf("MISMATCH %s score=%g\n", what, res.score);
+		}
+		snprintf(what, sizeof(what), "big_hit_count[%lld].final",
+			 counts[i]);
+		check_num(what, res.score, rest + sig * w->hit_count);
+	}
+}
+
 int main(void)
 {
 	char file[4096];
@@ -287,6 +352,8 @@ int main(void)
 	}
 
 	run_round_cases();
+
+	run_big_hit_counts(&w, &dc, reference);
 
 	aik_json_free(root);
 	printf("SUMMARY ranker checks=%zu mismatches=%zu\n", checked,

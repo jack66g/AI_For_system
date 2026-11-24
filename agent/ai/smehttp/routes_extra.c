@@ -11,6 +11,8 @@
  *   - import_file：字段缺失/非 multipart → 422 Pydantic missing（loc
  *     ["body","file"]）；JSON 解析失败 → 400 {"detail":"invalid file: …"}；
  *     顶层对象取 .memories，顶层数组原样，其余空；返回 {"imported":n}。
+ *     MEM-02b：导入前先过数值校验（aik_http_import_check_numbers，与
+ *     POST /import 共用）——会污染排序信号的非法值整批拒绝 422。
  *   - visualize：空间为空（没有带向量的活跃记忆）→ 501
  *     {"error":"no memories with embeddings to visualize"}；否则 image/png。
  *     C 版不依赖 matplotlib：把向量 PCA 投影到二维画散点/区域质心/图边，
@@ -307,6 +309,17 @@ void aik_http_route_import_file(aik_http_server *s,
 			return;
 		}
 		items = empty;
+	}
+	/*
+	 * MEM-02b：数值校验（与 POST /import 共用，见 http.h）。文件是
+	 * {"memories":[…]} 对象时 loc 带 "memories" 一段，与 /import 的形状
+	 * 对齐；顶层数组则直接 ["body", i, 字段]。
+	 */
+	if (aik_http_import_check_numbers(items,
+					  aik_json_typeof(root) == AIK_JSON_OBJ,
+					  resp) != 0) {
+		aik_json_free(root);
+		return;
 	}
 	if (aik_engine_import(aik_http_server_engine(s), items, &imported,
 			      err, sizeof(err)) != 0) {

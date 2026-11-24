@@ -175,6 +175,32 @@ int aik_engine_import(aik_engine *e, const aik_json *items,
 		      long long *out_count, char *err, size_t errlen);
 
 /*
+ * aik_memory_numbers_check - 记忆反序列化入口的数值校验（MEM-02b）
+ *
+ * 依据上游 ed5378a sme/models.py::_validate_memory_numbers（P2-4 / P2-2），
+ * 只拒绝**会污染排序信号**的非法值：
+ *   - hit_count < 0（或超出 int64 可表示范围）：ranking.hit_count 信号是
+ *     h/(1+h)，h=-1 除零得 ±inf，h<-1 得到正的假信号；
+ *   - weight < 0：ranking.weight 信号是 w/(1+w)，同理；
+ *   - hit_count / weight / importance / created_at / last_hit / freshness /
+ *     decay_factor 非有限（±inf：JSON 字面量 NaN/Infinity 在解析期已拒，
+ *     这里挡的是 1e999 这类溢出）：穿透 clamp 后 final 变 NaN/inf。
+ * importance 越界（如 7.5）**不在其内**：C 版沿用既有行为，上游 HEAD 会
+ * 拒绝，是否跟进留给主会话决定。
+ *
+ * item 为 export 形状的一条记忆（借用）；字段缺失或不是数值时沿用既有
+ * 的「补默认值」语义，不算非法。按上游检查顺序返回第一个非法字段：
+ * 返回 0 = 合法；1 = 非法（*field 为字段名，*msg 为静态文案，取上游
+ * _validate_memory_numbers 的原文）；-1 = 参数非法 / item 不是对象。
+ * field、msg 可为 NULL。
+ *
+ * 引擎内所有记忆反序列化（import / 快照 load / WAL 重放）都经过它；
+ * HTTP 层用它先整体校验再导入（POST /import、/import/file 返回 422）。
+ */
+int aik_memory_numbers_check(const aik_json *item, const char **field,
+			     const char **msg);
+
+/*
  * aik_engine_add - 新增一条记忆（sme/memory_manager.py::add_memory）
  *
  * text 为 NULL/空/Unicode 全空白 → -1。metadata 借用（NULL 视为 {}），

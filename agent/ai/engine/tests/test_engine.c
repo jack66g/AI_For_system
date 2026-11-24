@@ -35,6 +35,11 @@
  *     aik_config_from_json（启动期与 PUT /config 的同一入口）进引擎后，
  *     确实改变检索行为；修复前这两个键被配置层白名单丢弃。
  *
+ * 段 5：MEM-02b 导入数值校验（文件末尾，自包含）
+ *   - 会污染排序信号的非法值（hit_count < 0、weight < 0、数值字段非有限）
+ *     在记忆反序列化入口被拒（上游 ed5378a _validate_memory_numbers 的
+ *     子集，不含 importance 越界）；合法值与边界值照常入库。
+ *
  * 末行 "SUMMARY engine checks=N mismatches=M"；有失配退出码 1。
  */
 #define _POSIX_C_SOURCE 200809L
@@ -3280,6 +3285,192 @@ static void run_mem01c_knob_tests(void)
 	free(tmpdir);
 }
 
+/* ------------------------------------------------------------------ */
+/* 段 5：MEM-02b 导入数值校验（引擎层）                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 对应上游 experiment/regression/test_fix_round_20261120.py::
+ * test_import_negative_hit_count_rejected / _negative_weight_rejected /
+ * _nan_importance_rejected / _valid_items_still_work。引擎内所有记忆反
+ * 序列化（import / 快照 load / WAL 重放）都走 memory_from_json，校验放在
+ * 那里（上游放在 Memory.from_dict）。非有限值用 1e999 这类溢出字面量构造
+ * （JSON 的 NaN/Infinity 字面量解析期已拒）。
+ */
+static aik_json *parse_text(const char *text, const char *what)
+{
+	aik_json *v = aik_json_parse(text, strlen(text), NULL, 0);
+
+	check_int(what, v != NULL, 1);
+	return v;
+}
+
+static void run_mem02b_import_tests(void)
+{
+	static const struct {
+		const char *field;
+		const char *why;
+		const char *lit;
+	} bad[] = {
+		{ "hit_count", "hit_count must be a non-negative integer",
+		  "-1" },
+		{ "hit_count", "hit_count must be a non-negative integer",
+		  "1e300" },
+		{ "weight", "weight must be a finite non-negative number",
+		  "-1.0" },
+		{ "importance", "importance must be finite in [0,1]", "1e999" },
+		{ "created_at", "created_at must be finite", "1e999" },
+		{ "last_hit", "last_hit must be finite", "-1e999" },
+		{ "freshness", "freshness must be finite", "1e999" },
+		{ "decay_factor", "decay_factor must be finite", "1e999" },
+	};
+	struct cfg_opts o;
+	char err[256];
+	char *tmpdir = make_tmpdir();
+	aik_engine *e;
+	aik_json *items;
+	aik_json *body;
+	aik_json *out;
+	const char *field = NULL;
+	const char *why = NULL;
+	long long n = -99;
+	size_t i;
+	int finite = 1;
+
+	if (!tmpdir)
+		die("out of memory");
+	cfg_defaults(&o);
+	e = new_test_engine(make_cfg(tmpdir, &o, err, sizeof(err)), err,
+			     sizeof(err));
+	if (!e)
+		die("engine: %s", err);
+
+	/* 非法值：import 失败、err 带上游文案、库里一条没进 */
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		char text[512];
+		char tag[96];
+
+		snprintf(text, sizeof(text),
+			 "[{\"id\":\"p%zu\",\"text\":\"poison %zu\",\"%s\":%s}]",
+			 i, i, bad[i].field, bad[i].lit);
+		snprintf(tag, sizeof(tag), "m02b %s=%s", bad[i].field,
+			 bad[i].lit);
+		items = parse_text(text, tag);
+		if (!items)
+			continue;
+		n = -99;
+		err[0] = '\0';
+		snprintf(text, sizeof(text), "%s: rc", tag);
+		check_int(text, aik_engine_import(e, items, &n, err,
+						  sizeof(err)), -1);
+		snprintf(text, sizeof(text), "%s: count", tag);
+		check_int(text, n, 0);
+		snprintf(text, sizeof(text), "%s: err has why", tag);
+		check_int(text, strstr(err, bad[i].why) != NULL, 1);
+		snprintf(text, sizeof(text), "%s: err has id", tag);
+		check_int(text, strstr(err, "(id=p") != NULL, 1);
+		snprintf(text, sizeof(text), "%s: nothing imported", tag);
+		check_int(text, (long long)aik_engine_memory_count(e), 0);
+		aik_json_free(items);
+	}
+
+	/* 合法值（含边界）：照常入库，检索分数都是有限值 */
+	items = parse_text(
+		"[{\"id\":\"ok1\",\"text\":\"valid memory alpha\","
+		"\"hit_count\":3,\"weight\":1.4,\"importance\":0.8},"
+		"{\"id\":\"ok2\",\"text\":\"valid memory beta\","
+		"\"hit_count\":0,\"weight\":0},"
+		"{\"id\":\"ok3\",\"text\":\"valid memory gamma\","
+		"\"hit_count\":9223372036854775807,\"weight\":5.0}]",
+		"m02b valid parse");
+	if (items) {
+		err[0] = '\0';
+		n = -99;
+		check_int("m02b valid: rc", aik_engine_import(e, items, &n, err,
+							       sizeof(err)), 0);
+		check_int("m02b valid: count", n, 3);
+		check_int("m02b valid: memories",
+			  (long long)aik_engine_memory_count(e), 3);
+		aik_json_free(items);
+	}
+	body = jobj();
+	jput(body, "text", jstr("valid memory"));
+	jput(body, "top_k", jint(5));
+	out = do_search(e, body, err, sizeof(err), &n);
+	aik_json_free(body);
+	check_int("m02b search: count", n, 3);
+	{
+		const aik_json *res = aik_json_get(out, "results");
+
+		for (i = 0; res && i < aik_json_count(res); i++) {
+			const aik_json *score = aik_json_get(
+				aik_json_at(res, i), "score");
+
+			if (aik_json_typeof(score) != AIK_JSON_NUM ||
+			    !(fabs(aik_json_num(score)) < 1e300))
+				finite = 0;
+		}
+	}
+	check_int("m02b search: scores finite", finite, 1);
+	aik_json_free(out);
+
+	/* importance 越界：既有行为不变（放行；上游 HEAD 会拒绝，留给主会话） */
+	items = parse_text(
+		"[{\"id\":\"wide\",\"text\":\"wide importance\",\"importance\":7.5}]",
+		"m02b wide parse");
+	if (items) {
+		n = -99;
+		check_int("m02b wide: rc", aik_engine_import(e, items, &n, err,
+							      sizeof(err)), 0);
+		check_int("m02b wide: count", n, 1);
+		aik_json_free(items);
+	}
+
+	/* aik_memory_numbers_check 的契约 */
+	check_int("m02b check: NULL", aik_memory_numbers_check(NULL, &field,
+							       &why), -1);
+	items = aik_json_new_arr();
+	check_int("m02b check: non-object", aik_memory_numbers_check(
+			  items, &field, &why), -1);
+	aik_json_free(items);
+	items = parse_text("{}", "m02b check parse {}");
+	if (items) {
+		field = why = NULL;
+		check_int("m02b check: empty", aik_memory_numbers_check(
+				  items, &field, &why), 0);
+		check_int("m02b check: empty out",
+			  field == NULL && why == NULL, 1);
+		aik_json_free(items);
+	}
+	items = parse_text("{\"text\":\"x\",\"weight\":\"n/a\",\"hit_count\":0}",
+			   "m02b check parse non-numeric");
+	if (items) {
+		/* 非数值字段沿用补默认值语义，不算非法 */
+		check_int("m02b check: non-numeric", aik_memory_numbers_check(
+				  items, &field, &why), 0);
+		aik_json_free(items);
+	}
+	items = parse_text("{\"text\":\"x\",\"freshness\":1e999,\"weight\":-1}",
+			   "m02b check parse order");
+	if (items) {
+		/* 按上游检查顺序报第一个非法字段（weight 先于 freshness） */
+		field = why = NULL;
+		check_int("m02b check: order", aik_memory_numbers_check(
+				  items, &field, &why), 1);
+		check_int("m02b check: first bad field is weight",
+			  field && strcmp(field, "weight") == 0, 1);
+		check_int("m02b check: why",
+			  why && strcmp(why,
+					"weight must be a finite non-negative number")
+				       == 0, 1);
+		aik_json_free(items);
+	}
+
+	aik_engine_free(e);
+	rmdir(tmpdir);
+	free(tmpdir);
+}
+
 int main(void)
 {
 	run_api_case();
@@ -3292,6 +3483,7 @@ int main(void)
 	run_save_load_tests();
 	run_autosave_tests();
 	run_mem01c_knob_tests();
+	run_mem02b_import_tests();
 	printf("SUMMARY engine checks=%zu mismatches=%zu\n", checks,
 	       mismatches);
 	return mismatches ? 1 : 0;

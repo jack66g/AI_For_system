@@ -681,11 +681,80 @@ static double *json_embedding(const aik_json *obj, int *out_dim)
 }
 
 /*
+ * aik_memory_numbers_check - 记忆反序列化入口的数值校验（见 engine.h）
+ *
+ * MEM-02b，依据上游 ed5378a sme/models.py::_validate_memory_numbers
+ * （2026-11-20 测试战役 P2-4 / P2-2）的子集：只拒会污染排序信号的值，
+ * 不含 importance 越界。文案取上游原文。
+ */
+int aik_memory_numbers_check(const aik_json *item, const char **field,
+			     const char **msg)
+{
+	/* rule：0 = 有限；1 = 有限且 >= 0；2 = 有限、>= 0 且落在 int64 内 */
+	static const struct {
+		const char *name;
+		const char *why;
+		int rule;
+	} fields[] = {
+		{ "hit_count", "hit_count must be a non-negative integer", 2 },
+		{ "weight", "weight must be a finite non-negative number", 1 },
+		{ "importance", "importance must be finite in [0,1]", 0 },
+		{ "created_at", "created_at must be finite", 0 },
+		{ "last_hit", "last_hit must be finite", 0 },
+		{ "freshness", "freshness must be finite", 0 },
+		{ "decay_factor", "decay_factor must be finite", 0 },
+	};
+	size_t i;
+
+	if (field)
+		*field = NULL;
+	if (msg)
+		*msg = NULL;
+	if (!item || aik_json_typeof(item) != AIK_JSON_OBJ)
+		return -1;
+	for (i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+		const aik_json *v = aik_json_get(item, fields[i].name);
+		double x;
+		int invalid = 0;
+
+		if (!json_is_num(v))
+			continue;	/* 缺省或非数值：沿用补默认值语义 */
+		if (aik_json_typeof(v) == AIK_JSON_INT) {
+			/* INT 本身就是 int64：只看符号 */
+			invalid = fields[i].rule >= 1 && aik_json_int(v) < 0;
+		} else {
+			x = aik_json_num(v);
+			/*
+			 * NUM：非有限（1e999 溢出成的 ±inf）一律拒；rule 2 的
+			 * 上界——超出 int64 的 hit_count 转 long long 是未定义
+			 * 行为（x86-64 上得到负数，照样污染信号）。
+			 */
+			invalid = !isfinite(x) ||
+				  (fields[i].rule >= 1 && x < 0.0) ||
+				  (fields[i].rule == 2 &&
+				   x >= 9.223372036854775e18);
+		}
+		if (invalid) {
+			if (field)
+				*field = fields[i].name;
+			if (msg)
+				*msg = fields[i].why;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
  * memory_from_json - Memory.from_dict 等价（embedding 由调用方给出）
  *
  * 接管 emb（失败时一并释放）。缺省：id 用 id_fn，created_at/last_hit 用
  * now，hit_count=0, weight=1.0, importance=0.5, freshness=1.0,
  * decay_factor=1.0, version=1, archived=false, source="user"。
+ *
+ * MEM-02b：先过 aik_memory_numbers_check（import / 快照 load / WAL 重放
+ * 都走这里，对应上游把校验放在 Memory.from_dict）；非法值拒绝反序列化，
+ * 不带毒入库。importance 越界仍沿用既有行为（上游 HEAD 会拒绝）。
  */
 static aik_memory *memory_from_json(aik_engine *e, const aik_json *obj,
 				    double *emb, int emb_dim, char *err,
@@ -701,6 +770,29 @@ static aik_memory *memory_from_json(aik_engine *e, const aik_json *obj,
 		set_err(err, errlen, "engine: memory item is not an object");
 		free(emb);
 		return NULL;
+	}
+	{
+		const char *bad = NULL;
+		const char *why = NULL;
+
+		if (aik_memory_numbers_check(obj, &bad, &why) == 1) {
+			const aik_json *v = aik_json_get(obj, bad);
+			const char *sid = aik_json_str(aik_json_get(obj, "id"));
+
+			/* 文案对齐上游："<why>, got <value> (id=<id>)" */
+			if (aik_json_typeof(v) == AIK_JSON_INT)
+				set_err(err, errlen,
+					"engine: memory: %s, got %lld (id=%s)",
+					why, aik_json_int(v),
+					sid ? sid : "");
+			else
+				set_err(err, errlen,
+					"engine: memory: %s, got %.17g (id=%s)",
+					why, aik_json_num(v),
+					sid ? sid : "");
+			free(emb);
+			return NULL;
+		}
 	}
 	m = aik_memory__new();
 	if (!m) {
@@ -3488,7 +3580,7 @@ static void fill_views(const aik_engine *e, aik_memory_view *views)
 		views[i].importance = m->importance;
 		views[i].weight = m->weight;
 		views[i].freshness = m->freshness;
-		views[i].hit_count = (int)m->hit_count;
+		views[i].hit_count = m->hit_count;	/* MEM-02b：不再截成 int */
 		views[i].last_hit = m->last_hit;
 		views[i].source = m->source;
 		views[i].archived = m->archived;

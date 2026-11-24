@@ -49,7 +49,13 @@ typedef struct {
 	double importance;
 	double weight;
 	double freshness;
-	int hit_count;
+	/*
+	 * MEM-02b：原为 int，engine 的 fill_views 把 aik_memory.hit_count
+	 * （long long）截成 int——≥ 2^31 的合法计数被截成负数，hc/(1+hc) 除零
+	 * 得 -inf，final 变成 -Infinity（HTTP 响应体里出现非法 JSON 字面量）。
+	 * 改为 long long 原值，与上游（Python 任意精度整数）同义。
+	 */
+	long long hit_count;
 	double last_hit;
 	const char *source;
 	int archived;
