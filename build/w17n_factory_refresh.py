@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""W17N: rootfs 刷新 0.1.0-alpha.17.10 → 17.11（17.11 打版；sudo 于 L1）。
+"""W17N: rootfs 刷新（现役打版脚本；sudo 于 L1）。
+
+版本号与发布说明是单点：build/VERSION、build/RELEASE-NOTES.txt。
+旧版本串从出厂树 motd 现读（重跑幂等）。
 
 本版收编清单（HEAD=c97bc3f+，P-2 全量随车）：
   P-2 Phase A: aikctl user 族（add/del/list/passwd+from-gate+回滚器）+
@@ -33,7 +36,15 @@ KREL = "6.18.39"
 SOFTDOG_REL = "/lib/modules/%s/kernel/drivers/watchdog/softdog.ko" % KREL
 BZ_MD5 = "7b35b41fb86f2c1c20e1fd57053e3d5e"
 SOFTDOG_MD5 = "9e50cb73434ab8ba363127682646fa63"
-OLD, NEW = "0.1.0-alpha.17.10", "0.1.0-alpha.17.11"
+NEW = open(REPO + "/build/VERSION", encoding="utf-8").read().strip()
+RELEASE_NOTES = open(REPO + "/build/RELEASE-NOTES.txt",
+                     encoding="utf-8").read().strip()
+_motd = open(ROOT + "/etc/motd", encoding="utf-8").read()
+_m = re.search(r"0\.1\.0-alpha\.[0-9]+(?:\.[0-9]+)*", _motd)
+assert _m, "factory tree /etc/motd carries no version string"
+OLD = _m.group(0)
+assert re.fullmatch(r"0\.1\.0-alpha\.[0-9]+(?:\.[0-9]+)*", NEW), NEW
+print("release: %s -> %s" % (OLD, NEW))
 PROV_PUBKEY = "/home/jack66g/prov.pubkey"
 
 
@@ -73,6 +84,16 @@ def ensure_dir(rel, mode):
 
 
 F = REPO + "/factory"
+
+# -1) 出厂树卫生前置门（ENG-01；与 build_iso 的 tar 卫生断言双保险）
+_homes = sorted(set(os.listdir(ROOT + "/home")) - {"aiuser"})
+assert not _homes, "factory tree has stray home dirs: %s" % _homes
+for _rel in ("opt/w7s", "usr/local/bin/aik-console.pre-v3",
+             "opt/aikdesktop/aik-desktop.service", "root/.occ",
+             "root/.aikernel/history"):
+    assert not os.path.lexists(ROOT + "/" + _rel), \
+        "factory tree stray file: " + _rel
+print("factory tree hygiene: ok")
 
 # 0) P-33 前置门：#82 树一致性
 bz = K2 + "/arch/x86/boot/bzImage"
@@ -158,8 +179,12 @@ install_file("/etc/sysctl.d/50-aik-console-quiet.conf",
 
 # 3b) 17.9 收编面刷件（幂等重装）
 install_file("/usr/local/sbin/aipd", REPO + "/agent/ai/aipd/aipd", 0o755)
-install_file("/usr/local/bin/aik-sandbox",
-             REPO + "/agent/ai/sandbox/aik-sandbox", 0o755)
+# aik-sandbox：取「出厂同源锚」（未跟踪件；make 目标输出在
+# agent/ai/aik-sandbox，与此处取用位不是同一份——ENG-14 待处理）
+SBX_ANCHOR = REPO + "/agent/ai/sandbox/aik-sandbox"
+assert os.path.isfile(SBX_ANCHOR), \
+    "aik-sandbox factory anchor missing: " + SBX_ANCHOR
+install_file("/usr/local/bin/aik-sandbox", SBX_ANCHOR, 0o755)
 install_file("/usr/local/bin/aik-ime", F + "/usr/local/bin/aik-ime", 0o755)
 install_file("/root/.fbtermrc", F + "/root/.fbtermrc", 0o644)
 
@@ -310,6 +335,16 @@ assert "[models.cloud]" in mdc and "base_url" in mdc, \
     "models.d cloud.toml malformed"
 assert os.path.isdir(ROOT + "/var/ai/work")
 assert os.path.isdir(ROOT + "/var/log/aik-console")
+# 7d) 17.11.1 新面锚（P-60 收口：gate 读失败根因 / aik-console v11+v12 /
+#     occ W2 裁决审计）
+assert 'FB_PRE="HOME=/root USER=root "' in console, \
+    "aik-console not v11 (fbterm reads system config)"
+assert "gate_perm_fix" in console, "aik-console not v12 (gate perm fix)"
+assert "登录凭据不可读".encode() in occbin, \
+    "occ lacks gate unreadable-credentials screen"
+assert b"allow-w2" in occbin and b"tier-deny" in occbin, \
+    "occ lacks W2 decision audit"
+print("17.11.1 anchors: gate DENIED screen / aik-console v11+v12 / W2 audit")
 print("17.11 anchors: P-2 全量（console v9/v10+aikctl 五族+occ 四面）"
       "+ SENSE 双面 soft + 预建三目录")
 
@@ -357,7 +392,7 @@ if os.path.isfile(PROV_PUBKEY):
 else:
     print("NOTE: no prov.pubkey — ssh 首启接管需装后 nbd 预种")
 
-# 10) 版本串 17.10 → 17.11
+# 10) 版本串 OLD → NEW
 for rel in ("/etc/motd", "/root/README.md"):
     p = ROOT + rel
     s = open(p, encoding="utf-8").read()
@@ -373,26 +408,61 @@ if OLD in s:
 head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"],
                       capture_output=True, text=True).stdout.strip()
 bzsize = os.path.getsize(bz)
+# 快照数字实测（不写死）：工具数/通道数取出厂树现装的 tools.json，种子
+# 行数取出厂树现装的种子文件；读不到就写 unknown，不编造。
+import datetime
+import json
+today = datetime.date.today().isoformat()
+try:
+    _tj = json.load(open(ROOT + "/etc/aikernel/tools.json",
+                         encoding="utf-8"))
+    _tools = str(_tj.get("tool_count", "unknown"))
+    _chans = str(len(_tj.get("channel_counts", {})) or "unknown")
+except (OSError, ValueError) as _e:
+    _tools = _chans = "unknown"
+    print("WARN: tools.json not measurable:", _e)
+try:
+    _seed = str(sum(1 for _ in open(
+        ROOT + "/usr/local/share/aikernel/sme-seed.jsonl",
+        encoding="utf-8")))
+except OSError as _e:
+    _seed = "unknown"
+    print("WARN: seed not measurable:", _e)
+# aikd（记忆服务）不由本脚本重装：如实记它的出处，免得「userland=main@…」
+# 被读成「整棵出厂树都是这次编的」（ENG-14）。
+_aikd = ROOT + "/usr/local/sbin/aikd"
+_aikd_md5 = md5(_aikd) if os.path.isfile(_aikd) else "absent"
 snap = ROOT + "/etc/aikernel/ISO-SNAPSHOT-W82.txt"
 with open(snap, "w", encoding="utf-8") as fh:
     fh.write(
-        "version=%s-w82-20261123\n"
+        "version=%s-w82-%s\n"
         "kernel=6.18.39 #82 %s (%d bytes)\n"
         "softdog.ko=%s (same-tree linux-k2 #82; vermagic \"%s\")\n"
         "userland=main@%s\n"
-        "tools=230 channels=26 seed=247\n"
-        "built=2026-11-23 on L1\n"
+        "tools=%s channels=%s seed=%s\n"
+        "built=%s on L1\n"
+        "aikd_md5=%s (memory service NOT rebuilt by this refresh; "
+        "factory-tree file carried over)\n"
         "correction=2026-11-18: prior entry erroneously said #62 "
         "a667e9160b23036a859ebc8a70aae62b (provenance drift); the "
         "factory kernel is and was #82 = bzImage md5 above\n"
-        % (NEW, BZ_MD5, bzsize, SOFTDOG_MD5,
-           vr.stdout.strip(), head))
+        % (NEW, today.replace("-", ""), BZ_MD5, bzsize, SOFTDOG_MD5,
+           vr.stdout.strip(), head, _tools, _chans, _seed, today,
+           _aikd_md5))
 print("W82 snapshot rewritten")
 
-# 12) K17 快照追加本波账
+# 12) K17 快照追加本版条目（发布说明单点=build/RELEASE-NOTES.txt；
+#     同版本重跑不重复追加）
 snap = ROOT + "/etc/aikernel/ISO-SNAPSHOT-K17.txt"
-with open(snap, "a", encoding="utf-8") as fh:
-    fh.write(
+_k17 = open(snap, encoding="utf-8").read()
+_entry = "%s version=%s\n" % (RELEASE_NOTES, NEW)
+if ("version=%s\n" % NEW) not in _k17:
+    with open(snap, "a", encoding="utf-8") as fh:
+        fh.write(_entry)
+    print("K17 snapshot: appended", NEW)
+else:
+    print("K17 snapshot: already has", NEW)
+_LEGACY_17_11 = (
         "17.11: P-2 multiuser full suite (aikctl user/policy/session/"
         "quota/audit + aik-console v9 privdrop + v10 per-user workdir "
         "pre-seed + occ gate multi-entry dual-pane + /su=root door + "
@@ -401,5 +471,8 @@ with open(snap, "a", encoding="utf-8") as fh:
         "(aistreamd.conf producing + model.toml [api] exposure, single "
         "source = aik-reset heredoc) + aik-pqdump + factory dirs "
         "(models.d / var/log/aik-console / var/ai/work). kernel #82 "
-        "unchanged. version=%s\n" % NEW)
+        "unchanged. version=0.1.0-alpha.17.11\n")
+# 17.11 的旧条目是 17.11 那次打版写下的（旧脚本每跑一次追加一次）；
+# 这里只断言它在账上——出厂树若从没刷过 17.11 就不该拿本脚本刷补丁版。
+assert _LEGACY_17_11 in _k17, "unexpected K17 state (no 17.11 entry)"
 print("W17N_OK")

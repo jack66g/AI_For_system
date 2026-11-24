@@ -1,11 +1,12 @@
 #!/bin/bash
-# W17N: build 0.1.0-alpha.17.11 ISO（sudo 于 L1）——P-2 全量+SENSE 双面
+# W17N: build ISO（sudo 于 L1）——版本号单点=build/VERSION
 # soft 出厂。内核沿用 #82（bzImage 7b35b41f…；softdog.ko 同树 9e50cb73…）
 set -e
-VERSION=0.1.0-alpha.17.11
 BZ=/home/jack66g/linux-k2/arch/x86/boot/bzImage
 KO=/home/jack66g/linux-k2/drivers/watchdog/softdog.ko
 REPO=/home/jack66g/aikernel-repo-alpha11
+VERSION=$(cat "$REPO/build/VERSION")
+[ -n "$VERSION" ] || { echo "build/VERSION empty"; exit 1; }
 ISODIR=/home/jack66g/w17-isodir
 ISO=/home/jack66g/AIKernel-${VERSION}-x86_64.iso
 TAR=/home/jack66g/w17-rootfs-factory.tar
@@ -20,14 +21,16 @@ md5sum "$BZ"; file "$BZ" | head -1
     || { echo "bzImage not #82 final"; exit 1; }
 [ "$(md5sum "$KO" | cut -d" " -f1)" = "9e50cb73434ab8ba363127682646fa63" ] \
     || { echo "softdog.ko not same-tree #82 build"; exit 1; }
-grep -q "$VERSION" "$CFG" || { echo "grub cfg not at 17.11"; exit 1; }
+grep -q "$VERSION" "$CFG" || { echo "grub cfg not at $VERSION"; exit 1; }
 [ -f "$INITRD" ] || { echo "initrd missing"; exit 1; }
 
 echo "== factory tar =="
 rm -f "$TAR"
 tar -C /home/jack66g/w7i-rootfs -cf "$TAR" .
 chmod 644 "$TAR"; sync
-tar -xOf "$TAR" ./etc/motd | grep -q "$VERSION" || { echo "motd not 17.11"; exit 1; }
+tar -xOf "$TAR" ./etc/motd | grep -q "$VERSION" || { echo "motd not $VERSION"; exit 1; }
+# 出厂同源锚前置（未跟踪件；缺失即停，不得静默换件）
+[ -f "$REPO/agent/ai/sandbox/aik-sandbox" ] || { echo "aik-sandbox factory anchor missing"; exit 1; }
 tar -xOf "$TAR" ./etc/aikernel/ISO-SNAPSHOT-K17.txt | tail -2
 tar -xOf "$TAR" ./etc/aikernel/ISO-SNAPSHOT-W82.txt | head -4
 if tar -tf "$TAR" | grep -q 'var/lib/ollama/models/.*blob'; then
@@ -132,6 +135,48 @@ tar -xOf "$TAR" ./usr/local/bin/aik-ime | strings 2>/dev/null | \
     echo "aipd in tar != repo build"; exit 1; }
 echo "p55+o8+p56 anchors ok"
 
+# ---- 出厂 tar 卫生断言（命中任一条即中止打版；ENG-01）----
+# 通配模式在 17.11 的旧 tar 上干跑过：只命中当时尚未清掉的六处异物，
+# 对合法出厂件零误伤（11-24）。
+TAR_DENY=(
+    '^\./opt/w7s(/|$)'
+    '^\./opt/aikdesktop/aik-desktop\.service$'
+    '^\./usr/local/bin/[^/]*\.pre-[^/]*$'
+    '\.(bak|old|orig|rej|dpkg-old|dpkg-dist|ucf-old|swp|tmp)$'
+    '/[^/]*~$'
+)
+# /home 下允许出现的用户：用允许集，不写死打版机用户名
+TAR_HOME_ALLOW=aiuser
+tar -tf "$TAR" > "$TAR.lst" || { echo "cannot list factory tar"; exit 1; }
+for pat in "${TAR_DENY[@]}"; do
+    hit=$(grep -E -e "$pat" "$TAR.lst" | head -5)
+    if [ -n "$hit" ]; then
+        echo "factory tar hygiene: denied pattern [$pat]"; echo "$hit"; rm -f "$TAR.lst"; exit 1
+    fi
+done
+homes=$(sed -n 's#^\./home/\([^/]*\)\(/.*\)\?$#\1#p' "$TAR.lst" | sort -u)
+# grep 选不出任何行时返回 1；set -e 下要显式吞掉，否则「只有允许的
+# 那个家目录」这一正常情况会让打版直接退出。
+for a in $TAR_HOME_ALLOW; do
+    homes=$(printf '%s\n' "$homes" | { grep -v -x -F -e "$a" || true; })
+done
+if [ -n "$homes" ]; then
+    echo "factory tar hygiene: stray home directories: $(echo $homes)"; rm -f "$TAR.lst"; exit 1
+fi
+rm -f "$TAR.lst"
+echo "factory tar hygiene ok"
+
+# 17.11.1 新面断言（P-60 收口）
+tar -xOf "$TAR" ./usr/local/bin/aik-console | \
+    grep -F -q 'HOME=/root USER=root' || { echo "aik-console not v11"; exit 1; }
+tar -xOf "$TAR" ./usr/local/bin/aik-console | \
+    grep -F -q 'gate_perm_fix' || { echo "aik-console not v12"; exit 1; }
+tar -xOf "$TAR" ./usr/local/bin/occ | LC_ALL=C grep -aF -q '登录凭据不可读' || {
+    echo "occ lacks gate unreadable-credentials screen"; exit 1; }
+tar -xOf "$TAR" ./usr/local/bin/occ | strings 2>/dev/null | \
+    grep -q 'allow-w2' || { echo "occ lacks W2 decision audit"; exit 1; }
+echo "17.11.1 anchors ok"
+
 # 17.11 新面断言（P-2 全量+D-3① 双面+P-60）
 tar -xOf "$TAR" ./usr/local/bin/aik-console | \
     grep -F -q '/var/ai/work/$t_user' || {
@@ -172,7 +217,7 @@ tar -xOf "$TAR" ./root/.aikernel/model.toml | \
     echo "model.toml lacks exposure-side soft"; exit 1; }
 tar -xOf "$TAR" ./root/.aikernel/model.toml | \
     grep -q '^\[api\]$' || { echo "model.toml lacks [api]"; exit 1; }
-echo "p2+d3 anchors ok (17.11)"
+echo "p2+d3 anchors ok"
 
 # P1 断言：硬化键 + u-u 显式禁用 + man 已删
 tar -xOf "$TAR" ./etc/ssh/sshd_config.d/50-aik-hardening.conf | \
@@ -234,4 +279,4 @@ md5sum "$ISODIR/boot/bzImage" "$ISODIR/boot/initrd.img" \
 echo "== grub-mkrescue =="
 grub-mkrescue -o "$ISO" "$ISODIR" 2>&1 | tail -3
 ls -la "$ISO"; md5sum "$ISO"; stat -c%s "$ISO"
-echo ISO_BUILT_17_11
+echo "ISO_BUILT $VERSION"
