@@ -171,6 +171,9 @@ tar -xOf "$TAR" ./usr/local/bin/aik-console | \
     grep -F -q 'HOME=/root USER=root' || { echo "aik-console not v11"; exit 1; }
 tar -xOf "$TAR" ./usr/local/bin/aik-console | \
     grep -F -q 'gate_perm_fix' || { echo "aik-console not v12"; exit 1; }
+tar -xOf "$TAR" ./usr/local/bin/aik-console | \
+    grep -F -q 'env $FB_PRE' || {
+    echo "aik-console not v12.1 (non-root fb chain via env)"; exit 1; }
 tar -xOf "$TAR" ./usr/local/bin/occ | LC_ALL=C grep -aF -q '登录凭据不可读' || {
     echo "occ lacks gate unreadable-credentials screen"; exit 1; }
 tar -xOf "$TAR" ./usr/local/bin/occ | strings 2>/dev/null | \

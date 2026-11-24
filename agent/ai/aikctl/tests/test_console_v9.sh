@@ -52,6 +52,9 @@ cleanup() {
     id -u "$U" >/dev/null 2>&1 && userdel -r "$U" 2>/dev/null
     [ -n "${FBSTUB:-}" ] && rm -f "$FBSTUB"
     [ -n "${GSTUB:-}" ] && rm -f "$GSTUB"
+    [ -n "${STUBD:-}" ] && rm -rf "$STUBD"
+    id -u "$U" >/dev/null 2>&1 && rm -rf "/var/ai/work/$U" \
+        /var/log/aik-console/$U.log /var/log/aik-console/$U.err
     true
 }
 trap cleanup EXIT INT TERM
@@ -137,11 +140,11 @@ rm -f "$home/.fbtermrc"
 out=$(AIK_CONSOLE_DRY=1 AIK_CONSOLE_DRY_TTY=/dev/tty1 \
       AIK_CONSOLE_FBTERM="$FBSTUB" sh "$CONSOLE" 2>&1)
 ck "fbterm 以系统配置起：HOME=/root USER=root 紧贴 fbterm" \
-   "case '$out' in *'DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 HOME=/root USER=root $FBSTUB -- '*) true;; *) false;; esac"
+   "case '$out' in *'DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 env HOME=/root USER=root $FBSTUB -- '*) true;; *) false;; esac"
 ck "occ 经 env 拿用户家目录（setpriv 前缀）" \
    "case '$out' in *\"-- env HOME=$home USER=$U $SP\"*) true;; *) false;; esac"
-ck "occ 的 HOME 是用户家目录（无 env HOME=/root）" \
-   "case '$out' in *'env HOME=/root '*) false;; *) true;; esac"
+ck "occ 的 HOME 是用户家目录（-- 之后是 env HOME=<用户家>，不是 /root）" \
+   "case '$out' in *\"-- env HOME=$home USER=$U $SP\"*) true;; *) false;; esac && case '$out' in *'-- env HOME=/root'*) false;; *) true;; esac"
 ck "无 ~/.fbtermrc 不传字号（无 -s）" \
    "case '$out' in *' -s '*) false;; *) true;; esac"
 ck "fb 一览行：fbterm-home=/root occ-home=用户家目录 zoom=none" \
@@ -242,7 +245,7 @@ ck "10.5 串口 exec 行逐字不变" \
 echo "  -- 10.6 归一动作在打印面上，exec 行逐字不变"
 run10 root
 ck "10.6 非 root 目标 fb 链 exec 行逐字同 v11" \
-   "case '$out' in *\"DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 HOME=/root USER=root $FBSTUB -- env HOME=$home USER=$U $SP 2>> /var/log/aik-console/$U.err\"*) true;; *) false;; esac"
+   "case '$out' in *\"DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 env HOME=/root USER=root $FBSTUB -- env HOME=$home USER=$U $SP 2>> /var/log/aik-console/$U.err\"*) true;; *) false;; esac"
 echo root > "$LAST"
 run10 root
 ck "10.6 root 目标 fb 链 exec 行逐字同 v11" \
@@ -262,6 +265,47 @@ else
        "case '$out' in *gate-perm*) false;; *) true;; esac"
 fi
 rm -f "$GSTUB"
+
+echo "== 11. v12.1 真执行面（非 DRY）：非 root 目标的 fb 链确实起得来 =="
+# v11/v12 的 exec 行把 $FB_PRE（HOME=/root USER=root）拼在命令前——shell 在
+# 展开之前就判定哪些词是「变量赋值前缀」，展开出来的 HOME=/root 被当成命令
+# 名（「HOME=/root: not found」rc=127，每 2 秒重启一次）：非 root 的 VGA 控制台
+# 起不来（17.11.1 台架管理章咬出）。上面各节只验 DRY 打印面，验不到这个。
+# 这里让脚本真跑到 exec 行：PATH 前置桩 tty（报 /dev/tty1）与桩 fbterm（记下
+# 自己被怎样起动，然后以 71 退=用户主动退出→脚本断链 exit 0）。不跑 root
+# 目标（那会往本机 /root/aik-console.log 写日志）。
+STUBD=$(mktemp -d /tmp/p2b-stub.XXXXXX)
+cat > "$STUBD/tty" <<'EOF'
+#!/bin/sh
+echo /dev/tty1
+EOF
+cat > "$STUBD/fbterm" <<'EOF'
+#!/bin/sh
+echo "home=$HOME user=$USER" > "$FBSTUB_OUT"
+echo "args: $*" >> "$FBSTUB_OUT"
+exit 71
+EOF
+chmod +x "$STUBD/tty" "$STUBD/fbterm"
+FBSTUB_OUT=$STUBD/fb.out
+HAD_LOGD=0; [ -d /var/log/aik-console ] && HAD_LOGD=1
+echo "$U" > "$LAST"
+out=$(cd / && env -i PATH="$STUBD:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      HOME=/root FBSTUB_OUT="$FBSTUB_OUT" timeout 20 sh "$CONSOLE" 2>&1)
+rc=$?
+echo "  -- rc=$rc（修复前=124：127 重启环直到超时）"
+ck "11.1 脚本经 occ-logout 正常退出（rc=0，未陷入 127 重启环）" "[ '$rc' = 0 ]"
+ck "11.2 桩 fbterm 真被启动（留下了起动记录）" "[ -s '$FBSTUB_OUT' ]"
+ck "11.3 fbterm 以系统配置起：HOME=/root USER=root" \
+   "case \"\$(cat '$FBSTUB_OUT' 2>/dev/null)\" in *'home=/root user=root'*) true;; *) false;; esac"
+ck "11.4 传给 fbterm 的参数：-- env HOME=<用户家> USER=<用户> setpriv … occ" \
+   "case \"\$(cat '$FBSTUB_OUT' 2>/dev/null)\" in *\"args: -- env HOME=$home USER=$U $SP\"*) true;; *) false;; esac"
+ck "11.5 无「not found」" "case \"\$out\" in *'not found'*) false;; *) true;; esac"
+ck "11.6 日志记的是 occ-logout，且没有 rc=127" \
+   "grep -q 'occ-logout tty=fb user=$U' /var/log/aik-console/$U.log 2>/dev/null && ! grep -q 'rc=127' /var/log/aik-console/$U.log 2>/dev/null"
+rm -rf "$STUBD"; STUBD=
+rm -rf "/var/ai/work/$U"
+rm -f /var/log/aik-console/$U.log /var/log/aik-console/$U.err
+[ "$HAD_LOGD" = 1 ] || rmdir /var/log/aik-console 2>/dev/null
 
 echo
 echo "RESULT: pass=$pass fail=$fail"

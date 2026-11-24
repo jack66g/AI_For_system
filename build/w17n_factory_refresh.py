@@ -340,6 +340,8 @@ assert os.path.isdir(ROOT + "/var/log/aik-console")
 assert 'FB_PRE="HOME=/root USER=root "' in console, \
     "aik-console not v11 (fbterm reads system config)"
 assert "gate_perm_fix" in console, "aik-console not v12 (gate perm fix)"
+assert "env $FB_PRE" in console, \
+    "aik-console not v12.1 (non-root fb chain via env)"
 assert "登录凭据不可读".encode() in occbin, \
     "occ lacks gate unreadable-credentials screen"
 assert b"allow-w2" in occbin and b"tier-deny" in occbin, \
@@ -455,13 +457,23 @@ print("W82 snapshot rewritten")
 #     同版本重跑不重复追加）
 snap = ROOT + "/etc/aikernel/ISO-SNAPSHOT-K17.txt"
 _k17 = open(snap, encoding="utf-8").read()
-_entry = "%s version=%s\n" % (RELEASE_NOTES, NEW)
-if ("version=%s\n" % NEW) not in _k17:
-    with open(snap, "a", encoding="utf-8") as fh:
-        fh.write(_entry)
-    print("K17 snapshot: appended", NEW)
+_entry = "%s version=%s" % (RELEASE_NOTES, NEW)
+# 本版条目以发布说明为准：缺则追加；已有但文字不同（同版本重打、发布说明
+# 改了）则原位替换——只动本版的条目，旧版本的账一字不碰。
+_lines = [ln for ln in _k17.split("\n") if ln != ""]
+_mine = [ln for ln in _lines if ln.endswith(" version=%s" % NEW)]
+if _mine != [_entry]:
+    _keep = [ln for ln in _lines if not ln.endswith(" version=%s" % NEW)]
+    if _mine:
+        _keep.insert(_lines.index(_mine[0]), _entry)
+        print("K17 snapshot: entry replaced for", NEW)
+    else:
+        _keep.append(_entry)
+        print("K17 snapshot: appended", NEW)
+    with open(snap, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(_keep) + "\n")
 else:
-    print("K17 snapshot: already has", NEW)
+    print("K17 snapshot: already up to date for", NEW)
 _LEGACY_17_11 = (
         "17.11: P-2 multiuser full suite (aikctl user/policy/session/"
         "quota/audit + aik-console v9 privdrop + v10 per-user workdir "

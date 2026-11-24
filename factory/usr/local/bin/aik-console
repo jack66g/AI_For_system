@@ -1,4 +1,8 @@
 #!/bin/sh
+# aik-console v12.1 — 修 v11/v12 的非 root VGA 控制台起不来：fb 链上
+#   传给 fbterm 的 HOME=/root USER=root 改经 env 传入。拼在命令前时，
+#   shell 把展开出来的 HOME=/root 当成命令名（rc=127 重启环）。DRY 打印
+#   同形；测试第 11 节真执行（桩 tty/桩 fbterm）。root 目标命令不变。
 # aik-console v12 — P-60/D7 出厂：gate 权限归一（DEC-07 过渡方案）。
 #   v12：root 时刻（fb/串口两条循环每轮 resolve_target 之后、真 exec 之
 #   前）跑 gate_perm_fix——①gate 文件在 ②机器上有 aik-gate 组 ③文件尚
@@ -173,7 +177,9 @@ resolve_target() {
     # v11 fb 链前缀（见头部 v11 注）：fbterm=root 身份+root 配置
     # （HOME=/root USER=root——与 root 控制台同路，IME 子进程环境亦同），
     # 外加 per-user 字号选项 FB_OPT（白名单档位）；occ 经 env 拿回用户
-    # 家目录。FB_PRE 是 env 赋值词、必须紧贴二进制，故字号另设 FB_OPT。
+    # 家目录。v12.1：FB_PRE 的两个赋值经 env 传给 fbterm（不能当 shell
+    # 赋值前缀拼在命令前——展开出来的赋值词会被当成命令名）；字号另设
+    # FB_OPT，照旧作为 fbterm 的选项。
     FB_PRE="HOME=/root USER=root "
     zopt=$(zoom_font_arg "$t_home")
     FB_OPT=
@@ -225,8 +231,11 @@ dry_print() {
     # occ 用用户家目录）
     if [ -n "$FB_PRE" ]; then
       echo "DRY fb: fbterm-home=/root (system .fbtermrc) occ-home=$t_home user=$t_user zoom=${zopt:-none}"
+      # v12.1：打印面与真执行同形（非 root 经 env）
+      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
+    else
+      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
     fi
-    echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
   else
     echo "DRY exec: OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> $ERRF"
   fi
@@ -254,7 +263,19 @@ case "$TTY" in
       fi
       if [ -n "$FBTERM_BIN" ]; then
         # v11：FB_PRE/FB_OPT/OCC_PRE 仅非 root 目标非空（root 目标命令逐字同 v10）
-        FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE"$FBTERM_BIN" $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> "$ERRF"
+        if [ -n "$FB_PRE" ]; then
+          # v12.1：非 root 目标的两个环境赋值经 env 传给 fbterm。v11 把它们
+          # 放进 $FB_PRE 拼在命令前——shell 在展开之前就判定哪些词是「变量
+          # 赋值前缀」，展开出来的 HOME=/root 不算赋值而被当成命令名
+          # （「HOME=/root: not found」rc=127，每 2 秒重启一次）：非 root 的
+          # VGA 控制台在 v11/v12 上起不来（17.11.1 台架管理章咬出；串口分支
+          # 不经此行所以没暴露；当时的测试只验了 DRY 打印面）。root 目标
+          # 命令逐字不变。
+          FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE"$FBTERM_BIN" $FB_OPT-- \
+            $OCC_PRE$OCC_ARGS 2>> "$ERRF"
+        else
+          FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE"$FBTERM_BIN" $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> "$ERRF"
+        fi
       else
         OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
       fi
