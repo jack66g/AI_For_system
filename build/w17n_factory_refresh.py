@@ -21,15 +21,35 @@
   P-60 预建三目录: /etc/aikernel/models.d（系统层空目录）+
         /var/log/aik-console（0750）+/var/ai/work（0755）
   P-27: aik-pqdump 新入厂（/usr/local/bin）
+  ENG-14（11-25）: 二进制/脚本重装面改为清单驱动——单一清单在
+        build/factory_manifest.py；本脚本只装 installer=="refresh" 的件，
+        每件装后断言 md5 == 后处理后的仓内件（strip 只在临时副本上做，
+        不改仓内产物）。--check 为零写入核对模式；无安装器的件在
+        ISO-SNAPSHOT 里逐件记 NO_RECIPE + 出厂 md5。
 内核沿用 #82（bzImage 7b35b41f…；softdog.ko 同树 9e50cb73…）。"""
 import hashlib
 import os
 import re
 import shutil
 import subprocess
+import sys
 
-ROOT = "/home/jack66g/w7i-rootfs"
-REPO = "/home/jack66g/aikernel-repo-alpha11"
+ROOT = os.environ.get("AIK_FACTORY_ROOT") or "/home/jack66g/w7i-rootfs"
+REPO = os.environ.get("AIK_REPO") or "/home/jack66g/aikernel-repo-alpha11"
+
+# ENG-14：清单/审计模块与刷新脚本同目录（build/）。
+_BUILD_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BUILD_DIR not in sys.path:
+    sys.path.insert(0, _BUILD_DIR)
+import factory_manifest as FM  # noqa: E402
+
+# --check：零写入，按清单核对出厂树与仓内件；DRIFT/MISSING 退出非零。
+if "--check" in sys.argv[1:]:
+    sys.exit(FM.run_audit(ROOT, REPO, rev=FM.snapshot_ref(ROOT)))
+_unknown = [a for a in sys.argv[1:] if a != "--check"]
+if _unknown:
+    sys.stderr.write("usage: %s [--check]\n" % os.path.basename(__file__))
+    sys.exit(2)
 CFG = "/home/jack66g/aikernel-repo-alpha11/build/w17j-grub-iso.cfg"
 K2 = "/home/jack66g/linux-k2"
 KREL = "6.18.39"
@@ -102,16 +122,28 @@ ko = K2 + "/drivers/watchdog/softdog.ko"
 assert md5(ko) == SOFTDOG_MD5, "k2 softdog.ko drifted (expect 9e50cb73)"
 print("P33 gate: bzImage+softdog same-tree #82 verified")
 
-# 1) 二进制重装面（P-32：conf 键与二进制同刷）
-install_file("/usr/local/bin/occ", REPO + "/agent/ai/occ/occ", 0o755)
-install_file("/usr/local/sbin/aistreamd",
-             REPO + "/agent/ai/aistreamd/aistreamd", 0o755)
-install_file("/usr/local/bin/aik-console",
-             F + "/usr/local/bin/aik-console", 0o755)
-install_file("/usr/local/bin/aikctl", REPO + "/agent/ai/aikctl/aikctl", 0o755)
-install_file("/usr/local/bin/aik-pqdump",
-             REPO + "/agent/ai/aistreamd/aik-pqdump", 0o755)
-install_file("/usr/local/sbin/aik-reset", F + "/usr/local/sbin/aik-reset", 0o755)
+# 1) ENG-14：清单驱动的二进制/脚本重装面（P-32：conf 键与二进制同刷）
+#    单一清单=build/factory_manifest.py；这里只装 installer=="refresh" 的件。
+#    每件装后立刻断言 md5 == 后处理后的仓内件；strip 只在临时副本上做，
+#    绝不改仓内产物（旧 build-rootfs.sh 的就地 strip 不再沿用）。
+_n_inst = 0
+for _e in FM.ENTRIES:
+    if _e["installer"] != "refresh":
+        continue
+    _src = os.path.join(REPO, _e["src"]) if _e.get("src") else ""
+    assert _src and os.path.isfile(_src), (
+        "ENG-14: repo artifact missing for %s: %s\n"
+        "  build it first: %s"
+        % (_e["path"], _e.get("src"), _e.get("recipe") or "(no recipe)"))
+    with FM.prepared(_e, REPO) as _payload:
+        _want = FM.md5_file(_payload)
+        install_file(_e["path"], _payload, int(_e["mode"], 8))
+    _got = md5(ROOT + _e["path"])
+    assert _got == _want, (
+        "ENG-14: installed md5 mismatch for %s: %s != %s (postprocess=%s)"
+        % (_e["path"], _got, _want, _e["postprocess"]))
+    _n_inst += 1
+print("ENG-14 manifest install: %d pieces md5-asserted" % _n_inst)
 
 # 1b) P-2 Phase C：conf 双面（产生侧 soft）
 install_file("/etc/aikernel/aistreamd.conf",
@@ -166,26 +198,17 @@ os.chown(dst + "/model.toml", 0, 0)
 print("model.toml from aik-reset heredoc: %d bytes md5=%s"
       % (len(tmpl), hashlib.md5(tmpl.encode()).hexdigest()))
 
-# 2) 17.7 既有件在位断言（本波不动）
+# 2) 17.7 既有件在位断言（ENG-14 起由 §1 从仓装，装后 md5 已在 §1 断言）
 for rel in ("/usr/local/bin/aik-compat", "/usr/local/bin/aik-gcm"):
     assert os.path.isfile(ROOT + rel), "missing legacy file: " + rel
 
 # 3) conf/出厂面收编（既有波全量幂等重装）
-install_file("/usr/local/sbin/aik-upgrade",
-             F + "/usr/local/sbin/aik-upgrade", 0o755)
 install_file("/etc/fonts/fonts.conf", F + "/etc/fonts/fonts.conf", 0o644)
 install_file("/etc/sysctl.d/50-aik-console-quiet.conf",
              F + "/etc/sysctl.d/50-aik-console-quiet.conf", 0o644)
 
-# 3b) 17.9 收编面刷件（幂等重装）
-install_file("/usr/local/sbin/aipd", REPO + "/agent/ai/aipd/aipd", 0o755)
-# aik-sandbox：取「出厂同源锚」（未跟踪件；make 目标输出在
-# agent/ai/aik-sandbox，与此处取用位不是同一份——ENG-14 待处理）
-SBX_ANCHOR = REPO + "/agent/ai/sandbox/aik-sandbox"
-assert os.path.isfile(SBX_ANCHOR), \
-    "aik-sandbox factory anchor missing: " + SBX_ANCHOR
-install_file("/usr/local/bin/aik-sandbox", SBX_ANCHOR, 0o755)
-install_file("/usr/local/bin/aik-ime", F + "/usr/local/bin/aik-ime", 0o755)
+# 3b) 17.9 收编面（aipd / aik-sandbox / aik-ime 已由 §1 清单驱动重装；
+#     aik-sandbox 取 Makefile 产物 agent/ai/aik-sandbox，不再取未跟踪锚）
 install_file("/root/.fbtermrc", F + "/root/.fbtermrc", 0o644)
 
 
@@ -430,28 +453,47 @@ try:
 except OSError as _e:
     _seed = "unknown"
     print("WARN: seed not measurable:", _e)
-# aikd（记忆服务）不由本脚本重装：如实记它的出处，免得「userland=main@…」
-# 被读成「整棵出厂树都是这次编的」（ENG-14）。
+# aikd（记忆服务）自 ENG-14 起由 §1 清单驱动从仓内构建件安装；
+# 快照只记实测 md5 和清单摘要，不再写「userland=main@…」暗示整棵树同源。
 _aikd = ROOT + "/usr/local/sbin/aikd"
 _aikd_md5 = md5(_aikd) if os.path.isfile(_aikd) else "absent"
+_n_refresh = sum(1 for _e in FM.ENTRIES if _e["installer"] == "refresh")
+_n_norecipe = sum(1 for _e in FM.ENTRIES if _e["installer"] != "refresh")
+_norecipe_lines = []
+for _e in FM.ENTRIES:
+    if _e["installer"] == "refresh":
+        continue
+    _p = ROOT + _e["path"]
+    _m = md5(_p) if os.path.isfile(_p) else "absent"
+    _norecipe_lines.append("norecipe=%s md5=%s" % (_e["path"], _m))
 snap = ROOT + "/etc/aikernel/ISO-SNAPSHOT-W82.txt"
 with open(snap, "w", encoding="utf-8") as fh:
     fh.write(
         "version=%s-w82-%s\n"
         "kernel=6.18.39 #82 %s (%d bytes)\n"
         "softdog.ko=%s (same-tree linux-k2 #82; vermagic \"%s\")\n"
-        "userland=main@%s\n"
+        "refresh_commit=main@%s\n"
+        "manifest=build/factory_manifest.py entries=%d refresh=%d "
+        "norecipe=%d\n"
+        "manifest_ledger=/etc/aikernel/FACTORY-MANIFEST.txt\n"
         "tools=%s channels=%s seed=%s\n"
         "built=%s on L1\n"
-        "aikd_md5=%s (memory service NOT rebuilt by this refresh; "
-        "factory-tree file carried over)\n"
+        "aikd_md5=%s (installed from repo build; includes MEM-01a/b/c "
+        "and MEM-02a/b)\n"
+        "%s"
         "correction=2026-11-18: prior entry erroneously said #62 "
         "a667e9160b23036a859ebc8a70aae62b (provenance drift); the "
         "factory kernel is and was #82 = bzImage md5 above\n"
         % (NEW, today.replace("-", ""), BZ_MD5, bzsize, SOFTDOG_MD5,
-           vr.stdout.strip(), head, _tools, _chans, _seed, today,
-           _aikd_md5))
+           vr.stdout.strip(), head, len(FM.ENTRIES), _n_refresh,
+           _n_norecipe, _tools, _chans, _seed, today, _aikd_md5,
+           "".join(ln + "\n" for ln in _norecipe_lines)))
 print("W82 snapshot rewritten")
+# 出厂树内留一份完整清单（含 NO_RECIPE 逐件 md5），随 tar 出厂自描述。
+_mf = ROOT + "/etc/aikernel/FACTORY-MANIFEST.txt"
+FM.write_manifest(_mf, ROOT, REPO)
+os.chmod(_mf, 0o644)
+os.chown(_mf, 0, 0)
 
 # 12) K17 快照追加本版条目（发布说明单点=build/RELEASE-NOTES.txt；
 #     同版本重跑不重复追加）

@@ -24,13 +24,22 @@ md5sum "$BZ"; file "$BZ" | head -1
 grep -q "$VERSION" "$CFG" || { echo "grub cfg not at $VERSION"; exit 1; }
 [ -f "$INITRD" ] || { echo "initrd missing"; exit 1; }
 
+echo "== ENG-14 factory manifest audit =="
+# 出厂树每一件（清单内）必须等于仓内构建件（strip 后处理一致）；
+# 漂移/缺件即停。NO_RECIPE 件只记账不判红（见 build/FACTORY-PROVENANCE.md）。
+FROOT=~jack66g/w7i-rootfs
+python3 "$REPO/build/factory_manifest.py" --audit --repo "$REPO" \
+    --root "$FROOT" || {
+    echo "ENG-14: factory tree != repo build (see table above)"; exit 1; }
+
 echo "== factory tar =="
 rm -f "$TAR"
 tar -C /home/jack66g/w7i-rootfs -cf "$TAR" .
 chmod 644 "$TAR"; sync
 tar -xOf "$TAR" ./etc/motd | grep -q "$VERSION" || { echo "motd not $VERSION"; exit 1; }
-# 出厂同源锚前置（未跟踪件；缺失即停，不得静默换件）
-[ -f "$REPO/agent/ai/sandbox/aik-sandbox" ] || { echo "aik-sandbox factory anchor missing"; exit 1; }
+# ENG-14: aik-sandbox 现由 Makefile 产物 agent/ai/aik-sandbox 供给；旧
+# 未跟踪锚路径退役（两处在当前源码上实测同一件，见 FACTORY-PROVENANCE.md）。
+[ -f "$REPO/agent/ai/aik-sandbox" ] || { echo "aik-sandbox build product missing"; exit 1; }
 tar -xOf "$TAR" ./etc/aikernel/ISO-SNAPSHOT-K17.txt | tail -2
 tar -xOf "$TAR" ./etc/aikernel/ISO-SNAPSHOT-W82.txt | head -4
 if tar -tf "$TAR" | grep -q 'var/lib/ollama/models/.*blob'; then
@@ -128,7 +137,7 @@ tar -xOf "$TAR" ./usr/local/bin/aik-ime | strings 2>/dev/null | \
   "$(md5sum "$REPO/factory/usr/local/bin/aik-ime" | cut -d' ' -f1)" ] || {
     echo "aik-ime in tar != factory tree"; exit 1; }
 [ "$(tmd5 ./usr/local/bin/aik-sandbox)" = \
-  "$(md5sum "$REPO/agent/ai/sandbox/aik-sandbox" | cut -d' ' -f1)" ] || {
+  "$(md5sum "$REPO/agent/ai/aik-sandbox" | cut -d' ' -f1)" ] || {
     echo "aik-sandbox in tar != repo build"; exit 1; }
 [ "$(tmd5 ./usr/local/sbin/aipd)" = \
   "$(md5sum "$REPO/agent/ai/aipd/aipd" | cut -d' ' -f1)" ] || {
