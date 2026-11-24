@@ -46,7 +46,7 @@ agent/ai/aikime/aik-ime（条件件，见下）
 - **mbedTLS**：仓内 vendored（`agent/ai/third_party/mbedtls`），`make world` 第一步按需构建静态库；已有库则短路。
 - **静态库链**：记忆层五库由 `make world` 按 `store → space → retrieval → smeconfig → engine` 串行产出；**不要**在别处并发构建它们（并发写会产出坏库）。
 - **aik-ime（条件件）**：需要勘探基座的 librime 静态库，默认路径 `$(HOME)/p55-poc/librime/build/lib/librime.a`，可用 `make world AIK_IME_RIME_LIB=<路径>` 覆盖。**不在位时 `make world` 打印 `SKIP aik-ime` 并继续**（不静默、不算失败）；在位则必须建出来，否则判 MISS。
-- **make iso 额外**：root 权限、`build/VERSION` 非空、出厂树（默认 `$(HOME)/w7i-rootfs`，可用 `FACTORY_ROOT=<路径>` 覆盖）存在且可写、内核 `bzImage`/`softdog.ko`/initrd 与 grub cfg 在位。前置检查不过时 `make iso` 打印指引并非零退出，**不做半途写入**。
+- **make iso 额外**：root 权限、`build/VERSION` 非空、出厂树（默认 `$(HOME)/w7i-rootfs`，可用 `FACTORY_ROOT=<路径>` 覆盖）存在且可写——这三项由 `make iso` 的前置检查当场判定；内核 `bzImage`/`softdog.ko`/initrd 与 grub cfg 由 `build/w17n_build_iso.sh` 自行断言。前置检查不过时 `make iso` 打印指引并非零退出，**不做半途写入**。
 
 ### 失败处理
 
