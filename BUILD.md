@@ -2,6 +2,58 @@
 
 本文描述如何从**干净 Linux 6.18.39** 重建当前源码树（alpha.17.8.1 出厂基线）。发布 ISO/rootfs 的完整重建还涉及构建机路径和 root 权限，脚本在 `build/`（含 `w17*` 出厂线与 `w7_userland_pkg.sh` 散件打包器）、`w6i-tools/` 中作为参考保留。
 
+## 0. 一条命令（日常口径）
+
+仓根有唯一顶层入口 `Makefile`；**不再需要人手记 ≥11 步**。日常只有五条命令：
+
+| 命令 | 做什么 | 前置 |
+|---|---|---|
+| `make world` | 构建全部一方用户态件（依赖序串行，任一步失败即停） | 见下方「前置条件」 |
+| `make test` | 聚合全部测试并给统一汇总：`agent/ai/tests/run_all.sh` + 六套记忆门禁（engine / retrieval / smeconfig / space / smehttp / store）+ 出厂能力审计 `audit_occ_capabilities.py --check`；任一项红即退出非零并逐项列名 | 先跑过 `make world`（部分门要用仓内构建件） |
+| `make check` | 轻量门（不构建）：树宪章 `check_tree.sh` + 出厂能力审计 | 无 |
+| `make iso` | 打版出 ISO：先做 root / `build/VERSION` / 出厂树可写 前置检查，通过后依次跑 `build/w17n_factory_refresh.py`、`build/w17n_build_iso.sh` | **只在打版机以 root 跑**，且先跑过 `make world` |
+| `make clean` | 只清构建产物（复用各子目录 clean；不删仓内跟踪的同源锚二进制，不碰出厂树） | 无 |
+
+```bash
+make world     # 1) mbedTLS 2) store->space->retrieval->smeconfig->engine
+               # 3) aikernel-shell(+ai)/aik-sandbox/aik-compat/aik-gcm
+               # 4) aistreamd(+aik-pqdump) 5) occ 6) aipd/smehttp(aikd)/tlsgw/autocondense
+               # 7) aik-ime（条件件）→ 逐件产物核对
+make check     # 树宪章 + 出厂能力审计（提交前必跑）
+make test      # run_all + 六套记忆门禁 + 能力审计 → SUMMARY
+```
+
+`make world` 的产物清单（逐件在位核对，缺任一件即非零退出）：
+
+```text
+agent/ai/aikernel-shell          agent/ai/ai（-> aikernel-shell 符号链接）
+agent/ai/occ/occ                 agent/ai/aistreamd/aistreamd
+agent/ai/aistreamd/aik-pqdump    agent/ai/aipd/aipd
+agent/ai/aik-sandbox             agent/ai/aik-compat
+agent/ai/aik-gcm                 agent/ai/smehttp/smehttp
+agent/ai/smehttp/aikd            agent/ai/tlsgw/aik-tls-gateway
+agent/ai/autocondense/autocondensed
+agent/ai/autocondense/autocondense-mcp
+agent/ai/autocondense/autocondense-hook
+agent/ai/aikctl/aikctl（Python，无构建步，只核对在位）
+agent/ai/aikime/aik-ime（条件件，见下）
+```
+
+### 前置条件
+
+- **机器**：L1 打版机（Ubuntu 22.04）。构建/打版不跨机器。
+- **工具链**：GCC 11、GNU ld 2.38（链接器锁 `gold`）、GNU make、Python 3.10、`ar`/`zlib` 开发包。
+- **mbedTLS**：仓内 vendored（`agent/ai/third_party/mbedtls`），`make world` 第一步按需构建静态库；已有库则短路。
+- **静态库链**：记忆层五库由 `make world` 按 `store → space → retrieval → smeconfig → engine` 串行产出；**不要**在别处并发构建它们（并发写会产出坏库）。
+- **aik-ime（条件件）**：需要勘探基座的 librime 静态库，默认路径 `$(HOME)/p55-poc/librime/build/lib/librime.a`，可用 `make world AIK_IME_RIME_LIB=<路径>` 覆盖。**不在位时 `make world` 打印 `SKIP aik-ime` 并继续**（不静默、不算失败）；在位则必须建出来，否则判 MISS。
+- **make iso 额外**：root 权限、`build/VERSION` 非空、出厂树（默认 `$(HOME)/w7i-rootfs`，可用 `FACTORY_ROOT=<路径>` 覆盖）存在且可写、内核 `bzImage`/`softdog.ko`/initrd 与 grub cfg 在位。前置检查不过时 `make iso` 打印指引并非零退出，**不做半途写入**。
+
+### 失败处理
+
+- `make world`：任一步失败即停在该步（`set -e` 语义），看最后一行 `make: *** [Makefile:NN: world] Error`；修正后重跑同一条命令（各子目录增量构建）。
+- `make test`：末尾 `SUMMARY: pass=N fail=M` 与 `FAILED: <逐项名>`；单套日志由 run_all 落在 `/tmp/aik-*.log`。
+- 干净重建：`make clean && make world`（`make clean` 不动 mbedtls 第三方库与出厂树，需要连第三方一起清时手工清 `agent/ai/third_party/mbedtls/library`）。
+
 ## 1. 环境
 
 发布构建使用：
@@ -50,6 +102,14 @@ make -j"$(nproc)" KBUILD_BUILD_VERSION=59 \
 
 ## 3. 用户态控制台
 
+日常用顶层入口（仓根）：
+
+```bash
+make world     # 全部一方用户态件，见第 0 节
+```
+
+只重建控制台单件时（传统口径，产物与 `make world` 同位置）：
+
 ```bash
 cd agent/ai
 make -j1          # Makefile 已设置 .NOTPARALLEL，禁止并发构建
@@ -72,15 +132,31 @@ sudo make install
 
 ## 4. 测试与审计
 
+日常（仓根，一条命令跑全部并给统一汇总）：
+
 ```bash
-make -C tests -j1                       # 构建 37 个测试目标
+make test      # run_all + 六套记忆门禁 + 能力审计；SUMMARY: pass=N fail=M
+make check     # 树宪章 + 出厂能力审计（不构建）
+```
+
+单套手工口径（排查时用）：
+
+```bash
+make -C agent/ai/tests -j1              # 构建 37 个测试目标
 bash agent/ai/tests/run_all.sh          # 当前全量 runner（C + Python + audit，SUMMARY 全绿）
+make -C agent/ai/engine -j1 test        # 记忆层六套：engine / retrieval /
+make -C agent/ai/retrieval -j1 test     #   smeconfig / space / smehttp / store
+make -C agent/ai/smeconfig -j1 test     # 各自带库构建，可单独跑
+make -C agent/ai/space -j1 test
+make -C agent/ai/smehttp -j1 test
+make -C agent/ai/store -j1 test
 
 # 或单独运行：
 python3 tests/test_api_clarify.py
 python3 tests/test_clarify_gate.py --agent-dir .
 python3 tests/test_api_clarify_e2e.py --agent-dir .
 python3 tools/audit_capabilities.py --check
+python3 tools/audit_occ_capabilities.py --check
 ```
 
 期望：注册表 **237 工具 / 27 通道 / 20 desktop**（`tools.json` 2026-11-12 生成版实读；occ 通道 6 工具，旗控件 `config_write_network` 另计），sandbox **7 工具**，seed **248**（factory 双份一致）；`audit_capabilities.py --check` PASS。
@@ -104,6 +180,16 @@ factory/usr/...      -> guest /usr/...
 
 ISO 打包线在 `w6i-tools/`（`init` 安装器、`grub-iso.cfg`、`build-iso.sh`、`export-rootfs.sh`）。`build/w73-build-iso.sh`、`build/w73_factory_refresh.py` 是 alpha.12.0 的发布脚本，含构建机绝对路径（`/home/jack66g/...`）和 root 操作，移植时按环境改路径，不要直接在生产 VM 上运行。
 
+### 打版入口（一条命令）
+
+```bash
+sudo make world            # 先把一方件全建出来（出厂面按清单审计仓内件）
+sudo make iso              # 前置检查（root / build/VERSION / 出厂树可写）→
+                           #   build/w17n_factory_refresh.py → build/w17n_build_iso.sh
+```
+
+`make iso` **只能在打版机以 root 跑**（refresh 要写出厂树、ISO 组装要挂载/打包），且由主会话串行独占——不要与其他台架、串口测试并发。`make iso` 只做前置检查与两次既有脚本调用；脚本内部的构建机路径（`build/` 下 `w17n_*`）是既有例外，不在顶层 Makefile 里复制。
+
 ### 出厂/打包（alpha.17.x 出厂线）
 
 alpha.17 系每版出厂是「factory 刷新 → ISO 组装 → QEMU 钻证」三件套，按波次命名
@@ -118,6 +204,9 @@ alpha.17 系每版出厂是「factory 刷新 → ISO 组装 → QEMU 钻证」�
 
 ## 6. 发布校验清单
 
+- [ ] `make world` 全绿、产物逐件在位（`make world` 末尾打印 `world: 全部一方用户态件在位`）
+- [ ] `make test` 全绿（末尾 `SUMMARY: pass=N fail=0`）
+- [ ] `make check` 全绿（树宪章 9/0 + 出厂能力审计 PASS）
 - [ ] `agent/ai/aikernel-shell --version` = `0.1.0-alpha.14.0`（源码宏；出厂版本线以 ISO motd/grub 版本串为准，w17i 断言 `0.1.0-alpha.17.8.1`）
 - [ ] `tools.json` 237 工具、27 通道、20 desktop；`tools-sandbox.json` 7 工具
 - [ ] `sme-seed.jsonl` 248 行（factory 双份一致）

@@ -87,6 +87,10 @@ __pycache__/
 /agent/ai/autocondense/autocondensed
 /agent/ai/autocondense/autocondense-mcp
 /agent/ai/autocondense/autocondense-hook
+# make world 就地产物（ENG-06）：构建在组件目录内，文件名不是 tests/test_* 形态，
+# 按第六节先例逐件点名（非入库件）。
+/agent/ai/tlsgw/aik-tls-gateway
+/agent/ai/aikime/aik-ime
 
 # ---------------------------------------------------------------------------
 # 六、生成器与测试的运行报告（每次生成/测试都会重写）
