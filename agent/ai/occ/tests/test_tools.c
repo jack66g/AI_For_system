@@ -114,13 +114,16 @@ static int exec_rc(void)
 
 static void write_stub_ok(const char *path)
 {
-	char body[2048];
+	char body[4096];
 	FILE *f;
 
 	/*
-	 * 契约 stub：usage 含 --rw-path（探测过）；create/destroy=0；
-	 * run：定位 -- 后 exec（透传退出码/输出）；RUN_SLEEP 环境变量
-	 * 控制 run 阶段睡眠（超时组杀用例）。
+	 * 契约 stub（AIF-09 新协议）：usage 含 --rw-path 与 --status-fd；
+	 * create/destroy=0；run 解析 --status-fd N，跑完命令后在 fd N 写一行
+	 *   AIK-SANDBOX-STATUS v1 phase=child rc=<命令退出码>
+	 * 并以同码退出（真件同款口径）。OCC_STUB_SLEEP 控制 run 阶段睡眠；
+	 * OCC_STUB_PHASE/OCC_STUB_RC 伪造沙箱面相位；OCC_STUB_RAW[_RC] 原样
+	 * 写坏状态（伪造/截断用例）。
 	 */
 	f = fopen(path, "wb");
 	if (!f) {
@@ -131,7 +134,7 @@ static void write_stub_ok(const char *path)
  "#!/bin/bash\n"
  "# occ test stub for aik-sandbox (test only)\n"
  "if [ \"$1\" = \"--occ-probe\" ] || [ $# -eq 0 ]; then\n"
- "  echo 'usage: stub create|run|destroy [--rw-path P] -- cmd'\n"
+ "  echo 'usage: stub create|run|destroy [--rw-path P] [--status-fd N] -- cmd'\n"
  "  exit 1\n"
  "fi\n"
  "case \"$1\" in\n"
@@ -139,21 +142,100 @@ static void write_stub_ok(const char *path)
  "  run)\n"
  "    shift\n"
  "    zone=$1; shift\n"
- "    rw=\"\"\n"
+ "    rw=\"\"; sfd=\"\"\n"
  "    while [ $# -gt 0 ]; do\n"
  "      case \"$1\" in\n"
  "        --rw-path) rw=$2; shift 2 ;;\n"
+ "        --status-fd) sfd=$2; shift 2 ;;\n"
  "        --) shift; break ;;\n"
  "        *) shift ;;\n"
  "      esac\n"
  "    done\n"
  "    echo \"stub-zone=$zone rw=$rw\"\n"
  "    if [ -n \"$OCC_STUB_SLEEP\" ]; then sleep \"$OCC_STUB_SLEEP\"; fi\n"
- "    exec \"$@\"\n"
+ "    if [ -n \"$OCC_STUB_RAW\" ]; then\n"
+ "      if [ -n \"$sfd\" ]; then printf '%%s' \"$OCC_STUB_RAW\" >&$sfd; fi\n"
+ "      exit \"${OCC_STUB_RAW_RC:-0}\"\n"
+ "    fi\n"
+ "    if [ -n \"$OCC_STUB_PHASE\" ]; then\n"
+ "      rc=${OCC_STUB_RC:-0}\n"
+ "      if [ -n \"$sfd\" ]; then\n"
+ "        printf 'AIK-SANDBOX-STATUS v1 phase=%%s rc=%%s\\n' "
+ "\"$OCC_STUB_PHASE\" \"$rc\" >&$sfd\n"
+ "      fi\n"
+ "      exit \"$rc\"\n"
+ "    fi\n"
+ "    \"$@\"\n"
+ "    rc=$?\n"
+ "    if [ -n \"$sfd\" ]; then\n"
+ "      printf 'AIK-SANDBOX-STATUS v1 phase=child rc=%%s\\n' \"$rc\" >&$sfd\n"
+ "    fi\n"
+ "    exit $rc\n"
  "    ;;\n"
  "  *) exit 1 ;;\n"
  "esac\n");
 	fputs(body, f);
+	fclose(f);
+	chmod(path, 0755);
+}
+
+static void write_stub_legacy(const char *path)
+{
+	FILE *f = fopen(path, "wb");
+
+	if (!f) {
+		perror("stub-legacy");
+		exit(2);
+	}
+	/* 旧包装器契约：usage 有 --rw-path、**没有** --status-fd；run 直接
+	 * exec 命令、不写状态 → occ 必须标「来源未定」并原样保留输出。 */
+	fputs("#!/bin/bash\n"
+	      "# 旧版 stub：无状态通道（AIF-09 过渡兼容用例）\n"
+	      "if [ \"$1\" = \"--occ-probe\" ] || [ $# -eq 0 ]; then\n"
+	      "  echo 'usage: legacy create|run|destroy [--rw-path P] -- cmd'\n"
+	      "  exit 1\n"
+	      "fi\n"
+	      "case \"$1\" in\n"
+	      "  create|destroy) exit 0 ;;\n"
+	      "  run)\n"
+	      "    shift; zone=$1; shift\n"
+	      "    while [ $# -gt 0 ]; do\n"
+	      "      case \"$1\" in\n"
+	      "        --rw-path) shift 2 ;;\n"
+	      "        --) shift; break ;;\n"
+	      "        *) shift ;;\n"
+	      "      esac\n"
+	      "    done\n"
+	      "    echo \"legacy-zone=$zone\"\n"
+	      "    exec \"$@\"\n"
+	      "    ;;\n"
+	      "  *) exit 1 ;;\n"
+	      "esac\n", f);
+	fclose(f);
+	chmod(path, 0755);
+}
+
+/*
+ * 测试专用 sudo shim：真 sudo（1.9.x）执行命令前会关闭 >=3 的 fd，状态
+ * 通道（fd 3）在非 root 测试机上就永远不可达。这里只做「去 -n 后直接
+ * exec」，保住 fd 3，让协议路径在无 root 的 CI/开发机上也能被测到。
+ * 生产路径不经过它（occ 生产调用真 sudo，非 root 走「来源未定」）。
+ */
+static void write_sudo_shim(const char *dir)
+{
+	char path[600];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/sudo", dir);
+	f = fopen(path, "wb");
+	if (!f) {
+		perror("sudo-shim");
+		exit(2);
+	}
+	fputs("#!/bin/sh\n"
+	      "# test-only sudo shim (see test_tools.c)\n"
+	      "[ \"$1\" = \"-n\" ] && shift\n"
+	      "exec \"$@\"\n", f);
 	fclose(f);
 	chmod(path, 0755);
 }
@@ -638,14 +720,32 @@ int main(void)
 
 	/* ======== bash：沙箱契约 ======== */
 	{
-		char stub[512], stub_old[512], stub_fc[512];
+		char stub[512], stub_old[512], stub_fc[512], stub_legacy[512];
+		char shim[520];
+		char *saved_path;
 
 		snprintf(stub, sizeof(stub), "%s/stub-sb.sh", tmpdir);
 		snprintf(stub_old, sizeof(stub_old), "%s/stub-old.sh", tmpdir);
 		snprintf(stub_fc, sizeof(stub_fc), "%s/stub-fc.sh", tmpdir);
+		snprintf(stub_legacy, sizeof(stub_legacy), "%s/stub-legacy.sh",
+			 tmpdir);
+		snprintf(shim, sizeof(shim), "%s/shim", tmpdir);
 		write_stub_ok(stub);
 		write_stub_old(stub_old);
 		write_stub_fail_create(stub_fc);
+		write_stub_legacy(stub_legacy);
+		/* AIF-09：状态通道走 fd 3；真 sudo 会关掉它——测试用 shim
+		 * 保住 fd（生产非 root 路径走「来源未定」，见 sandbox.c）。 */
+		mkdir(shim, 0700);
+		write_sudo_shim(shim);
+		saved_path = strdup(getenv("PATH") ? getenv("PATH") : "");
+		{
+			char npath[3072];
+
+			snprintf(npath, sizeof(npath), "%s:%s", shim,
+				 saved_path ? saved_path : "");
+			setenv("PATH", npath, 1);
+		}
 		setenv("OCC_SANDBOX_BIN", stub, 1);
 		occ_sandbox_probe_cache_reset();
 
@@ -762,6 +862,115 @@ int main(void)
 		   strstr(s, "a\xEF\xBF\xBD""b") &&
 		   !memchr(s, 0xFF, strlen(s)),
 		   "bash8-utf8-sanitize-source");
+
+		/* ======== AIF-09：状态通道分类 ======== */
+
+		/* B9 命令自己的非零退出码 = 命令结果（不再误报沙箱失败） */
+		s = (char *)exec_tool("bash", "{\"command\":\"exit 1\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=1]") &&
+		   !strstr(s, "沙箱执行失败"), "bash9-child-exit1-ok");
+		s = (char *)exec_tool("bash", "{\"command\":\"exit 2\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=2]") &&
+		   !strstr(s, "沙箱执行失败"), "bash9-child-exit2-ok");
+		s = (char *)exec_tool("bash",
+		      "{\"command\":\"exit 127\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=127]") &&
+		   !strstr(s, "沙箱执行失败"), "bash9-child-exit127-ok");
+		s = (char *)exec_tool("bash",
+		      "{\"command\":\"kill -TERM $$\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=143]") &&
+		   !strstr(s, "沙箱执行失败"), "bash9-child-signal-ok");
+		/* grep 无匹配（1）/systemctl 式用法错误（2）是命令结果 */
+		s = (char *)exec_tool("bash",
+		      "{\"command\":\"grep never /dev/null\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=1]"),
+		   "bash9-grep-nomatch-ok");
+
+		/* B10 沙箱面故障：usage/setup/exec 才是工具错误 */
+		{
+			struct {
+				const char *phase;
+				const char *rc;
+				const char *want;
+				const char *name;
+			} fakes[] = {
+				{ "setup", "2", "阶段 setup", "bash10-setup-fault" },
+				{ "usage", "1", "阶段 usage", "bash10-usage-fault" },
+				{ "exec", "127", "阶段 exec", "bash10-exec-fault" },
+				{ "timeout", "3", "timeout", "bash10-timeout-phase" },
+				{ "signal", "143", "被信号终止",
+				  "bash10-signal-phase" },
+			};
+			size_t k;
+
+			for (k = 0; k < sizeof(fakes) / sizeof(fakes[0]);
+			     k++) {
+				setenv("OCC_STUB_PHASE", fakes[k].phase, 1);
+				setenv("OCC_STUB_RC", fakes[k].rc, 1);
+				s = (char *)exec_tool("bash",
+				      "{\"command\":\"true\"}");
+				unsetenv("OCC_STUB_PHASE");
+				unsetenv("OCC_STUB_RC");
+				OK(exec_rc() != 0 && s &&
+				   strstr(s, fakes[k].want), fakes[k].name);
+			}
+		}
+
+		/* B11 旧包装器（无状态通道）→ 来源未定 + 输出原样 */
+		setenv("OCC_SANDBOX_BIN", stub_legacy, 1);
+		occ_sandbox_probe_cache_reset();
+		s = (char *)exec_tool("bash",
+		      "{\"command\":\"echo legacy-out; exit 1\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "legacy-out") &&
+		   strstr(s, "[exit=1 来源未定]") &&
+		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit1");
+		s = (char *)exec_tool("bash", "{\"command\":\"exit 2\"}");
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=2 来源未定]") &&
+		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit2");
+
+		/* B12 状态伪造/截断 → 来源未定（不得当成功或沙箱失败） */
+		setenv("OCC_SANDBOX_BIN", stub, 1);
+		occ_sandbox_probe_cache_reset();
+		setenv("OCC_STUB_RAW",
+		       "AIK-SANDBOX-STATUS v1 phase=child rc=0\n", 1);
+		setenv("OCC_STUB_RAW_RC", "1", 1);
+		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
+		unsetenv("OCC_STUB_RAW");
+		unsetenv("OCC_STUB_RAW_RC");
+		OK(exec_rc() == 0 && s && strstr(s, "来源未定") &&
+		   !strstr(s, "[exit=0]") && !strstr(s, "沙箱执行失败"),
+		   "bash12-forged-rc-mismatch");
+		setenv("OCC_STUB_RAW",
+		       "AIK-SANDBOX-STATUS v1 phase=child rc=1", 1);
+		setenv("OCC_STUB_RAW_RC", "1", 1);
+		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
+		unsetenv("OCC_STUB_RAW");
+		unsetenv("OCC_STUB_RAW_RC");
+		OK(exec_rc() == 0 && s && strstr(s, "来源未定"),
+		   "bash12-truncated-line");
+		setenv("OCC_STUB_RAW",
+		       "AIK-SANDBOX-STATUS v1 phase=nonsense rc=0\n", 1);
+		setenv("OCC_STUB_RAW_RC", "0", 1);
+		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
+		unsetenv("OCC_STUB_RAW");
+		unsetenv("OCC_STUB_RAW_RC");
+		OK(exec_rc() == 0 && s && strstr(s, "来源未定"),
+		   "bash12-bogus-phase");
+		setenv("OCC_STUB_RAW",
+		       "AIK-SANDBOX-STATUS v1 phase=child rc=0\n"
+		       "AIK-SANDBOX-STATUS v1 phase=child rc=0\n", 1);
+		setenv("OCC_STUB_RAW_RC", "0", 1);
+		s = (char *)exec_tool("bash", "{\"command\":\"true\"}");
+		unsetenv("OCC_STUB_RAW");
+		unsetenv("OCC_STUB_RAW_RC");
+		OK(exec_rc() == 0 && s && strstr(s, "来源未定"),
+		   "bash12-extra-line");
+
+		/* 恢复 PATH（shim 只服务本块） */
+		if (saved_path) {
+			setenv("PATH", saved_path, 1);
+			free(saved_path);
+		}
 	}
 
 	/* ======== trace JSONL（带 session/trace_dir 的 ctx 直执） ======== */

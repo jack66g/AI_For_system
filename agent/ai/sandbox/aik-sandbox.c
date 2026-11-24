@@ -106,6 +106,13 @@
  *
  * 退出码：0 成功；1 用法错误；2 沙盒组装失败；127 exec 失败；
  *         子进程正常退出码 / 128+信号 原样透传。
+ *         这些码本身重叠（子命令也可 1/2/127/128+信号），需要区分的调用
+ *         方用 `run --status-fd N` 收一行版本化相位（AIF-09，见下）。
+ *
+ * 状态通道（AIF-09）：run 支持 `--status-fd N`，包装器在 fd N 上写一行
+ *   AIK-SANDBOX-STATUS v1 phase=<usage|setup|exec|child|timeout|signal> rc=<n>
+ * 纯增值信息：fd 无效/写失败静默跳过，退出码与输出零变化；旧调用不传该
+ * 参数即完全维持原行为。
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -235,6 +242,10 @@ struct sb_config {
 	int ro_n;
 	char rw_paths[SB_MAX_BINDS][PATH_MAX];
 	int rw_n;
+
+	/* AIF-09：run --status-fd N（版本化状态通道；-1 = 未启用）。
+	 * 只对 run 有效——create 显式给 --status-fd 即报错（不静默吞）。 */
+	int status_fd;
 };
 
 struct sb_meta {
@@ -287,6 +298,190 @@ static const char *const SB_DEV_OPT[] = {
 	"full", "tty", "console", NULL,
 };
 
+/* ---- AIF-09：版本化状态通道（run --status-fd N） ----
+ *
+ * 包装器在 fd N 上写**一行**（单次 write，原子；不含子命令输出）：
+ *
+ *   AIK-SANDBOX-STATUS v1 phase=<usage|setup|exec|child|timeout|signal> rc=<n>
+ *
+ * rc 与 run 的退出码同值。各相位：
+ *   usage   参数/用法错误（退出码 1；区名非法、缺 --、未知选项、非法选项值）
+ *   setup   沙箱组装面（含挂载/cgroup/clone/循环设备/子进程组装段内退出；
+ *           通常退出码 2，个别前置条件如锁忙/已有 run 进程仍按既有码 1）
+ *   exec    沙盒内 exec 命令失败（退出码 127；与「命令自己 exit 127」区分）
+ *   child   命令确实跑起来了：rc=子命令退出码（含 1/2/127/128+信号）
+ *   signal  包装器自身被 SIGTERM/INT/HUP/QUIT 终止：rc=128+信号
+ *   timeout 保留相位：本包装器无超时选项（超时由施加方 SIGKILL 或未来
+ *           supervisor 上报）；调用方按超时路径处理即可
+ *
+ * 契约：
+ *   - 通道纯属增值信息；fd 无效（含经 sudo 被关闭）、写失败、读端已关
+ *     一律静默跳过，绝不改变退出码、stdout/stderr 内容或子进程行为；
+ *   - fd 在包装器内设 FD_CLOEXEC：沙盒内命令**看不到**状态 fd，无法伪造；
+ *   - 子进程（clone 出的沙盒 init）关掉自己那份 fd，状态只由包装器写；
+ *   - 同一 run 最多一行（sb_status_written 幂等）。
+ * 调用方：agent/ai/occ/occ_tools/sandbox.c（按 phase 区分命令结果与沙箱
+ * 面故障）。旧调用者不传 --status-fd，行为逐字不变。
+ */
+#define SB_STATUS_FD_MIN	3
+#define SB_STATUS_FD_MAX	1023
+#define SB_STATUS_PREFIX	"AIK-SANDBOX-STATUS v1"
+
+static int sb_status_fd = -1;		/* <0 = 通道未启用 */
+static int sb_status_written;		/* 1 = 已写（一次 run 只写一行） */
+static const char *sb_status_phase = "usage";	/* die() 的相位口径 */
+
+/* 写一段字节；吞掉 EPIPE 对应的 SIGPIPE（读端先死时不得改变退出码） */
+static void sb_status_write(const char *buf, size_t len)
+{
+	sigset_t block, old;
+	struct timespec zero;
+	size_t off = 0;
+
+	sigemptyset(&block);
+	sigaddset(&block, SIGPIPE);
+	sigprocmask(SIG_BLOCK, &block, &old);
+	while (off < len) {
+		ssize_t n = write(sb_status_fd, buf + off, len - off);
+
+		if (n > 0) {
+			off += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && errno == EPIPE) {
+			/* SIGPIPE 已 pending：零超时取走它再恢复掩码 */
+			zero.tv_sec = 0;
+			zero.tv_nsec = 0;
+			sigtimedwait(&block, NULL, &zero);
+		}
+		break;
+	}
+	sigprocmask(SIG_SETMASK, &old, NULL);
+}
+
+/* 启用通道（fd 无效=静默禁用；成功时设 CLOEXEC 防沙盒内伪造） */
+static void sb_status_init(int fd)
+{
+	int fl;
+
+	if (fd < SB_STATUS_FD_MIN || fd > SB_STATUS_FD_MAX)
+		return;
+	fl = fcntl(fd, F_GETFD);
+	if (fl < 0)
+		return;
+	if (fcntl(fd, F_SETFD, fl | FD_CLOEXEC) < 0)
+		return;
+	sb_status_fd = fd;
+}
+
+/* 写一行（幂等；phase 为字面量） */
+static void sb_status_emit(const char *phase, int rc)
+{
+	char buf[128];
+	int n;
+
+	if (sb_status_fd < 0 || sb_status_written)
+		return;
+	sb_status_written = 1;
+	n = snprintf(buf, sizeof(buf), "%s phase=%s rc=%d\n",
+		     SB_STATUS_PREFIX, phase, rc);
+	if (n < 0 || (size_t)n >= sizeof(buf))
+		return;
+	sb_status_write(buf, (size_t)n);
+}
+
+/* 子进程用：关掉继承来的状态 fd（只影响子进程自己的 fd 表） */
+static void sb_status_child_off(void)
+{
+	if (sb_status_fd >= 0) {
+		close(sb_status_fd);
+		sb_status_fd = -1;
+	}
+}
+
+/* 包装器自身被终止：先写 phase=signal，再按原信号死去（退出码不变） */
+static const struct {
+	int sig;
+	const char *line;
+	size_t len;
+} sb_status_sigs[] = {
+#define SB_SIG_LINE(rc) SB_STATUS_PREFIX " phase=signal rc=" #rc "\n"
+	{ SIGTERM, SB_SIG_LINE(143), sizeof(SB_SIG_LINE(143)) - 1 },
+	{ SIGINT,  SB_SIG_LINE(130), sizeof(SB_SIG_LINE(130)) - 1 },
+	{ SIGHUP,  SB_SIG_LINE(129), sizeof(SB_SIG_LINE(129)) - 1 },
+	{ SIGQUIT, SB_SIG_LINE(131), sizeof(SB_SIG_LINE(131)) - 1 },
+#undef SB_SIG_LINE
+};
+
+static void sb_status_sig_handler(int sig)
+{
+	unsigned int i;
+
+	if (!sb_status_written) {
+		for (i = 0; i < sizeof(sb_status_sigs) /
+			     sizeof(sb_status_sigs[0]); i++) {
+			if (sb_status_sigs[i].sig != sig)
+				continue;
+			sb_status_written = 1;
+			sb_status_write(sb_status_sigs[i].line,
+					sb_status_sigs[i].len);
+			break;
+		}
+	}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void sb_status_install_sigs(void)
+{
+	struct sigaction sa;
+	unsigned int i;
+
+	if (sb_status_fd < 0)
+		return;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = sb_status_sig_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;	/* 不 SA_RESTART：现有 waitpid EINTR 循环照旧 */
+	for (i = 0; i < sizeof(sb_status_sigs) / sizeof(sb_status_sigs[0]); i++)
+		sigaction(sb_status_sigs[i].sig, &sa, NULL);
+}
+
+/* 前向：选项解析器在文件后半（预扫描也要用） */
+static int parse_num(const char *s, long min, long max, long *out);
+
+/*
+ * --status-fd 预扫描：区名校验等早期失败发生在 parse_opts 之前，先取
+ * 通道号，让 usage 相位也能上报。值非法留给 parse_opts 报错（那时通道
+ * 未启用，无处上报——调用方按「来源未定」处理）。
+ */
+static void sb_status_prescan(int argc, char **argv, int from)
+{
+	int i;
+
+	for (i = from; i < argc; i++) {
+		const char *a = argv[i];
+		long v;
+
+		if (strcmp(a, "--") == 0)
+			return;
+		if (strncmp(a, "--status-fd", 11) != 0)
+			continue;
+		if (a[11] == '=') {
+			if (!parse_num(a + 12, SB_STATUS_FD_MIN,
+				       SB_STATUS_FD_MAX, &v))
+				sb_status_init((int)v);
+		} else if (a[11] == '\0' && i + 1 < argc) {
+			if (!parse_num(argv[i + 1], SB_STATUS_FD_MIN,
+				       SB_STATUS_FD_MAX, &v))
+				sb_status_init((int)v);
+		}
+		return;
+	}
+}
+
 /* ---- 基础工具 ---- */
 
 static void die(int code, const char *fmt, ...)
@@ -298,6 +493,8 @@ static void die(int code, const char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
 	fputc('\n', stderr);
+	/* 状态通道：run 的早期失败也要有相位（usage=1 / setup=2） */
+	sb_status_emit(sb_status_phase, code);
 	exit(code);
 }
 
@@ -2012,7 +2209,54 @@ struct child_args {
 	int ro_n;
 	const char *const *rw_paths;
 	int rw_n;
+	/* AIF-09：阶段标记管道写端（-1 = 无）——'S' 进 setup 段、'X' 即将
+	 * exec、'F' exec 失败。只用于包装器内部 classify，不是状态通道。 */
+	int stage_fd;
 };
+
+/* 阶段标记（子进程侧；写失败不影响任何结果） */
+static void sb_stage_mark(int fd, char c)
+{
+	if (fd >= 0)
+		(void)!write(fd, &c, 1);
+}
+
+/* 包装器侧：阶段缓冲里是否出现过某标记 */
+static int sb_stage_seen(const char *buf, size_t len, char c)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		if (buf[i] == c)
+			return 1;
+	return 0;
+}
+
+/*
+ * AIF-09：状态相位判定。
+ * 有阶段管道（常态）：'F'→exec、'X'→child（命令已跑，含 1/2/127/128+
+ * 信号）、否则 setup（子进程在组装段内退出）。
+ * 无阶段管道（pipe2 失败，几乎不可能）：按退出码保守分类 2→setup、
+ * 127→exec、其余→child（旧口径，不新增误判面）。
+ */
+static const char *sb_status_classify(int have_stage, const char *buf,
+				      size_t len, int code, int signaled)
+{
+	if (have_stage) {
+		if (!signaled && sb_stage_seen(buf, len, 'F'))
+			return "exec";
+		if (sb_stage_seen(buf, len, 'X'))
+			return "child";
+		return "setup";
+	}
+	if (signaled)
+		return "setup";
+	if (code == 127)
+		return "exec";
+	if (code == 2)
+		return "setup";
+	return "child";
+}
 
 /* W79：把显式声明的宿主路径 bind 到工作区同绝对路径（ro/rw 各一组）。
  * 目标 inode 在镜像根上按源类型创建（目录 or 空文件），失败即 fail-closed
@@ -2060,6 +2304,11 @@ static int sandbox_child(void *argp)
 	char path[PATH_MAX], src[PATH_MAX];
 	const char *home;
 	int i;
+
+	/* AIF-09：状态通道只由包装器写——子进程关掉自己那份 fd（防沙盒内
+	 * 伪造状态行）；阶段管道打 'S' 表示已进入 setup 段。 */
+	sb_status_child_off();
+	sb_stage_mark(a->stage_fd, 'S');
 
 	/* -1. 父进程（run 包装）被 SIGKILL/异常退出时，PID 1 收到 SIGKILL，
 	 *     整个 PID namespace 随之消亡——避免子智能体被 init 收养成为
@@ -2317,10 +2566,20 @@ static int sandbox_child(void *argp)
 	 *     失败 fail-closed（见 sandbox_drop_caps）。 */
 	sandbox_drop_caps();
 
-	/* 13. 交棒 */
-	execvp(a->argv[0], a->argv);
-	fprintf(stderr, "aik-sandbox: exec %s: %s\n", a->argv[0],
-		strerror(errno));
+	/* 13. 交棒。'X' = setup 全部完成、即将 exec（exec 成则 CLOEXEC 关管
+	 * 道，父进程看到 'S''X' 即知命令已跑）；'F' = exec 失败（127 与
+	 * 「命令自己 exit 127」就此可区分）。 */
+	sb_stage_mark(a->stage_fd, 'X');
+	{
+		int err;
+
+		execvp(a->argv[0], a->argv);
+		err = errno;
+		fprintf(stderr, "aik-sandbox: exec %s: %s\n", a->argv[0],
+			strerror(err));
+		sb_stage_mark(a->stage_fd, 'F');
+		errno = err;
+	}
 	_exit(127);
 }
 
@@ -2365,6 +2624,7 @@ static void config_defaults(struct sb_config *c)
 	c->lim.mem_mb = SB_DEF_MEM_MB;
 	c->lim.pids_max = SB_DEF_PIDS;
 	c->cgroup = 1;
+	c->status_fd = -1;
 }
 
 static void config_env(struct sb_config *c)
@@ -2438,6 +2698,27 @@ static int parse_opts(struct sb_config *c, int argc, char **argv, int i)
 		}
 		if (strcmp(a, "--no-cgroup") == 0) {
 			c->cgroup = 0;
+			continue;
+		}
+		/* AIF-09：run 的版本化状态通道（--status-fd N / --status-fd=N） */
+		if (strncmp(a, "--status-fd", 11) == 0 &&
+		    (a[11] == '\0' || a[11] == '=')) {
+			const char *v = a[11] == '=' ? a + 12 : NULL;
+			long fd;
+
+			if (!v) {
+				if (++i >= argc)
+					die(1, "--status-fd 需要参数（fd 号 "
+					    "%d-%d）", SB_STATUS_FD_MIN,
+					    SB_STATUS_FD_MAX);
+				v = argv[i];
+			}
+			if (parse_num(v, SB_STATUS_FD_MIN, SB_STATUS_FD_MAX,
+				      &fd))
+				die(1, "非法 --status-fd '%s'（fd 号 "
+				    "%d-%d）", v, SB_STATUS_FD_MIN,
+				    SB_STATUS_FD_MAX);
+			c->status_fd = (int)fd;
 			continue;
 		}
 		if (strncmp(a, "--", 2) != 0)
@@ -2572,6 +2853,8 @@ static int cmd_create(const char *name, int argc, char **argv, int opti)
 	stop = parse_opts(&cfg, argc, argv, opti);
 	if (stop < argc)
 		die(1, "create 的多余参数: %s", argv[stop]);
+	if (cfg.status_fd >= 0)
+		die(1, "--status-fd 仅 run 支持（create 无状态可报）");
 	if (!valid_name(name))
 		die(1, "非法区名 '%s'（允许 [A-Za-z0-9._-]，不许点开头/连续点）",
 		    name ? name : "");
@@ -2858,9 +3141,18 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	const char *rw_ptrs[SB_MAX_BINDS];
 	char *child_argv[256];
 	int child_argc = 0;
+	int stage[2] = { -1, -1 };	/* AIF-09：阶段标记管道 */
+	char stage_buf[8];
+	ssize_t stage_len = 0;
+	int have_stage = 0;
 
 	(void)ro_ptrs;
 	(void)rw_ptrs;
+
+	/* AIF-09：先取状态通道号并装信号相位——区名校验等早期失败也要能
+	 * 上报 usage；通道号非法/关闭时静默禁用（不影响任何既有行为）。 */
+	sb_status_prescan(argc, argv, opti);
+	sb_status_install_sigs();
 
 	if (!valid_name(name))
 		die(1, "非法区名 '%s'", name ? name : "");
@@ -2884,6 +3176,12 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	child_argv[child_argc] = NULL;
 	if (child_argc < 1)
 		die(1, "run 需要 -- <cmd> [args...]");
+	/* 参数面校验通过：此后失败一律归沙箱组装面（phase=setup）。 */
+	if (cfg.status_fd >= 0 && cfg.status_fd != sb_status_fd) {
+		sb_status_init(cfg.status_fd);
+		sb_status_install_sigs();
+	}
+	sb_status_phase = "setup";
 	for (i = 0; i < cfg.ro_n; i++)
 		ro_ptrs[i] = cfg.ro_paths[i];
 	for (i = 0; i < cfg.rw_n; i++)
@@ -2987,7 +3285,23 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 	if (stack == MAP_FAILED)
 		die(2, "mmap stack: %s", strerror(errno));
 
+	/* AIF-09：阶段标记管道。O_CLOEXEC——exec 成功即自动关闭，父进程据
+	 * 'S'/'X'/'F' 区分「组装段内死」「exec 失败」「命令已跑」。读端非
+	 * 阻塞，防任何继承场景下死等。建不成只降级内部分类，不影响结果。 */
+	if (pipe2(stage, O_CLOEXEC) == 0) {
+		fcntl(stage[0], F_SETFL, O_NONBLOCK);
+		have_stage = 1;
+	} else {
+		stage[0] = -1;
+		stage[1] = -1;
+	}
+	a.stage_fd = stage[1];
+
 	pid = do_clone(&a, stack, cfg.net_none);
+	if (stage[1] >= 0) {
+		close(stage[1]);
+		stage[1] = -1;
+	}
 	if (pid < 0)
 		die(2, "clone(NS|PID|UTS%s): %s（需要 root/CAP_SYS_ADMIN）",
 		    cfg.net_none ? "|NET" : "", strerror(errno));
@@ -3007,6 +3321,27 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 			meta_write(name, &m);
 			die(2, "waitpid: %s", strerror(errno));
 		}
+	}
+
+	/* AIF-09：收阶段标记（沙盒 init 已回收，写端必已关闭；非阻塞读兜底） */
+	if (stage[0] >= 0) {
+		for (;;) {
+			ssize_t n = read(stage[0], stage_buf + stage_len,
+					 sizeof(stage_buf) -
+					 (size_t)stage_len);
+
+			if (n > 0) {
+				stage_len += n;
+				if ((size_t)stage_len >= sizeof(stage_buf))
+					break;
+				continue;
+			}
+			if (n < 0 && errno == EINTR)
+				continue;
+			break;
+		}
+		close(stage[0]);
+		stage[0] = -1;
 	}
 
 	/* PID namespace init 退出会带走全部后代；兜底清理任何残余 */
@@ -3036,18 +3371,28 @@ static int cmd_run(const char *name, int argc, char **argv, int opti)
 
 	if (WIFEXITED(st_status)) {
 		int code = WEXITSTATUS(st_status);
+		const char *phase = sb_status_classify(have_stage, stage_buf,
+						       (size_t)stage_len, code, 0);
 
-		if (code == 127)
+		/* 只有 exec 失败才说 exec 失败：命令自己 exit 127 是命令结果 */
+		if (strcmp(phase, "exec") == 0)
 			fputs("aik-sandbox: 沙盒内 exec 失败（命令在沙盒视"
 			      "图中不可执行）\n", stderr);
+		sb_status_emit(phase, code);
 		return code;
 	}
 	if (WIFSIGNALED(st_status)) {
 		int sig = WTERMSIG(st_status);
+		int code = 128 + sig;
+		const char *phase = sb_status_classify(have_stage, stage_buf,
+						       (size_t)stage_len, code, 1);
 
 		fprintf(stderr, "aik-sandbox: 子进程被信号 %d 击杀\n", sig);
-		return 128 + sig;
+		sb_status_emit(phase, code);
+		return code;
 	}
+	sb_status_emit(sb_status_classify(have_stage, stage_buf,
+					  (size_t)stage_len, 2, 1), 2);
 	return 2;
 }
 
@@ -3332,6 +3677,10 @@ static void usage(FILE *fp)
 "  --rw-path P      显式读写 bind 宿主路径 P（可重复）\n"
 "  --usr-overlay    /usr 改为 overlay 视图（upper 在 workspace 内；\n"
 "                   W82B 应用兼容专用，默认关闭）\n"
+"  --status-fd N    仅 run：在 fd N（3-1023）上写一行版本化状态\n"
+"                   AIK-SANDBOX-STATUS v1 phase=<usage|setup|exec|child|\n"
+"                   timeout|signal> rc=<n>；可选，写失败不影响退出码与\n"
+"                   输出（调用方据 phase 区分命令结果与沙箱面故障）\n"
 "\n"
 "环境变量：AIKERNEL_SANDBOX_CPUS/MEM_MB/PIDS/NET/NO_CGROUP，\n"
 "          AIKERNEL_SANDBOX_ARTIFACTS（宿主产物根，默认\n"
