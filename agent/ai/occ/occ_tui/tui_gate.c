@@ -31,6 +31,8 @@ static struct termios gate_term_orig;
 #define GATE_USER_MAX 32		/* P-2a：用户名上限（含 NUL 边界） */
 #define GATE_MAX_FAIL 3
 #define GATE_COOLDOWN_SEC 10
+#define GATE_SIZE_POLL_MS 250
+#define GATE_MAX_CELLS (256u * 1024u)
 #define GATE_ENTRY_MAX 256		/* P-2a：条目行数上限（防无界文件） */
 #define GATE_CD_SLOTS 8			/* P-2a：冷却内存表槽数（逐用户） */
 
@@ -656,57 +658,26 @@ static void gate_field_edit(const tui_event *ev, struct gate_field *f,
 		f->buf[f->len++] = (char)ev->ch;
 }
 
-static int gate_field_input(tui_input *in, struct gate_field *f, int *done,
-			    int *quit)
+/* Tab/上/下切框；用户名框 Enter 移焦点，密码框 Enter 提交。 */
+static void gate_login_input(const tui_event *ev, struct gate_field *uf,
+			     struct gate_field *pf, int *focus_user,
+			     int *done, int *quit)
 {
-	tui_event ev;
-
-	*done = 0;
-	*quit = 0;
-	if (tui_input_next(in, &ev) <= 0)
-		return 0;
-	if (ev.type != TUI_EV_KEY)
-		return 0;
-	if (ev.key == TUI_KEY_RETURN) {
-		*done = 1;
-		return 0;
-	}
-	gate_field_edit(&ev, f, GATE_PW_MAX, 0, quit);
-	return 0;
-}
-
-/* P-2a：LOGIN 双框输入路由。Tab/上/下=切框（与既有键位习惯兼容：
- * 缺省焦点密码框——直接打密码+Enter 即登录，老肌肉记忆不动）；
- * 用户名框 Enter=跳密码框；密码框 Enter=提交。 */
-static int gate_login_input(tui_input *in, struct gate_field *uf,
-			    struct gate_field *pf, int *focus_user,
-			    int *done, int *quit)
-{
-	tui_event ev;
-
-	*done = 0;
-	*quit = 0;
-	if (tui_input_next(in, &ev) <= 0)
-		return 0;
-	if (ev.type != TUI_EV_KEY)
-		return 0;
-	if (ev.key == TUI_KEY_TAB || ev.key == TUI_KEY_UP ||
-	    ev.key == TUI_KEY_DOWN) {
+	if (ev->key == TUI_KEY_TAB || ev->key == TUI_KEY_UP ||
+	    ev->key == TUI_KEY_DOWN) {
 		*focus_user ^= 1;
-		return 0;
+		return;
 	}
-	if (ev.key == TUI_KEY_RETURN) {
-		if (*focus_user) {
+	if (ev->key == TUI_KEY_RETURN) {
+		if (*focus_user)
 			*focus_user = 0;
-			return 0;
-		}
-		*done = 1;
-		return 0;
+		else
+			*done = 1;
+		return;
 	}
-	gate_field_edit(&ev, *focus_user ? uf : pf,
+	gate_field_edit(ev, *focus_user ? uf : pf,
 			*focus_user ? GATE_USER_MAX : GATE_PW_MAX,
 			*focus_user, quit);
-	return 0;
 }
 
 /* P-2a：逐用户冷却内存表（非阻塞——A 冷却不牵连 B 登录；
@@ -760,11 +731,6 @@ static void gate_cd_arm(struct gate_cd *tab, const char *name,
 	tab[i].until = until;
 }
 
-/* q17 实机抓获（audit A-1，致命）：gate 只出队（tui_input_next）不进队
- * ——无人调 tui_input_feed，首屏画完即冻死、CPU 空转，掩码/两段确认/
- * 3 错冷却在实机全部不可达（串口日志实证：喂键后零掩码重绘零状态变化）。
- * 补上主 TUI 同源的 poll→read→feed 泵（tui_view.c 输入口径）；
- * EOF/读错按主 TUI 惯例退出（termios 由收尾路径恢复）。 */
 static uint64_t gate_now_ms(void)
 {
 	struct timespec ts;
@@ -773,19 +739,55 @@ static uint64_t gate_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-static void gate_pump_input(tui_input *in, int *quit)
+/* 串口和非前台终端也会变尺寸，不依赖 SIGWINCH。 */
+static int gate_get_size(int *rows, int *cols)
 {
-	struct pollfd pfd;
+	if (tui_term_get_size(STDIN_FILENO, rows, cols) != 0)
+		return -1;
+	return (size_t)*rows * (size_t)*cols <= GATE_MAX_CELLS ? 0 : -1;
+}
+
+static int gate_wait_ms(uint64_t now, uint64_t deadline, int timeout)
+{
+	uint64_t left;
+
+	if (!deadline)
+		return timeout;
+	left = deadline > now ? deadline - now : 0;
+	return left < (uint64_t)timeout ? (int)left : timeout;
+}
+
+static uint64_t gate_cooldown_status(char *status, size_t size, uint64_t now,
+				     uint64_t until)
+{
+	uint64_t left;
+
+	if (now >= until) {
+		status[0] = '\0';
+		return 0;
+	}
+	left = (until - now + 999) / 1000;
+	snprintf(status, size, L_("冷却中（%lld 秒后再试）"), (long long)left);
+	return until - (left - 1) * 1000;
+}
+
+/* q17：从终端 read/feed，退出时由调用方还原终端。 */
+static void gate_pump_input(tui_input *in, int timeout, int *quit)
+{
+	struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
 	char buf[256];
 	ssize_t r;
+	int prc = poll(&pfd, 1, timeout);
 
-	pfd.fd = STDIN_FILENO;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
-	if (poll(&pfd, 1, 30) <= 0)
+	if (prc < 0 && errno != EINTR)
+		*quit = 1;
+	if (prc <= 0)
 		return;
-	if (!(pfd.revents & (POLLIN | POLLHUP)))
+	if (!(pfd.revents & POLLIN)) {
+		if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+			*quit = 1;
 		return;
+	}
 	r = read(STDIN_FILENO, buf, sizeof(buf));
 	if (r > 0)
 		(void)tui_input_feed(in, buf, (size_t)r, gate_now_ms());
@@ -838,14 +840,15 @@ static int gate_run_ui(int mode, int *unlocked)
 	tui_renderer *ren;
 	tui_input in;
 	tui_screen *s;
-	int rows, cols, rc = 1;
+	int rows, cols, rc = 1, redraw = 1;
 	struct gate_field f1, f2;
 	struct gate_field uf;		/* P-2a：用户名框（LOGIN） */
 	int focus_user = 0;		/* 缺省焦点=密码框（老习惯兼容） */
 	int stage = 0;			/* setup: 0=首次输入 1=确认输入 */
 	struct gate_cd cd_tab[GATE_CD_SLOTS];
 	char hash[TUI_GATE_HASH_LEN];
-	char login_note[160] = "";	/* 一次性状态（SETUP→LOGIN 切换说明） */
+	char status_buf[160] = "";
+	uint64_t status_until = 0, status_next = 0;
 	char denied_note[160] = "";	/* P-60/D1：凭据不可读原因行（报错屏） */
 	int hb_ms;			/* P-41/P-44b：空闲心跳周期（0=禁用） */
 	uint64_t hb_next;		/* 下次心跳探针到点 */
@@ -873,7 +876,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			gate_term_orig = orig;
 		}
 	}
-	if (tui_term_get_size(STDIN_FILENO, &rows, &cols) != 0) {
+	if (gate_get_size(&rows, &cols) != 0) {
 		rows = 24;
 		cols = 80;
 	}
@@ -902,120 +905,140 @@ static int gate_run_ui(int mode, int *unlocked)
 		gate_user_prefill(&uf);
 	if (mode == GATE_MODE_DENIED)
 		gate_denied_note(denied_note, sizeof(denied_note));
-	/* P-41/P-44c：空闲心跳——gate 静止等待输入时零帧输出，wd 无从
-	 * 计时（真机实测：静止 gate strace 12s 零 write）；时间基准每
-	 * OCC_TUI_HB_MS（缺省 5000，0=禁用，钳位 [0,600000]）发体量
-	 * 心跳（56KB SGR 复位拍+cur_attr 重放，零视觉——小探针会被
-	 * pty 缓冲整吞检测不出楔死，见 tui_renderer_heartbeat）检测
-	 * 消费端。规格原文按「sleep(1)×5 次一跳」计数——本循环实为
-	 * ~30ms/迭代（输入泵 poll 30ms），计数会 150ms 一跳刷屏，按
-	 * 时间基准实现同一 5s 语义（冷却内环 sleep(1) 同样覆盖）。 */
-	hb_ms = 5000;
+	/* fbterm 可能在没有输入时楔死，保留 P-44c 的主动探针。
+	 * 串口没有客户端时也属正常：缺省只在有实际画面变化时写。
+	 * OCC_TUI_HB_MS 仍可显式覆盖；正常帧的输出看门狗始终启用。 */
+	hb_ms = getenv("FBTERM") ? 5000 : 0;
 	{
 		const char *e = getenv("OCC_TUI_HB_MS");
 
 		if (e && e[0]) {
-			long hv = strtol(e, NULL, 10);
+			char *end;
+			long hv = strtol(e, &end, 10);
 
-			if (hv >= 0 && hv <= 600000)
+			if (*end == '\0' && hv >= 0 && hv <= 600000)
 				hb_ms = (int)hv;
 		}
 	}
-	hb_next = gate_now_ms() + (uint64_t)hb_ms;
+	hb_next = hb_ms > 0 ? gate_now_ms() + (uint64_t)hb_ms : 0;
 	for (;;) {
+		uint64_t now = gate_now_ms();
 		int done = 0, quit = 0;
-		const char *status;
-		static char status_buf[160];
+		int nr, nc;
+		tui_event ev;
 
-		if (hb_ms > 0 && gate_now_ms() >= hb_next) {
+		if (hb_next && now >= hb_next) {
 			int prc = tui_renderer_heartbeat(ren);
 
 			hb_next = gate_now_ms() + (uint64_t)hb_ms;
 			if (prc == -2 || prc == -1)
 				gate_sink_fatal(ren, prc);
 		}
-		tui_screen_fill(s, tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0));
-		box_frame(s, rows, cols);
-		if (mode == GATE_MODE_SETUP) {
-			draw_center(s, rows / 2 - 4, cols,
-				    L_("AIKernel 初始化"), title_a);
-			draw_center(s, rows / 2 - 3, cols,
-				    L_("首次使用：设置 admin 密码（≥6 位）"), mut_a);
-			draw_center(s, rows / 2 - 2, cols,
-				    stage == 0 ? L_("设置密码：") : L_("确认密码："),
-				    txt_a);
-			draw_masked(s, rows / 2 - 1, cols,
-				    stage == 0 ? &f1 : &f2, 1);
-			status = status_buf;
-			draw_center(s, rows / 2 + 1, cols, status,
-				    status[0] ? err_a : txt_a);
-			draw_center(s, rows / 2 + 3, cols,
-				    L_("配置云端模型：解锁后 /models"), mut_a);
-			draw_center(s, rows / 2 + 4, cols,
-				    L_("本地模型：/models 选 ollama"), mut_a);
-		} else if (mode == GATE_MODE_LOGIN) {
-			/* P-2a：用户名框（预填 last）+密码框双字段；
-			 * 布局自上而下：用户标签/用户框/密码标签/掩码框 */
-			draw_center(s, rows / 2 - 4, cols,
-				    "AIKernel · alpha", title_a);
-			draw_center(s, rows / 2 - 3, cols,
-				    L_("用户："), txt_a);
-			draw_user_field(s, rows / 2 - 2, cols, &uf,
-					focus_user);
-			draw_center(s, rows / 2 - 1, cols, L_("密码："), txt_a);
-			draw_masked(s, rows / 2, cols, &f1, !focus_user);
-			if (login_note[0]) {
-				snprintf(status_buf, sizeof(status_buf), "%s",
-					 login_note);
-				login_note[0] = '\0';
-			}
-			status = status_buf;
-			draw_center(s, rows / 2 + 1, cols, status,
-				    status[0] ? err_a : txt_a);
-			draw_center(s, rows / 2 + 3, cols,
-				    L_("Enter 登录 · Tab 切换 · Ctrl-C 退出"), mut_a);
-		} else if (mode == GATE_MODE_DENIED) {
-			/* P-60/D1（CON-02b）：凭据在却读不出——绝不进 SETUP
-			 * （旧口径把读失败当「文件不在」，读不了凭据的普通
-			 * 用户被引导「设置 admin 密码」、后续键入被向导吞）。
-			 * 诚实报错；任意一键后非零退出——aik-console 记账后
-			 * 重启循环，控制台仍处锁定态。 */
-			draw_center(s, rows / 2 - 4, cols,
-				    "AIKernel · alpha", title_a);
-			draw_center(s, rows / 2 - 3, cols,
-				    L_("登录凭据不可读——请联系管理员"), err_a);
-			draw_center(s, rows / 2 - 2, cols, denied_note, mut_a);
-			draw_center(s, rows / 2 + 3, cols,
-				    L_("按任意键退出"), mut_a);
+		if (status_next && now >= status_next) {
+			status_next = gate_cooldown_status(status_buf,
+					sizeof(status_buf), now, status_until);
+			redraw = 1;
 		}
-		{
-			int frc = tui_renderer_flush(ren, rows / 2 - 1,
-						     cols / 2);
+		if (gate_get_size(&nr, &nc) == 0 && (nr != rows || nc != cols)) {
+			tui_renderer_resize(ren, nr, nc);
+			if (s->rows == nr && s->cols == nc) {
+				rows = nr;
+				cols = nc;
+				redraw = 1;
+			}
+		}
+		if (redraw) {
+			int frc;
 
+			tui_screen_fill(s, tui_thm_attr(TUI_THM_FG, TUI_THM_BG, 0));
+			box_frame(s, rows, cols);
+			if (mode == GATE_MODE_SETUP) {
+				draw_center(s, rows / 2 - 4, cols,
+					    L_("AIKernel 初始化"), title_a);
+				draw_center(s, rows / 2 - 3, cols,
+					    L_("首次使用：设置 admin 密码（≥6 位）"), mut_a);
+				draw_center(s, rows / 2 - 2, cols,
+					    stage == 0 ? L_("设置密码：") : L_("确认密码："),
+					    txt_a);
+				draw_masked(s, rows / 2 - 1, cols,
+					    stage == 0 ? &f1 : &f2, 1);
+				draw_center(s, rows / 2 + 1, cols, status_buf,
+					    status_buf[0] ? err_a : txt_a);
+				draw_center(s, rows / 2 + 3, cols,
+					    L_("配置云端模型：解锁后 /models"), mut_a);
+				draw_center(s, rows / 2 + 4, cols,
+					    L_("本地模型：/models 选 ollama"), mut_a);
+			} else if (mode == GATE_MODE_LOGIN) {
+				/* P-2a：用户名框（预填 last）+密码框双字段；
+				 * 布局自上而下：用户标签/用户框/密码标签/掩码框 */
+				draw_center(s, rows / 2 - 4, cols,
+					    "AIKernel · alpha", title_a);
+				draw_center(s, rows / 2 - 3, cols,
+					    L_("用户："), txt_a);
+				draw_user_field(s, rows / 2 - 2, cols, &uf,
+						focus_user);
+				draw_center(s, rows / 2 - 1, cols, L_("密码："), txt_a);
+				draw_masked(s, rows / 2, cols, &f1, !focus_user);
+				draw_center(s, rows / 2 + 1, cols, status_buf,
+					    status_buf[0] ? err_a : txt_a);
+				draw_center(s, rows / 2 + 3, cols,
+					    L_("Enter 登录 · Tab 切换 · Ctrl-C 退出"), mut_a);
+			} else if (mode == GATE_MODE_DENIED) {
+				/* P-60/D1（CON-02b）：凭据在却读不出——绝不进 SETUP
+				 * （旧口径把读失败当「文件不在」，读不了凭据的普通
+				 * 用户被引导「设置 admin 密码」、后续键入被向导吞）。
+				 * 诚实报错；任意一键后非零退出——aik-console 记账后
+				 * 重启循环，控制台仍处锁定态。 */
+				draw_center(s, rows / 2 - 4, cols,
+					    "AIKernel · alpha", title_a);
+				draw_center(s, rows / 2 - 3, cols,
+					    L_("登录凭据不可读——请联系管理员"), err_a);
+				draw_center(s, rows / 2 - 2, cols, denied_note, mut_a);
+				draw_center(s, rows / 2 + 3, cols,
+					    L_("按任意键退出"), mut_a);
+			}
+			frc = tui_renderer_flush(ren, rows / 2 - 1, cols / 2);
 			if (frc == -2 || frc == -1)
 				gate_sink_fatal(ren, frc);
+			redraw = 0;
 		}
-		gate_pump_input(&in, &quit);
-		if (quit) {
-			rc = 1;
+
+		now = gate_now_ms();
+		(void)tui_input_tick(&in, now);
+		if (tui_input_next(&in, &ev) <= 0) {
+			int timeout = gate_wait_ms(now, hb_next, GATE_SIZE_POLL_MS);
+			long esc = in.state == TUI_ST_PASTE ? -1 :
+				tui_input_esc_deadline(&in, now);
+
+			timeout = gate_wait_ms(now, status_next, timeout);
+			if (esc >= 0 && esc < timeout)
+				timeout = (int)esc;
+			gate_pump_input(&in, timeout, &quit);
+			if (quit)
+				break;
+			continue;
+		}
+		if (ev.type != TUI_EV_KEY)
+			continue;
+		if (mode == GATE_MODE_DENIED) {
+			rc = TUI_GATE_DENIED;	/* 报错屏等任意键退出 */
 			break;
 		}
-
-		if (mode == GATE_MODE_DENIED) {
-			tui_event ev;
-
-			/* 报错屏：等任意一键再退（屏可读；不自旋自退——
-			 * 否则 2s 重启循环会把报错刷成闪烁） */
-			if (tui_input_next(&in, &ev) > 0 && ev.type == TUI_EV_KEY) {
-				rc = TUI_GATE_DENIED;
-				break;
-			}
+		if (ev.key == TUI_KEY_CHAR && (ev.mods & TUI_MOD_CTRL) &&
+		    (ev.ch == 'l' || ev.ch == 'L')) {
+			tui_renderer_clear(ren);
+			redraw = 1;
 			continue;
 		}
 
 		if (mode == GATE_MODE_SETUP) {
-			gate_field_input(&in, stage == 0 ? &f1 : &f2,
-					 &done, &quit);
+			struct gate_field *field = stage == 0 ? &f1 : &f2;
+			int old_len = field->len;
+
+			done = ev.key == TUI_KEY_RETURN;
+			if (!done)
+				gate_field_edit(&ev, field, GATE_PW_MAX, 0, &quit);
+			redraw = done || field->len != old_len;
 			if (quit) {
 				rc = 1;
 				break;
@@ -1072,8 +1095,8 @@ static int gate_run_ui(int mode, int *unlocked)
 								gate_user_prefill(&uf);
 								focus_user = 0;
 								stage = 0;
-								snprintf(login_note,
-									 sizeof(login_note),
+								snprintf(status_buf,
+									 sizeof(status_buf),
 									 "%s", L_("密码已由其他控制台设置，请登录"));
 								continue;
 							} else if (tui_gate_hash(f1.buf,
@@ -1098,7 +1121,18 @@ static int gate_run_ui(int mode, int *unlocked)
 		}
 		/* LOGIN（P-2a：用户名+密码提交；失败计数按用户行第 4 段
 		 * 存取；3 错 10s 冷却逐用户独立——A 冷却不阻塞 B） */
-		gate_login_input(&in, &uf, &f1, &focus_user, &done, &quit);
+		{
+			int old_ulen = uf.len, old_plen = f1.len;
+			int old_focus = focus_user;
+
+			gate_login_input(&ev, &uf, &f1, &focus_user, &done, &quit);
+			redraw = done || uf.len != old_ulen || f1.len != old_plen ||
+				focus_user != old_focus;
+			if (uf.len != old_ulen && status_next) {
+				status_next = 0;
+				status_buf[0] = '\0';
+			}
+		}
 		if (quit) {
 			rc = 1;
 			break;
@@ -1108,6 +1142,7 @@ static int gate_run_ui(int mode, int *unlocked)
 			int file_fails = 0;
 			int rd;
 
+			status_next = 0;
 			memcpy(uname, uf.buf, (size_t)uf.len);
 			uname[uf.len] = '\0';
 			rd = gate_read_user_full(tui_gate_path(), uname,
@@ -1152,14 +1187,10 @@ static int gate_run_ui(int mode, int *unlocked)
 
 				if (ci >= 0) {
 					if (now_ms < cd_tab[ci].until) {
-						long long left = (long long)
-							((cd_tab[ci].until -
-							  now_ms + 999) / 1000);
-
-						snprintf(status_buf,
-							 sizeof(status_buf),
-							 L_("冷却中（%lld 秒后再试）"),
-							 left);
+						status_until = cd_tab[ci].until;
+						status_next = gate_cooldown_status(
+							status_buf, sizeof(status_buf),
+							now_ms, status_until);
 						memset(&f1, 0, sizeof(f1));
 						continue;
 					}
@@ -1186,9 +1217,10 @@ static int gate_run_ui(int mode, int *unlocked)
 					/* 文件残留计数≥3（如 gate 进程
 					 * 重启）：重启不清锁——重新起算
 					 * 10s 冷却（诚实防绕） */
-					gate_cd_arm(cd_tab, uname,
-						    now_ms + (uint64_t)
-						    GATE_COOLDOWN_SEC * 1000u);
+					status_until = now_ms +
+						(uint64_t)GATE_COOLDOWN_SEC * 1000u;
+					status_next = now_ms + 1000;
+					gate_cd_arm(cd_tab, uname, status_until);
 					snprintf(status_buf,
 						 sizeof(status_buf),
 						 L_("尝试过多，冷却 %d 秒…"),
@@ -1214,11 +1246,11 @@ static int gate_run_ui(int mode, int *unlocked)
 						hash, nf);
 					gate_cd_note(cd_tab, uname, nf);
 					if (nf >= GATE_MAX_FAIL) {
-						gate_cd_arm(cd_tab, uname,
-							    gate_now_ms() +
-							    (uint64_t)
-							    GATE_COOLDOWN_SEC *
-							    1000u);
+						now_ms = gate_now_ms();
+						status_until = now_ms +
+							(uint64_t)GATE_COOLDOWN_SEC * 1000u;
+						status_next = now_ms + 1000;
+						gate_cd_arm(cd_tab, uname, status_until);
 						snprintf(status_buf,
 							 sizeof(status_buf),
 							 L_("尝试过多，冷却 %d 秒…"),

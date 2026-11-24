@@ -231,6 +231,41 @@ static int wait_exit(pid_t pid, int *status, int sec)
 	return waitpid(pid, status, WNOHANG) == pid;
 }
 
+static long long now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* 持续消费以免看门狗影响测量；EOF 或读错也必须让断言失败。 */
+static long count_bytes_for(int m, int ms)
+{
+	struct pollfd pfd = { .fd = m, .events = POLLIN };
+	long long deadline = now_ms() + ms;
+	long long left;
+	long total = 0;
+
+	while ((left = deadline - now_ms()) > 0) {
+		char buf[4096];
+		int polled = poll(&pfd, 1, (int)left);
+		ssize_t n;
+
+		if (polled < 0 && errno == EINTR)
+			continue;
+		if (polled == 0)
+			break;
+		if (polled < 0 || !(pfd.revents & POLLIN))
+			return -1;
+		n = read(m, buf, sizeof(buf));
+		if (n <= 0)
+			return -1;
+		total += n;
+	}
+	return total;
+}
+
 /* 起 gate 子进程：stdin/stdout=pty slave；返回 master fd，*pid 出参 */
 static int spawn_gate(const char *path, pid_t *pid)
 {
@@ -718,16 +753,22 @@ int main(void)
 		usleep(700000);
 		feed(m, "wrong-c");
 		CHECK(wait_tok(m, "尝试过多，冷却", 8));	/* 第 3 错触发 */
-		feed(m, "wrong-d");
-		CHECK(wait_tok(m, "冷却中", 8));		/* 冷却期内第 4 次 */
+		/* 无按键也从初始提示进入倒计时。 */
+		CHECK(wait_tok(m, "冷却中", 3));
+		feed(m, "wrong-d");		/* 冷却中拒绝再次提交 */
 		/* 文件计数写不进：字节逐一动、无 tmp 残留（确为「不可写」） */
 		CHECK(file_eq(wpath, line));
 		snprintf(tmpchk, sizeof(tmpchk), "%s.tmp", wpath);
 		CHECK(access(tmpchk, 0) != 0);
 		/* 冷却期满（GATE_COOLDOWN_SEC=10）：计数清零——下一错从
 		 * 1/3 起算（未清零则再触「尝试过多，冷却」） */
-		sleep(11);
-		acc_n = 0;		/* 旧 1/3 token 在缓冲里：清后再等新字节 */
+		CHECK(count_bytes_for(m, 10500) > 0);
+		acc_n = 0;
+		feedraw(m, "\x0c");	/* 重绘必须显示已经清除的冷却提示 */
+		CHECK(wait_tok(m, "Enter 登录", 3));
+		CHECK(!find_tok("冷却中"));
+		CHECK(!find_tok("尝试过多，冷却"));
+		acc_n = 0;		/* 从后续新字节确认计数 */
 		feed(m, "wrong-e");
 		CHECK(wait_tok(m, "密码不正确（1/3）", 8));
 		/* 计数=1（<3）：正确密码即可解锁 */
@@ -779,6 +820,49 @@ int main(void)
 		printf("test_gate_pty H (SETUP commit recheck: file appeared "
 		       "but unreadable -> not overwritten, honest screen): "
 		       "%s\n", case_status(f0));
+	}
+	/* I: 默认非 fbterm 的静默门，窗口跨过老代码的首拍心跳。 */
+	{
+		struct winsize wide = { .ws_row = 30, .ws_col = 100 };
+		int f0 = fails;
+		long idle;
+
+		alarm(30);
+		unsetenv("FBTERM");
+		unsetenv("OCC_TUI_HB_MS");
+		write_file(path, WO_LINE);
+		acc_n = 0;
+		m = spawn_gate(path, &pid);
+		CHECK(m >= 0);
+		CHECK(wait_tok(m, "Enter 登录", 3));
+		CHECK(count_bytes_for(m, 150) >= 0);	/* 排空首帧尾部 */
+		idle = count_bytes_for(m, 6000);
+		CHECK(idle == 0);
+
+		acc_n = 0;
+		CHECK(ioctl(m, TIOCSWINSZ, &wide) == 0);
+		/* 只改尺寸，无须输入唤醒。最终光标位置对应 30x100。 */
+		CHECK(wait_tok(m, "\x1b[2J", 3));
+		CHECK(wait_tok(m, "\x1b[15;51H", 3));
+		CHECK(find_tok("Enter 登录"));
+
+		acc_n = 0;
+		feedraw(m, "x");
+		CHECK(wait_tok(m, "*_", 3));
+		acc_n = 0;
+		feedraw(m, "\x0c");	/* Ctrl+L 全量重画且不改字段内容 */
+		CHECK(wait_tok(m, "\x1b[2J", 3));
+		CHECK(wait_tok(m, "\x1b[15;51H", 3));
+		CHECK(find_tok("*_"));
+		CHECK(!find_tok("**_"));
+		feedraw(m, "\x1b");	/* 单字节 Esc，无第二键也应退出 */
+		CHECK(wait_exit(pid, &status, 3));
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42);
+
+		close(m);
+		unlink(path);
+		printf("test_gate_pty I (idle, resize, refresh, escape): %s"
+		       " (idle bytes=%ld)\n", case_status(f0), idle);
 	}
 	unlink(g_last);
 

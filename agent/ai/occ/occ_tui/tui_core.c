@@ -685,10 +685,26 @@ void tui_renderer_clear(tui_renderer *r)
 
 void tui_renderer_resize(tui_renderer *r, int rows, int cols)
 {
+	tui_screen *front, *back, old;
+
 	if (!r || rows < 1 || cols < 1)
 		return;
-	tui_screen_resize(r->front, rows, cols);
-	tui_screen_resize(r->back, rows, cols);
+	front = tui_screen_create(rows, cols);
+	back = tui_screen_create(rows, cols);
+	if (!front || !back) {
+		tui_screen_destroy(front);
+		tui_screen_destroy(back);
+		return;
+	}
+	/* 前后缓冲同时交替，分配失败时保留原尺寸和画面。 */
+	old = *r->front;
+	*r->front = *front;
+	*front = old;
+	old = *r->back;
+	*r->back = *back;
+	*back = old;
+	tui_screen_destroy(front);
+	tui_screen_destroy(back);
 	r->need_clear = 1;		/* 终端重排不可知 → 下帧全清 */
 	r->cur_row = -1;
 	r->cur_col = -1;
