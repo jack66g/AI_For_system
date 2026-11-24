@@ -337,9 +337,13 @@ static int gate_tmp_finalize(int fd)
 	mode_t mode;
 	gid_t gid = (gid_t)-1;
 	gid_t gg = 0;
-	int wide;
+	int have, wide;
 
-	wide = tui_gate_file_policy(geteuid(), gate_group_aik(&gg), gg,
+	/* 先单独取组 gid，再传参：实参求值次序未定——把
+	 * gate_group_aik(&gg) 内联进实参表时，gg 可能先于它被取值
+	 * （gcc 即如此），组 gid 恒 0，写出的是 root:root。 */
+	have = gate_group_aik(&gg);
+	wide = tui_gate_file_policy(geteuid(), have, gg,
 				    &mode, &gid);
 	if (wide && fchown(fd, 0, gid) != 0)
 		return -1;
