@@ -116,7 +116,7 @@ c 为不吸收，d 为待定。§3 的三项 MEM-10 修复实施后归 a。
 | 向量 | 钉在 | 录制器 | 上次重录 |
 |---|---|---|---|
 | `text/text.vectors.json` | `ed5378a` | `parity/rec/record_text.py` | 2026-11-24（sha256 `984978e9…`） |
-| `config/groups_default.json`、`groups_mutated.json`、`config_file.expected.txt` | `e72bc75` 的 101 项，加 MEM-02c 的两处 C 版帮助文案 | `parity/rec/record_config.py`（参数化参考树） | MEM-02c 候选，随代码并入更新共享树 |
+| `config/groups_default.json`、`groups_mutated.json`、`config_file.expected.txt` | `e72bc75` 的 101 项，加 MEM-02c 的两处 C 版帮助文案 | `parity/rec/record_config.py`（参数化参考树） | 2026-11-25，旧件备份后更新共享树 |
 | `config/presets.json` | 6 预设，02、03、06 对齐 `ed5378a`，07 不随 C 版 | 同上 | 同上 |
 | 其余目录 | `e72bc75` / T4 | 各自录制器 | 未动 |
 
