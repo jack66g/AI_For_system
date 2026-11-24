@@ -1,6 +1,6 @@
 {
  "schema": "aik-occ-audit/1",
- "generated_at": "2026-11-24T19:40:57+0800",
+ "generated_at": "2026-11-25T00:54:14+0800",
  "core": {
   "params": {
    "admin_sandbox": "no"
@@ -676,14 +676,13 @@
   }
  ],
  "reach": {
-  "schema": "aik-occ-reach/1",
+  "schema": "aik-occ-reach/2",
   "probe_list": {
    "entries": 198,
    "sha256": "c14d830d3710792eab3b9e1b6a1961870b6048994afaceae1034676b6e1e1046"
   },
   "sources": [
    {
-    "file": "occ-reach-142-1710.tsv",
     "sha256": "00c0c8d274e6a7b7f64ca92a68def46ddb283e8227bc81eb8b27805c5b274a90",
     "bytes": 9828,
     "rows": 125,
@@ -691,9 +690,21 @@
     "uid": "0",
     "kernel": "6.18.39",
     "timeout": "10s",
-    "only": "all",
+    "filtered": false,
     "sandbox_size": 1111080,
-    "env": []
+    "env_overrides": false
+   },
+   {
+    "sha256": "b591fb1fe45466499e9330233b1593eb2e3c9660867bb8ccb89789312183245d",
+    "bytes": 8172,
+    "rows": 69,
+    "collected_at": "2026-11-24T11:53:45+0000",
+    "uid": "0",
+    "kernel": "6.18.39",
+    "timeout": "10s",
+    "filtered": false,
+    "sandbox_size": 1111080,
+    "env_overrides": false
    }
   ],
   "rows": [
@@ -704,7 +715,6 @@
     "seconds": 0.017,
     "out_bytes": 754,
     "occ_view": "ok",
-    "first_line": "total 4",
     "n": 0,
     "label": "view",
     "src": 0
@@ -716,7 +726,6 @@
     "seconds": 0.018,
     "out_bytes": 359,
     "occ_view": "ok",
-    "first_line": "total 16",
     "n": 1,
     "label": "view",
     "src": 0
@@ -728,7 +737,6 @@
     "seconds": 0.029,
     "out_bytes": 378,
     "occ_view": "ok",
-    "first_line": "total 0",
     "n": 2,
     "label": "view",
     "src": 0
@@ -740,7 +748,6 @@
     "seconds": 0.021,
     "out_bytes": 347,
     "occ_view": "sb_fail",
-    "first_line": "ls: cannot access '/run': No such file or directory",
     "n": 3,
     "label": "view",
     "src": 0
@@ -752,7 +759,6 @@
     "seconds": 0.016,
     "out_bytes": 20,
     "occ_view": "ok",
-    "first_line": "uid=0 gid=0 groups=0",
     "n": 4,
     "label": "view",
     "src": 0
@@ -764,7 +770,6 @@
     "seconds": 0.017,
     "out_bytes": 63,
     "occ_view": "ok",
-    "first_line": "CapEff: 0000000000002000",
     "n": 5,
     "label": "view",
     "src": 0
@@ -776,7 +781,6 @@
     "seconds": 0.015,
     "out_bytes": 2,
     "occ_view": "ok",
-    "first_line": "sh",
     "n": 6,
     "label": "view",
     "src": 0
@@ -788,7 +792,6 @@
     "seconds": 0.016,
     "out_bytes": 1919,
     "occ_view": "ok",
-    "first_line": "320 300 0:39 / / rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755",
     "n": 7,
     "label": "view",
     "src": 0
@@ -800,7 +803,6 @@
     "seconds": 0.015,
     "out_bytes": 13,
     "occ_view": "ok",
-    "first_line": "occreach19704",
     "n": 8,
     "label": "view",
     "src": 0
@@ -812,7 +814,6 @@
     "seconds": 0.014,
     "out_bytes": 73,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: aa-complain: not found",
     "n": 9,
     "label": "no",
     "src": 0
@@ -824,7 +825,6 @@
     "seconds": 0.02,
     "out_bytes": 72,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: aa-disable: not found",
     "n": 10,
     "label": "no",
     "src": 0
@@ -836,7 +836,6 @@
     "seconds": 0.015,
     "out_bytes": 72,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: aa-enforce: not found",
     "n": 11,
     "label": "no",
     "src": 0
@@ -848,7 +847,6 @@
     "seconds": 0.017,
     "out_bytes": 71,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: aa-status: not found",
     "n": 12,
     "label": "no",
     "src": 0
@@ -860,7 +858,6 @@
     "seconds": 0.029,
     "out_bytes": 386,
     "occ_view": "ok",
-    "first_line": "=== AIKernel A/B slot state (/boot/aik-slot-state) ===",
     "n": 13,
     "label": "no",
     "src": 0
@@ -872,7 +869,6 @@
     "seconds": 0.099,
     "out_bytes": 735,
     "occ_view": "ok",
-    "first_line": "{",
     "n": 14,
     "label": "ok",
     "src": 0
@@ -884,7 +880,6 @@
     "seconds": 0.021,
     "out_bytes": 77,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: apparmor_status: not found",
     "n": 15,
     "label": "no",
     "src": 0
@@ -896,7 +891,6 @@
     "seconds": 0.034,
     "out_bytes": 584,
     "occ_view": "tool_error",
-    "first_line": "",
     "n": 16,
     "label": "no",
     "src": 0
@@ -908,7 +902,6 @@
     "seconds": 0.018,
     "out_bytes": 48,
     "occ_view": "sb_fail",
-    "first_line": "arping: interface eth0 not found: No such device",
     "n": 17,
     "label": "ok",
     "src": 0
@@ -920,7 +913,6 @@
     "seconds": 0.017,
     "out_bytes": 0,
     "occ_view": "sb_fail",
-    "first_line": "",
     "n": 18,
     "label": "no",
     "src": 0
@@ -932,7 +924,6 @@
     "seconds": 0.025,
     "out_bytes": 178,
     "occ_view": "ok",
-    "first_line": "Couldn't find EFI system partition. It is recommended to mount it to /boot or /efi.",
     "n": 19,
     "label": "no",
     "src": 0
@@ -944,7 +935,6 @@
     "seconds": 0.016,
     "out_bytes": 1446,
     "occ_view": "ok",
-    "first_line": "MemTotal:        4004744 kB",
     "n": 20,
     "label": "partial",
     "src": 0
@@ -956,7 +946,6 @@
     "seconds": 0.015,
     "out_bytes": 64,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: cc: not found",
     "n": 21,
     "label": "no",
     "src": 0
@@ -968,7 +957,6 @@
     "seconds": 0.018,
     "out_bytes": 71,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: conntrack: not found",
     "n": 22,
     "label": "no",
     "src": 0
@@ -980,7 +968,6 @@
     "seconds": 0.027,
     "out_bytes": 22,
     "occ_view": "sb_fail",
-    "first_line": "crontab: unknown uid 0",
     "n": 23,
     "label": "no",
     "src": 0
@@ -992,7 +979,6 @@
     "seconds": 10.004,
     "out_bytes": 0,
     "occ_view": "tool_error",
-    "first_line": "",
     "n": 24,
     "label": "ok",
     "src": 0
@@ -1004,7 +990,6 @@
     "seconds": 0.03,
     "out_bytes": 31,
     "occ_view": "ok",
-    "first_line": "{\"status\":\"ok\",\"memories\":7199}",
     "n": 25,
     "label": "ok",
     "src": 0
@@ -1016,7 +1001,6 @@
     "seconds": 0.017,
     "out_bytes": 585,
     "occ_view": "ok",
-    "first_line": "MemTotal",
     "n": 26,
     "label": "ok",
     "src": 0
@@ -1028,7 +1012,6 @@
     "seconds": 0.017,
     "out_bytes": 10,
     "occ_view": "ok",
-    "first_line": "1795457987",
     "n": 27,
     "label": "partial",
     "src": 0
@@ -1040,7 +1023,6 @@
     "seconds": 0.016,
     "out_bytes": 179,
     "occ_view": "ok",
-    "first_line": "Filesystem     1024-blocks    Used Available Capacity Mounted on",
     "n": 28,
     "label": "partial",
     "src": 0
@@ -1052,7 +1034,6 @@
     "seconds": 0.018,
     "out_bytes": 42197,
     "occ_view": "ok",
-    "first_line": "[    0.000000] Linux version 6.18.39 (jack66g@jack66g-virtual-machine) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, GNU",
     "n": 29,
     "label": "ok",
     "src": 0
@@ -1064,7 +1045,6 @@
     "seconds": 0.02,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 30,
     "label": "no",
     "src": 0
@@ -1076,7 +1056,6 @@
     "seconds": 0.017,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 31,
     "label": "no",
     "src": 0
@@ -1088,7 +1067,6 @@
     "seconds": 0.021,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 32,
     "label": "no",
     "src": 0
@@ -1100,7 +1078,6 @@
     "seconds": 0.019,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 33,
     "label": "no",
     "src": 0
@@ -1112,7 +1089,6 @@
     "seconds": 0.018,
     "out_bytes": 16,
     "occ_view": "ok",
-    "first_line": "0 /var/ai",
     "n": 34,
     "label": "no",
     "src": 0
@@ -1124,7 +1100,6 @@
     "seconds": 0.021,
     "out_bytes": 139,
     "occ_view": "sb_fail",
-    "first_line": "dumpe2fs 1.46.5 (30-Dec-2021)",
     "n": 35,
     "label": "no",
     "src": 0
@@ -1136,7 +1111,6 @@
     "seconds": 0.017,
     "out_bytes": 2,
     "occ_view": "ok",
-    "first_line": "ok",
     "n": 36,
     "label": "ok",
     "src": 0
@@ -1148,7 +1122,6 @@
     "seconds": 0.014,
     "out_bytes": 69,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: ethtool: not found",
     "n": 37,
     "label": "no",
     "src": 0
@@ -1160,7 +1133,6 @@
     "seconds": 0.016,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 38,
     "label": "no",
     "src": 0
@@ -1172,7 +1144,6 @@
     "seconds": 0.015,
     "out_bytes": 75,
     "occ_view": "ok",
-    "first_line": "/sys/class/net",
     "n": 39,
     "label": "partial",
     "src": 0
@@ -1184,7 +1155,6 @@
     "seconds": 0.032,
     "out_bytes": 4199,
     "occ_view": "ok",
-    "first_line": "{",
     "n": 40,
     "label": "partial",
     "src": 0
@@ -1196,7 +1166,6 @@
     "seconds": 0.017,
     "out_bytes": 206,
     "occ_view": "ok",
-    "first_line": "               total        used        free      shared  buff/cache   available",
     "n": 41,
     "label": "ok",
     "src": 0
@@ -1208,7 +1177,6 @@
     "seconds": 0.013,
     "out_bytes": 65,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: gcc: not found",
     "n": 42,
     "label": "no",
     "src": 0
@@ -1220,7 +1188,6 @@
     "seconds": 0.014,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 43,
     "label": "no",
     "src": 0
@@ -1232,7 +1199,6 @@
     "seconds": 0.015,
     "out_bytes": 1,
     "occ_view": "ok",
-    "first_line": "3",
     "n": 44,
     "label": "ok",
     "src": 0
@@ -1244,7 +1210,6 @@
     "seconds": 0.017,
     "out_bytes": 139,
     "occ_view": "ok",
-    "first_line": "MemTotal:        4004744 kB",
     "n": 45,
     "label": "ok",
     "src": 0
@@ -1256,7 +1221,6 @@
     "seconds": 0.018,
     "out_bytes": 13,
     "occ_view": "ok",
-    "first_line": "occreach19704",
     "n": 46,
     "label": "partial",
     "src": 0
@@ -1268,7 +1232,6 @@
     "seconds": 0.018,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 47,
     "label": "no",
     "src": 0
@@ -1280,7 +1243,6 @@
     "seconds": 0.017,
     "out_bytes": 20,
     "occ_view": "ok",
-    "first_line": "uid=0 gid=0 groups=0",
     "n": 48,
     "label": "no",
     "src": 0
@@ -1292,7 +1254,6 @@
     "seconds": 0.017,
     "out_bytes": 1199,
     "occ_view": "ok",
-    "first_line": "enp0s17   Link encap:Ethernet  HWaddr XX:XX:XX:XX:XX:XX  ",
     "n": 49,
     "label": "ok",
     "src": 0
@@ -1304,7 +1265,6 @@
     "seconds": 0.016,
     "out_bytes": 1335,
     "occ_view": "ok",
-    "first_line": "[{\"ifindex\":1,\"ifname\":\"lo\",\"flags\":[\"LOOPBACK\",\"UP\",\"LOWER_UP\"],\"mtu\":65536,\"qdisc\":\"noqueue\",\"operstate\":\"UNKNOWN\",\"gr",
     "n": 50,
     "label": "ok",
     "src": 0
@@ -1316,7 +1276,6 @@
     "seconds": 0.016,
     "out_bytes": 45,
     "occ_view": "ok",
-    "first_line": "No journal files were found.",
     "n": 51,
     "label": "no",
     "src": 0
@@ -1328,7 +1287,6 @@
     "seconds": 0.011,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 52,
     "label": "no",
     "src": 0
@@ -1340,7 +1298,6 @@
     "seconds": 0.015,
     "out_bytes": 58,
     "occ_view": "sb_fail",
-    "first_line": "last: cannot open /var/log/wtmp: No such file or directory",
     "n": 53,
     "label": "no",
     "src": 0
@@ -1352,7 +1309,6 @@
     "seconds": 0.014,
     "out_bytes": 2163,
     "occ_view": "sb_fail",
-    "first_line": "nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_connt|nf_",
     "n": 54,
     "label": "ok",
     "src": 0
@@ -1364,7 +1320,6 @@
     "seconds": 0.018,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 55,
     "label": "no",
     "src": 0
@@ -1376,7 +1331,6 @@
     "seconds": 0.018,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 56,
     "label": "no",
     "src": 0
@@ -1388,7 +1342,6 @@
     "seconds": 0.016,
     "out_bytes": 15,
     "occ_view": "ok",
-    "first_line": "enp0s17",
     "n": 57,
     "label": "partial",
     "src": 0
@@ -1400,7 +1353,6 @@
     "seconds": 0.015,
     "out_bytes": 41,
     "occ_view": "ok",
-    "first_line": "--------------e------- /usr/local/bin/occ",
     "n": 58,
     "label": "partial",
     "src": 0
@@ -1412,7 +1364,6 @@
     "seconds": 0.02,
     "out_bytes": 1280,
     "occ_view": "ok",
-    "first_line": "{",
     "n": 59,
     "label": "ok",
     "src": 0
@@ -1424,7 +1375,6 @@
     "seconds": 0.017,
     "out_bytes": 4430,
     "occ_view": "ok",
-    "first_line": "{",
     "n": 60,
     "label": "ok",
     "src": 0
@@ -1436,7 +1386,6 @@
     "seconds": 0.016,
     "out_bytes": 1078,
     "occ_view": "ok",
-    "first_line": "RESOURCE DESCRIPTION                                              LIMIT USED  USE%",
     "n": 61,
     "label": "ok",
     "src": 0
@@ -1448,7 +1397,6 @@
     "seconds": 0.019,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 62,
     "label": "ok",
     "src": 0
@@ -1460,7 +1408,6 @@
     "seconds": 0.016,
     "out_bytes": 50,
     "occ_view": "sb_fail",
-    "first_line": "lslogins: /var/log/wtmp: No such file or directory",
     "n": 63,
     "label": "no",
     "src": 0
@@ -1472,7 +1419,6 @@
     "seconds": 0.017,
     "out_bytes": 72,
     "occ_view": "sb_fail",
-    "first_line": "lsmem: cannot open /sys/devices/system/memory: No such file or directory",
     "n": 64,
     "label": "ok",
     "src": 0
@@ -1484,7 +1430,6 @@
     "seconds": 0.018,
     "out_bytes": 745,
     "occ_view": "ok",
-    "first_line": "        NS TYPE   NPROCS PID USER COMMAND",
     "n": 65,
     "label": "no",
     "src": 0
@@ -1496,7 +1441,6 @@
     "seconds": 0.012,
     "out_bytes": 65,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: lvs: not found",
     "n": 66,
     "label": "no",
     "src": 0
@@ -1508,7 +1452,6 @@
     "seconds": 0.016,
     "out_bytes": 1515,
     "occ_view": "ok",
-    "first_line": "tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755)",
     "n": 67,
     "label": "no",
     "src": 0
@@ -1520,7 +1463,6 @@
     "seconds": 0.017,
     "out_bytes": 440,
     "occ_view": "sb_fail",
-    "first_line": "nc: invalid option -- 'z'",
     "n": 68,
     "label": "ok",
     "src": 0
@@ -1532,7 +1474,6 @@
     "seconds": 0.015,
     "out_bytes": 933,
     "occ_view": "ok",
-    "first_line": "Active Internet connections (only servers)",
     "n": 69,
     "label": "ok",
     "src": 0
@@ -1544,7 +1485,6 @@
     "seconds": 0.016,
     "out_bytes": 55,
     "occ_view": "sb_fail",
-    "first_line": "Failed to connect system bus: No such file or directory",
     "n": 70,
     "label": "no",
     "src": 0
@@ -1556,7 +1496,6 @@
     "seconds": 0.016,
     "out_bytes": 42,
     "occ_view": "sb_fail",
-    "first_line": "Operation not permitted (you must be root)",
     "n": 71,
     "label": "no",
     "src": 0
@@ -1568,7 +1507,6 @@
     "seconds": 0.014,
     "out_bytes": 83,
     "occ_view": "ok",
-    "first_line": "Server:  127.0.0.53",
     "n": 72,
     "label": "ok",
     "src": 0
@@ -1580,7 +1518,6 @@
     "seconds": 0.018,
     "out_bytes": 17442,
     "occ_view": "ok",
-    "first_line": "#kernel",
     "n": 73,
     "label": "ok",
     "src": 0
@@ -1592,7 +1529,6 @@
     "seconds": 0.03,
     "out_bytes": 31,
     "occ_view": "ok",
-    "first_line": "NAME    ID    SIZE    MODIFIED ",
     "n": 74,
     "label": "ok",
     "src": 0
@@ -1604,7 +1540,6 @@
     "seconds": 0.016,
     "out_bytes": 40,
     "occ_view": "sb_fail",
-    "first_line": "passwd: Cannot determine your user name.",
     "n": 75,
     "label": "no",
     "src": 0
@@ -1616,7 +1551,6 @@
     "seconds": 0.017,
     "out_bytes": 0,
     "occ_view": "sb_fail",
-    "first_line": "",
     "n": 76,
     "label": "no",
     "src": 0
@@ -1628,7 +1562,6 @@
     "seconds": 0.014,
     "out_bytes": 0,
     "occ_view": "sb_fail",
-    "first_line": "",
     "n": 77,
     "label": "no",
     "src": 0
@@ -1640,7 +1573,6 @@
     "seconds": 1.024,
     "out_bytes": 310,
     "occ_view": "ok",
-    "first_line": "PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.",
     "n": 78,
     "label": "ok",
     "src": 0
@@ -1652,7 +1584,6 @@
     "seconds": 0.014,
     "out_bytes": 2,
     "occ_view": "ok",
-    "first_line": "ok",
     "n": 79,
     "label": "ok",
     "src": 0
@@ -1664,7 +1595,6 @@
     "seconds": 0.019,
     "out_bytes": 76,
     "occ_view": "ok",
-    "first_line": "    PID    PPID STAT COMMAND",
     "n": 80,
     "label": "no",
     "src": 0
@@ -1676,7 +1606,6 @@
     "seconds": 0.016,
     "out_bytes": 65,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: pvs: not found",
     "n": 81,
     "label": "no",
     "src": 0
@@ -1688,7 +1617,6 @@
     "seconds": 0.025,
     "out_bytes": 1,
     "occ_view": "ok",
-    "first_line": "1",
     "n": 82,
     "label": "ok",
     "src": 0
@@ -1700,7 +1628,6 @@
     "seconds": 0.016,
     "out_bytes": 67,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: quota: not found",
     "n": 83,
     "label": "no",
     "src": 0
@@ -1712,7 +1639,6 @@
     "seconds": 0.019,
     "out_bytes": 70,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: repquota: not found",
     "n": 84,
     "label": "no",
     "src": 0
@@ -1724,7 +1650,6 @@
     "seconds": 0.024,
     "out_bytes": 45,
     "occ_view": "sb_fail",
-    "first_line": "sd_bus_open_system: No such file or directory",
     "n": 85,
     "label": "no",
     "src": 0
@@ -1736,7 +1661,6 @@
     "seconds": 0.018,
     "out_bytes": 341,
     "occ_view": "ok",
-    "first_line": "Kernel IP routing table",
     "n": 86,
     "label": "ok",
     "src": 0
@@ -1748,7 +1672,6 @@
     "seconds": 10.007,
     "out_bytes": 1231,
     "occ_view": "tool_error",
-    "first_line": "rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_cache|rt_",
     "n": 87,
     "label": "ok",
     "src": 0
@@ -1760,7 +1683,6 @@
     "seconds": 0.135,
     "out_bytes": 83,
     "occ_view": "ok",
-    "first_line": "MemTotal:        4004744 kB",
     "n": 88,
     "label": "ok",
     "src": 0
@@ -1772,7 +1694,6 @@
     "seconds": 0.013,
     "out_bytes": 70,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: setquota: not found",
     "n": 89,
     "label": "no",
     "src": 0
@@ -1784,7 +1705,6 @@
     "seconds": 0.015,
     "out_bytes": 91,
     "occ_view": "ok",
-    "first_line": "6eb8e39b6e3edd841b48211adefb53bf60a8c80e8eafc596d11af974494c9d9a  /etc/aikernel/policy.conf",
     "n": 90,
     "label": "partial",
     "src": 0
@@ -1796,7 +1716,6 @@
     "seconds": 0.018,
     "out_bytes": 13897,
     "occ_view": "ok",
-    "first_line": " Active / Total Objects (% used)    : 307567 / 310479 (99.1%)",
     "n": 91,
     "label": "ok",
     "src": 0
@@ -1808,7 +1727,6 @@
     "seconds": 0.02,
     "out_bytes": 197,
     "occ_view": "sb_fail",
-    "first_line": "smartctl 7.2 2020-12-30 r5155 [x86_64-linux-6.18.39] (local build)",
     "n": 92,
     "label": "no",
     "src": 0
@@ -1820,7 +1738,6 @@
     "seconds": 0.017,
     "out_bytes": 1446,
     "occ_view": "ok",
-    "first_line": "Active(anon):        332 kB",
     "n": 93,
     "label": "ok",
     "src": 0
@@ -1832,7 +1749,6 @@
     "seconds": 0.022,
     "out_bytes": 813,
     "occ_view": "ok",
-    "first_line": "Netid State  Recv-Q Send-Q   Local Address:Port  Peer Address:PortProcess",
     "n": 94,
     "label": "ok",
     "src": 0
@@ -1844,7 +1760,6 @@
     "seconds": 0.02,
     "out_bytes": 47,
     "occ_view": "sb_fail",
-    "first_line": "/etc/ssh/sshd_config: No such file or directory",
     "n": 95,
     "label": "no",
     "src": 0
@@ -1856,7 +1771,6 @@
     "seconds": 0.017,
     "out_bytes": 390,
     "occ_view": "ok",
-    "first_line": "  File: /usr/local/bin/occ",
     "n": 96,
     "label": "partial",
     "src": 0
@@ -1868,7 +1782,6 @@
     "seconds": 0.027,
     "out_bytes": 1143,
     "occ_view": "ok",
-    "first_line": "% time     seconds  usecs/call     calls    errors syscall",
     "n": 97,
     "label": "partial",
     "src": 0
@@ -1880,7 +1793,6 @@
     "seconds": 0.019,
     "out_bytes": 59,
     "occ_view": "ok",
-    "first_line": "NAME      TYPE SIZE USED PRIO",
     "n": 98,
     "label": "no",
     "src": 0
@@ -1892,7 +1804,6 @@
     "seconds": 0.041,
     "out_bytes": 42246,
     "occ_view": "ok",
-    "first_line": "abi.vsyscall32 = 1",
     "n": 99,
     "label": "ok",
     "src": 0
@@ -1904,7 +1815,6 @@
     "seconds": 0.016,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 100,
     "label": "no",
     "src": 0
@@ -1916,7 +1826,6 @@
     "seconds": 0.021,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 101,
     "label": "no",
     "src": 0
@@ -1928,7 +1837,6 @@
     "seconds": 0.017,
     "out_bytes": 129,
     "occ_view": "sb_fail",
-    "first_line": "Failed to get root control group path.",
     "n": 102,
     "label": "no",
     "src": 0
@@ -1940,7 +1848,6 @@
     "seconds": 0.018,
     "out_bytes": 58,
     "occ_view": "sb_fail",
-    "first_line": "Failed to determine supported controllers: No medium found",
     "n": 103,
     "label": "no",
     "src": 0
@@ -1952,7 +1859,6 @@
     "seconds": 0.022,
     "out_bytes": 6,
     "occ_view": "ok",
-    "first_line": "vmware",
     "n": 104,
     "label": "ok",
     "src": 0
@@ -1964,7 +1870,6 @@
     "seconds": 0.017,
     "out_bytes": 139,
     "occ_view": "ok",
-    "first_line": "Hugepagesize:       2048 kB",
     "n": 105,
     "label": "ok",
     "src": 0
@@ -1976,7 +1881,6 @@
     "seconds": 0.025,
     "out_bytes": 290,
     "occ_view": "ok",
-    "first_line": "[{\"kind\":\"noqueue\",\"handle\":\"0:\",\"dev\":\"lo\",\"root\":true,\"refcnt\":2,\"options\":{}},{\"kind\":\"fq_codel\",\"handle\":\"0:\",\"dev\":",
     "n": 106,
     "label": "ok",
     "src": 0
@@ -1988,7 +1892,6 @@
     "seconds": 0.027,
     "out_bytes": 117,
     "occ_view": "sb_fail",
-    "first_line": "System has not been booted with systemd as init system (PID 1). Can't operate.",
     "n": 107,
     "label": "no",
     "src": 0
@@ -2000,7 +1903,6 @@
     "seconds": 0.168,
     "out_bytes": 603,
     "occ_view": "ok",
-    "first_line": "top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05",
     "n": 108,
     "label": "no",
     "src": 0
@@ -2012,7 +1914,6 @@
     "seconds": 0.014,
     "out_bytes": 108,
     "occ_view": "ok",
-    "first_line": "traceroute to 127.0.0.1 (127.0.0.1), 5 hops max, 46 byte packets",
     "n": 109,
     "label": "ok",
     "src": 0
@@ -2024,7 +1925,6 @@
     "seconds": 0.016,
     "out_bytes": 63,
     "occ_view": "ok",
-    "first_line": "P: /class/net",
     "n": 110,
     "label": "no",
     "src": 0
@@ -2036,7 +1936,6 @@
     "seconds": 0.016,
     "out_bytes": 7,
     "occ_view": "ok",
-    "first_line": "6.18.39",
     "n": 111,
     "label": "ok",
     "src": 0
@@ -2048,7 +1947,6 @@
     "seconds": 0.02,
     "out_bytes": 1862,
     "occ_view": "ok",
-    "first_line": "      1 Active(anon):        332 kB",
     "n": 112,
     "label": "ok",
     "src": 0
@@ -2060,7 +1958,6 @@
     "seconds": 0.018,
     "out_bytes": 68,
     "occ_view": "ok",
-    "first_line": " 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05",
     "n": 113,
     "label": "ok",
     "src": 0
@@ -2072,7 +1969,6 @@
     "seconds": 0.019,
     "out_bytes": 83,
     "occ_view": "ok",
-    "first_line": "GROUP=100",
     "n": 114,
     "label": "no",
     "src": 0
@@ -2084,7 +1980,6 @@
     "seconds": 0.015,
     "out_bytes": 65,
     "occ_view": "tool_error",
-    "first_line": "/bin/sh: 1: vgs: not found",
     "n": 115,
     "label": "no",
     "src": 0
@@ -2096,7 +1991,6 @@
     "seconds": 1.018,
     "out_bytes": 325,
     "occ_view": "ok",
-    "first_line": "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----",
     "n": 116,
     "label": "ok",
     "src": 0
@@ -2108,7 +2002,6 @@
     "seconds": 0.015,
     "out_bytes": 959,
     "occ_view": "ok",
-    "first_line": "disk- ------------reads------------ ------------writes----------- -----IO------",
     "n": 117,
     "label": "ok",
     "src": 0
@@ -2120,7 +2013,6 @@
     "seconds": 0.018,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 118,
     "label": "no",
     "src": 0
@@ -2132,7 +2024,6 @@
     "seconds": 0.019,
     "out_bytes": 16,
     "occ_view": "ok",
-    "first_line": "52 /proc/meminfo",
     "n": 119,
     "label": "ok",
     "src": 0
@@ -2144,7 +2035,6 @@
     "seconds": 0.021,
     "out_bytes": 65,
     "occ_view": "sb_fail",
-    "first_line": "wdctl: No default device is available.: No such file or directory",
     "n": 120,
     "label": "no",
     "src": 0
@@ -2156,7 +2046,6 @@
     "seconds": 0.026,
     "out_bytes": 31,
     "occ_view": "ok",
-    "first_line": "{\"status\":\"ok\",\"memories\":7199}",
     "n": 121,
     "label": "ok",
     "src": 0
@@ -2168,7 +2057,6 @@
     "seconds": 0.017,
     "out_bytes": 15,
     "occ_view": "ok",
-    "first_line": "ls: /usr/bin/ls",
     "n": 122,
     "label": "ok",
     "src": 0
@@ -2180,7 +2068,6 @@
     "seconds": 0.015,
     "out_bytes": 12,
     "occ_view": "ok",
-    "first_line": "/usr/bin/awk",
     "n": 123,
     "label": "ok",
     "src": 0
@@ -2192,10 +2079,768 @@
     "seconds": 0.015,
     "out_bytes": 0,
     "occ_view": "ok",
-    "first_line": "",
     "n": 124,
     "label": "no",
     "src": 0
+   },
+   {
+    "cmd": "arping -c 1 -I lo 127.0.0.1",
+    "static_at_capture": "ok",
+    "rc": 2,
+    "seconds": 0.026,
+    "out_bytes": 35,
+    "occ_view": "sb_fail",
+    "n": 125,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "nc -h",
+    "static_at_capture": "view",
+    "rc": 1,
+    "seconds": 0.019,
+    "out_bytes": 440,
+    "occ_view": "sb_fail",
+    "n": 126,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "nc -w 2 127.0.0.1 8000 </dev/null",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.017,
+    "out_bytes": 0,
+    "occ_view": "ok",
+    "n": 127,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "ctstat -c 1",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 0,
+    "occ_view": "sb_fail",
+    "n": 128,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "rtstat -c 1",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 615,
+    "occ_view": "sb_fail",
+    "n": 129,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "ls /proc/net/stat",
+    "static_at_capture": "view",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 43,
+    "occ_view": "ok",
+    "n": 130,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "ls /sys/devices/system",
+    "static_at_capture": "view",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 55,
+    "occ_view": "ok",
+    "n": 131,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/locks",
+    "static_at_capture": "view",
+    "rc": 0,
+    "seconds": 0.021,
+    "out_bytes": 0,
+    "occ_view": "ok",
+    "n": 132,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/swaps",
+    "static_at_capture": "view",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 99,
+    "occ_view": "ok",
+    "n": 133,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "ls -ld /etc/localtime /etc/timezone",
+    "static_at_capture": "view",
+    "rc": 2,
+    "seconds": 0.017,
+    "out_bytes": 122,
+    "occ_view": "sb_fail",
+    "n": 134,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "ls /dev",
+    "static_at_capture": "view",
+    "rc": 0,
+    "seconds": 0.023,
+    "out_bytes": 41,
+    "occ_view": "ok",
+    "n": 135,
+    "label": "view",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/cpuinfo",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.018,
+    "out_bytes": 2414,
+    "occ_view": "ok",
+    "n": 136,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/stat",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 1143,
+    "occ_view": "ok",
+    "n": 137,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.015,
+    "out_bytes": 85,
+    "occ_view": "sb_fail",
+    "n": 138,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/swaps",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 99,
+    "occ_view": "ok",
+    "n": 139,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/pressure/cpu",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 99,
+    "occ_view": "ok",
+    "n": 140,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/pressure/memory",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.02,
+    "out_bytes": 93,
+    "occ_view": "ok",
+    "n": 141,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/pressure/io",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 105,
+    "occ_view": "ok",
+    "n": 142,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/diskstats",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 695,
+    "occ_view": "ok",
+    "n": 143,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/block/sda/stat",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 152,
+    "occ_view": "ok",
+    "n": 144,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/bdi/8:0/read_ahead_kb",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.014,
+    "out_bytes": 4,
+    "occ_view": "ok",
+    "n": 145,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/partitions",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.012,
+    "out_bytes": 145,
+    "occ_view": "ok",
+    "n": 146,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/mounts",
+    "static_at_capture": "partial",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 1394,
+    "occ_view": "ok",
+    "n": 147,
+    "label": "partial",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/mdstat",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 39,
+    "occ_view": "ok",
+    "n": 148,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/cmdline",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 132,
+    "occ_view": "ok",
+    "n": 149,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "ip -j link",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 739,
+    "occ_view": "ok",
+    "n": 150,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/net/eth0/statistics/rx_bytes",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.016,
+    "out_bytes": 71,
+    "occ_view": "sb_fail",
+    "n": 151,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "ip -j route",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 386,
+    "occ_view": "ok",
+    "n": 152,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/net/route",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.017,
+    "out_bytes": 511,
+    "occ_view": "ok",
+    "n": 153,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/net/tcp",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.017,
+    "out_bytes": 10799,
+    "occ_view": "ok",
+    "n": 154,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/net/nf_conntrack",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.014,
+    "out_bytes": 15572,
+    "occ_view": "ok",
+    "n": 155,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /etc/resolv.conf",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 929,
+    "occ_view": "ok",
+    "n": 156,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "ip -d -j link",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 1356,
+    "occ_view": "ok",
+    "n": 157,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/net/eth0/mtu",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.015,
+    "out_bytes": 55,
+    "occ_view": "sb_fail",
+    "n": 158,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/bus/pci/devices/0000:00:02.0/vendor",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 74,
+    "occ_view": "sb_fail",
+    "n": 159,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/drm/card0/status",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.022,
+    "out_bytes": 59,
+    "occ_view": "sb_fail",
+    "n": 160,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/thermal/thermal_zone0/temp",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.025,
+    "out_bytes": 69,
+    "occ_view": "sb_fail",
+    "n": 161,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/hwmon/hwmon0/temp1_input",
+    "static_at_capture": "ok",
+    "rc": 1,
+    "seconds": 0.023,
+    "out_bytes": 67,
+    "occ_view": "sb_fail",
+    "n": 162,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/class/power_supply/ACAD/online",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.02,
+    "out_bytes": 1,
+    "occ_view": "ok",
+    "n": 163,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/ai/status",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 1843,
+    "occ_view": "ok",
+    "n": 164,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/ai/control",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 1781,
+    "occ_view": "ok",
+    "n": 165,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/ai/hitrate",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 28,
+    "occ_view": "ok",
+    "n": 168,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /proc/ai/latency",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.018,
+    "out_bytes": 86,
+    "occ_view": "ok",
+    "n": 169,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/ai/stats/telemetry_emitted",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 7,
+    "occ_view": "ok",
+    "n": 170,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/ai/stats/decisions_total",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.019,
+    "out_bytes": 1,
+    "occ_view": "ok",
+    "n": 171,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/ai/stats/runtime_state",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 1,
+    "occ_view": "ok",
+    "n": 172,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/ai/decision/stats",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.017,
+    "out_bytes": 705,
+    "occ_view": "ok",
+    "n": 174,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "date",
+    "static_at_capture": "partial",
+    "rc": 0,
+    "seconds": 0.016,
+    "out_bytes": 28,
+    "occ_view": "ok",
+    "n": 175,
+    "label": "partial",
+    "src": 1
+   },
+   {
+    "cmd": "curl -s -m 5 http://127.0.0.1:8000/stats",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.021,
+    "out_bytes": 606,
+    "occ_view": "ok",
+    "n": 176,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "curl -s -m 5 http://127.0.0.1:8091/api/health",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.018,
+    "out_bytes": 334,
+    "occ_view": "ok",
+    "n": 177,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "curl -s -m 5 http://127.0.0.1:8091/api/stats",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.02,
+    "out_bytes": 181,
+    "occ_view": "ok",
+    "n": 178,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "curl -s -m 5 http://127.0.0.1:8091/api/apps",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.02,
+    "out_bytes": 24,
+    "occ_view": "ok",
+    "n": 179,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "curl -s -m 5 http://127.0.0.1:8091/api/theme",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.02,
+    "out_bytes": 1412,
+    "occ_view": "ok",
+    "n": 180,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "aikctl policy get",
+    "static_at_capture": "ok",
+    "rc": 0,
+    "seconds": 0.119,
+    "out_bytes": 312,
+    "occ_view": "ok",
+    "n": 181,
+    "label": "ok",
+    "src": 1
+   },
+   {
+    "cmd": "aikctl compat hw",
+    "static_at_capture": "partial",
+    "rc": 0,
+    "seconds": 0.093,
+    "out_bytes": 2183,
+    "occ_view": "ok",
+    "n": 182,
+    "label": "partial",
+    "src": 1
+   },
+   {
+    "cmd": "aikctl policy get sudoers",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.136,
+    "out_bytes": 24,
+    "occ_view": "sb_fail",
+    "n": 184,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "ps -eo pid,ni,pri,comm",
+    "static_at_capture": "no",
+    "rc": 0,
+    "seconds": 0.014,
+    "out_bytes": 61,
+    "occ_view": "ok",
+    "n": 185,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/fs/cgroup/cgroup.procs",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 59,
+    "occ_view": "sb_fail",
+    "n": 186,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/fs/cgroup/cgroup.controllers",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.016,
+    "out_bytes": 65,
+    "occ_view": "sb_fail",
+    "n": 187,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/fs/cgroup/memory.current",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.018,
+    "out_bytes": 61,
+    "occ_view": "sb_fail",
+    "n": 188,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "systemctl list-timers --no-pager",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 117,
+    "occ_view": "sb_fail",
+    "n": 189,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "systemctl --failed --no-legend",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.02,
+    "out_bytes": 117,
+    "occ_view": "sb_fail",
+    "n": 190,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "apt list --upgradable",
+    "static_at_capture": "no",
+    "rc": 100,
+    "seconds": 0.032,
+    "out_bytes": 584,
+    "occ_view": "tool_error",
+    "n": 191,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/security/apparmor/profiles",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.017,
+    "out_bytes": 70,
+    "occ_view": "sb_fail",
+    "n": 192,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "ip netns list",
+    "static_at_capture": "no",
+    "rc": 0,
+    "seconds": 0.017,
+    "out_bytes": 0,
+    "occ_view": "ok",
+    "n": 193,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /etc/passwd",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.016,
+    "out_bytes": 43,
+    "occ_view": "sb_fail",
+    "n": 194,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "getent group",
+    "static_at_capture": "no",
+    "rc": 0,
+    "seconds": 0.015,
+    "out_bytes": 0,
+    "occ_view": "ok",
+    "n": 195,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "ps -eo user,tty,stat,comm",
+    "static_at_capture": "no",
+    "rc": 0,
+    "seconds": 0.018,
+    "out_bytes": 82,
+    "occ_view": "ok",
+    "n": 196,
+    "label": "no",
+    "src": 1
+   },
+   {
+    "cmd": "cat /sys/kernel/debug/kunit/results",
+    "static_at_capture": "no",
+    "rc": 1,
+    "seconds": 0.016,
+    "out_bytes": 63,
+    "occ_view": "sb_fail",
+    "n": 197,
+    "label": "no",
+    "src": 1
    }
   ],
   "derived": {
@@ -2454,7 +3099,7 @@
     [
      27,
      "partial",
-     "host",
+     "part",
      [],
      "",
      false,
@@ -2644,9 +3289,11 @@
     ],
     [
      46,
-     "partial",
-     "part",
-     [],
+     "notdata",
+     "none",
+     [
+      "a"
+     ],
      "",
      false,
      false
@@ -2893,7 +3540,7 @@
     [
      72,
      "partial",
-     "host",
+     "part",
      [],
      "",
      false,
@@ -2910,8 +3557,8 @@
     ],
     [
      74,
-     "ok",
-     "host",
+     "emptyset",
+     "none",
      [],
      "",
      false,
@@ -3380,926 +4027,2043 @@
      "blocked",
      false,
      false
+    ],
+    [
+     125,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     126,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     127,
+     "empty",
+     "none",
+     [
+      "c"
+     ],
+     "na",
+     false,
+     false
+    ],
+    [
+     128,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     129,
+     "unreviewed",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     130,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     131,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     132,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     133,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     134,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     135,
+     "view",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     136,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     137,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     138,
+     "fail",
+     "none",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     139,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     140,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     141,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     142,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     143,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     144,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     145,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     146,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     147,
+     "notdata",
+     "none",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     148,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     149,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     150,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     151,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     152,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     153,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     154,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     true
+    ],
+    [
+     155,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     true
+    ],
+    [
+     156,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     157,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     158,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     159,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     160,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     161,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     162,
+     "fail",
+     "unresolved",
+     [
+      "a"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     163,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     164,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     165,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     168,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     169,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     170,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     171,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     172,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     174,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     175,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     176,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     177,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     178,
+     "ok",
+     "host",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     179,
+     "emptyset",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     180,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     181,
+     "partial",
+     "part",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     182,
+     "unreviewed",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     184,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     185,
+     "notdata",
+     "none",
+     [
+      "b2"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     186,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     187,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     188,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     189,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     190,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     191,
+     "error",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     192,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     193,
+     "empty",
+     "none",
+     [
+      "b2",
+      "c"
+     ],
+     "blocked",
+     false,
+     false
+    ],
+    [
+     194,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
+    ],
+    [
+     195,
+     "empty",
+     "none",
+     [
+      "b2",
+      "c"
+     ],
+     "blocked",
+     false,
+     false
+    ],
+    [
+     196,
+     "notdata",
+     "none",
+     [
+      "b2"
+     ],
+     "",
+     false,
+     false
+    ],
+    [
+     197,
+     "fail",
+     "none",
+     [],
+     "",
+     false,
+     false
     ]
    ],
-   "summary": {
-    "latest": [
-     [
-      0,
-      0
+   "captures": [
+    {
+     "observed": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       3
+      ],
+      [
+       4,
+       4
+      ],
+      [
+       5,
+       5
+      ],
+      [
+       6,
+       6
+      ],
+      [
+       7,
+       7
+      ],
+      [
+       8,
+       8
+      ],
+      [
+       9,
+       9
+      ],
+      [
+       10,
+       10
+      ],
+      [
+       11,
+       11
+      ],
+      [
+       12,
+       12
+      ],
+      [
+       13,
+       13
+      ],
+      [
+       14,
+       14
+      ],
+      [
+       15,
+       15
+      ],
+      [
+       16,
+       16
+      ],
+      [
+       17,
+       17
+      ],
+      [
+       18,
+       18
+      ],
+      [
+       19,
+       19
+      ],
+      [
+       20,
+       20
+      ],
+      [
+       21,
+       21
+      ],
+      [
+       22,
+       22
+      ],
+      [
+       23,
+       23
+      ],
+      [
+       24,
+       24
+      ],
+      [
+       25,
+       25
+      ],
+      [
+       26,
+       26
+      ],
+      [
+       27,
+       27
+      ],
+      [
+       28,
+       28
+      ],
+      [
+       29,
+       29
+      ],
+      [
+       30,
+       30
+      ],
+      [
+       31,
+       31
+      ],
+      [
+       32,
+       32
+      ],
+      [
+       33,
+       33
+      ],
+      [
+       34,
+       34
+      ],
+      [
+       35,
+       35
+      ],
+      [
+       36,
+       36
+      ],
+      [
+       37,
+       37
+      ],
+      [
+       38,
+       38
+      ],
+      [
+       39,
+       39
+      ],
+      [
+       40,
+       40
+      ],
+      [
+       41,
+       41
+      ],
+      [
+       42,
+       42
+      ],
+      [
+       43,
+       43
+      ],
+      [
+       44,
+       44
+      ],
+      [
+       45,
+       45
+      ],
+      [
+       46,
+       46
+      ],
+      [
+       47,
+       47
+      ],
+      [
+       48,
+       48
+      ],
+      [
+       49,
+       49
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       51,
+       51
+      ],
+      [
+       52,
+       52
+      ],
+      [
+       53,
+       53
+      ],
+      [
+       54,
+       54
+      ],
+      [
+       55,
+       55
+      ],
+      [
+       56,
+       56
+      ],
+      [
+       57,
+       57
+      ],
+      [
+       58,
+       58
+      ],
+      [
+       59,
+       59
+      ],
+      [
+       60,
+       60
+      ],
+      [
+       61,
+       61
+      ],
+      [
+       62,
+       62
+      ],
+      [
+       63,
+       63
+      ],
+      [
+       64,
+       64
+      ],
+      [
+       65,
+       65
+      ],
+      [
+       66,
+       66
+      ],
+      [
+       67,
+       67
+      ],
+      [
+       68,
+       68
+      ],
+      [
+       69,
+       69
+      ],
+      [
+       70,
+       70
+      ],
+      [
+       71,
+       71
+      ],
+      [
+       72,
+       72
+      ],
+      [
+       73,
+       73
+      ],
+      [
+       74,
+       74
+      ],
+      [
+       75,
+       75
+      ],
+      [
+       76,
+       76
+      ],
+      [
+       77,
+       77
+      ],
+      [
+       78,
+       78
+      ],
+      [
+       79,
+       79
+      ],
+      [
+       80,
+       80
+      ],
+      [
+       81,
+       81
+      ],
+      [
+       82,
+       82
+      ],
+      [
+       83,
+       83
+      ],
+      [
+       84,
+       84
+      ],
+      [
+       85,
+       85
+      ],
+      [
+       86,
+       86
+      ],
+      [
+       87,
+       87
+      ],
+      [
+       88,
+       88
+      ],
+      [
+       89,
+       89
+      ],
+      [
+       90,
+       90
+      ],
+      [
+       91,
+       91
+      ],
+      [
+       92,
+       92
+      ],
+      [
+       93,
+       93
+      ],
+      [
+       94,
+       94
+      ],
+      [
+       95,
+       95
+      ],
+      [
+       96,
+       96
+      ],
+      [
+       97,
+       97
+      ],
+      [
+       98,
+       98
+      ],
+      [
+       99,
+       99
+      ],
+      [
+       100,
+       100
+      ],
+      [
+       101,
+       101
+      ],
+      [
+       102,
+       102
+      ],
+      [
+       103,
+       103
+      ],
+      [
+       104,
+       104
+      ],
+      [
+       105,
+       105
+      ],
+      [
+       106,
+       106
+      ],
+      [
+       107,
+       107
+      ],
+      [
+       108,
+       108
+      ],
+      [
+       109,
+       109
+      ],
+      [
+       110,
+       110
+      ],
+      [
+       111,
+       111
+      ],
+      [
+       112,
+       112
+      ],
+      [
+       113,
+       113
+      ],
+      [
+       114,
+       114
+      ],
+      [
+       115,
+       115
+      ],
+      [
+       116,
+       116
+      ],
+      [
+       117,
+       117
+      ],
+      [
+       118,
+       118
+      ],
+      [
+       119,
+       119
+      ],
+      [
+       120,
+       120
+      ],
+      [
+       121,
+       121
+      ],
+      [
+       122,
+       122
+      ],
+      [
+       123,
+       123
+      ],
+      [
+       124,
+       124
+      ]
      ],
-     [
-      1,
-      1
-     ],
-     [
-      2,
-      2
-     ],
-     [
-      3,
-      3
-     ],
-     [
-      4,
-      4
-     ],
-     [
-      5,
-      5
-     ],
-     [
-      6,
-      6
-     ],
-     [
-      7,
-      7
-     ],
-     [
-      8,
-      8
-     ],
-     [
-      9,
-      9
-     ],
-     [
-      10,
-      10
-     ],
-     [
-      11,
-      11
-     ],
-     [
-      12,
-      12
-     ],
-     [
-      13,
-      13
-     ],
-     [
-      14,
-      14
-     ],
-     [
-      15,
-      15
-     ],
-     [
-      16,
-      16
-     ],
-     [
+     "n_view": 9,
+     "m": {
+      "ok": 13,
+      "partial": 12,
+      "notdata": 10,
+      "unreviewed": 27,
+      "emptyset": 1,
+      "empty": 10,
+      "fail": 25,
+      "missing": 15,
+      "timeout": 2,
+      "error": 1
+     },
+     "a": [
       17,
-      17
-     ],
-     [
-      18,
-      18
-     ],
-     [
-      19,
-      19
-     ],
-     [
-      20,
-      20
-     ],
-     [
-      21,
-      21
-     ],
-     [
-      22,
-      22
-     ],
-     [
-      23,
-      23
-     ],
-     [
       24,
-      24
-     ],
-     [
-      25,
-      25
-     ],
-     [
-      26,
-      26
-     ],
-     [
-      27,
-      27
-     ],
-     [
-      28,
-      28
-     ],
-     [
-      29,
-      29
-     ],
-     [
-      30,
-      30
-     ],
-     [
-      31,
-      31
-     ],
-     [
-      32,
-      32
-     ],
-     [
-      33,
-      33
-     ],
-     [
-      34,
-      34
-     ],
-     [
-      35,
-      35
-     ],
-     [
-      36,
-      36
-     ],
-     [
-      37,
-      37
-     ],
-     [
-      38,
-      38
-     ],
-     [
-      39,
-      39
-     ],
-     [
-      40,
-      40
-     ],
-     [
-      41,
-      41
-     ],
-     [
-      42,
-      42
-     ],
-     [
-      43,
-      43
-     ],
-     [
-      44,
-      44
-     ],
-     [
-      45,
-      45
-     ],
-     [
       46,
-      46
-     ],
-     [
-      47,
-      47
-     ],
-     [
-      48,
-      48
-     ],
-     [
-      49,
-      49
-     ],
-     [
-      50,
-      50
-     ],
-     [
-      51,
-      51
-     ],
-     [
-      52,
-      52
-     ],
-     [
-      53,
-      53
-     ],
-     [
-      54,
-      54
-     ],
-     [
-      55,
-      55
-     ],
-     [
-      56,
-      56
-     ],
-     [
-      57,
-      57
-     ],
-     [
-      58,
-      58
-     ],
-     [
-      59,
-      59
-     ],
-     [
-      60,
-      60
-     ],
-     [
-      61,
-      61
-     ],
-     [
-      62,
-      62
-     ],
-     [
-      63,
-      63
-     ],
-     [
-      64,
-      64
-     ],
-     [
-      65,
-      65
-     ],
-     [
-      66,
-      66
-     ],
-     [
-      67,
-      67
-     ],
-     [
       68,
-      68
-     ],
-     [
-      69,
-      69
-     ],
-     [
-      70,
-      70
-     ],
-     [
-      71,
-      71
-     ],
-     [
-      72,
-      72
-     ],
-     [
-      73,
-      73
-     ],
-     [
-      74,
-      74
-     ],
-     [
-      75,
-      75
-     ],
-     [
-      76,
-      76
-     ],
-     [
-      77,
-      77
-     ],
-     [
-      78,
-      78
-     ],
-     [
-      79,
-      79
-     ],
-     [
-      80,
-      80
-     ],
-     [
-      81,
-      81
-     ],
-     [
-      82,
-      82
-     ],
-     [
-      83,
-      83
-     ],
-     [
-      84,
-      84
-     ],
-     [
-      85,
-      85
-     ],
-     [
-      86,
-      86
-     ],
-     [
-      87,
       87
      ],
-     [
-      88,
-      88
+     "b1": [],
+     "b2": [
+      13,
+      19,
+      30,
+      31,
+      32,
+      33,
+      34,
+      38,
+      43,
+      48,
+      51,
+      52,
+      62,
+      65,
+      80,
+      110,
+      114,
+      118,
+      124
      ],
-     [
-      89,
-      89
+     "c": [
+      30,
+      31,
+      32,
+      33,
+      38,
+      43,
+      52,
+      62,
+      118,
+      124
      ],
-     [
-      90,
-      90
+     "empty": [
+      [
+       30,
+       "blocked"
+      ],
+      [
+       31,
+       "blocked"
+      ],
+      [
+       32,
+       "blocked"
+      ],
+      [
+       33,
+       "blocked"
+      ],
+      [
+       38,
+       "blocked"
+      ],
+      [
+       43,
+       "blocked"
+      ],
+      [
+       52,
+       "na"
+      ],
+      [
+       62,
+       "blocked"
+      ],
+      [
+       118,
+       "blocked"
+      ],
+      [
+       124,
+       "blocked"
+      ]
      ],
-     [
-      91,
-      91
+     "truncated": [
+      29
      ],
-     [
-      92,
-      92
-     ],
-     [
-      93,
-      93
-     ],
-     [
-      94,
-      94
-     ],
-     [
-      95,
-      95
-     ],
-     [
-      96,
-      96
-     ],
-     [
-      97,
-      97
-     ],
-     [
+     "stale": [],
+     "unlisted": [],
+     "label_mismatch": [
+      20,
+      62,
+      64,
+      67,
       98,
-      98
-     ],
-     [
-      99,
-      99
-     ],
-     [
-      100,
-      100
-     ],
-     [
-      101,
-      101
-     ],
-     [
-      102,
-      102
-     ],
-     [
-      103,
-      103
-     ],
-     [
-      104,
-      104
-     ],
-     [
-      105,
-      105
-     ],
-     [
-      106,
-      106
-     ],
-     [
-      107,
-      107
-     ],
-     [
-      108,
       108
      ],
-     [
-      109,
-      109
+     "rc_nonzero_with_data": [
+      54
      ],
-     [
-      110,
-      110
-     ],
-     [
-      111,
-      111
-     ],
-     [
-      112,
-      112
-     ],
-     [
-      113,
-      113
-     ],
-     [
-      114,
-      114
-     ],
-     [
-      115,
-      115
-     ],
-     [
-      116,
-      116
-     ],
-     [
-      117,
-      117
-     ],
-     [
-      118,
-      118
-     ],
-     [
-      119,
-      119
-     ],
-     [
-      120,
-      120
-     ],
-     [
-      121,
-      121
-     ],
-     [
-      122,
-      122
-     ],
-     [
-      123,
-      123
-     ],
-     [
-      124,
-      124
-     ]
-    ],
-    "pending": [
-     125,
-     126,
-     127,
-     128,
-     129,
-     130,
-     131,
-     132,
-     133,
-     134,
-     135,
-     136,
-     137,
-     138,
-     139,
-     140,
-     141,
-     142,
-     143,
-     144,
-     145,
-     146,
-     147,
-     148,
-     149,
-     150,
-     151,
-     152,
-     153,
-     154,
-     155,
-     156,
-     157,
-     158,
-     159,
-     160,
-     161,
-     162,
-     163,
-     164,
-     165,
-     166,
-     167,
-     168,
-     169,
-     170,
-     171,
-     172,
-     173,
-     174,
-     175,
-     176,
-     177,
-     178,
-     179,
-     180,
-     181,
-     182,
-     183,
-     184,
-     185,
-     186,
-     187,
-     188,
-     189,
-     190,
-     191,
-     192,
-     193,
-     194,
-     195,
-     196,
-     197
-    ],
-    "n_view": 9,
-    "m": {
-     "ok": 14,
-     "partial": 13,
-     "notdata": 9,
-     "unreviewed": 27,
-     "empty": 10,
-     "fail": 25,
-     "missing": 15,
-     "timeout": 2,
-     "error": 1
+     "obj": {
+      "applicable": 90,
+      "static_reachable": 81,
+      "read": [
+       "AI-08",
+       "MEM-01",
+       "NET-02",
+       "NET-03",
+       "PKG-05",
+       "RES-02",
+       "RES-04",
+       "RES-06",
+       "SYS-04"
+      ],
+      "partial": [
+       "DISK-05",
+       "FS-03",
+       "FS-08",
+       "NET-05"
+      ],
+      "unreadable": [],
+      "unresolved": [
+       "DISK-01",
+       "DISK-04",
+       "DISK-06",
+       "HW-01",
+       "ID-05",
+       "RES-01"
+      ],
+      "untested": [
+       "AI-01",
+       "AI-02",
+       "AI-03",
+       "AI-04",
+       "AI-05",
+       "AI-06",
+       "AI-07",
+       "CG-01",
+       "CG-02",
+       "DISK-02",
+       "DT-01",
+       "DT-02",
+       "DT-03",
+       "DT-04",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "FS-01",
+       "FS-02",
+       "FS-04",
+       "FS-05",
+       "HW-02",
+       "HW-03",
+       "HW-04",
+       "HW-05",
+       "ID-01",
+       "ID-02",
+       "ID-03",
+       "ID-04",
+       "ID-06",
+       "ID-07",
+       "ID-08",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05",
+       "MEM-06",
+       "NET-01",
+       "NET-04",
+       "NET-06",
+       "NET-07",
+       "NET-08",
+       "PKG-01",
+       "PKG-02",
+       "PROC-01",
+       "PROC-02",
+       "PROC-03",
+       "PROC-04",
+       "PROC-05",
+       "RES-03",
+       "RES-05",
+       "RES-07",
+       "SB-03",
+       "SB-05",
+       "SYS-01",
+       "SYS-03",
+       "SYS-05",
+       "SYS-07",
+       "SYS-08",
+       "TIME-01",
+       "TIME-03"
+      ],
+      "confirmed": [
+       "DISK-03",
+       "PKG-04",
+       "SYS-06"
+      ],
+      "orphan": [
+       "MEM-08",
+       "PKG-03",
+       "SB-01",
+       "SB-02",
+       "SB-04",
+       "SYS-02"
+      ],
+      "reopened": [],
+      "na": [
+       "DT-06",
+       "FS-06",
+       "FS-07",
+       "FS-09",
+       "FS-10",
+       "MEM-07",
+       "TIME-02"
+      ],
+      "untested_host_only": [
+       "CG-01",
+       "CG-02",
+       "FS-01",
+       "FS-02",
+       "FS-04",
+       "FS-05",
+       "ID-01",
+       "ID-02",
+       "ID-03",
+       "ID-04",
+       "ID-06",
+       "ID-07",
+       "ID-08",
+       "MEM-06",
+       "NET-06",
+       "NET-07",
+       "PKG-01",
+       "PKG-02",
+       "PROC-01",
+       "PROC-02",
+       "PROC-03",
+       "PROC-04",
+       "PROC-05",
+       "SB-03",
+       "SB-05",
+       "SYS-01",
+       "SYS-03",
+       "SYS-07",
+       "SYS-08",
+       "TIME-03"
+      ],
+      "untested_with_sb": [
+       "AI-01",
+       "AI-02",
+       "AI-03",
+       "AI-04",
+       "AI-05",
+       "AI-06",
+       "AI-07",
+       "DISK-02",
+       "DT-01",
+       "DT-02",
+       "DT-03",
+       "DT-04",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "HW-02",
+       "HW-03",
+       "HW-04",
+       "HW-05",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05",
+       "NET-01",
+       "NET-04",
+       "NET-08",
+       "RES-03",
+       "RES-05",
+       "RES-07",
+       "SYS-05",
+       "TIME-01"
+      ],
+      "untested_family_ok": [
+       "AI-01",
+       "AI-02",
+       "AI-03",
+       "AI-04",
+       "AI-05",
+       "AI-06",
+       "AI-07",
+       "DISK-02",
+       "DT-01",
+       "DT-02",
+       "DT-03",
+       "DT-04",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "HW-02",
+       "HW-03",
+       "HW-04",
+       "HW-05",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05",
+       "NET-01",
+       "NET-04",
+       "NET-08",
+       "RES-03",
+       "RES-05",
+       "RES-07",
+       "SYS-05",
+       "TIME-01"
+      ],
+      "zero_byte_objects": [
+       "ID-01",
+       "ID-03",
+       "PKG-01",
+       "PKG-04"
+      ],
+      "misleading_objects": [
+       "DISK-05",
+       "PROC-01",
+       "SYS-05"
+      ]
+     }
     },
-    "a": [
-     17,
-     24,
-     68,
-     87
-    ],
-    "b1": [],
-    "b2": [
-     13,
-     19,
-     30,
-     31,
-     32,
-     33,
-     34,
-     38,
-     43,
-     48,
-     51,
-     52,
-     62,
-     65,
-     80,
-     110,
-     114,
-     118,
-     124
-    ],
-    "c": [
-     30,
-     31,
-     32,
-     33,
-     38,
-     43,
-     52,
-     62,
-     118,
-     124
-    ],
-    "empty": [
-     [
-      30,
-      "blocked"
+    {
+     "observed": [
+      [
+       125,
+       125
+      ],
+      [
+       126,
+       126
+      ],
+      [
+       127,
+       127
+      ],
+      [
+       128,
+       128
+      ],
+      [
+       129,
+       129
+      ],
+      [
+       130,
+       130
+      ],
+      [
+       131,
+       131
+      ],
+      [
+       132,
+       132
+      ],
+      [
+       133,
+       133
+      ],
+      [
+       134,
+       134
+      ],
+      [
+       135,
+       135
+      ],
+      [
+       136,
+       136
+      ],
+      [
+       137,
+       137
+      ],
+      [
+       138,
+       138
+      ],
+      [
+       139,
+       139
+      ],
+      [
+       140,
+       140
+      ],
+      [
+       141,
+       141
+      ],
+      [
+       142,
+       142
+      ],
+      [
+       143,
+       143
+      ],
+      [
+       144,
+       144
+      ],
+      [
+       145,
+       145
+      ],
+      [
+       146,
+       146
+      ],
+      [
+       147,
+       147
+      ],
+      [
+       148,
+       148
+      ],
+      [
+       149,
+       149
+      ],
+      [
+       150,
+       150
+      ],
+      [
+       151,
+       151
+      ],
+      [
+       152,
+       152
+      ],
+      [
+       153,
+       153
+      ],
+      [
+       154,
+       154
+      ],
+      [
+       155,
+       155
+      ],
+      [
+       156,
+       156
+      ],
+      [
+       157,
+       157
+      ],
+      [
+       158,
+       158
+      ],
+      [
+       159,
+       159
+      ],
+      [
+       160,
+       160
+      ],
+      [
+       161,
+       161
+      ],
+      [
+       162,
+       162
+      ],
+      [
+       163,
+       163
+      ],
+      [
+       164,
+       164
+      ],
+      [
+       165,
+       165
+      ],
+      [
+       168,
+       166
+      ],
+      [
+       169,
+       167
+      ],
+      [
+       170,
+       168
+      ],
+      [
+       171,
+       169
+      ],
+      [
+       172,
+       170
+      ],
+      [
+       174,
+       171
+      ],
+      [
+       175,
+       172
+      ],
+      [
+       176,
+       173
+      ],
+      [
+       177,
+       174
+      ],
+      [
+       178,
+       175
+      ],
+      [
+       179,
+       176
+      ],
+      [
+       180,
+       177
+      ],
+      [
+       181,
+       178
+      ],
+      [
+       182,
+       179
+      ],
+      [
+       184,
+       180
+      ],
+      [
+       185,
+       181
+      ],
+      [
+       186,
+       182
+      ],
+      [
+       187,
+       183
+      ],
+      [
+       188,
+       184
+      ],
+      [
+       189,
+       185
+      ],
+      [
+       190,
+       186
+      ],
+      [
+       191,
+       187
+      ],
+      [
+       192,
+       188
+      ],
+      [
+       193,
+       189
+      ],
+      [
+       194,
+       190
+      ],
+      [
+       195,
+       191
+      ],
+      [
+       196,
+       192
+      ],
+      [
+       197,
+       193
+      ]
      ],
-     [
-      31,
-      "blocked"
+     "n_view": 7,
+     "m": {
+      "ok": 20,
+      "partial": 14,
+      "notdata": 3,
+      "unreviewed": 2,
+      "emptyset": 1,
+      "empty": 3,
+      "fail": 18,
+      "missing": 0,
+      "timeout": 0,
+      "error": 1
+     },
+     "a": [
+      125,
+      128,
+      138,
+      147,
+      151,
+      158,
+      159,
+      160,
+      161,
+      162
      ],
-     [
-      32,
-      "blocked"
+     "b1": [],
+     "b2": [
+      185,
+      193,
+      195,
+      196
      ],
-     [
-      33,
-      "blocked"
+     "c": [
+      127,
+      193,
+      195
      ],
-     [
-      38,
-      "blocked"
+     "empty": [
+      [
+       127,
+       "na"
+      ],
+      [
+       193,
+       "blocked"
+      ],
+      [
+       195,
+       "blocked"
+      ]
      ],
-     [
-      43,
-      "blocked"
+     "truncated": [
+      154,
+      155
      ],
-     [
-      52,
-      "na"
-     ],
-     [
-      62,
-      "blocked"
-     ],
-     [
-      118,
-      "blocked"
-     ],
-     [
-      124,
-      "blocked"
-     ]
-    ],
-    "truncated": [
-     29
-    ],
-    "stale": [],
-    "unlisted": [],
-    "label_mismatch": [
-     20,
-     62,
-     64,
-     67,
-     98,
-     108
-    ],
-    "rc_nonzero_with_data": [
-     54
-    ],
-    "obj": {
-     "applicable": 90,
-     "static_reachable": 81,
-     "read": [
-      "AI-08",
-      "MEM-01",
-      "NET-02",
-      "NET-03",
-      "PKG-05",
-      "RES-02",
-      "RES-04",
-      "RES-06",
-      "SYS-04"
-     ],
-     "partial": [
-      "DISK-05",
-      "FS-03",
-      "FS-08",
-      "NET-05"
-     ],
-     "unreadable": [],
-     "unresolved": [
-      "DISK-01",
-      "DISK-04",
-      "DISK-06",
-      "HW-01",
-      "ID-05",
-      "RES-01"
-     ],
-     "untested": [
-      "AI-01",
-      "AI-02",
-      "AI-03",
-      "AI-04",
-      "AI-05",
-      "AI-06",
-      "AI-07",
-      "CG-01",
-      "CG-02",
-      "DISK-02",
-      "DT-01",
-      "DT-02",
-      "DT-03",
-      "DT-04",
-      "DT-05",
-      "DT-07",
-      "DT-08",
-      "DT-09",
-      "FS-01",
-      "FS-02",
-      "FS-04",
-      "FS-05",
-      "HW-02",
-      "HW-03",
-      "HW-04",
-      "HW-05",
-      "ID-01",
-      "ID-02",
-      "ID-03",
-      "ID-04",
-      "ID-06",
-      "ID-07",
-      "ID-08",
-      "MEM-02",
-      "MEM-03",
-      "MEM-04",
-      "MEM-05",
-      "MEM-06",
-      "NET-01",
-      "NET-04",
-      "NET-06",
-      "NET-07",
-      "NET-08",
-      "PKG-01",
-      "PKG-02",
-      "PROC-01",
-      "PROC-02",
-      "PROC-03",
-      "PROC-04",
-      "PROC-05",
-      "RES-03",
-      "RES-05",
-      "RES-07",
-      "SB-03",
-      "SB-05",
-      "SYS-01",
-      "SYS-03",
-      "SYS-05",
-      "SYS-07",
-      "SYS-08",
-      "TIME-01",
-      "TIME-03"
-     ],
-     "confirmed": [
-      "DISK-03",
-      "PKG-04",
-      "SYS-06"
-     ],
-     "orphan": [
-      "MEM-08",
-      "PKG-03",
-      "SB-01",
-      "SB-02",
-      "SB-04",
-      "SYS-02"
-     ],
-     "reopened": [],
-     "na": [
-      "DT-06",
-      "FS-06",
-      "FS-07",
-      "FS-09",
-      "FS-10",
-      "MEM-07",
-      "TIME-02"
-     ],
-     "untested_host_only": [
-      "CG-01",
-      "CG-02",
-      "FS-01",
-      "FS-02",
-      "FS-04",
-      "FS-05",
-      "ID-01",
-      "ID-02",
-      "ID-03",
-      "ID-04",
-      "ID-06",
-      "ID-07",
-      "ID-08",
-      "MEM-06",
-      "NET-06",
-      "NET-07",
-      "PKG-01",
-      "PKG-02",
-      "PROC-01",
-      "PROC-02",
-      "PROC-03",
-      "PROC-04",
-      "PROC-05",
-      "SB-03",
-      "SB-05",
-      "SYS-01",
-      "SYS-03",
-      "SYS-07",
-      "SYS-08",
-      "TIME-03"
-     ],
-     "untested_with_sb": [
-      "AI-01",
-      "AI-02",
-      "AI-03",
-      "AI-04",
-      "AI-05",
-      "AI-06",
-      "AI-07",
-      "DISK-02",
-      "DT-01",
-      "DT-02",
-      "DT-03",
-      "DT-04",
-      "DT-05",
-      "DT-07",
-      "DT-08",
-      "DT-09",
-      "HW-02",
-      "HW-03",
-      "HW-04",
-      "HW-05",
-      "MEM-02",
-      "MEM-03",
-      "MEM-04",
-      "MEM-05",
-      "NET-01",
-      "NET-04",
-      "NET-08",
-      "RES-03",
-      "RES-05",
-      "RES-07",
-      "SYS-05",
-      "TIME-01"
-     ],
-     "untested_family_ok": [
-      "AI-01",
-      "AI-02",
-      "AI-03",
-      "AI-04",
-      "AI-05",
-      "AI-06",
-      "AI-07",
-      "DISK-02",
-      "DT-01",
-      "DT-02",
-      "DT-03",
-      "DT-04",
-      "DT-05",
-      "DT-07",
-      "DT-08",
-      "DT-09",
-      "HW-02",
-      "HW-03",
-      "HW-04",
-      "HW-05",
-      "MEM-02",
-      "MEM-03",
-      "MEM-04",
-      "MEM-05",
-      "NET-01",
-      "NET-04",
-      "NET-08",
-      "RES-03",
-      "RES-05",
-      "RES-07",
-      "SYS-05",
-      "TIME-01"
-     ],
-     "zero_byte_objects": [
-      "ID-01",
-      "ID-03",
-      "PKG-01",
-      "PKG-04"
-     ],
-     "misleading_objects": [
-      "DISK-05",
-      "PROC-01",
-      "SYS-05"
-     ]
+     "stale": [],
+     "unlisted": [],
+     "label_mismatch": [],
+     "rc_nonzero_with_data": [],
+     "obj": {
+      "applicable": 90,
+      "static_reachable": 81,
+      "read": [
+       "AI-01",
+       "AI-02",
+       "AI-05",
+       "DISK-01",
+       "DT-01",
+       "MEM-01",
+       "NET-01",
+       "NET-04",
+       "RES-01",
+       "RES-02",
+       "RES-05",
+       "RES-06"
+      ],
+      "partial": [
+       "AI-06",
+       "AI-07",
+       "DISK-06",
+       "DT-04",
+       "HW-04",
+       "ID-05",
+       "NET-02",
+       "NET-03",
+       "NET-05",
+       "NET-08",
+       "RES-04",
+       "RES-07",
+       "SYS-05",
+       "TIME-01"
+      ],
+      "unreadable": [],
+      "unresolved": [
+       "DISK-02",
+       "DT-02",
+       "HW-02",
+       "HW-03",
+       "HW-05",
+       "RES-03"
+      ],
+      "untested": [
+       "AI-03",
+       "AI-04",
+       "AI-08",
+       "CG-01",
+       "CG-02",
+       "DISK-04",
+       "DISK-05",
+       "DT-03",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "FS-01",
+       "FS-02",
+       "FS-03",
+       "FS-04",
+       "FS-05",
+       "FS-08",
+       "HW-01",
+       "ID-01",
+       "ID-02",
+       "ID-03",
+       "ID-04",
+       "ID-06",
+       "ID-07",
+       "ID-08",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05",
+       "MEM-06",
+       "NET-06",
+       "NET-07",
+       "PKG-01",
+       "PKG-02",
+       "PKG-05",
+       "PROC-01",
+       "PROC-02",
+       "PROC-03",
+       "PROC-04",
+       "PROC-05",
+       "SB-03",
+       "SB-05",
+       "SYS-01",
+       "SYS-03",
+       "SYS-04",
+       "SYS-07",
+       "SYS-08",
+       "TIME-03"
+      ],
+      "confirmed": [
+       "PKG-03",
+       "SYS-02"
+      ],
+      "orphan": [
+       "DISK-03",
+       "MEM-08",
+       "PKG-04",
+       "SB-01",
+       "SB-02",
+       "SB-04",
+       "SYS-06"
+      ],
+      "reopened": [],
+      "na": [
+       "DT-06",
+       "FS-06",
+       "FS-07",
+       "FS-09",
+       "FS-10",
+       "MEM-07",
+       "TIME-02"
+      ],
+      "untested_host_only": [
+       "CG-01",
+       "CG-02",
+       "FS-01",
+       "FS-02",
+       "FS-04",
+       "FS-05",
+       "ID-01",
+       "ID-02",
+       "ID-03",
+       "ID-04",
+       "ID-06",
+       "ID-07",
+       "ID-08",
+       "MEM-06",
+       "NET-06",
+       "NET-07",
+       "PKG-01",
+       "PKG-02",
+       "PROC-01",
+       "PROC-02",
+       "PROC-03",
+       "PROC-04",
+       "PROC-05",
+       "SB-03",
+       "SB-05",
+       "SYS-01",
+       "SYS-03",
+       "SYS-07",
+       "SYS-08",
+       "TIME-03"
+      ],
+      "untested_with_sb": [
+       "AI-03",
+       "AI-04",
+       "AI-08",
+       "DISK-04",
+       "DISK-05",
+       "DT-03",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "FS-03",
+       "FS-08",
+       "HW-01",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05",
+       "PKG-05",
+       "SYS-04"
+      ],
+      "untested_family_ok": [
+       "DT-03",
+       "DT-05",
+       "DT-07",
+       "DT-08",
+       "DT-09",
+       "MEM-02",
+       "MEM-03",
+       "MEM-04",
+       "MEM-05"
+      ],
+      "zero_byte_objects": [
+       "ID-02",
+       "NET-07"
+      ],
+      "misleading_objects": [
+       "DISK-02",
+       "ID-03",
+       "PROC-03"
+      ]
+     }
     }
-   },
-   "notes_sha256": "6bfcdb57176476ca2fd6f06eec0436f9fcfe580d793326e734f9dba2b8646c4a"
+   ],
+   "pending": [
+    166,
+    167,
+    173,
+    183
+   ],
+   "notes_sha256": "9815b46c123295a52e46133a9e23f576d5324afd143f45d77a3732bfd4c38126"
   }
  }
 }
