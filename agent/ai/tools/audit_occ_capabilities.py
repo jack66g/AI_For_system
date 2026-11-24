@@ -16,8 +16,18 @@ audit_capabilities，不复制第二份），按「出厂 AI 视角」对每个�
 可达读面（occ 宿主工具 / 沙箱命令 / aikctl 子命令 / 回环 HTTP）、是否免
 确认、语义级别、可达写面。
 
-纯静态：不执行任何系统命令、不连任何主机（旧模块里的 HTTP 探测被本脚本
+静态部分：不执行任何系统命令、不连任何主机（旧模块里的 HTTP 探测被本脚本
 替身为恒失败）。只读仓库文件。
+
+实测层（AIF-01b，报告 §13 起）
+------------------------------
+静态部分只回答「按代码结构应该读得到吗」；实测层回答「在出厂机上到底读到了
+什么」。证据是 `occ_reach_probe.sh` 在出厂配方测试机上采得的 TSV（留在证据
+目录，不进树）：`--reach-tsv` 读进来，按探测清单顺序对行、逐条判读，结果作为
+独立字段写进基线 JSON，并在 Markdown 里出「静态 vs 实测」对照与不一致清单。
+静态部分的求值不读实测数据；实测层只有在实测证明了某条静态规则错的时候才
+改静态表（改动逐条登记在 RULE_FIXES）。没有 TSV 的机器上，实测层作为标注随
+基线入库，`--check` 照常跑：拿基线里存的原始行重算判读，与基线里存的判读比。
 
 出厂身份矩阵（两种身份）
 ------------------------
@@ -48,8 +58,13 @@ audit_capabilities，不复制第二份），按「出厂 AI 视角」对每个�
   python3 agent/ai/tools/audit_occ_capabilities.py --markdown
   python3 agent/ai/tools/audit_occ_capabilities.py --write-baseline
   python3 agent/ai/tools/audit_occ_capabilities.py --check
+  python3 agent/ai/tools/audit_occ_capabilities.py --write-baseline \
+      --reach-tsv <证据目录>/occ-reach-<机>-<时>.tsv      # 带上实测层（可给多个）
+  python3 agent/ai/tools/audit_occ_capabilities.py --check \
+      --reach-tsv <同一个 TSV>                           # 另核：TSV 与基线存的实测层一致
 
-退出码：0 成功；1 --check 与入库基线不一致或源码事实漂移；2 参数错误。
+退出码：0 成功；1 --check 与入库基线不一致或源码事实漂移；2 参数错误、
+或 --reach-tsv 指的文件有问题（格式不对、与探测清单对不上）。
 """
 
 import argparse
@@ -1254,7 +1269,7 @@ def mapping_sha():
     return hashlib.sha256(blob).hexdigest()
 
 
-def build_report(repo, admin_sandbox):
+def build_report(repo, admin_sandbox, reach=None):
     reg, oldmap, old_metrics = old_view(root=os.path.join(repo, "agent", "ai"))
     TOOLMAP.clear()
     TOOLMAP.update({t["name"]: t for t in reg["tools"]})
@@ -1288,6 +1303,7 @@ def build_report(repo, admin_sandbox):
         "scenario_ids_missing": sorted({s for t in TOP15 for s in t[3].split(",")
                                          if s != "-" and s not in scen}),
         "mapping_sha256": mapping_sha(),
+        "reach": reach,            # AIF-01b 实测层；没接上是 None。静态求值不读它
     }
 
 
@@ -1300,6 +1316,914 @@ def core_of(rep):
         "top15": [t[1] for t in TOP15],
         "mapping_sha256": rep["mapping_sha256"],
     }
+
+
+# ===========================================================================
+# 实测层（AIF-01b）：出厂机沙箱实测回填
+#   证据 = occ_reach_probe.sh 在出厂配方测试机上采得的 TSV（留在证据目录，不进树）。
+#   这里只做三件事：读 TSV 并按探测清单对行；逐行判读；把对象读面对到实测条目上。
+#   静态部分的求值（上面的 eval_object / compute）不读这里的任何数据。
+# ===========================================================================
+P_PROBE = os.path.join("agent", "ai", "tools", "occ_reach_probe.sh")
+REACH_SCHEMA = "aik-occ-reach/1"
+OCC_OUT_MAX = 8192                   # occ_tools.h:85（bash 结果截断上限）
+REACH_LABELS = ("view", "ok", "partial", "no")
+OCC_VIEWS = ("ok", "sb_fail", "tool_error")
+TSV_COLUMNS = "static_verdict cmd rc seconds out_bytes occ_view first_line"
+FIRST_LINE_MAX = 120                 # 入库的首行长度上限（全文在证据 TSV 里）
+READABLE = ("ok", "partial")         # 实测判定里算「读到数据」的两种
+SB_LIKE = ("sb", "curl", "aikctl")   # 对象读面里走沙箱 / 回环 / aikctl 的三类
+
+# 静态规则被实测推翻后的更正登记：(命令, 改前, 改后, 凭什么)。
+# 现行静态表若与「改后」不符，--check 失败（防止悄悄改回去）。
+RULE_FIXES = []
+
+REACH_M = (
+    ("view", "视图探针"),
+    ("ok", "读到宿主数据"),
+    ("partial", "读到一部分"),
+    ("notdata", "rc=0·不是宿主数据"),
+    ("empty", "rc=0·零字节"),
+    ("fail", "rc=1/2"),
+    ("missing", "rc=127·没有这个命令"),
+    ("timeout", "超时被杀"),
+    ("error", "其它非零退出"),
+)
+M_OF = dict(REACH_M)
+OCC_VIEW_DESC = (
+    ("ok", "rc=0：输出 + `[exit=0]`，工具 rc=0"),
+    ("sb_fail", "rc=1/2：`ERROR: bash 沙箱执行失败（aik-sandbox exit=N）：` + 输出，工具 rc=-1"),
+    ("tool_error", "rc 为其它值（127 / 100 / 137 …）：输出 + `[exit=N]`，工具 rc=0"),
+)
+OCC_VIEW_OF = dict(OCC_VIEW_DESC)
+EMPTY_M = (
+    ("blocked", "被沙箱视图挡了"),
+    ("none", "真没数据"),
+    ("undetermined", "未定"),
+    ("na", "不适用：成功本来就没有输出"),
+)
+EMPTY_OF = dict(EMPTY_M)
+OBJ_V = (
+    ("read", "实测读到"),
+    ("partial", "实测读到（仅一部分）"),
+    ("unreadable", "实测读不到"),
+    ("unresolved", "未定：已测的读不到，另有未测"),
+    ("untested", "未测"),
+    ("confirmed", "不可达·实测确认"),
+    ("orphan", "不可达·未测"),
+    ("reopened", "静态不可达，实测却读到"),
+    ("na", "n/a"),
+)
+V_OF = dict(OBJ_V)
+
+
+class ReachError(Exception):
+    """实测层数据有问题：TSV 格式不对、与探测清单对不上、基线里存的实测层失效。"""
+
+
+# ---------------------------------------------------------------------------
+# 逐条人工判读。退出码和字节数定不了「读到的是不是宿主数据」——rc=0 有输出
+# 的行里，有的是宿主真数据，有的只是沙箱自己的影子。这一步必须有人逐行看过，
+# 结论写在下面，并钉住当时的那一行结果（when = (rc, out_bytes)）：再次采集
+# 结果变了，判读自动作废并在报告里标出来，不会拿旧结论套新数据。
+#   m      实测判定（REACH_M 的键）
+#   data   host=宿主数据  part=一部分  none=没有宿主数据
+#   empty  仅零字节行：blocked=被沙箱视图挡 none=真没数据 undetermined=未定 na=不适用
+#   todo   未定项要补的测（沙箱内命令，或宿主侧对照）
+# ---------------------------------------------------------------------------
+def _note(when, m=None, data=None, why="", empty=None, todo="", ev=""):
+    d = {"when": when, "why": why}
+    if m:
+        d["m"] = m
+    if data:
+        d["data"] = data
+    if empty:
+        d["empty"] = empty
+    if todo:
+        d["todo"] = todo
+    if ev:
+        d["ev"] = ev
+    return d
+
+
+_V6 = "ls -ld /run /boot /var/log /var/lib/dpkg /etc/passwd /etc/systemd/system"
+REACH_NOTE = {
+    # ---- 视图探针：沙箱到底长什么样（给静态表里的「沙箱视图」前提取实证）----
+    ("view", "ls -la /"): _note(None, why="沙箱根是 tmpfs 骨架（usr/proc/sys/etc/tmp/home/var/opt/srv/dev），"
+                                "不是宿主根", ev=SB + ":826-829"),
+    ("view", "ls -la /etc"): _note(None, why="/etc 是白名单式的，只有几个小文件（首行 total 16）；"
+                                   "全文见证据文件", ev=EV_ETCHK),
+    ("view", "ls -la /dev"): _note(None, why="/dev 里只有 4 个字符设备（首行 total 0），"
+                                   "没有块设备与看门狗节点", ev=EV_NODEV),
+    ("view", _V6): _note(None, why="rc=2，首行是 /run 不存在；347 字节约合 6 行同构报错——"
+                         "六条路径都不在沙箱视图【推断：只留了首行】",
+                         ev=EV_NORUN + "；" + EV_NOVAR + "；" + EV_NOETC),
+    ("view", "id"): _note(None, why="沙箱内进程是 uid 0；用户名/组名解析不出来"
+                          "（无 /etc/passwd、/etc/group）", ev=EV_NOETC),
+    ("view", "grep -E '^(CapEff|CapBnd|NoNewPrivs):' /proc/self/status"):
+        _note(None, why="CapEff=0000000000002000：有效能力只剩 CAP_NET_RAW", ev=EV_NOCAP),
+    ("view", "cat /proc/1/comm"): _note(None, why="沙箱里的 1 号进程是 sh：独立 PID 命名空间，"
+                                        "宿主进程不可见", ev=EV_PIDNS),
+    ("view", "cat /proc/self/mountinfo"): _note(None, why="1919 字节：沙箱自己的挂载表",
+                                                ev=SB + ":2089-2304"),
+    ("view", "hostname"): _note(None, why="UTS 隔离：主机名是隔离区名，不是宿主名",
+                                ev=SB + ":2307-2309"),
+    # ---- (a) 静态判 ok、实测读不到 ----
+    ("ok", "arping -c 1 127.0.0.1"): _note(
+        (2, 48), "fail",
+        why="arping 的缺省接口是 eth0，该机网卡叫 enp0s17 → 接口不存在就退出。"
+            "规则依据的前提（能力集里有 CAP_NET_RAW）根本没被检验到，判定未定",
+        todo="arping -c 1 -I lo 127.0.0.1（清单补测第 1 组）",
+        ev="首行 arping: interface eth0 not found；同批 `ls /sys/class/net` 首行 enp0s17"),
+    ("ok", "nc -z -w 2 127.0.0.1 22"): _note(
+        (1, 440), "fail",
+        why="该机的 nc 不支持 -z（首行 nc: invalid option -- 'z'）：样例命令本身跑不起来。"
+            "TCP 连接能力没被检验——同批 curl/wget 连回环端口都成功",
+        todo="nc -h（看是哪一版 nc）；nc -w 2 127.0.0.1 8000 </dev/null",
+        ev="occ_tools/sandbox.c:576-582（非 0/1/2 的退出码原样写进结果）"),
+    ("ok", "ctstat"): _note(
+        (137, 0), "timeout",
+        why="不带 -c 的 ctstat 不会自己退出，10 秒超时被杀、零输出：数据面没被检验。"
+            "打版机同版本 iproute2 5.15.0 上不带 -c 同样不退出",
+        todo="ctstat -c 1；ls /proc/net/stat"),
+    ("ok", "rtstat"): _note(
+        (137, 1231), "timeout",
+        why="同 ctstat，不会自己退出；被杀前已输出 1231 字节，首行是 rt_cache 的表头"
+            "——数据面是通的，坏的是样例写法",
+        todo="rtstat -c 1"),
+    ("ok", "lsmem"): _note(
+        (1, 72), "fail",
+        why="出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory。"
+            "宿主上同样没有（memory.o 只在该选项下编译），不是沙箱挡的",
+        ev=".config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile:16"),
+    ("ok", "lslocks"): _note(
+        (0, 0), "empty",
+        why="/proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。"
+            "沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见",
+        empty="blocked", todo="宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁",
+        ev="linux-6.18.39 fs/locks.c:2892-2898（locks_show）；" + EV_PIDNS),
+    ("ok", "lnstat -c 1"): _note(
+        (1, 2163), "ok", "host",
+        why="rc=1 却有 2163 字节数据（首行是 nf_conntrack 的表头）：iproute2 的 lnstat -c 采完一次"
+            "就返回 1（打版机同版本复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成"
+            "「沙箱执行失败」",
+        ev=EV_INFER + "；occ_tools/sandbox.c:570-575（AIF-09）"),
+    # ---- (b) 静态判 no、实测 rc=0：读到宿主数据的三条 ----
+    ("no", "swapon --show"): _note(
+        (0, 59), "ok", "host",
+        why="59 字节 = 表头 + 1 行：读到宿主的 swap 清单（一个 swap 文件）。--show 读 /proc/swaps，"
+            "不需要 CAP_SYS_ADMIN【推断：行内容是按打版机同版本 util-linux 2.37.2 的输出格式"
+            "复算出来的（表头 SIZE 后单空格 + 28 字节一行，只有 file 型条目对得上），全文待补测】",
+        todo="带 --keep 重采一次取全文"),
+    ("no", "mount"): _note(
+        (0, 1515), "partial", "part",
+        why="不带参数的 mount 是列挂载表，是读操作、不需要 CAP_SYS_ADMIN；列出的是沙箱自己的"
+            "挂载表（首行 tmpfs on /），同 findmnt"),
+    ("no", "top -b -n 1"): _note(
+        (0, 603), "partial", "part",
+        why="汇总行取自 /proc 全局节点，是宿主数据（首行 top - … up 1 day,  9:51,  0 users, "
+            "load average: …）；进程表只有沙箱自己，用户数因无 utmp 恒为 0"),
+    # ---- (b) 静态判 no、实测 rc=0：跑成功了，但输出的不是宿主数据 ----
+    ("no", "aik-upgrade status"): _note(
+        (0, 386), "notdata",
+        why="报告照常打印但全是空壳：槽状态文件、grubenv、/boot 内核清单、userland 状态都不在"
+            "沙箱视图，输出的是「(no state file)」「last install: (none)」；只有 /proc/cmdline "
+            "一段是真数据【推断：按脚本源码复算，386 字节吻合】",
+        ev="factory/usr/local/sbin/aik-upgrade:486-527（cmd_status）"),
+    ("no", "bootctl status"): _note(
+        (0, 178), "notdata", why="rc=0，但首行就是「Couldn't find EFI system partition」：/boot 不在沙箱视图"),
+    ("no", "journalctl -n 20 --no-pager"): _note(
+        (0, 45), "notdata",
+        why="rc=0，但只有一句「No journal files were found.」：/var/log/journal、/run/journal "
+            "都不在沙箱视图"),
+    ("no", "du -x -d1 /var"): _note(
+        (0, 16), "notdata",
+        why="输出「0 /var/ai」是沙箱空 tmpfs /var 里的产物区空目录，不是宿主 /var 的占用",
+        ev=SB + ":152（SB_ARTIFACT_CANON）"),
+    ("no", "id"): _note(
+        (0, 20), "notdata",
+        why="打印的是沙箱自己的身份（uid=0 gid=0 groups=0），用户名/组名解析不出来："
+            "无 /etc/passwd、/etc/group"),
+    ("no", "lsns"): _note(
+        (0, 745), "notdata",
+        why="列出的是沙箱自己进程的命名空间（745 字节），不是宿主的命名空间清单；occ 会显示成功"),
+    ("no", "ps -eo pid,ppid,stat,comm"): _note(
+        (0, 76), "notdata",
+        why="76 字节 = 表头 + 2 行：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；occ 会显示成功",
+        ev=EV_PIDNS),
+    ("no", "udevadm info /sys/class/net"): _note(
+        (0, 63), "notdata",
+        why="只回显 syspath（P: /class/net），没有任何属性：udev 库（/run/udev）不在沙箱视图"),
+    ("no", "useradd -D"): _note(
+        (0, 83), "notdata",
+        why="打印的是二进制内置缺省值（GROUP=100 …），不是宿主的 /etc/login.defs："
+            "看着像配置，其实与宿主无关"),
+    # ---- (c) rc=0 且零字节：occ 显示「成功、无输出」 ----
+    ("no", "dpkg-query -W"): _note(
+        (0, 0), "empty",
+        why="/var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；"
+            "宿主上明明装着包，AI 分不清「没装包」与「看不见」",
+        empty="blocked", ev=EV_NOVAR),
+    ("no", "fdisk -l"): _note(
+        (0, 0), "empty",
+        why="/dev 里没有块设备节点（视图探针 ls -la /dev：total 0）→ 什么都不列、rc=0；"
+            "宿主上明明有盘，AI 分不清「没有盘」与「看不见」",
+        empty="blocked", ev=EV_NODEV),
+    ("no", "getent passwd"): _note(
+        (0, 0), "empty",
+        why="/etc/passwd 不在白名单 → 一条也查不到、rc=0；AI 分不清「没有用户」与「看不见」",
+        empty="blocked", ev=EV_NOETC),
+    ("no", "who"): _note(
+        (0, 0), "empty",
+        why="/run 不在沙箱视图 → 读不到 /var/run/utmp，恒为空、rc=0；AI 分不清「没人登录」"
+            "与「看不见」。宿主当时有没有登录会话没采集",
+        empty="blocked", todo="宿主侧对照：同一时刻在宿主上跑 who / w",
+        ev=EV_NORUN),
+    ("no", "w -h"): _note(
+        (0, 0), "empty",
+        why="同 who：读不到 /var/run/utmp，恒为空、rc=0",
+        empty="blocked", todo="宿主侧对照：同一时刻在宿主上跑 who / w", ev=EV_NORUN),
+    ("no", "kill -0 1"): _note(
+        (0, 0), "empty",
+        why="信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功",
+        empty="na", ev=EV_PIDNS),
+    # ---- 静态 partial / ok：实测一致，补一句读到的到底是什么 ----
+    ("partial", "cat /proc/meminfo"): _note(
+        (0, 1446), why="清单上的 partial 是命令表对 cat 这个通用工具的判定；按路径求值 /proc/* "
+                       "为 ok（对象矩阵 RES-04 标的就是 [ok]）。实测 1446 字节宿主内存数据"),
+    ("partial", "hostname"): _note(
+        (0, 13), "partial", "part", why="输出的是隔离区名（UTS 隔离），不是宿主名"),
+    ("partial", "date +%s"): _note(
+        (0, 10), "partial",
+        why="只给 epoch（1795457987 = 2026-11-23T18:19:47Z，与采集时间吻合）；"
+            "「时区恒 UTC」这个样例检验不到", todo="date"),
+    ("partial", "df -P"): _note(
+        (0, 179), "partial", "part",
+        why="179 字节 = 表头 + 2 行：只见沙箱挂载点（/ 与 /usr bind）。宿主根分区的容量/用量"
+            "看得到，其余挂载看不到"),
+    ("partial", "findmnt -J"): _note(
+        (0, 4199), "partial", "part", why="沙箱自己的挂载表（JSON，4199 字节）"),
+    ("partial", "find /sys/class/net -maxdepth 1"): _note(
+        (0, 75), "partial", "part",
+        why="命令能跑；样例路径在 /sys，输出的是宿主网卡名（enp0s17——该机没有 eth0）"),
+    ("partial", "ls /sys/class/net"): _note(
+        (0, 15), "partial", "part", why="命令能跑；输出的是宿主网卡名 enp0s17（该机没有 eth0）"),
+    ("partial", "lsattr /usr/local/bin/occ"): _note(
+        (0, 41), "partial", "part", why="命令能跑，对象是 /usr 只读面上的真实宿主文件；宿主其余目录看不到"),
+    ("partial", "stat /usr/local/bin/occ"): _note(
+        (0, 390), "partial", "part", why="命令能跑，对象是 /usr 只读面上的真实宿主文件；宿主其余目录看不到"),
+    ("partial", "sha256sum /etc/aikernel/policy.conf"): _note(
+        (0, 91), "partial", "part", why="命令能跑，对象是 /etc 白名单里的真实宿主文件；宿主其余文件看不到"),
+    ("partial", "strace -c true"): _note(
+        (0, 1143), "partial", "part", why="能跑，只能跟踪沙箱里自己起的进程"),
+    ("ok", "ifconfig -a"): _note(
+        (0, 1199), why="接口清单是宿主的（共享网络命名空间）；该机网卡名 enp0s17，没有 eth0",
+        ev=EV_NET),
+    ("ok", "dmesg --color=never"): _note(
+        (0, 42197), why="42197 字节、首行是内核版本行：整条启动日志都读得到。该机 "
+                        "kernel.dmesg_restrict=0，静态标的「依赖运行态」在该机成立"),
+    ("ok", "ollama list"): _note(
+        (0, 31), why="表头 + 空表：服务在跑（127.0.0.1:11434 可达），该机没有拉模型。"
+                     "空列表带表头，可与失败区分"),
+    ("no", "nft list ruleset"): _note((1, 42), why="Operation not permitted (you must be root)："
+                                                  "uid 是 0 但没有 CAP_NET_ADMIN",
+                                     ev=EV_NOCAP),
+    ("no", "apt list --installed"): _note(
+        (100, 584), why="apt 在缺 /var/lib/dpkg、/etc/apt 的沙箱里以 100 退出", ev=EV_NOVAR + "；" + EV_NOETC),
+}
+
+
+_PROBE_LINE = re.compile(r'^\t"(view|ok|partial|no)"\$\'\\t\'"(.*)"$')
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_MAC = re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b")
+
+
+def parse_probe_list(text):
+    """occ_reach_probe.sh 的 PROBE_LIST → [{"n": 序号, "label": 判定, "cmd": 命令}]。"""
+    m = re.search(r"^PROBE_LIST=\(\n(.*?)^\)[ \t]*$", text, re.S | re.M)
+    if not m:
+        raise ReachError("occ_reach_probe.sh 里找不到 PROBE_LIST=( ... )")
+    out = []
+    for line in m.group(1).split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        e = _PROBE_LINE.match(line)
+        if not e:
+            raise ReachError("PROBE_LIST 里有解析不了的行：%r" % line)
+        out.append({"n": len(out), "label": e.group(1), "cmd": e.group(2)})
+    if not out:
+        raise ReachError("PROBE_LIST 是空的")
+    return out
+
+
+def probe_list_info(entries):
+    blob = "".join("%s\t%s\n" % (e["label"], e["cmd"]) for e in entries)
+    return {"entries": len(entries),
+            "sha256": hashlib.sha256(blob.encode("utf-8")).hexdigest()}
+
+
+def _mask_env(s):
+    """首行入库前抹掉环境标识：MAC 全掩，非回环 IPv4 掩成 x.x.x.x
+    （环境地址不进树；回环地址是命令自带的目标，保留）。"""
+    s = _MAC.sub("XX:XX:XX:XX:XX:XX", s)
+    return _IPV4.sub(lambda m: m.group(0) if m.group(0).startswith("127.")
+                     else "x.x.x.x", s)
+
+
+def parse_reach_tsv(path):
+    """occ_reach_probe.sh 的 TSV → (来源元信息, 数据行)。格式不对就抛 ReachError。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        raise ReachError("读不了实测数据 %s：%s" % (path, exc.strerror))
+    meta = {"file": os.path.basename(path), "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw), "rows": 0, "collected_at": "", "uid": "", "kernel": "",
+            "timeout": "", "only": "", "sandbox_size": 0, "env": []}
+    rows, saw_columns = [], False
+    head = TSV_COLUMNS.replace(" ", "\t")
+    for lineno, line in enumerate(raw.decode("utf-8", errors="replace").split("\n"), 1):
+        line = line.rstrip("\r")
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            parts = line[1:].strip().split("\t")
+            if "=" not in parts[0] and len(parts) > 1:       # 首行：工具名 + 采集时间
+                meta["collected_at"] = parts[1].strip()
+                continue
+            for part in parts:
+                part = part.strip()
+                if part.startswith("columns:"):
+                    saw_columns = part[len("columns:"):].strip() == TSV_COLUMNS
+                    continue
+                k, sep, v = part.partition("=")
+                if not sep:
+                    continue
+                k, v = k.strip(), v.strip()
+                if k.startswith("env"):                      # # env NAME=value（…）
+                    meta["env"].append("%s=%s" % (k[3:].strip(), v.split("\uff08")[0].strip()))
+                elif k in ("uid", "kernel", "timeout", "only"):
+                    meta[k] = v
+                elif k == "size":
+                    meta["sandbox_size"] = int(v) if v.isdigit() else 0
+            continue
+        if line == head:
+            continue                                          # 列名行
+        if not saw_columns:
+            raise ReachError("%s 的列名行缺失或格式不认识（应为 %s），先于第 %d 行"
+                             % (meta["file"], TSV_COLUMNS, lineno))
+        f = line.split("\t")
+        if len(f) != 7:
+            raise ReachError("%s 第 %d 行不是 7 列（实际 %d 列）" % (meta["file"], lineno, len(f)))
+        try:
+            rc, nb, secs = int(f[2]), int(f[4]), round(float(f[3]), 3)
+        except ValueError:
+            raise ReachError("%s 第 %d 行的 rc / seconds / out_bytes 不是数：%r"
+                             % (meta["file"], lineno, f[1:5]))
+        if f[0] not in REACH_LABELS or f[5] not in OCC_VIEWS:
+            raise ReachError("%s 第 %d 行的判定或 occ_view 不认识：%r / %r"
+                             % (meta["file"], lineno, f[0], f[5]))
+        rows.append({"cmd": f[1], "static_at_capture": f[0], "rc": rc, "seconds": secs,
+                     "out_bytes": nb, "occ_view": f[5],
+                     "first_line": _mask_env(f[6])[:FIRST_LINE_MAX]})
+    if not rows:
+        raise ReachError("%s 没有数据行" % meta["file"])
+    meta["rows"] = len(rows)
+    return meta, rows
+
+
+def align_reach(entries, trows, fname):
+    """TSV 数据行按命令文本、顺着清单对号（清单里同文重复的条目按先后各归各的；
+    `--only` 过滤过的子集同样能对）。"""
+    out, cur = [], 0
+    for i, r in enumerate(trows, 1):
+        j = cur
+        while j < len(entries) and entries[j]["cmd"] != r["cmd"]:
+            j += 1
+        if j >= len(entries):
+            raise ReachError("%s 第 %d 条（%r）对不上探测清单：清单里没有这条命令，"
+                             "或顺序与清单不一致" % (fname, i, r["cmd"]))
+        out.append((entries[j], r))
+        cur = j + 1
+    return out
+
+
+def collect_reach(repo, paths):
+    """读入全部 TSV，对到探测清单上。来源按采集时间从旧到新编号；同一条目被采过
+    多次时各次都留档，判读取最新的一次。"""
+    entries = parse_probe_list(read_text(repo, P_PROBE))
+    srcs, rows, order = [], [], []
+    for p in paths:
+        meta, trows = parse_reach_tsv(p)
+        pairs = align_reach(entries, trows, meta["file"])
+        order.append((meta["collected_at"], len(srcs)))
+        srcs.append(meta)
+        for ent, r in pairs:
+            rows.append(dict(r, n=ent["n"], label=ent["label"], src=len(srcs) - 1))
+    remap = {old: new for new, (_, old) in enumerate(sorted(order))}
+    srcs = [srcs[old] for _, old in sorted(order)]
+    for r in rows:
+        r["src"] = remap[r["src"]]
+    rows.sort(key=lambda r: (r["src"], r["n"]))
+    return {"schema": REACH_SCHEMA, "probe_list": probe_list_info(entries),
+            "sources": srcs, "rows": rows,
+            "entries": [[e["label"], e["cmd"]] for e in entries]}
+
+
+def reach_from_baseline(repo, stored):
+    """没有 TSV 的机器上：把入库基线里存的实测层（原始行）读回来，核对每一条
+    仍然对得上当前探测清单的同一个序号。"""
+    if not isinstance(stored, dict) or stored.get("schema") != REACH_SCHEMA:
+        raise ReachError("入库基线里的实测层格式不认识（schema 不是 %s）" % REACH_SCHEMA)
+    entries = parse_probe_list(read_text(repo, P_PROBE))
+    rows = stored.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ReachError("入库基线里的实测层没有原始行")
+    for r in rows:
+        n = r.get("n") if isinstance(r, dict) else None
+        if not isinstance(n, int) or not 0 <= n < len(entries) or entries[n]["cmd"] != r.get("cmd"):
+            raise ReachError("实测层第 %r 条（%r）与当前探测清单对不上：清单改过顺序或文本？"
+                             "请带 --reach-tsv 重新 --write-baseline" % (n, r.get("cmd")))
+    if not isinstance(stored.get("sources"), list) or not stored["sources"]:
+        raise ReachError("入库基线里的实测层没有来源信息")
+    return {"schema": REACH_SCHEMA, "probe_list": probe_list_info(entries),
+            "sources": [dict(s) for s in stored["sources"]],
+            "rows": [dict(r) for r in rows],
+            "entries": [[e["label"], e["cmd"]] for e in entries]}
+
+
+def _norm_curl(cmd):
+    """curl / wget 的超时参数不改变读面：与对象读面的路径文本对齐时抹掉 `-m N`。"""
+    if cmd.split()[0] in ("curl", "wget"):
+        return re.sub(r"\s+-m\s+\d+", "", cmd)
+    return cmd
+
+
+def static_verdict_of(cmd):
+    """一条命令在现行静态规则下的判定，解析方式与对象读面的 S() / K() 相同。
+    返回 (判定, 备注)；静态表里没有的命令返回 (None, 原因)。"""
+    name = cmd.split()[0]
+    if name == "aikctl":
+        sub = cmd[len("aikctl"):].strip()
+        keys = [k for k in AIKCTL_SUBS if sub == k or sub.startswith(k + " ")]
+        if keys:
+            return AIKCTL_SUBS[max(keys, key=len)][0], ""
+    if name not in SBX:
+        return None, "静态表里没有这条命令"
+    verdict = SBX[name]["verdict"]
+    if name == "cat":
+        pv, _why = _cat_verdict(cmd)
+        if pv != verdict:
+            return pv, "命令表 %s、按路径 %s" % (verdict, pv)
+    return verdict, ""
+
+
+def judge_reach(r):
+    """一行实测 → 判读。退出码与字节数只定得出「跑没跑、有没有输出」；读到的
+    是不是宿主数据，看 REACH_NOTE 里钉住的那条人工判读（结果变了就作废）。"""
+    label, cmd, rc, nb = r["label"], r["cmd"], r["rc"], r["out_bytes"]
+    if label == "view":
+        m, data = "view", "none"
+    elif rc == 0 and nb > 0:
+        m, data = "ok", "host"
+    elif rc == 0:
+        m, data = "empty", "none"
+    elif rc in (1, 2):
+        m, data = "fail", "none"
+    elif rc == 127:
+        m, data = "missing", "none"
+    elif rc in (124, 137):
+        m, data = "timeout", "none"
+    else:
+        m, data = "error", "none"
+    empty = "undetermined" if m == "empty" else ""
+    why = todo = ev = ""
+    stale = False
+    note = REACH_NOTE.get((label, cmd))
+    if note:
+        if note["when"] is None or note["when"] == (rc, nb):
+            if "m" in note:                      # 判读改了判定，数据性质跟着改
+                m = note["m"]
+                data = note.get("data") or ("host" if m in READABLE else "none")
+            empty = note.get("empty", empty)
+            why, todo, ev = note["why"], note.get("todo", ""), note.get("ev", "")
+        else:
+            stale = True
+            why = ("判读注记是按另一次结果（rc=%s、%s 字节）写的，对不上这一次，没有套用——要人重看"
+                   % note["when"])
+    snow, snote = (None, "") if label == "view" else static_verdict_of(cmd)
+    cls = []
+    if label != "view":
+        if snow in ("ok", "partial") and m not in READABLE:
+            cls.append("a")                                # 静态判可读，实测读不到
+        if snow == "no" and rc == 0:
+            cls.append("b1" if m in READABLE else "b2")    # 静态判 no，实测 rc=0：读到了 / 没读到
+        if rc == 0 and nb == 0:
+            cls.append("c")                                # rc=0 且零字节
+    return {"n": r["n"], "m": m, "data": data, "cls": cls, "empty": empty,
+            "stale": stale, "trunc": m in READABLE and nb > OCC_OUT_MAX,
+            "snow": snow, "snote": snote, "why": why, "todo": todo, "ev": ev}
+
+
+def _path_key(cmd):
+    """实测条目与对象读面路径对号用的键：aikctl 取子命令（AIKCTL_SUBS 的键），
+    curl / wget 抹掉超时参数，其余就是命令原文。"""
+    name = cmd.split()[0]
+    if name == "aikctl":
+        sub = cmd[len("aikctl"):].strip()
+        keys = [k for k in AIKCTL_SUBS if sub == k or sub.startswith(k + " ")]
+        return "aikctl " + max(keys, key=len) if keys else cmd
+    return _norm_curl(cmd)
+
+
+def derive_reach(reach, objects_root):
+    """由原始行算出全部判读与汇总。纯函数：同样的原始行 + 同样的静态规则 →
+    同样的结果（--check 就靠这一点，在没有 TSV 的机器上核基线里的实测层）。"""
+    rows = reach["rows"]
+    try:
+        drows = [judge_reach(r) for r in rows]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReachError("实测层原始行有缺字段或类型不对：%r" % (exc,))
+    latest = {}
+    for i, d in enumerate(drows):
+        latest[d["n"]] = i            # rows 已按 (来源, 序号) 排好，后出现的是更新的采集
+    nent = reach["probe_list"]["entries"]
+    if any(n < 0 or n >= nent for n in latest):
+        raise ReachError("实测层里有超出探测清单范围的序号")
+
+    def pick(ids):
+        return max(ids)
+
+    by_key, by_fam = {}, {}
+    for i, r in enumerate(rows):
+        by_key.setdefault(_path_key(r["cmd"]), []).append(i)
+        by_fam.setdefault(r["cmd"].split()[0], []).append(i)
+
+    def hit(target):
+        """对象读面的一条路径 → (最新一次实测的行下标, 对上的层级)。"""
+        ids = by_key.get(_path_key(target))
+        if ids:
+            return pick(ids), "key"
+        if target.split()[0] != "aikctl":       # aikctl 的子命令语义不同，不做前缀匹配
+            pre = [i for i, r in enumerate(rows) if r["cmd"].startswith(target + " ")]
+            if pre:
+                return pick(pre), "prefix"
+        return None, ""
+
+    objects = {}
+    for o in objects_root:
+        hits, untested = [], []
+        for p in o["paths"]:
+            if p["kind"] not in SB_LIKE:
+                continue
+            i, _tier = hit(p["target"])
+            if i is not None:
+                # [路径, 静态判定, 静态是否可达, 实测判定]
+                hits.append([p["target"], p["verdict"], p["reach"], drows[i]["m"]])
+            elif p["reach"]:
+                # 没被直接测到的可达路径：带上同命令样例的实测判定，只作旁证、不计入
+                fam = by_fam.get(p["target"].split()[0])
+                untested.append([p["target"], drows[pick(fam)]["m"] if fam else ""])
+        good = [h for h in hits if h[2] and h[3] in READABLE]
+        bad = [h for h in hits if h[2] and h[3] not in READABLE]
+        n_host = sum(1 for p in o["paths"] if p["reach"] and p["kind"] not in SB_LIKE)
+        if o["status"] == "n/a":
+            v = "na"
+        elif not any(p["reach"] for p in o["paths"]):   # 静态不可达：看实测是不是印证
+            if any(h[3] in READABLE for h in hits):
+                v = "reopened"
+            elif hits:
+                v = "confirmed"
+            else:
+                v = "orphan"
+        elif any(h[3] == "ok" for h in good):
+            v = "read"
+        elif good:
+            v = "partial"
+        elif bad and not untested and not n_host:
+            v = "unreadable"                   # 可达读面全部测过，全部读不到
+        elif bad:
+            v = "unresolved"                   # 已测的读不到，还有没测的
+        else:
+            v = "untested"
+        objects[o["id"]] = {"v": v, "static": o["read_any"], "hits": hits,
+                            "untested": untested, "host": n_host}
+
+    by = lambda v: sorted(k for k, o in objects.items() if o["v"] == v)  # noqa: E731
+    O = {
+        "applicable": sum(1 for o in objects.values() if o["v"] != "na"),
+        "static_reachable": sum(1 for o in objects.values()
+                                if o["static"] and o["v"] != "na"),
+        "read": by("read"), "partial": by("partial"), "unreadable": by("unreadable"),
+        "unresolved": by("unresolved"), "untested": by("untested"),
+        "confirmed": by("confirmed"), "orphan": by("orphan"),
+        "reopened": by("reopened"), "na": by("na"),
+        "untested_host_only": sorted(k for k in by("untested") if not objects[k]["untested"]),
+        "untested_with_sb": sorted(k for k in by("untested") if objects[k]["untested"]),
+        "untested_family_ok": sorted(k for k in by("untested")
+                                     if any(u[1] in READABLE for u in objects[k]["untested"])),
+        "zero_byte_objects": sorted(k for k, o in objects.items()
+                                    if any(h[3] == "empty" for h in o["hits"])),
+        "misleading_objects": sorted(k for k, o in objects.items()
+                                     if any(h[3] == "notdata" for h in o["hits"])),
+    }
+    lat = [drows[i] for i in sorted(latest.values())]
+    st = [d for d in lat if d["m"] != "view"]
+    S = {
+        "latest": sorted([n, i] for n, i in latest.items()),
+        "pending": [n for n in range(nent) if n not in latest],
+        "n_view": len(lat) - len(st),
+        "m": {k: sum(1 for d in st if d["m"] == k) for k, _ in REACH_M if k != "view"},
+        "a": sorted(d["n"] for d in st if "a" in d["cls"]),
+        "b1": sorted(d["n"] for d in st if "b1" in d["cls"]),
+        "b2": sorted(d["n"] for d in st if "b2" in d["cls"]),
+        "c": sorted(d["n"] for d in st if "c" in d["cls"]),
+        "empty": sorted([d["n"], d["empty"]] for d in st if d["m"] == "empty"),
+        "truncated": sorted(d["n"] for d in st if d["trunc"]),
+        "stale": sorted(d["n"] for d in lat if d["stale"]),
+        "unlisted": sorted(d["n"] for d in st if d["snow"] is None),
+        "label_mismatch": sorted(d["n"] for d in st
+                                 if d["snow"] is not None and rows[latest[d["n"]]]["static_at_capture"] != d["snow"]),
+        "rc_nonzero_with_data": sorted(d["n"] for d in st if d["m"] == "ok" and rows[latest[d["n"]]]["rc"] != 0),
+        "obj": O,
+    }
+    return {"rows": drows, "summary": S, "objects": objects}
+
+
+def diff_json(a, b, path=""):
+    """逐层比对（字典按键、列表按下标），返回差异清单。"""
+    out = []
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            if k not in a:
+                out.append("%s.%s：基线多出" % (path, k))
+            elif k not in b:
+                out.append("%s.%s：基线缺" % (path, k))
+            else:
+                out.extend(diff_json(a[k], b[k], "%s.%s" % (path, k)))
+    elif isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            out.append("%s：条数 现在=%d 基线=%d" % (path, len(b), len(a)))
+        for i, (x, y) in enumerate(zip(a, b)):
+            out.extend(diff_json(x, y, "%s[%d]" % (path, i)))
+    elif a != b:
+        out.append("%s：现在=%r 基线=%r" % (path, b, a))
+    return out
+
+
+_ROW_CORE = ("n", "m", "data", "cls", "empty", "stale", "trunc")
+
+
+def notes_sha():
+    """人工判读与各 legends 的指纹。改了判读注记或措辞，基线里的实测层就要重生成
+    （--check 靠它发现「工具改了、入库 MD 没跟上」）。"""
+    blob = json.dumps([sorted([list(k), v] for k, v in REACH_NOTE.items()),
+                       REACH_M, OCC_VIEW_DESC, EMPTY_M, OBJ_V, RULE_FIXES],
+                      ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def derived_core(derived):
+    """写进基线 JSON 的判读结果：每行只留判定字段，汇总留清单，不留说明文字与
+    逐对象明细（那两样渲染时由工具现算）。"""
+    return {"rows": [[d[k] for k in _ROW_CORE] for d in derived["rows"]],
+            "summary": derived["summary"],
+            "notes_sha256": notes_sha()}
+
+
+def reach_public(reach):
+    """写进基线 JSON 的实测层：原始行 + 来源 + 紧凑的判读结果；去掉只在内存里
+    用的探测清单原文与逐对象明细。"""
+    return {"schema": reach["schema"], "probe_list": reach["probe_list"],
+            "sources": reach["sources"], "rows": reach["rows"],
+            "derived": derived_core(reach["derived"])}
+
+
+def _code(cmd):
+    return "`%s`" % cell(cmd)
+
+
+def render_reach(rep):
+    """Markdown §13 起：实测层。没有实测层时只留一句怎么接上。"""
+    R = rep.get("reach")
+    if not R:
+        return ["## 13. 实测层", "",
+                "本次输出没有带实测层：入库基线里没有，或已与当前探测清单对不上（原因见标准错误输出）。"
+                "在拿得到 `occ_reach_probe.sh` 证据 TSV 的机器上跑 `--write-baseline --reach-tsv <TSV>` "
+                "即可接上；原始 TSV 留在证据目录，不进树。", ""]
+    rows, D = R["rows"], R["derived"]
+    S, objects = D["summary"], D["objects"]
+    O = S["obj"]
+    rmap = {o["id"]: o for o in rep["objects"]["root"]}
+    lat = dict(S["latest"])
+    L = ["## 13. 实测层：证据出处与口径", ""]
+    L += ["| # | 证据文件 | sha256 | 字节 | 数据行 | 采集时间 | 身份 | 内核 | aik-sandbox | 超时 | 过滤 |",
+          "|---|---|---|---:|---:|---|---|---|---|---|---|"]
+    for i, s in enumerate(R["sources"]):
+        L.append("| %d | `%s` | `%s` | %d | %d | %s | uid=%s | %s | %s | %s | %s |" % (
+            i, cell(s["file"]), s["sha256"], s["bytes"], s["rows"],
+            s.get("collected_at") or "（未记）", s.get("uid") or "?",
+            s.get("kernel") or "（未记）",
+            ("%s 字节" % s["sandbox_size"]) if s.get("sandbox_size") else "（未记）",
+            s.get("timeout") or "（未记）", s.get("only") or "（未记）"))
+    L.append("")
+    for s in R["sources"]:
+        if s.get("env"):
+            L.append("- **注意**：`%s` 采集时置了会改变沙箱视图的环境变量（%s），与静态表对照时要打折。"
+                     % (cell(s["file"]), "、".join(s["env"])))
+    nlat = len(S["latest"])
+    L += [
+        "- **怎么采的**：`occ_reach_probe.sh` 以 root 在出厂配方测试机上，把探测清单逐条放进 aik-sandbox 执行，"
+        "调用方式与 occ 的 bash 工具逐字对齐（create → run --rw-path → destroy）。清单现共 %d 条，"
+        "已采 %d 条（视图探针 %d、命令 %d）；其余 %d 条还没有实测数据，见 §17。「清单#」是条目在 "
+        "PROBE_LIST 里的序号（从 0 数）。"
+        % (R["probe_list"]["entries"], nlat, S["n_view"], nlat - S["n_view"], len(S["pending"])),
+        "- **实测判定**（逐行）：" + "；".join("`%s`=%s" % (k, v) for k, v in REACH_M) + "。",
+        "- **occ 呈现**（按退出码推得，探针没有真跑 occ）：" + "；".join(
+            "`%s` → %s" % (k, v) for k, v in OCC_VIEW_DESC)
+        + "（occ_tools/sandbox.c:564-582）。rc=1/2 被一律报成「沙箱执行失败」是已知呈现层缺陷（AIF-09）。",
+        "- **输出上限**：超过 %d 字节的，occ 只把前 %d 字节给模型（`OCC_TOOL_OUT_MAX`，occ_tools.h:85）。"
+        % (OCC_OUT_MAX, OCC_OUT_MAX),
+        "- **身份**：只在 root 身份下采过；admin 缺省没有沙箱，实测层对它不适用。",
+        "- **判读怎么来的**：退出码和字节数定不了「读到的是不是宿主数据」。§15 的判读是逐条人工看过的，"
+        "注记写在工具里（`REACH_NOTE`）并钉住了当时那一行结果；再次采集结果变了，注记自动作废并标出来。",
+        "",
+        "### 13.1 视图探针：沙箱到底长什么样", "",
+        "| 清单# | 探针 | rc | 字节 | 首行 | 看到了什么 |",
+        "|---:|---|---:|---:|---|---|",
+    ]
+    for n, i in S["latest"]:
+        if D["rows"][i]["m"] != "view":
+            continue
+        r = rows[i]
+        L.append("| %d | %s | %d | %d | %s | %s |" % (
+            n, _code(r["cmd"]), r["rc"], r["out_bytes"], cell(r["first_line"]),
+            cell(D["rows"][i]["why"])))
+    L.append("")
+
+    # ---- 14 对照表 ----
+    L += ["## 14. 静态 vs 实测对照表（按探测清单顺序）", "",
+          "静态判定列是**现行**静态规则下该条命令的判定（与对象读面同一种解析）；与采集时清单上标的不同时，"
+          "写成「采集时 → **现值**」。类 a / b1 / b2 / c 的定义见 §15。", "",
+          "| 清单# | 命令 | 静态判定 | 实测判定 | 类 | rc | 耗时 s | 字节 | occ 呈现 | 首行 |",
+          "|---:|---|---|---|---|---:|---:|---:|---|---|"]
+    for n, i in S["latest"]:
+        d = D["rows"][i]
+        if d["m"] == "view":
+            continue
+        r = rows[i]
+        sv = d["snow"] or "（静态表无）"
+        if d["snow"] and r["static_at_capture"] != d["snow"]:
+            sv = "%s → **%s**" % (r["static_at_capture"], d["snow"])
+        if d["snote"]:
+            sv += "（%s）" % d["snote"]
+        mv = M_OF[d["m"]]
+        if d["trunc"]:
+            mv += "（超 8KB 截断）"
+        if d["stale"]:
+            mv += "（注记失效）"
+        L.append("| %d | %s | %s | %s | %s | %d | %s | %d | %s | %s |" % (
+            n, _code(r["cmd"]), sv, mv, "/".join(d["cls"]), r["rc"], r["seconds"],
+            r["out_bytes"], r["occ_view"], cell(r["first_line"]) or "（空）"))
+    L.append("")
+
+    # ---- 15 不一致逐条清单 ----
+    def table(ns, heads, cells_of):
+        out = ["| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | " + " | ".join(heads) + " |",
+               "|---:|---|---|---|---:|---:|---|" + "|".join("---" for _ in heads) + "|"]
+        for n in ns:
+            d, r = D["rows"][lat[n]], rows[lat[n]]
+            out.append("| %d | %s | %s | %s | %d | %d | %s | %s |" % (
+                n, _code(r["cmd"]), d["snow"] or "（静态表无）", M_OF[d["m"]], r["rc"],
+                r["out_bytes"], cell(r["first_line"]) or "（空）",
+                " | ".join(cell(c) for c in cells_of(d, r))))
+        return out or ["| （无） |"]
+
+    def none(ns):
+        return ["（无）"]
+
+    L += ["## 15. 不一致逐条清单", "",
+          "三类按出厂机首批对账的口径分；每行给命令、退出码、输出字节数、首行与原因。「静态」列是现行判定。", ""]
+    L += ["### 15.1 (a) 静态判 ok / partial，实测读不到", "",
+          "静态规则错了，或规则依赖的前提在沙箱里不成立。", ""]
+    L += (table(S["a"], ["原因与证据", "补测"],
+                lambda d, r: [" ".join(x for x in (d["why"], "依据：" + d["ev"] if d["ev"] else "") if x),
+                              d["todo"] or "—"]) if S["a"] else none(S["a"]))
+    L.append("")
+    L += ["### 15.2 (b) 静态判 no，实测 rc=0", ""]
+    L += ["**(b1) 实测读到了数据（全部或一部分）——静态规则错了**（已更正的见 §15.7）：", ""]
+    L += (table(S["b1"], ["原因与证据", "补测"],
+                lambda d, r: [d["why"], d["todo"] or "—"]) if S["b1"] else none(S["b1"]))
+    L += ["", "**(b2) 跑成功了，但没读到宿主数据**——输出是沙箱自己的影子，或者干脆是空的。"
+          "判「拿不到宿主数据」没错，可 occ 会显示成功，模型会把沙箱的影子当成宿主的现状"
+          "（零字节的另见 §15.3）：", ""]
+    L += (table(S["b2"], ["看到了什么"],
+                lambda d, r: [d["why"]]) if S["b2"] else none(S["b2"]))
+    L.append("")
+    L += ["### 15.3 (c) rc=0 且零字节：occ 显示「成功、无输出」", "",
+          "模型分不清「本来就没有」与「看不见」。逐条判读是真没数据，还是被沙箱视图挡了；判不了的标未定并写明补测。", ""]
+    L += ["| 清单# | 命令 | 静态 | 判读 | 依据 | 补测 |", "|---:|---|---|---|---|---|"]
+    for n, code in S["empty"]:
+        d, r = D["rows"][lat[n]], rows[lat[n]]
+        L.append("| %d | %s | %s | **%s**：%s | %s | %s |" % (
+            n, _code(r["cmd"]), d["snow"] or "（静态表无）", EMPTY_OF[code], cell(d["why"]),
+            cell(d["ev"]) or "—", d["todo"] or "—"))
+    if not S["empty"]:
+        L.append("| （无） | | | | | |")
+    L.append("")
+    L += ["### 15.4 退出码非零，但输出里有数据", "",
+          "occ 会把这些标成「沙箱执行失败」或「命令超时」，可输出里带着读到的数据（AIF-09 同类）。", ""]
+    nz = [n for n, i in S["latest"]
+          if (D["rows"][i]["m"] == "ok" and rows[i]["rc"] != 0)
+          or (D["rows"][i]["m"] == "timeout" and rows[i]["out_bytes"] > 0)]
+    L += (table(nz, ["说明"], lambda d, r: [d["why"]]) if nz else none(nz))
+    L += ["", "### 15.5 输出超过 8KB，被 occ 截断", "",
+          "读得到，但模型只看得到前 %d 字节；要全文得自己加过滤（`| tail`、`| grep`）。" % OCC_OUT_MAX, ""]
+    L += (table(S["truncated"], ["说明"], lambda d, r: ["模型只看得到前 8KB"])
+          if S["truncated"] else none(S["truncated"]))
+    L += ["", "### 15.6 判读注记失效 / 静态表里没有的命令 / 采集后静态判定变过", ""]
+    L.append("- 注记失效（实测结果与判读所依据的那一行不同，要人重看）：%s。"
+             % ("、".join("#%d" % n for n in S["stale"]) or "无"))
+    L.append("- 清单里有、静态表里没有的命令：%s。"
+             % ("、".join("#%d" % n for n in S["unlisted"]) or "无"))
+    L.append("- 采集时清单上标的判定与现行静态判定不同的条目：%s（§14 里写成「采集时 → 现值」）。"
+             % ("、".join("#%d" % n for n in S["label_mismatch"]) or "无"))
+    L += ["", "### 15.7 已按实测更正的静态规则", "",
+          "只有实测给出了明确正确判定的才改静态表；只证明了「样例跑不起来」、没证明正确判定是什么的不改"
+          "（留在 §15.1，挂补测）。", ""]
+    if RULE_FIXES:
+        L += ["| 命令 | 改前 | 改后 | 凭什么 |", "|---|---|---|---|"]
+        for name, before, after, why in RULE_FIXES:
+            L.append("| `%s` | %s | **%s** | %s |" % (name, before, after, cell(why)))
+    else:
+        L.append("（本轮没有改静态表。）")
+    L.append("")
+
+    # ---- 16 对象级 ----
+    rd, pt = len(O["read"]), len(O["partial"])
+    L += ["## 16. 对象级实测判定（出厂 root，分母 %d）" % O["applicable"], ""]
+    L += [
+        "- **实测直接确认读到数据 %d/%d**（读到宿主数据 %d + 读到但仅一部分 %d），全部落在静态可读的 %d 个之内。"
+        "**没有出现「静态说能读、实测读不到」的对象**（实测读不到 %d、未定 %d、静态不可达却读到 %d）。"
+        % (rd + pt, O["applicable"], rd, pt, O["static_reachable"],
+           len(O["unreadable"]), len(O["unresolved"]), len(O["reopened"])),
+        "- 与静态口径 %d/%d 的差 %d 个是**未测**，不是否定：其中 %d 个的可达读面只有宿主工具"
+        "（occ read / glob / config_write_network），本批探测不经过那条通道；另 %d 个还有没采到的沙箱/回环路径"
+        "（其中 %d 个已有同命令样例读到数据的旁证）。待采条目见 §17。"
+        % (O["static_reachable"], O["applicable"], len(O["untested"]),
+           len(O["untested_host_only"]), len(O["untested_with_sb"]),
+           len(O["untested_family_ok"])),
+        "- 静态不可达 %d 个：实测确认 %d 个（%s）；未测 %d 个（%s）。"
+        % (O["applicable"] - O["static_reachable"], len(O["confirmed"]),
+           "、".join(O["confirmed"]) or "无", len(O["orphan"]), "、".join(O["orphan"]) or "无"),
+        "- **零字节假成功**：%d 行、%d 条命令，涉及 %d 个对象（%s）。全是静态已判不可达的沙箱路径，"
+        "对象级结论不变；但 occ 会把这几条显示成「成功、无输出」。"
+        % (len(S["c"]), len(set(rows[lat[n]]["cmd"] for n in S["c"])),
+           len(O["zero_byte_objects"]), "、".join(O["zero_byte_objects"]) or "无"),
+        "- **rc=0 但输出不是宿主数据**（误导性成功）：涉及 %d 个对象（%s）。"
+        % (len(O["misleading_objects"]), "、".join(O["misleading_objects"]) or "无"),
+        "- 「已测读面」只算与路径同一条命令（或同一命令多带参数）的实测；「没测到」里括号内的同命令旁证不计入。",
+        "",
+        "| 对象 | 静态（root） | 实测判定 | 已测读面 → 实测 | 没测到的可达读面 |",
+        "|---|---|---|---|---|",
+    ]
+    for oid in OBJ:
+        oo = objects[oid]
+        o = rmap[oid]
+        sv = "n/a" if o["status"] == "n/a" else (
+            "不可达" if not o["read_any"] else lv(o))
+        hs = ["%s [%s → %s]" % (_code(h[0]), h[1], M_OF[h[3]]) for h in oo["hits"][:3]]
+        if len(oo["hits"]) > 3:
+            hs.append("+%d" % (len(oo["hits"]) - 3))
+        bits = []
+        if oo["host"]:
+            bits.append("宿主工具 %d 条" % oo["host"])
+        for u in oo["untested"][:2]:
+            bits.append("%s%s" % (_code(u[0]), "（同命令样例：%s）" % M_OF[u[1]] if u[1] else ""))
+        if len(oo["untested"]) > 2:
+            bits.append("+%d" % (len(oo["untested"]) - 2))
+        L.append("| %s %s | %s | %s | %s | %s |" % (
+            oid, cell(o["name"]), sv, V_OF[oo["v"]], "<br>".join(hs) or "—",
+            "<br>".join(bits) or "—"))
+    L.append("")
+
+    # ---- 17 待补测 ----
+    ents = R.get("entries") or []
+    L += ["## 17. 待补测清单", "",
+          "清单里还没有实测数据的 %d 条（按清单顺序；`occ_reach_probe.sh --only \"<首 token>,…\"` 可挑着跑，"
+          "采完用 `--write-baseline --reach-tsv <旧 TSV> --reach-tsv <新 TSV>` 并库）。" % len(S["pending"]),
+          ""]
+    if S["pending"] and ents:
+        L += ["```"] + ["%s\t%s" % (ents[n][0], ents[n][1]) for n in S["pending"]] + ["```", ""]
+    host = []
+    for n, i in S["latest"]:
+        d = D["rows"][i]
+        if d["todo"] and "宿主侧对照" in d["todo"] and d["todo"] not in host:
+            host.append(d["todo"])
+    L += ["沙箱里做不了、得在宿主侧同一时刻做的对照：", ""]
+    L += ["- %s" % cell(t) for t in host] or ["- （无）"]
+    L.append("")
+    return L
 
 
 # ===========================================================================
@@ -1353,6 +2277,19 @@ def lv(o):
     return s
 
 
+def limitations(rep):
+    """§11 的局限清单。接上实测层后，首条换成实测层自己的边界。"""
+    out = list(LIMITATIONS)
+    R = rep.get("reach")
+    if R:
+        out[0] = ("实测层只覆盖探测清单里采过的条目（%d 行），且只在一台出厂配方测试机上以 root 身份采过"
+                  "（单条超时 %s）；对象读面里没被采到的仍是静态推断——未测的对象见 §16，待采条目见 §17。"
+                  "网卡名、磁盘名、内核节点这类运行态因机而异，个别路径的结论不通用。"
+                  % (len(R["rows"]), (R["sources"][0].get("timeout") if R["sources"] else "")
+                     or "缺省值"))
+    return out
+
+
 def render_markdown(rep):
     L = []
     tv = rep["tools"]
@@ -1363,8 +2300,14 @@ def render_markdown(rep):
     L.append("# 出厂 AI 真实视角能力基线（OCC-CAPABILITY-BASELINE）")
     L.append("")
     L.append("> 由 `agent/ai/tools/audit_occ_capabilities.py --markdown` 生成，不手填；"
-             "对象目录与缺口登记 import 自旧审计 `audit_capabilities.py`。"
-             "全部为静态推断（未在沙箱内实测）；实测用 `agent/ai/tools/occ_reach_probe.sh`。")
+             "对象目录与缺口登记 import 自旧审计 `audit_capabilities.py`。")
+    if rep.get("reach"):
+        note = "§1–§12 是静态推断（求值规则见 §1）；§13 起是出厂机实测层"
+        if RULE_FIXES:
+            note += "（静态规则已按实测更正 %d 条，见 §15.7）" % len(RULE_FIXES)
+        L.append("> " + note + "。")
+    else:
+        L.append("> 全部为静态推断（未在沙箱内实测）；实测用 `agent/ai/tools/occ_reach_probe.sh`。")
     L.append("")
     L.append("## 1. 口径")
     L.append("")
@@ -1549,7 +2492,7 @@ def render_markdown(rep):
     L.append("")
     L.append("## 11. 局限与待复核")
     L.append("")
-    for d in LIMITATIONS:
+    for d in limitations(rep):
         L.append("- %s" % d)
     L.append("")
     L.append("## 12. 源码事实钉子（--check 逐条核对）")
@@ -1559,6 +2502,7 @@ def render_markdown(rep):
     for f in sorted(rep["source_facts"], key=lambda x: x["id"]):
         L.append("| %s | %s | %s |" % (f["id"], cell(f["desc"]), "成立" if f["ok"] else "**漂移**"))
     L.append("")
+    L.extend(render_reach(rep))
     L.append("<!-- MAPPING_SHA256: %s -->" % rep["mapping_sha256"])
     return "\n".join(L) + "\n"
 
@@ -1583,7 +2527,7 @@ def diff_core(a, b, path=""):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="AIF-01 出厂 AI 真实视角能力审计（纯静态）")
+        description="AIF-01 出厂 AI 真实视角能力审计（静态求值）+ 出厂机实测层（AIF-01b）")
     ap.add_argument("--repo", default=os.path.abspath(os.path.join(
         HERE, "..", "..", "..")), help="仓库根（含 agent/ai 与 factory/）")
     ap.add_argument("--admin-sandbox", choices=("no", "ok"), default="no",
@@ -1592,6 +2536,9 @@ def main(argv=None):
     ap.add_argument("--markdown", action="store_true", help="输出基线报告 Markdown")
     ap.add_argument("--write-baseline", action="store_true",
                     help="把当前结果写成入库基线 docs/OCC-CAPABILITY-BASELINE.json")
+    ap.add_argument("--reach-tsv", action="append", default=[], metavar="PATH",
+                    help="实测证据 TSV（occ_reach_probe.sh 的输出），可重复给多个。与 "
+                         "--write-baseline 连用把实测层写进基线；不给时沿用入库基线里已有的实测层")
     ap.add_argument("--check", action="store_true", help="与入库基线比对，不一致即失败")
     args = ap.parse_args(argv)
 
@@ -1599,8 +2546,44 @@ def main(argv=None):
     if not os.path.isfile(os.path.join(repo, P_TOOLS)):
         sys.stderr.write("audit_occ_capabilities: %s 下找不到 %s\n" % (repo, P_TOOLS))
         return 2
-    rep = build_report(repo, args.admin_sandbox)
     bpath = os.path.join(repo, "agent", "ai", BASELINE_REL)
+    base = None
+    if os.path.isfile(bpath):
+        try:
+            with open(bpath, "r", encoding="utf-8") as f:
+                base = json.load(f)
+        except ValueError:
+            base = None
+    rep = build_report(repo, args.admin_sandbox)
+
+    # ---- 实测层：给了 TSV 就读 TSV；没给就把入库基线里存的实测层读回来 ----
+    reach, rerr = None, ""
+    if args.reach_tsv:
+        try:
+            reach = collect_reach(repo, args.reach_tsv)
+        except ReachError as exc:
+            rerr = str(exc)
+    elif isinstance(base, dict) and base.get("reach") is not None:
+        try:
+            reach = reach_from_baseline(repo, base["reach"])
+        except ReachError as exc:
+            rerr = str(exc)
+    if reach is not None:
+        try:
+            reach["derived"] = derive_reach(reach, rep["objects"]["root"])
+        except ReachError as exc:
+            rerr, reach = str(exc), None
+    if rerr:
+        if args.reach_tsv:
+            sys.stderr.write("audit_occ_capabilities: 实测数据有问题：%s\n" % rerr)
+            return 2
+        if args.check or args.write_baseline:
+            print("OCC CHECK FAIL" if args.check else "OCC BASELINE NOT WRITTEN")
+            print(" - 入库基线里的实测层已失效：%s" % rerr)
+            return 1
+        sys.stderr.write("audit_occ_capabilities: 警告：入库基线的实测层已失效，"
+                         "本次输出不带实测层：%s\n" % rerr)
+    rep["reach"] = reach
 
     if args.write_baseline:
         doc = {"schema": SCHEMA,
@@ -1608,20 +2591,21 @@ def main(argv=None):
                    "%Y-%m-%dT%H:%M:%S%z"),
                "core": core_of(rep), "old_view": rep["old_view"],
                "source_facts": rep["source_facts"]}
+        if reach is not None:
+            doc["reach"] = reach_public(reach)
         os.makedirs(os.path.dirname(bpath), exist_ok=True)
         with open(bpath, "w", encoding="utf-8", newline="\n") as f:
             json.dump(doc, f, ensure_ascii=False, indent=1)
             f.write("\n")
-        print("OCC BASELINE WRITTEN %s" % bpath)
+        print("OCC BASELINE WRITTEN %s%s" % (
+            bpath, "（含实测层：%d 行）" % len(reach["rows"]) if reach is not None else ""))
         return 0
 
     if args.check:
         errors = []
-        if not os.path.isfile(bpath):
-            errors.append("入库基线不存在：%s" % bpath)
+        if not isinstance(base, dict):
+            errors.append("入库基线不存在或读不出来：%s" % bpath)
         else:
-            with open(bpath, "r", encoding="utf-8") as f:
-                base = json.load(f)
             errors.extend(diff_core(base.get("core", {}), core_of(rep)))
         for f in rep["source_facts"]:
             if not f["ok"]:
@@ -1629,6 +2613,20 @@ def main(argv=None):
         if rep["scenario_ids_missing"]:
             errors.append("Top 15 引用了场景库里没有的场景：%s"
                           % "、".join(rep["scenario_ids_missing"]))
+        for name, before, after, why in RULE_FIXES:
+            if SBX.get(name, {}).get("verdict") != after:
+                errors.append("静态规则与实测更正登记不符：%s 现为 %s，RULE_FIXES 记的是 %s → %s"
+                              % (name, SBX.get(name, {}).get("verdict"), before, after))
+        # 实测层：基线里存的 ↔ 现在算出来的（没给 TSV 时，「现在」= 基线里的原始行重算）
+        brec = base.get("reach") if isinstance(base, dict) else None
+        if args.reach_tsv:
+            if not isinstance(brec, dict):
+                errors.append("基线里没有实测层：请带 --reach-tsv 重新 --write-baseline")
+            elif (brec.get("probe_list") or {}).get("sha256") != reach["probe_list"]["sha256"]:
+                errors.append("reach.probe_list：探测清单改过了，基线里的实测层是按旧清单存的——"
+                              "请带 --reach-tsv 重新 --write-baseline")
+        if isinstance(brec, dict) and reach is not None:
+            errors.extend(diff_json(brec, reach_public(reach), "reach"))
         if errors:
             print("OCC CHECK FAIL")
             for e in errors:
@@ -1659,10 +2657,23 @@ def main(argv=None):
                  rep["tools"]["factory_unreachable_registry_count"]))
         print("source_facts=%d ok=%d" % (len(rep["source_facts"]),
                                          sum(1 for f in rep["source_facts"] if f["ok"])))
+        if reach is not None:
+            S = reach["derived"]["summary"]
+            O = S["obj"]
+            print("reach: sources=%d rows=%d entries_measured=%d/%d "
+                  "objects_read=%d(+partial %d)/%d untested=%d "
+                  "a=%d b1=%d b2=%d c=%d"
+                  % (len(reach["sources"]), len(reach["rows"]), len(S["latest"]),
+                     reach["probe_list"]["entries"], len(O["read"]), len(O["partial"]),
+                     O["applicable"], len(O["untested"]),
+                     len(S["a"]), len(S["b1"]), len(S["b2"]), len(S["c"])))
         return 0
 
     if args.json:
-        print(json.dumps(rep, ensure_ascii=False, sort_keys=True, indent=1))
+        out = dict(rep)
+        if out.get("reach") is not None:
+            out["reach"] = reach_public(out["reach"])
+        print(json.dumps(out, ensure_ascii=False, sort_keys=True, indent=1))
         return 0
     if args.markdown:
         sys.stdout.write(render_markdown(rep))

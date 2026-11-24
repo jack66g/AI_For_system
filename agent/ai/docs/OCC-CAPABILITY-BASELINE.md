@@ -1,6 +1,7 @@
 # 出厂 AI 真实视角能力基线（OCC-CAPABILITY-BASELINE）
 
-> 由 `agent/ai/tools/audit_occ_capabilities.py --markdown` 生成，不手填；对象目录与缺口登记 import 自旧审计 `audit_capabilities.py`。全部为静态推断（未在沙箱内实测）；实测用 `agent/ai/tools/occ_reach_probe.sh`。
+> 由 `agent/ai/tools/audit_occ_capabilities.py --markdown` 生成，不手填；对象目录与缺口登记 import 自旧审计 `audit_capabilities.py`。
+> §1–§12 是静态推断（求值规则见 §1）；§13 起是出厂机实测层。
 
 ## 1. 口径
 
@@ -432,13 +433,13 @@
 - 覆盖率随审计机变化：`cmd:` 读/写路径的 ok 取决于审计机上有没有该二进制（:1157-1162、:1218-1227），不是被审系统的属性。
 - 0 处提及 aikctl：user/policy/session/quota/audit 五族对其完全不可见。
 - `principal:` 记号（/lease list|show）不是 Agent 工具，却按 gated 读面计入 read_gated 并保住 structured 级别（:1193-1196、:1262）。
-- `scan_desktop` 候选路径里写死了一条开发机家目录绝对路径（:1054-1058）——主会话 2026-11-24 已删（上一行 expanduser 候选覆盖同一位置）。
+- `scan_desktop` 候选路径里写死了一条开发机家目录绝对路径（:1054-1058；主会话 2026-11-24 已删）。
 - 文案与阈值不一致：READ_TARGET=92.0（:64），矩阵文案却写「未达 95% 读覆盖」（:1505-1506）。
 - docs/CAPABILITY-GAPS.md 没跟上脚本：文档生成时间 2026-10-24，G-024 行仍写「只能 python3 hashlib 逃逸」，而脚本里的 G-024 已改成「python3 已摘除」（脚本 :258 对文档 :43）。
 
 ## 11. 局限与待复核
 
-- 全部是静态推断：没有任何一条在沙箱里实测过（组装沙箱需要特权）。用 agent/ai/tools/occ_reach_probe.sh 在真机逐条实测后回填。
+- 实测层只覆盖探测清单里采过的条目（125 行），且只在一台出厂配方测试机上以 root 身份采过（单条超时 10s）；对象读面里没被采到的仍是静态推断——未测的对象见 §16，待采条目见 §17。网卡名、磁盘名、内核节点这类运行态因机而异，个别路径的结论不通用。
 - admin 身份的沙箱命令缺省按不可达计：仓内 build-rootfs.sh 与出厂树都没有 sudo 二进制与放行 aik-sandbox 的 sudoers 规则；另有一处疑似缺陷——aik-sandbox.c 没有任何 setuid 代码，经 sudo 组装后沙箱内进程是 uid 0，而 per-user 工作区是 0700 属 admin（occ_tools/sandbox.c:318-336），无 CAP_DAC_OVERRIDE 的 uid 0 进不去该目录，`cd <workdir>` 可能直接失败。
 - 回环 HTTP（SME 8000、desktop 8091）读面依赖服务在跑且鉴权可过；出厂 /opt/sme/data/sme.config.json 含凭据位，未读，api.auth_token 取值未知。
 - occ 的 read/glob 输出截 8KB、glob 200 项上限，大文件/大目录的「可达」只是理论上可达，实际要多次分页。
@@ -471,5 +472,449 @@
 | F21 | 写域=工作目录∪/tmp∪/var/ai∪$HOME，~/.occ 恒拒 | 成立 |
 | F22 | model.toml/provider.toml 被拷入沙箱 /root/.aikernel | 成立 |
 | F23 | W2 档位取自 policy（按 uid）；headless 须显式 --allow-w2 | 成立 |
+
+## 13. 实测层：证据出处与口径
+
+| # | 证据文件 | sha256 | 字节 | 数据行 | 采集时间 | 身份 | 内核 | aik-sandbox | 超时 | 过滤 |
+|---|---|---|---:|---:|---|---|---|---|---|---|
+| 0 | `occ-reach-142-1710.tsv` | `00c0c8d274e6a7b7f64ca92a68def46ddb283e8227bc81eb8b27805c5b274a90` | 9828 | 125 | 2026-11-23T18:19:36+0000 | uid=0 | 6.18.39 | 1111080 字节 | 10s | all |
+
+- **怎么采的**：`occ_reach_probe.sh` 以 root 在出厂配方测试机上，把探测清单逐条放进 aik-sandbox 执行，调用方式与 occ 的 bash 工具逐字对齐（create → run --rw-path → destroy）。清单现共 199 条，已采 125 条（视图探针 9、命令 116）；其余 74 条还没有实测数据，见 §17。「清单#」是条目在 PROBE_LIST 里的序号（从 0 数）。
+- **实测判定**（逐行）：`view`=视图探针；`ok`=读到宿主数据；`partial`=读到一部分；`notdata`=rc=0·不是宿主数据；`empty`=rc=0·零字节；`fail`=rc=1/2；`missing`=rc=127·没有这个命令；`timeout`=超时被杀；`error`=其它非零退出。
+- **occ 呈现**（按退出码推得，探针没有真跑 occ）：`ok` → rc=0：输出 + `[exit=0]`，工具 rc=0；`sb_fail` → rc=1/2：`ERROR: bash 沙箱执行失败（aik-sandbox exit=N）：` + 输出，工具 rc=-1；`tool_error` → rc 为其它值（127 / 100 / 137 …）：输出 + `[exit=N]`，工具 rc=0（occ_tools/sandbox.c:564-582）。rc=1/2 被一律报成「沙箱执行失败」是已知呈现层缺陷（AIF-09）。
+- **输出上限**：超过 8192 字节的，occ 只把前 8192 字节给模型（`OCC_TOOL_OUT_MAX`，occ_tools.h:85）。
+- **身份**：只在 root 身份下采过；admin 缺省没有沙箱，实测层对它不适用。
+- **判读怎么来的**：退出码和字节数定不了「读到的是不是宿主数据」。§15 的判读是逐条人工看过的，注记写在工具里（`REACH_NOTE`）并钉住了当时那一行结果；再次采集结果变了，注记自动作废并标出来。
+
+### 13.1 视图探针：沙箱到底长什么样
+
+| 清单# | 探针 | rc | 字节 | 首行 | 看到了什么 |
+|---:|---|---:|---:|---|---|
+| 0 | `ls -la /` | 0 | 754 | total 4 | 沙箱根是 tmpfs 骨架（usr/proc/sys/etc/tmp/home/var/opt/srv/dev），不是宿主根 |
+| 1 | `ls -la /etc` | 0 | 359 | total 16 | /etc 是白名单式的，只有几个小文件（首行 total 16）；全文见证据文件 |
+| 2 | `ls -la /dev` | 0 | 378 | total 0 | /dev 里只有 4 个字符设备（首行 total 0），没有块设备与看门狗节点 |
+| 3 | `ls -ld /run /boot /var/log /var/lib/dpkg /etc/passwd /etc/systemd/system` | 2 | 347 | ls: cannot access '/run': No such file or directory | rc=2，首行是 /run 不存在；347 字节约合 6 行同构报错——六条路径都不在沙箱视图【推断：只留了首行】 |
+| 4 | `id` | 0 | 20 | uid=0 gid=0 groups=0 | 沙箱内进程是 uid 0；用户名/组名解析不出来（无 /etc/passwd、/etc/group） |
+| 5 | `grep -E '^(CapEff\|CapBnd\|NoNewPrivs):' /proc/self/status` | 0 | 63 | CapEff: 0000000000002000 | CapEff=0000000000002000：有效能力只剩 CAP_NET_RAW |
+| 6 | `cat /proc/1/comm` | 0 | 2 | sh | 沙箱里的 1 号进程是 sh：独立 PID 命名空间，宿主进程不可见 |
+| 7 | `cat /proc/self/mountinfo` | 0 | 1919 | 320 300 0:39 / / rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755 | 1919 字节：沙箱自己的挂载表 |
+| 8 | `hostname` | 0 | 13 | occreach19704 | UTS 隔离：主机名是隔离区名，不是宿主名 |
+
+## 14. 静态 vs 实测对照表（按探测清单顺序）
+
+静态判定列是**现行**静态规则下该条命令的判定（与对象读面同一种解析）；与采集时清单上标的不同时，写成「采集时 → **现值**」。类 a / b1 / b2 / c 的定义见 §15。
+
+| 清单# | 命令 | 静态判定 | 实测判定 | 类 | rc | 耗时 s | 字节 | occ 呈现 | 首行 |
+|---:|---|---|---|---|---:|---:|---:|---|---|
+| 9 | `aa-complain --help` | no | rc=127·没有这个命令 |  | 127 | 0.014 | 73 | tool_error | /bin/sh: 1: aa-complain: not found |
+| 10 | `aa-disable --help` | no | rc=127·没有这个命令 |  | 127 | 0.02 | 72 | tool_error | /bin/sh: 1: aa-disable: not found |
+| 11 | `aa-enforce --help` | no | rc=127·没有这个命令 |  | 127 | 0.015 | 72 | tool_error | /bin/sh: 1: aa-enforce: not found |
+| 12 | `aa-status --help` | no | rc=127·没有这个命令 |  | 127 | 0.017 | 71 | tool_error | /bin/sh: 1: aa-status: not found |
+| 13 | `aik-upgrade status` | no | rc=0·不是宿主数据 | b2 | 0 | 0.029 | 386 | ok | === AIKernel A/B slot state (/boot/aik-slot-state) === |
+| 14 | `aikctl policy get --json` | ok | 读到宿主数据 |  | 0 | 0.099 | 735 | ok | { |
+| 15 | `apparmor_status --help` | no | rc=127·没有这个命令 |  | 127 | 0.021 | 77 | tool_error | /bin/sh: 1: apparmor_status: not found |
+| 16 | `apt list --installed` | no | 其它非零退出 |  | 100 | 0.034 | 584 | tool_error | （空） |
+| 17 | `arping -c 1 127.0.0.1` | ok | rc=1/2 | a | 2 | 0.018 | 48 | sb_fail | arping: interface eth0 not found: No such device |
+| 18 | `blkid -o export` | no | rc=1/2 |  | 2 | 0.017 | 0 | sb_fail | （空） |
+| 19 | `bootctl status` | no | rc=0·不是宿主数据 | b2 | 0 | 0.025 | 178 | ok | Couldn't find EFI system partition. It is recommended to mount it to /boot or /efi. |
+| 20 | `cat /proc/meminfo` | partial → **ok**（命令表 partial、按路径 ok） | 读到宿主数据 |  | 0 | 0.016 | 1446 | ok | MemTotal:        4004744 kB |
+| 21 | `cc --version` | no | rc=127·没有这个命令 |  | 127 | 0.015 | 64 | tool_error | /bin/sh: 1: cc: not found |
+| 22 | `conntrack -L` | no | rc=127·没有这个命令 |  | 127 | 0.018 | 71 | tool_error | /bin/sh: 1: conntrack: not found |
+| 23 | `crontab -l` | no | rc=1/2 |  | 1 | 0.027 | 22 | sb_fail | crontab: unknown uid 0 |
+| 24 | `ctstat` | ok | 超时被杀 | a | 137 | 10.004 | 0 | tool_error | （空） |
+| 25 | `curl -s -m 5 http://127.0.0.1:8000/health` | ok | 读到宿主数据 |  | 0 | 0.03 | 31 | ok | {"status":"ok","memories":7199} |
+| 26 | `cut -d: -f1 /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.017 | 585 | ok | MemTotal |
+| 27 | `date +%s` | partial | 读到一部分 |  | 0 | 0.017 | 10 | ok | 1795457987 |
+| 28 | `df -P` | partial | 读到一部分 |  | 0 | 0.016 | 179 | ok | Filesystem     1024-blocks    Used Available Capacity Mounted on |
+| 29 | `dmesg --color=never` | ok | 读到宿主数据（超 8KB 截断） |  | 0 | 0.018 | 42197 | ok | [    0.000000] Linux version 6.18.39 (jack66g@jack66g-virtual-machine) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, GNU |
+| 30 | `dpkg-query -W` | no | rc=0·零字节 | b2/c | 0 | 0.02 | 0 | ok | （空） |
+| 31 | `dpkg-query -W` | no | rc=0·零字节 | b2/c | 0 | 0.017 | 0 | ok | （空） |
+| 32 | `dpkg-query -W` | no | rc=0·零字节 | b2/c | 0 | 0.021 | 0 | ok | （空） |
+| 33 | `dpkg-query -W` | no | rc=0·零字节 | b2/c | 0 | 0.019 | 0 | ok | （空） |
+| 34 | `du -x -d1 /var` | no | rc=0·不是宿主数据 | b2 | 0 | 0.018 | 16 | ok | 0 /var/ai |
+| 35 | `dumpe2fs -h /dev/sda1` | no | rc=1/2 |  | 2 | 0.021 | 139 | sb_fail | dumpe2fs 1.46.5 (30-Dec-2021) |
+| 36 | `echo ok` | ok | 读到宿主数据 |  | 0 | 0.017 | 2 | ok | ok |
+| 37 | `ethtool eth0` | no | rc=127·没有这个命令 |  | 127 | 0.014 | 69 | tool_error | /bin/sh: 1: ethtool: not found |
+| 38 | `fdisk -l` | no | rc=0·零字节 | b2/c | 0 | 0.016 | 0 | ok | （空） |
+| 39 | `find /sys/class/net -maxdepth 1` | partial | 读到一部分 |  | 0 | 0.015 | 75 | ok | /sys/class/net |
+| 40 | `findmnt -J` | partial | 读到一部分 |  | 0 | 0.032 | 4199 | ok | { |
+| 41 | `free -b` | ok | 读到宿主数据 |  | 0 | 0.017 | 206 | ok |                total        used        free      shared  buff/cache   available |
+| 42 | `gcc --version` | no | rc=127·没有这个命令 |  | 127 | 0.013 | 65 | tool_error | /bin/sh: 1: gcc: not found |
+| 43 | `getent passwd` | no | rc=0·零字节 | b2/c | 0 | 0.014 | 0 | ok | （空） |
+| 44 | `grep -c Mem /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.015 | 1 | ok | 3 |
+| 45 | `head -n 5 /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.017 | 139 | ok | MemTotal:        4004744 kB |
+| 46 | `hostname` | partial | 读到一部分 |  | 0 | 0.018 | 13 | ok | occreach19704 |
+| 47 | `hostnamectl` | no | rc=1/2 |  | 1 | 0.018 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 48 | `id` | no | rc=0·不是宿主数据 | b2 | 0 | 0.017 | 20 | ok | uid=0 gid=0 groups=0 |
+| 49 | `ifconfig -a` | ok | 读到宿主数据 |  | 0 | 0.017 | 1199 | ok | enp0s17   Link encap:Ethernet  HWaddr XX:XX:XX:XX:XX:XX   |
+| 50 | `ip -j addr` | ok | 读到宿主数据 |  | 0 | 0.016 | 1335 | ok | [{"ifindex":1,"ifname":"lo","flags":["LOOPBACK","UP","LOWER_UP"],"mtu":65536,"qdisc":"noqueue","operstate":"UNKNOWN","gr |
+| 51 | `journalctl -n 20 --no-pager` | no | rc=0·不是宿主数据 | b2 | 0 | 0.016 | 45 | ok | No journal files were found. |
+| 52 | `kill -0 1` | no | rc=0·零字节 | b2/c | 0 | 0.011 | 0 | ok | （空） |
+| 53 | `last -n 5` | no | rc=1/2 |  | 1 | 0.015 | 58 | sb_fail | last: cannot open /var/log/wtmp: No such file or directory |
+| 54 | `lnstat -c 1` | ok | 读到宿主数据 |  | 1 | 0.014 | 2163 | sb_fail | nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_ |
+| 55 | `localectl status` | no | rc=1/2 |  | 1 | 0.018 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 56 | `loginctl list-sessions` | no | rc=1/2 |  | 1 | 0.018 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 57 | `ls /sys/class/net` | partial | 读到一部分 |  | 0 | 0.016 | 15 | ok | enp0s17 |
+| 58 | `lsattr /usr/local/bin/occ` | partial | 读到一部分 |  | 0 | 0.015 | 41 | ok | --------------e------- /usr/local/bin/occ |
+| 59 | `lsblk -J` | ok | 读到宿主数据 |  | 0 | 0.02 | 1280 | ok | { |
+| 60 | `lscpu -J` | ok | 读到宿主数据 |  | 0 | 0.017 | 4430 | ok | { |
+| 61 | `lsipc` | ok | 读到宿主数据 |  | 0 | 0.016 | 1078 | ok | RESOURCE DESCRIPTION                                              LIMIT USED  USE% |
+| 62 | `lslocks` | ok | rc=0·零字节 | a/c | 0 | 0.019 | 0 | ok | （空） |
+| 63 | `lslogins` | no | rc=1/2 |  | 1 | 0.016 | 50 | sb_fail | lslogins: /var/log/wtmp: No such file or directory |
+| 64 | `lsmem` | ok | rc=1/2 | a | 1 | 0.017 | 72 | sb_fail | lsmem: cannot open /sys/devices/system/memory: No such file or directory |
+| 65 | `lsns` | no | rc=0·不是宿主数据 | b2 | 0 | 0.018 | 745 | ok |         NS TYPE   NPROCS PID USER COMMAND |
+| 66 | `lvs --help` | no | rc=127·没有这个命令 |  | 127 | 0.012 | 65 | tool_error | /bin/sh: 1: lvs: not found |
+| 67 | `mount` | no | 读到一部分 | b1 | 0 | 0.016 | 1515 | ok | tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755) |
+| 68 | `nc -z -w 2 127.0.0.1 22` | ok | rc=1/2 | a | 1 | 0.017 | 440 | sb_fail | nc: invalid option -- 'z' |
+| 69 | `netstat -tunl` | ok | 读到宿主数据 |  | 0 | 0.015 | 933 | ok | Active Internet connections (only servers) |
+| 70 | `networkctl status` | no | rc=1/2 |  | 1 | 0.016 | 55 | sb_fail | Failed to connect system bus: No such file or directory |
+| 71 | `nft list ruleset` | no | rc=1/2 |  | 1 | 0.016 | 42 | sb_fail | Operation not permitted (you must be root) |
+| 72 | `nslookup 127.0.0.1` | ok | 读到宿主数据 |  | 0 | 0.014 | 83 | ok | Server:  127.0.0.53 |
+| 73 | `nstat -az` | ok | 读到宿主数据（超 8KB 截断） |  | 0 | 0.018 | 17442 | ok | #kernel |
+| 74 | `ollama list` | ok | 读到宿主数据 |  | 0 | 0.03 | 31 | ok | NAME    ID    SIZE    MODIFIED  |
+| 75 | `passwd -S root` | no | rc=1/2 |  | 1 | 0.016 | 40 | sb_fail | passwd: Cannot determine your user name. |
+| 76 | `pgrep -a sshd` | no | rc=1/2 |  | 1 | 0.017 | 0 | sb_fail | （空） |
+| 77 | `pidof systemd` | no | rc=1/2 |  | 1 | 0.014 | 0 | sb_fail | （空） |
+| 78 | `ping -c 2 127.0.0.1` | ok | 读到宿主数据 |  | 0 | 1.024 | 310 | ok | PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data. |
+| 79 | `printf ok` | ok | 读到宿主数据 |  | 0 | 0.014 | 2 | ok | ok |
+| 80 | `ps -eo pid,ppid,stat,comm` | no | rc=0·不是宿主数据 | b2 | 0 | 0.019 | 76 | ok |     PID    PPID STAT COMMAND |
+| 81 | `pvs --help` | no | rc=127·没有这个命令 |  | 127 | 0.016 | 65 | tool_error | /bin/sh: 1: pvs: not found |
+| 82 | `python3 -c 'print(1)'` | ok | 读到宿主数据 |  | 0 | 0.025 | 1 | ok | 1 |
+| 83 | `quota --help` | no | rc=127·没有这个命令 |  | 127 | 0.016 | 67 | tool_error | /bin/sh: 1: quota: not found |
+| 84 | `repquota --help` | no | rc=127·没有这个命令 |  | 127 | 0.019 | 70 | tool_error | /bin/sh: 1: repquota: not found |
+| 85 | `resolvectl status` | no | rc=1/2 |  | 1 | 0.024 | 45 | sb_fail | sd_bus_open_system: No such file or directory |
+| 86 | `route -n` | ok | 读到宿主数据 |  | 0 | 0.018 | 341 | ok | Kernel IP routing table |
+| 87 | `rtstat` | ok | 超时被杀 | a | 137 | 10.007 | 1231 | tool_error | rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_ |
+| 88 | `sed -n 1,3p /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.135 | 83 | ok | MemTotal:        4004744 kB |
+| 89 | `setquota --help` | no | rc=127·没有这个命令 |  | 127 | 0.013 | 70 | tool_error | /bin/sh: 1: setquota: not found |
+| 90 | `sha256sum /etc/aikernel/policy.conf` | partial | 读到一部分 |  | 0 | 0.015 | 91 | ok | 6eb8e39b6e3edd841b48211adefb53bf60a8c80e8eafc596d11af974494c9d9a  /etc/aikernel/policy.conf |
+| 91 | `slabtop -o -s c` | ok | 读到宿主数据（超 8KB 截断） |  | 0 | 0.018 | 13897 | ok |  Active / Total Objects (% used)    : 307567 / 310479 (99.1%) |
+| 92 | `smartctl -a /dev/sda` | no | rc=1/2 |  | 2 | 0.02 | 197 | sb_fail | smartctl 7.2 2020-12-30 r5155 [x86_64-linux-6.18.39] (local build) |
+| 93 | `sort /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.017 | 1446 | ok | Active(anon):        332 kB |
+| 94 | `ss -tunl` | ok | 读到宿主数据 |  | 0 | 0.022 | 813 | ok | Netid State  Recv-Q Send-Q   Local Address:Port  Peer Address:PortProcess |
+| 95 | `sshd -T` | no | rc=1/2 |  | 1 | 0.02 | 47 | sb_fail | /etc/ssh/sshd_config: No such file or directory |
+| 96 | `stat /usr/local/bin/occ` | partial | 读到一部分 |  | 0 | 0.017 | 390 | ok |   File: /usr/local/bin/occ |
+| 97 | `strace -c true` | partial | 读到一部分 |  | 0 | 0.027 | 1143 | ok | % time     seconds  usecs/call     calls    errors syscall |
+| 98 | `swapon --show` | no | 读到宿主数据 | b1 | 0 | 0.019 | 59 | ok | NAME      TYPE SIZE USED PRIO |
+| 99 | `sysctl -a` | ok | 读到宿主数据（超 8KB 截断） |  | 0 | 0.041 | 42246 | ok | abi.vsyscall32 = 1 |
+| 100 | `systemctl list-units --no-pager` | no | rc=1/2 |  | 1 | 0.016 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 101 | `systemd-analyze time` | no | rc=1/2 |  | 1 | 0.021 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 102 | `systemd-cgls --no-pager` | no | rc=1/2 |  | 1 | 0.017 | 129 | sb_fail | Failed to get root control group path. |
+| 103 | `systemd-cgtop -n 1` | no | rc=1/2 |  | 1 | 0.018 | 58 | sb_fail | Failed to determine supported controllers: No medium found |
+| 104 | `systemd-detect-virt` | ok | 读到宿主数据 |  | 0 | 0.022 | 6 | ok | vmware |
+| 105 | `tail -n 5 /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.017 | 139 | ok | Hugepagesize:       2048 kB |
+| 106 | `tc -j qdisc show` | ok | 读到宿主数据 |  | 0 | 0.025 | 290 | ok | [{"kind":"noqueue","handle":"0:","dev":"lo","root":true,"refcnt":2,"options":{}},{"kind":"fq_codel","handle":"0:","dev": |
+| 107 | `timedatectl show` | no | rc=1/2 |  | 1 | 0.027 | 117 | sb_fail | System has not been booted with systemd as init system (PID 1). Can't operate. |
+| 108 | `top -b -n 1` | no | 读到一部分 | b1 | 0 | 0.168 | 603 | ok | top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 |
+| 109 | `traceroute -n -m 5 127.0.0.1` | ok | 读到宿主数据 |  | 0 | 0.014 | 108 | ok | traceroute to 127.0.0.1 (127.0.0.1), 5 hops max, 46 byte packets |
+| 110 | `udevadm info /sys/class/net` | no | rc=0·不是宿主数据 | b2 | 0 | 0.016 | 63 | ok | P: /class/net |
+| 111 | `uname -r` | ok | 读到宿主数据 |  | 0 | 0.016 | 7 | ok | 6.18.39 |
+| 112 | `sort /proc/meminfo \| uniq -c` | ok | 读到宿主数据 |  | 0 | 0.02 | 1862 | ok |       1 Active(anon):        332 kB |
+| 113 | `uptime` | ok | 读到宿主数据 |  | 0 | 0.018 | 68 | ok |  18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 |
+| 114 | `useradd -D` | no | rc=0·不是宿主数据 | b2 | 0 | 0.019 | 83 | ok | GROUP=100 |
+| 115 | `vgs --help` | no | rc=127·没有这个命令 |  | 127 | 0.015 | 65 | tool_error | /bin/sh: 1: vgs: not found |
+| 116 | `vmstat 1 2` | ok | 读到宿主数据 |  | 0 | 1.018 | 325 | ok | procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu----- |
+| 117 | `vmstat -d` | ok | 读到宿主数据 |  | 0 | 0.015 | 959 | ok | disk- ------------reads------------ ------------writes----------- -----IO------ |
+| 118 | `w -h` | no | rc=0·零字节 | b2/c | 0 | 0.018 | 0 | ok | （空） |
+| 119 | `wc -l /proc/meminfo` | ok | 读到宿主数据 |  | 0 | 0.019 | 16 | ok | 52 /proc/meminfo |
+| 120 | `wdctl` | no | rc=1/2 |  | 1 | 0.021 | 65 | sb_fail | wdctl: No default device is available.: No such file or directory |
+| 121 | `wget -q -O - http://127.0.0.1:8000/health` | ok | 读到宿主数据 |  | 0 | 0.026 | 31 | ok | {"status":"ok","memories":7199} |
+| 122 | `whereis ls` | ok | 读到宿主数据 |  | 0 | 0.017 | 15 | ok | ls: /usr/bin/ls |
+| 123 | `which awk` | ok | 读到宿主数据 |  | 0 | 0.015 | 12 | ok | /usr/bin/awk |
+| 124 | `who` | no | rc=0·零字节 | b2/c | 0 | 0.015 | 0 | ok | （空） |
+
+## 15. 不一致逐条清单
+
+三类按出厂机首批对账的口径分；每行给命令、退出码、输出字节数、首行与原因。「静态」列是现行判定。
+
+### 15.1 (a) 静态判 ok / partial，实测读不到
+
+静态规则错了，或规则依赖的前提在沙箱里不成立。
+
+| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 原因与证据 | 补测 |
+|---:|---|---|---|---:|---:|---|---|---|
+| 17 | `arping -c 1 127.0.0.1` | ok | rc=1/2 | 2 | 48 | arping: interface eth0 not found: No such device | arping 的缺省接口是 eth0，该机网卡叫 enp0s17 → 接口不存在就退出。规则依据的前提（能力集里有 CAP_NET_RAW）根本没被检验到，判定未定 依据：首行 arping: interface eth0 not found；同批 `ls /sys/class/net` 首行 enp0s17 | arping -c 1 -I lo 127.0.0.1（清单补测第 1 组） |
+| 24 | `ctstat` | ok | 超时被杀 | 137 | 0 | （空） | 不带 -c 的 ctstat 不会自己退出，10 秒超时被杀、零输出：数据面没被检验。打版机同版本 iproute2 5.15.0 上不带 -c 同样不退出 | ctstat -c 1；ls /proc/net/stat |
+| 62 | `lslocks` | ok | rc=0·零字节 | 0 | 0 | （空） | /proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见 依据：linux-6.18.39 fs/locks.c:2892-2898（locks_show）；aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁 |
+| 64 | `lsmem` | ok | rc=1/2 | 1 | 72 | lsmem: cannot open /sys/devices/system/memory: No such file or directory | 出厂内核 .config 未设 CONFIG_MEMORY_HOTPLUG → 没有 /sys/devices/system/memory。宿主上同样没有（memory.o 只在该选项下编译），不是沙箱挡的 依据：.config（# CONFIG_MEMORY_HOTPLUG is not set）；linux-6.18.39 drivers/base/Makefile:16 | — |
+| 68 | `nc -z -w 2 127.0.0.1 22` | ok | rc=1/2 | 1 | 440 | nc: invalid option -- 'z' | 该机的 nc 不支持 -z（首行 nc: invalid option -- 'z'）：样例命令本身跑不起来。TCP 连接能力没被检验——同批 curl/wget 连回环端口都成功 依据：occ_tools/sandbox.c:576-582（非 0/1/2 的退出码原样写进结果） | nc -h（看是哪一版 nc）；nc -w 2 127.0.0.1 8000 </dev/null |
+| 87 | `rtstat` | ok | 超时被杀 | 137 | 1231 | rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_ | 同 ctstat，不会自己退出；被杀前已输出 1231 字节，首行是 rt_cache 的表头——数据面是通的，坏的是样例写法 | rtstat -c 1 |
+
+### 15.2 (b) 静态判 no，实测 rc=0
+
+**(b1) 实测读到了数据（全部或一部分）——静态规则错了**（已更正的见 §15.7）：
+
+| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 原因与证据 | 补测 |
+|---:|---|---|---|---:|---:|---|---|---|
+| 67 | `mount` | no | 读到一部分 | 0 | 1515 | tmpfs on / type tmpfs (rw,nosuid,nodev,relatime,mode=755) | 不带参数的 mount 是列挂载表，是读操作、不需要 CAP_SYS_ADMIN；列出的是沙箱自己的挂载表（首行 tmpfs on /），同 findmnt | — |
+| 98 | `swapon --show` | no | 读到宿主数据 | 0 | 59 | NAME      TYPE SIZE USED PRIO | 59 字节 = 表头 + 1 行：读到宿主的 swap 清单（一个 swap 文件）。--show 读 /proc/swaps，不需要 CAP_SYS_ADMIN【推断：行内容是按打版机同版本 util-linux 2.37.2 的输出格式复算出来的（表头 SIZE 后单空格 + 28 字节一行，只有 file 型条目对得上），全文待补测】 | 带 --keep 重采一次取全文 |
+| 108 | `top -b -n 1` | no | 读到一部分 | 0 | 603 | top - 18:20:00 up 1 day,  9:51,  0 users,  load average: 0.10, 0.07, 0.05 | 汇总行取自 /proc 全局节点，是宿主数据（首行 top - … up 1 day,  9:51,  0 users, load average: …）；进程表只有沙箱自己，用户数因无 utmp 恒为 0 | — |
+
+**(b2) 跑成功了，但没读到宿主数据**——输出是沙箱自己的影子，或者干脆是空的。判「拿不到宿主数据」没错，可 occ 会显示成功，模型会把沙箱的影子当成宿主的现状（零字节的另见 §15.3）：
+
+| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 看到了什么 |
+|---:|---|---|---|---:|---:|---|---|
+| 13 | `aik-upgrade status` | no | rc=0·不是宿主数据 | 0 | 386 | === AIKernel A/B slot state (/boot/aik-slot-state) === | 报告照常打印但全是空壳：槽状态文件、grubenv、/boot 内核清单、userland 状态都不在沙箱视图，输出的是「(no state file)」「last install: (none)」；只有 /proc/cmdline 一段是真数据【推断：按脚本源码复算，386 字节吻合】 |
+| 19 | `bootctl status` | no | rc=0·不是宿主数据 | 0 | 178 | Couldn't find EFI system partition. It is recommended to mount it to /boot or /efi. | rc=0，但首行就是「Couldn't find EFI system partition」：/boot 不在沙箱视图 |
+| 30 | `dpkg-query -W` | no | rc=0·零字节 | 0 | 0 | （空） | /var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 |
+| 31 | `dpkg-query -W` | no | rc=0·零字节 | 0 | 0 | （空） | /var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 |
+| 32 | `dpkg-query -W` | no | rc=0·零字节 | 0 | 0 | （空） | /var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 |
+| 33 | `dpkg-query -W` | no | rc=0·零字节 | 0 | 0 | （空） | /var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 |
+| 34 | `du -x -d1 /var` | no | rc=0·不是宿主数据 | 0 | 16 | 0 /var/ai | 输出「0 /var/ai」是沙箱空 tmpfs /var 里的产物区空目录，不是宿主 /var 的占用 |
+| 38 | `fdisk -l` | no | rc=0·零字节 | 0 | 0 | （空） | /dev 里没有块设备节点（视图探针 ls -la /dev：total 0）→ 什么都不列、rc=0；宿主上明明有盘，AI 分不清「没有盘」与「看不见」 |
+| 43 | `getent passwd` | no | rc=0·零字节 | 0 | 0 | （空） | /etc/passwd 不在白名单 → 一条也查不到、rc=0；AI 分不清「没有用户」与「看不见」 |
+| 48 | `id` | no | rc=0·不是宿主数据 | 0 | 20 | uid=0 gid=0 groups=0 | 打印的是沙箱自己的身份（uid=0 gid=0 groups=0），用户名/组名解析不出来：无 /etc/passwd、/etc/group |
+| 51 | `journalctl -n 20 --no-pager` | no | rc=0·不是宿主数据 | 0 | 45 | No journal files were found. | rc=0，但只有一句「No journal files were found.」：/var/log/journal、/run/journal 都不在沙箱视图 |
+| 52 | `kill -0 1` | no | rc=0·零字节 | 0 | 0 | （空） | 信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功 |
+| 65 | `lsns` | no | rc=0·不是宿主数据 | 0 | 745 |         NS TYPE   NPROCS PID USER COMMAND | 列出的是沙箱自己进程的命名空间（745 字节），不是宿主的命名空间清单；occ 会显示成功 |
+| 80 | `ps -eo pid,ppid,stat,comm` | no | rc=0·不是宿主数据 | 0 | 76 |     PID    PPID STAT COMMAND | 76 字节 = 表头 + 2 行：只有沙箱里的 sh 和 ps 自己，看不到宿主进程；occ 会显示成功 |
+| 110 | `udevadm info /sys/class/net` | no | rc=0·不是宿主数据 | 0 | 63 | P: /class/net | 只回显 syspath（P: /class/net），没有任何属性：udev 库（/run/udev）不在沙箱视图 |
+| 114 | `useradd -D` | no | rc=0·不是宿主数据 | 0 | 83 | GROUP=100 | 打印的是二进制内置缺省值（GROUP=100 …），不是宿主的 /etc/login.defs：看着像配置，其实与宿主无关 |
+| 118 | `w -h` | no | rc=0·零字节 | 0 | 0 | （空） | 同 who：读不到 /var/run/utmp，恒为空、rc=0 |
+| 124 | `who` | no | rc=0·零字节 | 0 | 0 | （空） | /run 不在沙箱视图 → 读不到 /var/run/utmp，恒为空、rc=0；AI 分不清「没人登录」与「看不见」。宿主当时有没有登录会话没采集 |
+
+### 15.3 (c) rc=0 且零字节：occ 显示「成功、无输出」
+
+模型分不清「本来就没有」与「看不见」。逐条判读是真没数据，还是被沙箱视图挡了；判不了的标未定并写明补测。
+
+| 清单# | 命令 | 静态 | 判读 | 依据 | 补测 |
+|---:|---|---|---|---|---|
+| 30 | `dpkg-query -W` | no | **被沙箱视图挡了**：/var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 | aik-sandbox.c:826-829（/var、/tmp、/home 为 tmpfs 空目录） | — |
+| 31 | `dpkg-query -W` | no | **被沙箱视图挡了**：/var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 | aik-sandbox.c:826-829（/var、/tmp、/home 为 tmpfs 空目录） | — |
+| 32 | `dpkg-query -W` | no | **被沙箱视图挡了**：/var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 | aik-sandbox.c:826-829（/var、/tmp、/home 为 tmpfs 空目录） | — |
+| 33 | `dpkg-query -W` | no | **被沙箱视图挡了**：/var/lib/dpkg/status 不在沙箱视图（视图探针 ls -ld 报不存在）→ 空表 + rc=0；宿主上明明装着包，AI 分不清「没装包」与「看不见」 | aik-sandbox.c:826-829（/var、/tmp、/home 为 tmpfs 空目录） | — |
+| 38 | `fdisk -l` | no | **被沙箱视图挡了**：/dev 里没有块设备节点（视图探针 ls -la /dev：total 0）→ 什么都不列、rc=0；宿主上明明有盘，AI 分不清「没有盘」与「看不见」 | aik-sandbox.c:283-288（/dev 仅 null/zero/random/urandom[+full/tty/console]） | — |
+| 43 | `getent passwd` | no | **被沙箱视图挡了**：/etc/passwd 不在白名单 → 一条也查不到、rc=0；AI 分不清「没有用户」与「看不见」 | aik-sandbox.c:274-281（/etc 白名单仅 4 文件；passwd/group/sudoers 不挂） | — |
+| 52 | `kill -0 1` | no | **不适用：成功本来就没有输出**：信号权限检查成功，但对象是沙箱自己的 1 号进程 sh，不是宿主 PID 1——假成功 | aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | — |
+| 62 | `lslocks` | ok | **被沙箱视图挡了**：/proc/locks 按读取端 procfs 的 PID 命名空间过滤：属主进程不在本命名空间就不显示。沙箱是独立 PID 命名空间里新挂的 procfs，只列得出沙箱自己进程的锁，宿主锁看不见 | linux-6.18.39 fs/locks.c:2892-2898（locks_show）；aik-sandbox.c:2832-2835,2301-2304（CLONE_NEWPID + 新挂 procfs：只见沙箱自身进程） | 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁 |
+| 118 | `w -h` | no | **被沙箱视图挡了**：同 who：读不到 /var/run/utmp，恒为空、rc=0 | aik-sandbox.c:824-859（根骨架无 /run） | 宿主侧对照：同一时刻在宿主上跑 who / w |
+| 124 | `who` | no | **被沙箱视图挡了**：/run 不在沙箱视图 → 读不到 /var/run/utmp，恒为空、rc=0；AI 分不清「没人登录」与「看不见」。宿主当时有没有登录会话没采集 | aik-sandbox.c:824-859（根骨架无 /run） | 宿主侧对照：同一时刻在宿主上跑 who / w |
+
+### 15.4 退出码非零，但输出里有数据
+
+occ 会把这些标成「沙箱执行失败」或「命令超时」，可输出里带着读到的数据（AIF-09 同类）。
+
+| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 说明 |
+|---:|---|---|---|---:|---:|---|---|
+| 54 | `lnstat -c 1` | ok | 读到宿主数据 | 1 | 2163 | nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_connt\|nf_ | rc=1 却有 2163 字节数据（首行是 nf_conntrack 的表头）：iproute2 的 lnstat -c 采完一次就返回 1（打版机同版本复现 rc=1 且有数据）。数据读到了，但 occ 会把它标成「沙箱执行失败」 |
+| 87 | `rtstat` | ok | 超时被杀 | 137 | 1231 | rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_cache\|rt_ | 同 ctstat，不会自己退出；被杀前已输出 1231 字节，首行是 rt_cache 的表头——数据面是通的，坏的是样例写法 |
+
+### 15.5 输出超过 8KB，被 occ 截断
+
+读得到，但模型只看得到前 8192 字节；要全文得自己加过滤（`| tail`、`| grep`）。
+
+| 清单# | 命令 | 静态 | 实测 | rc | 字节 | 首行 | 说明 |
+|---:|---|---|---|---:|---:|---|---|
+| 29 | `dmesg --color=never` | ok | 读到宿主数据 | 0 | 42197 | [    0.000000] Linux version 6.18.39 (jack66g@jack66g-virtual-machine) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, GNU | 模型只看得到前 8KB |
+| 73 | `nstat -az` | ok | 读到宿主数据 | 0 | 17442 | #kernel | 模型只看得到前 8KB |
+| 91 | `slabtop -o -s c` | ok | 读到宿主数据 | 0 | 13897 |  Active / Total Objects (% used)    : 307567 / 310479 (99.1%) | 模型只看得到前 8KB |
+| 99 | `sysctl -a` | ok | 读到宿主数据 | 0 | 42246 | abi.vsyscall32 = 1 | 模型只看得到前 8KB |
+
+### 15.6 判读注记失效 / 静态表里没有的命令 / 采集后静态判定变过
+
+- 注记失效（实测结果与判读所依据的那一行不同，要人重看）：无。
+- 清单里有、静态表里没有的命令：无。
+- 采集时清单上标的判定与现行静态判定不同的条目：#20（§14 里写成「采集时 → 现值」）。
+
+### 15.7 已按实测更正的静态规则
+
+只有实测给出了明确正确判定的才改静态表；只证明了「样例跑不起来」、没证明正确判定是什么的不改（留在 §15.1，挂补测）。
+
+（本轮没有改静态表。）
+
+## 16. 对象级实测判定（出厂 root，分母 90）
+
+- **实测直接确认读到数据 20/90**（读到宿主数据 16 + 读到但仅一部分 4），全部落在静态可读的 81 个之内。**没有出现「静态说能读、实测读不到」的对象**（实测读不到 0、未定 0、静态不可达却读到 0）。
+- 与静态口径 81/90 的差 61 个是**未测**，不是否定：其中 30 个的可达读面只有宿主工具（occ read / glob / config_write_network），本批探测不经过那条通道；另 31 个还有没采到的沙箱/回环路径（其中 31 个已有同命令样例读到数据的旁证）。待采条目见 §17。
+- 静态不可达 9 个：实测确认 3 个（DISK-03、PKG-04、SYS-06）；未测 6 个（MEM-08、PKG-03、SB-01、SB-02、SB-04、SYS-02）。
+- **零字节假成功**：10 行、7 条命令，涉及 4 个对象（ID-01、ID-03、PKG-01、PKG-04）。全是静态已判不可达的沙箱路径，对象级结论不变；但 occ 会把这几条显示成「成功、无输出」。
+- **rc=0 但输出不是宿主数据**（误导性成功）：涉及 3 个对象（DISK-05、PROC-01、SYS-05）。
+- 「已测读面」只算与路径同一条命令（或同一命令多带参数）的实测；「没测到」里括号内的同命令旁证不计入。
+
+| 对象 | 静态（root） | 实测判定 | 已测读面 → 实测 | 没测到的可达读面 |
+|---|---|---|---|---|
+| PROC-01 进程枚举与属性 | 读/raw（仅部分） | 未测 | `ps -eo pid,ppid,stat,comm` [no → rc=0·不是宿主数据] | 宿主工具 2 条 |
+| PROC-02 线程 | 读/raw | 未测 | — | 宿主工具 2 条 |
+| PROC-03 调度属性与内核控制 | 读/structured | 未测 | — | 宿主工具 2 条 |
+| PROC-04 进程内存/IO/文件描述符 | 读/structured | 未测 | — | 宿主工具 3 条 |
+| PROC-05 进程 cgroup 归属 | 读/structured | 未测 | — | 宿主工具 1 条 |
+| RES-01 CPU 拓扑/型号 | 读/structured | 实测读到 | `lscpu -J` [ok → 读到宿主数据] | 宿主工具 1 条<br>`cat /proc/cpuinfo`（同命令样例：读到宿主数据） |
+| RES-02 CPU 使用率/负载 | 读/structured | 实测读到 | `uptime` [ok → 读到宿主数据]<br>`vmstat 1 2` [ok → 读到宿主数据] | 宿主工具 1 条<br>`cat /proc/stat`（同命令样例：读到宿主数据） |
+| RES-03 CPU 频率/调频 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`（同命令样例：读到宿主数据） |
+| RES-04 内存/swap | 读/structured | 实测读到 | `free -b` [ok → 读到宿主数据]<br>`cat /proc/meminfo` [ok → 读到宿主数据] | 宿主工具 1 条<br>`cat /proc/swaps`（同命令样例：读到宿主数据） |
+| RES-05 PSI 压力（CPU/内存/IO） | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /proc/pressure/cpu`（同命令样例：读到宿主数据）<br>`cat /proc/pressure/memory`（同命令样例：读到宿主数据）<br>+1 |
+| RES-06 块 IO 统计 | 读/structured | 实测读到 | `vmstat -d` [ok → 读到宿主数据] | 宿主工具 2 条<br>`cat /proc/diskstats`（同命令样例：读到宿主数据）<br>`cat /sys/block/sda/stat`（同命令样例：读到宿主数据） |
+| RES-07 IO 调参（预读/优先级/带宽） | 读/structured | 未测 | — | 宿主工具 2 条<br>`cat /sys/class/bdi/8:0/read_ahead_kb`（同命令样例：读到宿主数据） |
+| CG-01 cgroup v2 层级/限额 | 读/structured | 未测 | — | 宿主工具 3 条 |
+| CG-02 cgroup 统计/AI 推理计数 | 读/structured | 未测 | — | 宿主工具 2 条 |
+| FS-01 文件内容读取 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| FS-02 目录枚举 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| FS-03 元数据/链接 | 读/structured（仅部分） | 实测读到（仅一部分） | `stat /usr/local/bin/occ` [partial → 读到一部分] | 宿主工具 1 条 |
+| FS-04 文件写入/编辑 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| FS-05 删除/重命名 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| FS-06 文件 ACL | n/a | n/a | — | — |
+| FS-07 扩展属性 xattr | n/a | n/a | — | — |
+| FS-08 文件属性 chattr/lsattr | 读/raw（仅部分） | 实测读到（仅一部分） | `lsattr /usr/local/bin/occ` [partial → 读到一部分] | — |
+| FS-09 文件完整性/校验和 | n/a | n/a | `sha256sum /etc/aikernel/policy.conf` [partial → 读到一部分] | — |
+| FS-10 磁盘配额 | n/a | n/a | `quota --help` [no → rc=127·没有这个命令] | — |
+| DISK-01 块设备/分区 | 读/structured | 实测读到 | `lsblk -J` [ok → 读到宿主数据]<br>`blkid -o export` [no → rc=1/2] | 宿主工具 1 条<br>`cat /proc/partitions`（同命令样例：读到宿主数据） |
+| DISK-02 文件系统/挂载 | 读/structured | 未测 | `dumpe2fs -h /dev/sda1` [no → rc=1/2] | 宿主工具 2 条<br>`cat /proc/mounts`（同命令样例：读到宿主数据） |
+| DISK-03 SMART/磁盘健康 | 不可达 | 不可达·实测确认 | `smartctl -a /dev/sda` [no → rc=1/2] | — |
+| DISK-04 LVM/逻辑卷 | 读/structured | 实测读到 | `lsblk -J` [ok → 读到宿主数据] | 宿主工具 1 条 |
+| DISK-05 磁盘用量/inode | 读/structured（仅部分） | 实测读到（仅一部分） | `df -P` [partial → 读到一部分]<br>`du -x -d1 /var` [no → rc=0·不是宿主数据] | — |
+| DISK-06 TRIM/软 RAID/dm | 读/structured | 实测读到 | `lsblk -J` [ok → 读到宿主数据] | 宿主工具 1 条<br>`cat /proc/mdstat`（同命令样例：读到宿主数据） |
+| SYS-01 units/服务状态 | 读/raw（仅部分） | 未测 | `systemctl list-units --no-pager` [no → rc=1/2] | 宿主工具 2 条 |
+| SYS-02 失败单元 | 不可达 | 不可达·未测 | — | — |
+| SYS-03 journal 日志 | 读/raw | 未测 | — | 宿主工具 2 条 |
+| SYS-04 内核日志/dmesg | 读/raw（依赖运行态） | 实测读到 | `dmesg --color=never` [ok → 读到宿主数据] | — |
+| SYS-05 启动链 A/B/内核参数 | 读/structured | 未测 | `aik-upgrade status` [no → rc=0·不是宿主数据] | 宿主工具 3 条<br>`cat /proc/cmdline`（同命令样例：读到宿主数据） |
+| SYS-06 启动耗时 | 不可达 | 不可达·实测确认 | `systemd-analyze time` [no → rc=1/2] | — |
+| SYS-07 timers/计划任务总览 | 读/raw | 未测 | — | 宿主工具 2 条 |
+| SYS-08 unit 配置/drop-in | 读/raw | 未测 | — | 宿主工具 2 条 |
+| NET-01 接口/链路/网卡诊断 | 读/structured | 未测 | `ethtool eth0` [no → rc=127·没有这个命令] | 宿主工具 2 条<br>`ip -j link`（同命令样例：读到宿主数据）<br>`cat /sys/class/net/eth0/statistics/rx_bytes`（同命令样例：读到宿主数据） |
+| NET-02 地址/路由 | 读/structured | 实测读到 | `ip -j addr` [ok → 读到宿主数据] | 宿主工具 1 条<br>`ip -j route`（同命令样例：读到宿主数据）<br>`cat /proc/net/route`（同命令样例：读到宿主数据） |
+| NET-03 连接/套接字 | 读/structured | 实测读到 | `ss -tunl` [ok → 读到宿主数据] | 宿主工具 1 条<br>`cat /proc/net/tcp`（同命令样例：读到宿主数据） |
+| NET-04 conntrack 连接跟踪 | 读/structured（依赖运行态） | 未测 | `conntrack -L` [no → rc=127·没有这个命令] | 宿主工具 1 条<br>`cat /proc/net/nf_conntrack`（同命令样例：读到宿主数据） |
+| NET-05 DNS 解析配置 | 读/structured | 实测读到 | `nslookup 127.0.0.1` [ok → 读到宿主数据]<br>`resolvectl status` [no → rc=1/2] | 宿主工具 1 条<br>`cat /etc/resolv.conf`（同命令样例：读到宿主数据） |
+| NET-06 防火墙/LSM 策略 | 读/raw | 未测 | `nft list ruleset` [no → rc=1/2] | 宿主工具 2 条 |
+| NET-07 网络命名空间 | 读/raw（仅部分）（依赖运行态） | 未测 | — | 宿主工具 1 条 |
+| NET-08 接口配置/qdisc | 读/structured | 未测 | — | 宿主工具 2 条<br>`ip -d -j link`（同命令样例：读到宿主数据）<br>`cat /sys/class/net/eth0/mtu`（同命令样例：读到宿主数据） |
+| ID-01 用户账户 | 读/raw | 未测 | `getent passwd` [no → rc=0·零字节] | 宿主工具 1 条 |
+| ID-02 组/成员 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| ID-03 登录会话 | 读/raw（仅部分） | 未测 | `who` [no → rc=0·零字节] | 宿主工具 1 条 |
+| ID-04 sudoers | 读/raw | 未测 | — | 宿主工具 1 条 |
+| ID-05 授权策略/租约 | 读/structured | 实测读到 | `aikctl policy get` [ok → 读到宿主数据] | 宿主工具 3 条 |
+| ID-06 SSH 服务配置 | 读/raw | 未测 | — | 宿主工具 2 条 |
+| ID-07 SSH authorized_keys | 读/raw | 未测 | — | 宿主工具 1 条 |
+| ID-08 SSH 主机密钥状态 | 读/raw | 未测 | — | 宿主工具 2 条 |
+| PKG-01 已安装包 | 读/raw | 未测 | `dpkg-query -W` [no → rc=0·零字节] | 宿主工具 1 条 |
+| PKG-02 仓库/源 | 读/raw | 未测 | — | 宿主工具 3 条 |
+| PKG-03 可用更新 | 不可达 | 不可达·未测 | — | — |
+| PKG-04 安装/卸载/升级 | 不可达 | 不可达·实测确认 | `dpkg-query -W` [no → rc=0·零字节] | — |
+| PKG-05 依赖/版本/内核模块 | 读/raw | 实测读到 | `uname -r` [ok → 读到宿主数据] | 宿主工具 1 条 |
+| HW-01 CPU 硬件 | 读/structured | 实测读到 | `lscpu -J` [ok → 读到宿主数据] | 宿主工具 1 条 |
+| HW-02 GPU/显示 | 读/raw（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/class/drm/card0/status`（同命令样例：读到宿主数据） |
+| HW-03 温度/风扇 | 读/raw（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/class/thermal/thermal_zone0/temp`（同命令样例：读到宿主数据）<br>`cat /sys/class/hwmon/hwmon0/temp1_input`（同命令样例：读到宿主数据） |
+| HW-04 电源/电池 | 读/raw（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/class/power_supply/ACAD/online`（同命令样例：读到宿主数据） |
+| HW-05 PCI/USB/设备树 | 读/raw | 未测 | — | 宿主工具 1 条<br>`cat /sys/bus/pci/devices/0000:00:02.0/vendor`（同命令样例：读到宿主数据）<br>`aikctl compat hw`（同命令样例：读到宿主数据） |
+| AI-01 /proc/ai/status | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /proc/ai/status`（同命令样例：读到宿主数据） |
+| AI-02 /proc/ai/control 参数表 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /proc/ai/control`（同命令样例：读到宿主数据） |
+| AI-03 决策/因果链 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /proc/ai/decisions`（同命令样例：读到宿主数据）<br>`cat /proc/ai/chains`（同命令样例：读到宿主数据） |
+| AI-04 遥测/netlink SENSE | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /proc/ai/telemetry`（同命令样例：读到宿主数据） |
+| AI-05 AI 统计计数 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 2 条<br>`cat /proc/ai/hitrate`（同命令样例：读到宿主数据）<br>`cat /proc/ai/latency`（同命令样例：读到宿主数据）<br>+3 |
+| AI-06 内核模型加载/推理 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/kernel/ai/model_out`（同命令样例：读到宿主数据）<br>`cat /proc/ai/status`（同命令样例：读到宿主数据） |
+| AI-07 策略/回滚 | 读/structured（依赖运行态） | 未测 | — | 宿主工具 1 条<br>`cat /sys/kernel/ai/decision/stats`（同命令样例：读到宿主数据）<br>`cat /proc/ai/hitrate`（同命令样例：读到宿主数据） |
+| AI-08 KUnit/内核测试 | 读/raw（依赖运行态） | 实测读到 | `dmesg --color=never` [ok → 读到宿主数据] | — |
+| MEM-01 SME 健康/统计 | 读/structured（依赖运行态） | 实测读到 | `curl -s http://127.0.0.1:8000/health` [ok → 读到宿主数据] | `curl -s http://127.0.0.1:8000/stats`（同命令样例：读到宿主数据） |
+| MEM-02 记忆 CRUD/检索 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8000/export`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8000/memories/<id>`（同命令样例：读到宿主数据） |
+| MEM-03 事实图谱/多跳 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8000/graph`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8000/facts`（同命令样例：读到宿主数据） |
+| MEM-04 Region 空间聚类 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8000/regions`（同命令样例：读到宿主数据） |
+| MEM-05 QA/画像/指标/配置 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8000/qapairs`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8000/profile`（同命令样例：读到宿主数据）<br>+2 |
+| MEM-06 trace JSONL 文件 | 读/structured | 未测 | — | 宿主工具 2 条 |
+| MEM-07 训练导出 | n/a | n/a | — | — |
+| MEM-08 会话历史 | 不可达 | 不可达·未测 | — | — |
+| SB-01 隔离区列表/状态/资源限额 | 不可达 | 不可达·未测 | — | — |
+| SB-02 沙箱资源限制 | 不可达 | 不可达·未测 | — | — |
+| SB-03 隔离区产物/残留 | 读/raw | 未测 | — | 宿主工具 1 条 |
+| SB-04 spawn/destroy 生命周期 | 不可达 | 不可达·未测 | — | — |
+| SB-05 子智能体工具面/子会话 trace | 读/structured（仅部分） | 未测 | — | 宿主工具 1 条 |
+| DT-01 桌面健康/统计 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/health`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8091/api/stats`（同命令样例：读到宿主数据） |
+| DT-02 应用枚举/启动/关闭 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/apps`（同命令样例：读到宿主数据） |
+| DT-03 窗口 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/windows`（同命令样例：读到宿主数据） |
+| DT-04 主题/壁纸 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/theme`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8091/api/wallpaper`（同命令样例：读到宿主数据） |
+| DT-05 通知 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/notifs`（同命令样例：读到宿主数据） |
+| DT-06 输入注入（键鼠） | n/a | n/a | — | — |
+| DT-07 截图 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/screenshot`（同命令样例：读到宿主数据） |
+| DT-08 剪贴板 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/clipboard`（同命令样例：读到宿主数据） |
+| DT-09 聊天/会话/电源 | 读/structured（依赖运行态） | 未测 | — | `curl -s http://127.0.0.1:8091/api/chat/history`（同命令样例：读到宿主数据）<br>`curl -s http://127.0.0.1:8091/api/chat/sessions`（同命令样例：读到宿主数据） |
+| TIME-01 时钟/NTP | 读/raw | 实测读到（仅一部分） | `date` [partial → 读到一部分]<br>`timedatectl show` [no → rc=1/2] | 宿主工具 1 条 |
+| TIME-02 用户 crontab | n/a | n/a | — | — |
+| TIME-03 系统 cron/timers | 读/raw | 未测 | — | 宿主工具 3 条 |
+
+## 17. 待补测清单
+
+清单里还没有实测数据的 74 条（按清单顺序；`occ_reach_probe.sh --only "<首 token>,…"` 可挑着跑，采完用 `--write-baseline --reach-tsv <旧 TSV> --reach-tsv <新 TSV>` 并库）。
+
+```
+ok	arping -c 1 -I lo 127.0.0.1
+view	nc -h
+ok	nc -w 2 127.0.0.1 8000 </dev/null
+ok	ctstat -c 1
+ok	rtstat -c 1
+view	ls /proc/net/stat
+view	ls /sys/devices/system
+view	cat /proc/locks
+view	cat /proc/swaps
+view	ls -ld /etc/localtime /etc/timezone
+view	ls /dev
+ok	cat /proc/cpuinfo
+ok	cat /proc/stat
+ok	cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+ok	cat /proc/swaps
+ok	cat /proc/pressure/cpu
+ok	cat /proc/pressure/memory
+ok	cat /proc/pressure/io
+ok	cat /proc/diskstats
+ok	cat /sys/block/sda/stat
+ok	cat /sys/class/bdi/8:0/read_ahead_kb
+ok	cat /proc/partitions
+partial	cat /proc/mounts
+ok	cat /proc/mdstat
+ok	cat /proc/cmdline
+ok	ip -j link
+ok	cat /sys/class/net/eth0/statistics/rx_bytes
+ok	ip -j route
+ok	cat /proc/net/route
+ok	cat /proc/net/tcp
+ok	cat /proc/net/nf_conntrack
+ok	cat /etc/resolv.conf
+ok	ip -d -j link
+ok	cat /sys/class/net/eth0/mtu
+ok	cat /sys/bus/pci/devices/0000:00:02.0/vendor
+ok	cat /sys/class/drm/card0/status
+ok	cat /sys/class/thermal/thermal_zone0/temp
+ok	cat /sys/class/hwmon/hwmon0/temp1_input
+ok	cat /sys/class/power_supply/ACAD/online
+ok	cat /proc/ai/status
+ok	cat /proc/ai/control
+ok	cat /proc/ai/decisions
+ok	cat /proc/ai/chains
+ok	cat /proc/ai/telemetry
+ok	cat /proc/ai/hitrate
+ok	cat /proc/ai/latency
+ok	cat /sys/kernel/ai/stats/telemetry_emitted
+ok	cat /sys/kernel/ai/stats/decisions_total
+ok	cat /sys/kernel/ai/stats/runtime_state
+ok	cat /sys/kernel/ai/model_out
+ok	cat /sys/kernel/ai/decision/stats
+partial	date
+ok	curl -s -m 5 http://127.0.0.1:8000/stats
+ok	curl -s -m 5 http://127.0.0.1:8091/api/health
+ok	curl -s -m 5 http://127.0.0.1:8091/api/stats
+ok	curl -s -m 5 http://127.0.0.1:8091/api/apps
+ok	curl -s -m 5 http://127.0.0.1:8091/api/theme
+ok	aikctl policy get
+partial	aikctl compat hw
+no	aikctl session list
+no	aikctl policy get sudoers
+no	ps -eo pid,ni,pri,comm
+no	cat /sys/fs/cgroup/cgroup.procs
+no	cat /sys/fs/cgroup/cgroup.controllers
+no	cat /sys/fs/cgroup/memory.current
+no	systemctl list-timers --no-pager
+no	systemctl --failed --no-legend
+no	apt list --upgradable
+no	cat /sys/kernel/security/apparmor/profiles
+no	ip netns list
+no	cat /etc/passwd
+no	getent group
+no	ps -eo user,tty,stat,comm
+no	cat /sys/kernel/debug/kunit/results
+```
+
+沙箱里做不了、得在宿主侧同一时刻做的对照：
+
+- 宿主侧对照：同一时刻在宿主上跑 lslocks，应有锁
+- 宿主侧对照：同一时刻在宿主上跑 who / w
 
 <!-- MAPPING_SHA256: bc0f373c577090cda30f6fba54d0a697affe1f3afdecbac84bd54dc5d5908aab -->
