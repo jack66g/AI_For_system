@@ -36,9 +36,9 @@
  *     确实改变检索行为；修复前这两个键被配置层白名单丢弃。
  *
  * 段 5：MEM-02b 导入数值校验（文件末尾，自包含）
- *   - 会污染排序信号的非法值（hit_count < 0、weight < 0、数值字段非有限）
- *     在记忆反序列化入口被拒（上游 ed5378a _validate_memory_numbers 的
- *     子集，不含 importance 越界）；合法值与边界值照常入库。
+ *   - 会污染排序信号的非法值（hit_count < 0、weight < 0、importance 不在
+ *     [0,1]、数值字段非有限）在记忆反序列化入口被拒（上游 ed5378a
+ *     _validate_memory_numbers 全量）；合法值与边界值照常入库。
  *
  * 末行 "SUMMARY engine checks=N mismatches=M"；有失配退出码 1。
  */
@@ -3318,6 +3318,10 @@ static void run_mem02b_import_tests(void)
 		  "1e300" },
 		{ "weight", "weight must be a finite non-negative number",
 		  "-1.0" },
+		  { "importance", "importance must be finite in [0,1]", "7.5" },
+		  { "importance", "importance must be finite in [0,1]", "-0.5" },
+		  { "importance", "importance must be finite in [0,1]", "2" },
+		  { "importance", "importance must be finite in [0,1]", "-1" },
 		{ "importance", "importance must be finite in [0,1]", "1e999" },
 		{ "created_at", "created_at must be finite", "1e999" },
 		{ "last_hit", "last_hit must be finite", "-1e999" },
@@ -3414,15 +3418,22 @@ static void run_mem02b_import_tests(void)
 	check_int("m02b search: scores finite", finite, 1);
 	aik_json_free(out);
 
-	/* importance 越界：既有行为不变（放行；上游 HEAD 会拒绝，留给主会话） */
+	/* importance 边界：0 与 1 合法（闭区间，与上游 0.0 <= x <= 1.0 一致；
+	 * 浮点与整数两种 JSON 形态都试）。越界值的拒绝在上面的 bad[]。 */
 	items = parse_text(
-		"[{\"id\":\"wide\",\"text\":\"wide importance\",\"importance\":7.5}]",
-		"m02b wide parse");
+		"[{\"id\":\"wide0\",\"text\":\"importance zero\",\"importance\":0.0},"
+		"{\"id\":\"wide1\",\"text\":\"importance one\",\"importance\":1.0},"
+		"{\"id\":\"wide2\",\"text\":\"importance int one\",\"importance\":1},"
+		"{\"id\":\"wide3\",\"text\":\"importance int zero\",\"importance\":0}]",
+		"m02b bounds parse");
 	if (items) {
 		n = -99;
-		check_int("m02b wide: rc", aik_engine_import(e, items, &n, err,
-							      sizeof(err)), 0);
-		check_int("m02b wide: count", n, 1);
+		err[0] = '\0';
+		check_int("m02b bounds: rc", aik_engine_import(e, items, &n, err,
+						       sizeof(err)), 0);
+		check_int("m02b bounds: count", n, 4);
+		check_int("m02b bounds: memories",
+			  (long long)aik_engine_memory_count(e), 7);
 		aik_json_free(items);
 	}
 

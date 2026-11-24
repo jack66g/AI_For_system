@@ -44,8 +44,8 @@
  * MEM-02b（上游 ed5378a sme/models.py::_validate_memory_numbers，P2-4）：
  *  19. POST /import、/import/file：hit_count < 0、weight < 0、数值字段非
  *      有限（1e999 溢出的 ±inf）→ 整批 422（value_error，loc 指到条目与
- *      字段，与空白 text 的 422 同款），什么都没入库；importance 越界
- *      （7.5）仍按既有行为放行；边界值放行后检索分数有限。
+ *      字段，与空白 text 的 422 同款；importance 不在 [0,1] 同拒），
+ *      什么都没入库；边界值放行后检索分数有限。
  * 自 MEM-02a 起配置热重建会往 storage.path 写快照，所以：
  *  - 默认配置那台服务器的子进程先 chdir 到临时目录（默认 storage.path
  *    是相对路径 data/engine.json），快照落在临时目录里而不是源码树；
@@ -2906,7 +2906,7 @@ static void test_dynamics_http(int port)
 /* _nan_importance_rejected / _valid_items_still_work。上游 HEAD 的    */
 /* POST /import 对这类数据是未捕获 ValueError → 500；C 版按任务书回 422 */
 /* （value_error，与空白 text 的 422 同款），并且先整体校验、整批原子拒绝。 */
-/* importance 越界（7.5）不在拒绝范围内：C 版既有行为不变。              */
+/* importance 不在 [0,1] 同拒（上游同拒；信号直接进 final 不经 clamp）。   */
 /* ------------------------------------------------------------------ */
 static long long export_count(int port);
 
@@ -3042,6 +3042,16 @@ static void test_mem02b_import(int port)
 		{ "[{\"id\":\"p8\",\"text\":\"poison eight\",\"hit_count\":1e300}]",
 		  "hit_count", "hit_count must be a non-negative integer",
 		  0, 0, NULL },
+		/* importance 越界：整数与浮点两种形态都拒（闭区间之外） */
+		{ "[{\"id\":\"p9\",\"text\":\"poison nine\",\"importance\":2}]",
+		  "importance", "importance must be finite in [0,1]",
+		  1, 2, NULL },
+		{ "[{\"id\":\"p10\",\"text\":\"poison ten\",\"importance\":-1}]",
+		  "importance", "importance must be finite in [0,1]",
+		  1, -1, NULL },
+		{ "[{\"id\":\"p11\",\"text\":\"poison eleven\",\"importance\":1.5}]",
+		  "importance", "importance must be finite in [0,1]",
+		  0, 0, NULL },
 	};
 	char body[1024];
 	int status = -1;
@@ -3083,17 +3093,32 @@ static void test_mem02b_import(int port)
 		   "m02b NaN literal type");
 	aik_json_free(root);
 
-	/* importance 越界：既有行为不变（放行；上游 HEAD 是 422，留给主会话） */
+	/* importance 越界 → 422（上游同拒；importance 直接进 final 不经 clamp） */
 	status = -1;
 	root = call_json(port, "POST", "/import",
 			 "{\"memories\":[{\"id\":\"ok1\",\"text\":\"mem02b valid "
-			 "memory\",\"hit_count\":3,\"weight\":1.4,"
-			 "\"importance\":7.5}]}",
+		 "memory\",\"hit_count\":3,\"weight\":1.4,"
+		 "\"importance\":7.5}]}",
 			 &status, NULL);
-	check_int(status, 200,
-		  "m02b importance out of range status (existing behaviour)");
+	check_int(status, 422, "m02b importance out of range status");
+	detail = root ? first_detail(root, "m02b importance out of range") : NULL;
+	if (detail)
+		check_value_error(detail, 1, 0, "importance",
+					  "importance must be finite in [0,1]",
+					  0, 0, NULL, "m02b importance out of range");
+	aik_json_free(root);
+	check_int(export_count(port), 0,
+		  "m02b export count after importance reject");
+	/* 同一条、importance 改回界内（0.8）→ 入库 */
+	status = -1;
+	root = call_json(port, "POST", "/import",
+			 "{\"memories\":[{\"id\":\"ok1\",\"text\":\"mem02b valid "
+		 "memory\",\"hit_count\":3,\"weight\":1.4,"
+		 "\"importance\":0.8}]}",
+			 &status, NULL);
+	check_int(status, 200, "m02b importance in range status");
 	check_int(root ? aik_json_int(aik_json_get(root, "imported")) : -99, 1,
-		  "m02b importance out of range imported");
+		  "m02b importance in range imported");
 	aik_json_free(root);
 	check_int(export_count(port), 1, "m02b export count after valid");
 

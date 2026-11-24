@@ -49,9 +49,8 @@
  * POST /import 先整体过数值校验（aik_http_import_check_numbers，与
  * /import/file 共用）：hit_count < 0、weight < 0、数值字段非有限（1e999
  * 溢出成的 ±inf）会污染排序信号 → 整批拒绝 422（value_error，与空白 text
- * 的 422 同款）。importance 越界仍按既有行为放行（上游 HEAD 会拒绝，留给
- * 主会话决定）。上游 HEAD 对这类导入是未捕获的 ValueError → 500；422 是
- * C 侧的决定。
+ * 的 422 同款；importance 不在 [0,1] 同拒，与上游一致）。上游 HEAD 对这类
+ * 导入是未捕获的 ValueError → 500；422 是 C 侧的决定。
  *
  * 引擎失败（非校验）统一 500 {"detail":"Internal Server Error"}；batch 中途
  * 失败返回参考的详细 detail（error/failed_index/committed_ids/...）。

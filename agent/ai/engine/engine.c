@@ -684,13 +684,15 @@ static double *json_embedding(const aik_json *obj, int *out_dim)
  * aik_memory_numbers_check - 记忆反序列化入口的数值校验（见 engine.h）
  *
  * MEM-02b，依据上游 ed5378a sme/models.py::_validate_memory_numbers
- * （2026-11-20 测试战役 P2-4 / P2-2）的子集：只拒会污染排序信号的值，
- * 不含 importance 越界。文案取上游原文。
+ * （2026-11-20 测试战役 P2-4 / P2-2）：拒会污染排序信号的值——
+ * hit_count < 0、weight < 0、importance 不在 [0,1]、数值字段非有限。
+ * 文案取上游原文。
  */
 int aik_memory_numbers_check(const aik_json *item, const char **field,
 			     const char **msg)
 {
-	/* rule：0 = 有限；1 = 有限且 >= 0；2 = 有限、>= 0 且落在 int64 内 */
+	/* rule：0 = 有限；1 = 有限且 >= 0；2 = 有限、>= 0 且落在 int64 内；
+	 *        3 = 有限且落在 [0,1]（闭区间） */
 	static const struct {
 		const char *name;
 		const char *why;
@@ -698,7 +700,7 @@ int aik_memory_numbers_check(const aik_json *item, const char **field,
 	} fields[] = {
 		{ "hit_count", "hit_count must be a non-negative integer", 2 },
 		{ "weight", "weight must be a finite non-negative number", 1 },
-		{ "importance", "importance must be finite in [0,1]", 0 },
+		{ "importance", "importance must be finite in [0,1]", 3 },
 		{ "created_at", "created_at must be finite", 0 },
 		{ "last_hit", "last_hit must be finite", 0 },
 		{ "freshness", "freshness must be finite", 0 },
@@ -720,8 +722,10 @@ int aik_memory_numbers_check(const aik_json *item, const char **field,
 		if (!json_is_num(v))
 			continue;	/* 缺省或非数值：沿用补默认值语义 */
 		if (aik_json_typeof(v) == AIK_JSON_INT) {
-			/* INT 本身就是 int64：只看符号 */
-			invalid = fields[i].rule >= 1 && aik_json_int(v) < 0;
+			/* INT 本身就是 int64：只看符号与 rule 3 的上界 */
+			invalid = (fields[i].rule >= 1 &&
+				   aik_json_int(v) < 0) ||
+				  (fields[i].rule == 3 && aik_json_int(v) > 1);
 		} else {
 			x = aik_json_num(v);
 			/*
@@ -732,7 +736,8 @@ int aik_memory_numbers_check(const aik_json *item, const char **field,
 			invalid = !isfinite(x) ||
 				  (fields[i].rule >= 1 && x < 0.0) ||
 				  (fields[i].rule == 2 &&
-				   x >= 9.223372036854775e18);
+				  	   x >= 9.223372036854775e18) ||
+				  (fields[i].rule == 3 && x > 1.0);
 		}
 		if (invalid) {
 			if (field)
@@ -754,7 +759,9 @@ int aik_memory_numbers_check(const aik_json *item, const char **field,
  *
  * MEM-02b：先过 aik_memory_numbers_check（import / 快照 load / WAL 重放
  * 都走这里，对应上游把校验放在 Memory.from_dict）；非法值拒绝反序列化，
- * 不带毒入库。importance 越界仍沿用既有行为（上游 HEAD 会拒绝）。
+ * 不带毒入库。importance 不在 [0,1] 同拒——ranking.importance 信号是
+ * importance × 衰减因子，直接进 final 不经 clamp（引擎自己的写入口新建/
+ * 更新/强化都夹在 [0,1]，只有反序列化入口曾不夹）。
  */
 static aik_memory *memory_from_json(aik_engine *e, const aik_json *obj,
 				    double *emb, int emb_dim, char *err,

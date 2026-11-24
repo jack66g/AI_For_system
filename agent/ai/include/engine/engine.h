@@ -185,8 +185,9 @@ int aik_engine_import(aik_engine *e, const aik_json *items,
  *   - hit_count / weight / importance / created_at / last_hit / freshness /
  *     decay_factor 非有限（±inf：JSON 字面量 NaN/Infinity 在解析期已拒，
  *     这里挡的是 1e999 这类溢出）：穿透 clamp 后 final 变 NaN/inf。
- * importance 越界（如 7.5）**不在其内**：C 版沿用既有行为，上游 HEAD 会
- * 拒绝，是否跟进留给主会话决定。
+ *   - importance 不在 [0,1]：ranking.importance 信号是 importance × 衰减
+ *     因子，直接进 final 不经 clamp（上游同拒）。引擎自己的写入口本来就
+ *     夹在 [0,1]，只有反序列化入口曾不夹。
  *
  * item 为 export 形状的一条记忆（借用）；字段缺失或不是数值时沿用既有
  * 的「补默认值」语义，不算非法。按上游检查顺序返回第一个非法字段：
