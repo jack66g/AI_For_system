@@ -922,10 +922,10 @@ int main(void)
 		s = (char *)exec_tool("bash",
 		      "{\"command\":\"echo legacy-out; exit 1\"}");
 		OK(exec_rc() == 0 && s && strstr(s, "legacy-out") &&
-		   strstr(s, "[exit=1 来源未定]") &&
+		   strstr(s, "[exit=1]（来源未定）") &&
 		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit1");
 		s = (char *)exec_tool("bash", "{\"command\":\"exit 2\"}");
-		OK(exec_rc() == 0 && s && strstr(s, "[exit=2 来源未定]") &&
+		OK(exec_rc() == 0 && s && strstr(s, "[exit=2]（来源未定）") &&
 		   !strstr(s, "沙箱执行失败"), "bash11-legacy-unknown-exit2");
 
 		/* B12 状态伪造/截断 → 来源未定（不得当成功或沙箱失败） */

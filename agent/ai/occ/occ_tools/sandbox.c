@@ -779,10 +779,11 @@ int occ_sandbox_bash(const occ_tool_ctx *ctx, const char *command,
 			default:
 				/* 旧包装器 / sudo 关 fd / 写失败 / 截断 / 伪造：
 				 * 来源未定——原样保留输出并标出来，不静默当成功
-				 * 也不当沙箱失败（退出码照实给出）。 */
+				 * 也不当沙箱失败（退出码照实给出）。[exit=N]
+				 * 形态保持原样（现役调用方按它取退出码）。 */
 				occ_ob_puts(o, rr.out ? rr.out : "");
 				ob_num(o, "\n[exit=", rr.exit_code,
-				       L_(" 来源未定]"));
+				       L_("]（来源未定）"));
 				break;
 			}
 		}
