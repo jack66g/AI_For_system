@@ -107,4 +107,13 @@ int tui_gate_file_policy(uid_t euid, int have_group, gid_t group_gid,
  */
 int tui_gate_enter(void);
 
+/*
+ * CON-11：门实际认证的用户名（成功时非 NULL；NULL=未解锁/未进过门）。
+ * occ 阶段 G（AIK_CONSOLE_GATE_ONLY）把它写进出带外 marker，aik-console
+ * 阶段 S 据此决定目标 uid——「认证身份 = 会话身份」的不变量，不让可缺省
+ * 的 .last 成为身份来源。每次 tui_gate_enter 入口清零；门只在主 TUI 之前
+ * 的单线程里跑，无需加锁。
+ */
+const char *tui_gate_authed_user(void);
+
 #endif /* OCC_TUI_GATE_H */

@@ -821,6 +821,26 @@ static void gate_sink_fatal(tui_renderer *ren, int frc)
 	exit(72);
 }
 
+/*
+ * CON-11：门实际认证的用户名（成功时非空）——occ 阶段 G 把它写进出带外
+ * marker，aik-console 阶段 S 据此决定目标 uid（认证身份=会话身份）。
+ * 门只在主 TUI 之前的单线程里跑，静态缓冲无须加锁；入口清零。
+ */
+static char gate_authed_user_buf[GATE_USER_MAX];
+
+const char *tui_gate_authed_user(void)
+{
+	return gate_authed_user_buf[0] ? gate_authed_user_buf : NULL;
+}
+
+static void gate_authed_set(const char *user)
+{
+	if (!user || !user[0])
+		return;
+	snprintf(gate_authed_user_buf, sizeof(gate_authed_user_buf), "%s",
+		 user);
+}
+
 /* 登录框用户名预填（last 文件净化后入框） */
 static void gate_user_prefill(struct gate_field *uf)
 {
@@ -1105,6 +1125,7 @@ static int gate_run_ui(int mode, int *unlocked)
 									   tui_gate_path(),
 									   hash) == 0) {
 								gate_last_write(GATE_USER);
+								gate_authed_set(GATE_USER);
 								*unlocked = 1;
 								rc = 0;
 								break;
@@ -1233,6 +1254,7 @@ static int gate_run_ui(int mode, int *unlocked)
 						tui_gate_path(), uname,
 						hash, 0);	/* 计数清零 */
 					gate_last_write(uname);
+					gate_authed_set(uname);
 					*unlocked = 1;
 					rc = 0;
 					break;
@@ -1283,6 +1305,8 @@ int tui_gate_enter(void)
 	char hash[TUI_GATE_HASH_LEN];
 	long long ts;
 	int unlocked;
+
+	gate_authed_user_buf[0] = '\0';	/* CON-11：每次进门前清零 */
 
 	/* 旁路：引导参数（ISO 烟测）或环境标记（pty 集成测试注入；
 	 * 物理接触者本可旁路，非漏洞） */

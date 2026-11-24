@@ -4644,6 +4644,73 @@ static int run_interactive(occ_db *db, const char *model_toml,
 		return (rc < 0) ? 1 : rc;
 	}
 
+/*
+ * CON-11：控制台两阶段契约的能力版本（occ 侧）。
+ * aik-console 以 `occ --console-gate-version` 探针确认本二进制支持阶段 G
+ * （AIK_CONSOLE_GATE_ONLY）与带认证用户名的 gate marker；旧 occ 不认该
+ * 参数（unknown command，rc=2）→ 新 console 回退 v12.1 单阶段路径，
+ * 绝不把 AIK_CONSOLE_GATE_ONLY 交给不认识的旧件（旧件会以 root 直进
+ * 会话=提权）。版本号随 marker 格式/阶段契约变更而升。
+ */
+#define OCC_CONSOLE_GATE_VERSION 2
+
+/*
+ * CON-11 阶段 G 结果出带外 marker（fbterm 吞退出码，与 P-47 同因）。
+ * 格式：`<ver> <0|1> <认证用户名|->`——用户名是门实际认证的身份，阶段 S
+ * 以它（而不是可缺省的 .last）决定目标 uid（认证身份=会话身份的不变量；
+ * 两阶段模式下 `-`/坏格式=认证身份不可得，console 侧一律 fail-closed）。
+ * 路径固定 /run/aik-console-gate.<seat>（root tmpfs，恒可写；**不回落
+ * /tmp**——/tmp 任何用户可预置同名符号链接，root 跟随写会把目标文件
+ * 截断，且 marker 是「下一个 uid」的信任源）。写侧：先 unlink 陈旧文件，
+ * 再 O_CREAT|O_EXCL|O_NOFOLLOW（不跟随符号链接）+ fchmod 0600 + fchown
+ * root:root；任一步失败=不产出 marker（console 按 fail-closed 回登录门）。
+ * seat 来自 AIK_CONSOLE_SEAT，只接受 [A-Za-z0-9_-] 且 ≤16 字符（防路径
+ * 注入）。
+ */
+static void console_gate_mark(int ok, const char *user)
+{
+	const char *seat = getenv("AIK_CONSOLE_SEAT");
+	char path[192];
+	FILE *f;
+	int fd, i;
+
+	if (!seat || !seat[0] || strlen(seat) > 16)
+		seat = "serial";
+	for (i = 0; seat[i]; i++) {
+		char c = seat[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+			seat = "serial";
+			break;
+		}
+	}
+	snprintf(path, sizeof(path), "/run/aik-console-gate.%s", seat);
+	(void)unlink(path);	/* 陈旧结果不得被当成本轮认证 */
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	if (fd < 0)
+		return;
+	if (fchmod(fd, 0600) != 0 || fchown(fd, 0, 0) != 0) {
+		close(fd);
+		(void)unlink(path);
+		return;
+	}
+	f = fdopen(fd, "w");
+	if (!f) {
+		close(fd);
+		(void)unlink(path);
+		return;
+	}
+	if (fprintf(f, "%d %d %s\n", OCC_CONSOLE_GATE_VERSION,
+		    ok ? 0 : 1, (user && user[0]) ? user : "-") < 0) {
+		fclose(f);
+		(void)unlink(path);
+		return;
+	}
+	if (fclose(f) != 0)
+		(void)unlink(path);
+}
+
 int main(int argc, char **argv)
 {
 	const char *model_toml, *provider_toml, *db_path;
@@ -4653,9 +4720,30 @@ int main(int argc, char **argv)
 	int rc = 2;
 	int want_tui = 0;
 
+	/* CON-11：无副作用能力探针（aik-console 启动前调用）——只打印固定
+	 * 串退 0，不读配置/不建库/不碰终端。必须早于一切初始化。 */
+	if (argc == 2 && !strcmp(argv[1], "--console-gate-version")) {
+		printf("occ-console-gate %d\n", OCC_CONSOLE_GATE_VERSION);
+		return 0;
+	}
 	memset(&p, 0, sizeof(p));
 	tui_lang_init_env();	/* O-20 A：OCC_LANG=en|zh（缺省 zh）——
 				 * 必须先于一切 L_() 消费点 */
+	/* CON-11 阶段 G（gate-only）：aik-console 以 root 起本进程，只跑
+	 * 登录门（验密/首次设密；凭据与 per-seat .last 均由 root 身份写），
+	 * 成功 _exit(0)/退出失败 _exit(1)——绝不落进会话面（不 open db、
+	 * 不读 policy/模型/catalog/provider，也不进 TUI 主循环）。root
+	 * 特权面因此只剩登录门本身。 */
+	{
+		const char *go = getenv("AIK_CONSOLE_GATE_ONLY");
+
+		if (go && go[0] && strcmp(go, "0") != 0) {
+			int gok = (tui_gate_enter() == 0);
+
+			console_gate_mark(gok, tui_gate_authed_user());
+			_exit(gok ? 0 : 1);
+		}
+	}
 	if (argc < 2) {
 		/* T9c2 交互入口：tty → 全屏 TUI；非 tty → 人话报错 rc=2 */
 		if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {

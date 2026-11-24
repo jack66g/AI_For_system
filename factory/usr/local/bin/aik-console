@@ -1,4 +1,51 @@
 #!/bin/sh
+# aik-console v13 — CON-11 两阶段控制台 + 席位状态（认证身份=会话身份）。
+#   v13：把控制台拆成两个阶段，身份不再由「上一轮 .last」猜：
+#   ① 阶段 G（gate，root 特权验密）：以 root 起 occ，env
+#      AIK_CONSOLE_GATE_ONLY=1 + AIK_CONSOLE_SEAT=<vga|serial> +
+#      AIK_CONSOLE_GATE_LAST=<per-seat .last>。occ 在 main 早期只跑
+#      tui_gate_enter()，成功 _exit(0)/退出失败 _exit(1)，绝不进会话
+#      （不 open db/不读 policy/model/catalog/provider）——root 面只剩
+#      登录门本身。门的凭据与 .last 写入都是 root 身份。
+#      门结果出带外 marker：/run/aik-console-gate.<seat>（fbterm 吞
+#      退出码，与 P-47 同因；固定 root tmpfs，**绝不回落 /tmp**——/tmp
+#      任何用户可预置同名符号链接，而 marker 是「下一个 uid」的信任源）。
+#      格式 `<ver> <0|1> <认证用户名|->`。阶段 S 只认 `2 0 <合法用户名>`：
+#      用户名是**门实际认证的身份**；没有它（skipgate 旁路、写失败、旧
+#      格式）一律回登录门，绝不回落 .last/admin。每轮阶段 G 前清本席位
+#      旧 marker，读后即焚。
+#   ② 阶段 S（session）：读 marker 的认证用户名（缺则回落 per-seat
+#      .last，仍缺=admin，现行为）→ 按名字取 OS uid/gid → 沿用 v9
+#      setpriv 降权链起 occ，env 加 AIK_CONSOLE_GATE_SKIP=1（旁路已有）
+#      与 AIK_CONSOLE_AUTHED=<user>（诊断）。会话进程 getuid()==认证
+#      用户。
+#   席位：tty1–3=vga（fbterm 链）、ttyS*=serial；状态文件
+#      /var/lib/aikernel/console-gate.last.vga|.serial（root:root
+#      0600，root 写）。旧全局 .last 只作首次迁移来源（拷贝后不再依赖），
+#      并在每次阶段 S 成功后反向同步一份给旧 console（兼容窗口）。
+#   fail-closed（CON-11 安全边界）：阶段 S 的目标用户在本机没有 OS 号时，
+#      绝不回落 root 会话——
+#      · 目标是 admin 且 gate 文件有 admin 条目 → 先试出厂归位
+#        （aikctl user add admin --wheel --from-gate）；aikctl 缺席/
+#        失败才允许旧盘升级的 root 回落（warning 日志，admin 本是
+#        wheel//su 角色）；
+#      · 其它任何用户名 → 记日志 + 屏上人话 + 回登录门，不启动会话。
+#      空/非法用户名按 admin 处理（现行为），同样只走上面那条 admin 例外。
+#   兼容（新旧件过渡必须 fail-safe）：
+#      · 探针：occ --console-gate-version（无副作用，只打印固定串退 0）。
+#        探针不过（旧 occ 报 unknown command rc=2）→ 不进两阶段，整体
+#        回退 v12.1 单阶段路径（按 .last 降权起 occ、不传 GATE_SKIP），
+#        root 日志记 legacy-fallback 一行。否则旧 occ 不认
+#        AIK_CONSOLE_GATE_ONLY 会以 root 进会话=提权。
+#      · 旧 console + 新 occ：无 GATE_ONLY 即走老单阶段（行为同 v12.1）。
+#   退出码：阶段 G 非 0 → 退出 0（getty 回来重新进 G）；阶段 S rc=71
+#      （/exit）→ 退出 0；rc=70（/zoom）→ 直接重起阶段 S；其它（72
+#      看门狗等）→ sleep 2 回阶段 G（重新认证，不静默续跑）。
+#   可测面：AIK_CONSOLE_DRY=1 打印阶段 G（DRY gate: …）与阶段 S
+#      （DRY exec: …）完整命令，不落盘不真 exec；AIK_CONSOLE_DRY_PROBE
+#      =ok|fail 覆盖探针结果（DRY 专用）；AIK_CONSOLE_TEST=1 +
+#      AIK_CONSOLE_OCC 指桩 occ（真执行桩用；生产未设=定值）。
+#   —— 以下为 v12.1 及以前的历史 ——
 # aik-console v12.1 — 修 v11/v12 的非 root VGA 控制台起不来：fb 链上
 #   传给 fbterm 的 HOME=/root USER=root 改经 env 传入。拼在命令前时，
 #   shell 把展开出来的 HOME=/root 当成命令名（rc=127 重启环）。DRY 打印
@@ -91,9 +138,13 @@ fi
 [ -n "$TTY" ] || exit 0
 
 GATE_LAST=/var/lib/aikernel/console-gate.last
+GATE_LAST_DIR=/var/lib/aikernel
 GATE_FILE=/etc/aikernel/console-gate
 GATE_GROUP=aik-gate				# v12：gate 组读面的系统组
 LOGDIR=/var/log/aik-console
+GATE_LOGF=/root/aik-console.log			# 阶段 G 固定 root 观察面
+GATE_ERRF=/root/aik-console.err
+OCC_BIN=/usr/local/bin/occ
 DRY=0
 [ "$AIK_CONSOLE_DRY" = 1 ] && DRY=1
 # v12 DRY 可测面：桩文件/桩组名（仅 DRY 生效；真跑一律用上面的定值）
@@ -101,6 +152,141 @@ if [ "$DRY" = 1 ]; then
   [ -n "${AIK_CONSOLE_GATE_FILE:-}" ] && GATE_FILE=$AIK_CONSOLE_GATE_FILE
   [ -n "${AIK_CONSOLE_GATE_GROUP:-}" ] && GATE_GROUP=$AIK_CONSOLE_GATE_GROUP
 fi
+# v13 测试钩子：桩 occ（真执行桩/探针夹具）。须 AIK_CONSOLE_TEST=1 显式
+# 开门；生产面不设该变量时恒为 /usr/local/bin/occ。本脚本以 root 跑，
+# 能改它环境的人已具 root，不构成新提权面。
+if [ "$AIK_CONSOLE_TEST" = 1 ] && [ -n "${AIK_CONSOLE_OCC:-}" ]; then
+  OCC_BIN=$AIK_CONSOLE_OCC
+fi
+
+# 席位（v13）：tty1–3=VGA（fbterm 链）；ttyS*/其它=serial。席位状态文件
+# 与阶段 G marker 都按席位分——VGA 与串口互不覆盖（CON-11 双控制台面）。
+case "$TTY" in
+  /dev/tty1|/dev/tty2|/dev/tty3) SEAT=vga; SEAT_FB=1 ;;
+  /dev/ttyS*) SEAT=serial; SEAT_FB=0 ;;
+  *) exit 0 ;;			# v12.1 行为：其它 tty（pts 等）不接管
+esac
+GATE_LAST_SEAT=$GATE_LAST_DIR/console-gate.last.$SEAT
+GATE_MARK_RUN=/run/aik-console-gate.$SEAT
+
+LOGF=$GATE_LOGF
+ERRF=$GATE_ERRF
+
+log() { echo "$(date +%s) $*" >> "$LOGF"; }
+log_gate() { echo "$(date +%s) $*" >> "$GATE_LOGF"; }
+
+# v13：0600 原子写（root 身份；/var/lib/aikernel 属 root，非 root 根本
+# 进不来——席位的「下一会话用谁」通道恒 root 写）。
+write_root_file() { # <path> <value>
+  _wf_tmp="$1.tmp.$$"
+  printf '%s\n' "$2" > "$_wf_tmp" 2>/dev/null || { rm -f "$_wf_tmp"; return 1; }
+  chmod 0600 "$_wf_tmp" 2>/dev/null
+  mv -f "$_wf_tmp" "$1" 2>/dev/null || { rm -f "$_wf_tmp"; return 1; }
+  return 0
+}
+
+# v13：用户名净化（与 tui_gate 的 GATE_USER_MAX=32/白名单同口径）。非法/
+# 空 → 空（调用方按 admin 处理=现行为）。
+seat_user_sanitize() {
+  case "$1" in
+    ""|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  [ "${#1}" -le 31 ] || return 0
+  printf '%s' "$1"
+}
+
+# v13：per-seat .last 当前值（净化后；缺/坏=空）
+seat_last_value() {
+  [ -f "$GATE_LAST_SEAT" ] || return 0
+  _sv=$(head -n 1 "$GATE_LAST_SEAT" 2>/dev/null | tr -d '\r')
+  seat_user_sanitize "$_sv"
+}
+
+# v13：旧全局 .last（只作首次迁移来源与旧 console 兼容同步面）
+legacy_last_value() {
+  [ -f "$GATE_LAST" ] || return 0
+  _lv=$(head -n 1 "$GATE_LAST" 2>/dev/null | tr -d '\r')
+  seat_user_sanitize "$_lv"
+}
+
+# v13：首次迁移——per-seat 文件不在而旧全局在 → 拷贝（root 0600）。
+# 幂等：per-seat 一旦存在就不再依赖旧文件。
+seat_last_migrate() {
+  [ -f "$GATE_LAST_SEAT" ] && return 0
+  _mv=$(legacy_last_value)
+  [ -n "$_mv" ] || return 0
+  if [ "$DRY" = 1 ]; then
+    # DRY 不落盘：把「迁移后会读到的值」记下来供本轮 resolve 用（打印
+    # 面与真跑一致；真跑的写侧在非 DRY 分支）
+    SEAT_MIG_USER=$_mv
+    echo "DRY migrate-last: $GATE_LAST -> $GATE_LAST_SEAT user=$_mv"
+    return 0
+  fi
+  mkdir -p -m 755 "$GATE_LAST_DIR" 2>/dev/null
+  write_root_file "$GATE_LAST_SEAT" "$_mv" \
+    && log_gate "seat-last-migrate seat=$SEAT user=$_mv from=global"
+  return 0
+}
+
+# v13：反向同步——阶段 S 成功后把认证用户同步一份到旧全局 .last，让
+# 旧 console（只读全局）仍能读到。root 做，best-effort。
+seat_last_sync() {
+  [ "$TWO_PHASE" = 1 ] || return 0
+  [ -n "$t_user" ] || return 0
+  [ "$t_failclosed" = 1 ] && return 0
+  _cg=$(legacy_last_value)
+  [ "$_cg" = "$t_user" ] && return 0
+  if [ "$DRY" = 1 ]; then
+    echo "DRY sync-last: $GATE_LAST_SEAT -> $GATE_LAST user=$t_user"
+    return 0
+  fi
+  write_root_file "$GATE_LAST" "$t_user" \
+    && log_gate "seat-last-sync seat=$SEAT user=$t_user to=global"
+  return 0
+}
+
+# gate 文件里有没有 admin 条目（出厂归位/旧盘 root 回落的前提之一）
+gate_has_admin_entry() {
+  [ -f "$GATE_FILE" ] || return 1
+  grep -q '^admin:\$6\$' "$GATE_FILE" 2>/dev/null
+}
+
+# v13 兼容探针：新 occ 的 --console-gate-version 只打印固定串退 0（不读
+# 配置/不建库/不碰终端）；旧 occ 未知参数退 2。探针不过 → 整体回退
+# v12.1 单阶段（旧 occ 不认 AIK_CONSOLE_GATE_ONLY，以 root 起它会直接
+# 进会话=提权）。DRY 面：AIK_CONSOLE_DRY_PROBE=ok|fail 可覆盖（测试用）。
+probe_two_phase() {
+  if [ "$DRY" = 1 ] && [ -n "${AIK_CONSOLE_DRY_PROBE:-}" ]; then
+    [ "$AIK_CONSOLE_DRY_PROBE" = ok ]
+    return $?
+  fi
+  [ -x "$OCC_BIN" ] || return 1
+  _pv=$("$OCC_BIN" --console-gate-version 2>/dev/null </dev/null)
+  [ "$_pv" = "occ-console-gate 2" ]
+}
+
+# v13：阶段 G 结果 marker 读侧（读后即焚）。只认 `2 <0|1> <用户|->`——
+# 旧格式/坏格式一律当「没有 marker」（阶段 G 侧再按 fail-closed 处理）。
+# 路径固定 /run（root tmpfs）；绝无 /tmp 回落（/tmp 可被任何用户预置同名
+# 文件，而 marker 是「下一个 uid」的信任源）。设 G_MARK_OK（0/1/空）与
+# G_MARK_USER（认证用户名，缺=空）。
+gate_mark_read() {
+  G_MARK_OK=; G_MARK_USER=
+  [ -f "$GATE_MARK_RUN" ] || return 1
+  _gv=$(cat "$GATE_MARK_RUN" 2>/dev/null)
+  rm -f "$GATE_MARK_RUN"
+  _gv=$(printf '%s' "$_gv" | tr -d '\r\n')
+  [ -n "$_gv" ] || return 1
+  _g1=$(printf '%s' "$_gv" | cut -d' ' -f1)
+  _g2=$(printf '%s' "$_gv" | cut -d' ' -f2)
+  _g3=$(printf '%s' "$_gv" | cut -d' ' -f3)
+  [ "$_g1" = 2 ] || return 1
+  G_MARK_OK=$_g2
+  if [ -n "$_g3" ] && [ "$_g3" != "-" ]; then
+    G_MARK_USER=$(seat_user_sanitize "$_g3")
+  fi
+  return 0
+}
 
 # v11：per-user 字号透传。fbterm 改以系统配置 HOME 起后，用户 /zoom 写
 # 在自家 ~/.fbtermrc 的 font-size 不再被 fbterm 直接读到——这里从该文件
@@ -121,83 +307,141 @@ zoom_font_arg() {
   return 0
 }
 
-# P-2 Phase A：目标用户解析（每轮循环重解——首启 SETUP 归位/号变动即时
-# 生效，无需重启控制台链）。设：t_user/t_uid/t_gid/t_home/OCC_ARGS/
-# MARKER_RUN/MARKER_TMP/LOGF/ERRF（OCC_ARGS 不加引号=按词拆给 exec 面）。
-# v11 增设 fb 链专用前缀 FB_PRE（fbterm 的 env+选项）与 OCC_PRE（occ 的
-# env 前缀）：仅非 root 目标非空；串口链不用（脚本已导出用户 HOME/USER）。
+# 出厂 admin 归位（v9 语义，v13 只允许它作为「admin 无号」的例外路径）。
+# 返回 0=已就位或 DRY（打印动作）；1=aikctl 缺席或失败。
+place_admin() {
+  if [ "$DRY" = 1 ]; then
+    echo "DRY place-admin: /usr/local/bin/aikctl user add admin --wheel --from-gate"
+    return 0
+  fi
+  if [ -x /usr/local/bin/aikctl ]; then
+    if /usr/local/bin/aikctl user add admin --wheel --from-gate; then
+      return 0
+    fi
+    echo "aik-console: admin 归位失败（aikctl user add）——旧盘升级：本轮回 root 路径" >&2
+    echo "$(date +%s) admin-place-failed tty=$TTY" >> /root/aik-console.log 2>/dev/null
+    return 1
+  fi
+  echo "aik-console: aikctl 缺席，admin 归位跳过（旧盘升级路径）——本轮回 root 路径" >&2
+  echo "$(date +%s) admin-place-skip-no-aikctl tty=$TTY" >> /root/aik-console.log 2>/dev/null
+  return 1
+}
+
+# 阶段 S 目标解析（每轮重解）。设 t_user/t_uid/t_gid/t_home/OCC_ARGS/
+# MARKER_RUN/MARKER_TMP/LOGF/ERRF/FB_PRE/FB_OPT/OCC_PRE/SESS_ENV/
+# t_failclosed/t_reason。
+# 身份来源（两阶段）：阶段 G marker 的认证用户名 > per-seat .last > admin。
+# 旧 occ 单阶段（探针不过）：全局 .last > admin（v12.1 行为）。
 resolve_target() {
-  t_user=$(cat "$GATE_LAST" 2>/dev/null)
-  [ -n "$t_user" ] || t_user=admin
-  t_uid=$(id -u "$t_user" 2>/dev/null) || t_uid=
-  t_gid=$(id -g "$t_user" 2>/dev/null) || t_gid=
-  # 出厂 admin 归位：gate 有 admin 行而 OS 号缺席（首次 SETUP 已过）
-  if [ "$t_user" = admin ] && [ -z "$t_uid" ] \
-     && grep -q '^admin:\$6\$' "$GATE_FILE" 2>/dev/null; then
-    if [ "$DRY" = 1 ]; then
-      echo "DRY place-admin: /usr/local/bin/aikctl user add admin --wheel --from-gate"
-    elif [ -x /usr/local/bin/aikctl ]; then
-      if /usr/local/bin/aikctl user add admin --wheel --from-gate; then
-        t_uid=$(id -u "$t_user" 2>/dev/null) || t_uid=
-        t_gid=$(id -g "$t_user" 2>/dev/null) || t_gid=
-      else
-        # 旧盘升级路径（useradd 缺席等）：warning 不阻塞，回落 root
-        echo "aik-console: admin 归位失败（aikctl user add；旧盘升级=正常回落）——本轮回 root 路径" >&2
-        echo "$(date +%s) admin-place-failed tty=$TTY" >> /root/aik-console.log 2>/dev/null
+  t_user=; t_uid=; t_gid=; t_home=
+  t_failclosed=0; t_reason=; t_adminfb=0
+  FB_PRE=; FB_OPT=; OCC_PRE=; SESS_ENV=
+  if [ "$TWO_PHASE" = 1 ]; then
+    if [ -n "$G_MARK_USER" ]; then
+      _cand=$G_MARK_USER
+    elif [ "$DRY" = 1 ]; then
+      # DRY 没有真门可跑：按 per-seat .last（含迁移模拟值）预演打印面
+      _cand=$(seat_last_value)
+      if [ -z "$_cand" ] && [ -n "${SEAT_MIG_USER:-}" ]; then
+        _cand=$SEAT_MIG_USER
       fi
     else
-      echo "aik-console: aikctl 缺席，admin 归位跳过（旧盘升级路径）——本轮回 root 路径" >&2
-      echo "$(date +%s) admin-place-skip-no-aikctl tty=$TTY" >> /root/aik-console.log 2>/dev/null
+      # 防御：真实两阶段没有认证身份 —— 绝不回落 .last/admin
+      t_failclosed=1
+      t_reason=no-gate-identity
+      return 1
     fi
+  else
+    _cand=$(legacy_last_value)
+  fi
+  t_user=$(seat_user_sanitize "$_cand")
+  [ -n "$t_user" ] || t_user=admin
+  t_uid=$(id -u "$t_user" 2>/dev/null)
+  t_gid=$(id -g "$t_user" 2>/dev/null)
+  # 出厂 admin 归位：gate 有 admin 行而 OS 号缺席（首次 SETUP 已过）
+  if [ "$t_user" = admin ] && [ -z "$t_uid" ] && gate_has_admin_entry; then
+    place_admin
+    t_uid=$(id -u admin 2>/dev/null)
+    t_gid=$(id -g admin 2>/dev/null)
   fi
   if [ -n "$t_uid" ] && [ -n "$t_gid" ] && [ "$t_uid" != 0 ]; then
-    t_home=$(getent passwd "$t_user" 2>/dev/null | cut -d: -f6)
-    [ -n "$t_home" ] || t_home=/
-    OCC_ARGS="setpriv --reuid=$t_uid --regid=$t_gid --init-groups --inh-caps=-all /usr/local/bin/occ"
-    MARKER_RUN=/run/aik-occ-exit.$t_uid
-    MARKER_TMP=/tmp/aik-occ-exit.$t_uid
-    HOME="$t_home"; USER="$t_user"; export HOME USER
-    cd "$t_home" 2>/dev/null || cd /
-    [ "$DRY" = 1 ] || mkdir -p -m 750 "$LOGDIR" 2>/dev/null
-    # v10（P-60 /var/ai 权限面）：root 代组装时刻预建 per-user 回退
-    # 工作区（见头部 v10 注）；失败静默=occ 诚实回落共享区不阻塞。
-    if [ "$DRY" != 1 ]; then
-      case "$t_user" in
-        ""|*[!A-Za-z0-9._-]*) ;;
-        *)
-          if [ "${#t_user}" -le 64 ]; then
-            mkdir -p -m 0700 "/var/ai/work/$t_user" 2>/dev/null
-            chown "$t_uid:$t_gid" "/var/ai/work/$t_user" 2>/dev/null
-          fi
-          ;;
-      esac
+    setpriv_session
+    return 0
+  fi
+  if [ -n "$t_uid" ] && [ -n "$t_gid" ]; then
+    root_session "$t_user"
+    return 0
+  fi
+  # 目标用户在本机没有 OS 号
+  if [ "$TWO_PHASE" = 1 ]; then
+    if [ "$t_user" = admin ] && gate_has_admin_entry; then
+      # admin 例外（旧盘升级）：admin 本是 wheel//su 角色，归位失败才回落
+      t_adminfb=1
+      root_session admin
+      return 0
     fi
-    LOGF="$LOGDIR/$t_user.log"
-    ERRF="$LOGDIR/$t_user.err"
-    # v11 fb 链前缀（见头部 v11 注）：fbterm=root 身份+root 配置
-    # （HOME=/root USER=root——与 root 控制台同路，IME 子进程环境亦同），
-    # 外加 per-user 字号选项 FB_OPT（白名单档位）；occ 经 env 拿回用户
-    # 家目录。v12.1：FB_PRE 的两个赋值经 env 传给 fbterm（不能当 shell
-    # 赋值前缀拼在命令前——展开出来的赋值词会被当成命令名）；字号另设
-    # FB_OPT，照旧作为 fbterm 的选项。
-    FB_PRE="HOME=/root USER=root "
-    zopt=$(zoom_font_arg "$t_home")
-    FB_OPT=
-    [ -n "$zopt" ] && FB_OPT="$zopt "
-    OCC_PRE="env HOME=$t_home USER=$t_user "
-  else
-    OCC_ARGS="/usr/local/bin/occ"
-    MARKER_RUN=/run/aik-occ-exit
-    MARKER_TMP=/tmp/aik-occ-exit
-    LOGF=/root/aik-console.log
-    ERRF=/root/aik-console.err
-    FB_PRE=
-    FB_OPT=
-    OCC_PRE=
+    t_failclosed=1
+    t_reason=no-os-account
+    return 1
+  fi
+  # 旧 occ 单阶段（v12.1 行为）：号不在 → root 路径
+  root_session admin
+  return 0
+}
+
+# 非 root：v9 降权链（v13 只在两阶段时加 GATE_SKIP/AUTHED——旧 occ 也
+# 认 AIK_CONSOLE_GATE_SKIP，单阶段回退绝不能传，否则等于免密直进会话）。
+setpriv_session() {
+  t_home=$(getent passwd "$t_user" 2>/dev/null | cut -d: -f6)
+  [ -n "$t_home" ] || t_home=/
+  OCC_ARGS="setpriv --reuid=$t_uid --regid=$t_gid --init-groups --inh-caps=-all $OCC_BIN"
+  MARKER_RUN=/run/aik-occ-exit.$t_uid
+  MARKER_TMP=/tmp/aik-occ-exit.$t_uid
+  HOME="$t_home"; USER="$t_user"; export HOME USER
+  cd "$t_home" 2>/dev/null || cd /
+  [ "$DRY" = 1 ] || mkdir -p -m 750 "$LOGDIR" 2>/dev/null
+  # v10（P-60 /var/ai 权限面）：root 代组装时刻预建 per-user 回退
+  # 工作区；失败静默=occ 诚实回落共享区不阻塞。
+  if [ "$DRY" != 1 ]; then
+    case "$t_user" in
+      ""|*[!A-Za-z0-9._-]*) ;;
+      *)
+        if [ "${#t_user}" -le 64 ]; then
+          mkdir -p -m 0700 "/var/ai/work/$t_user" 2>/dev/null
+          chown "$t_uid:$t_gid" "/var/ai/work/$t_user" 2>/dev/null
+        fi
+        ;;
+    esac
+  fi
+  LOGF="$LOGDIR/$t_user.log"
+  ERRF="$LOGDIR/$t_user.err"
+  # v11 fb 链前缀：fbterm=root 身份+root 配置；occ 经 env 拿回用户家目录。
+  FB_PRE="HOME=/root USER=root "
+  zopt=$(zoom_font_arg "$t_home")
+  FB_OPT=
+  [ -n "$zopt" ] && FB_OPT="$zopt "
+  OCC_PRE="env HOME=$t_home USER=$t_user "
+  if [ "$TWO_PHASE" = 1 ]; then
+    OCC_PRE="$OCC_PRE""AIK_CONSOLE_GATE_SKIP=1 AIK_CONSOLE_AUTHED=$t_user "
+    SESS_ENV="AIK_CONSOLE_GATE_SKIP=1 AIK_CONSOLE_AUTHED=$t_user "
   fi
 }
 
-log() { echo "$(date +%s) $*" >> "$LOGF"; }
+# root 会话：两阶段=认证用户就是 root（gate 里 root 行手播的显式通道）；
+# 单阶段=旧盘回落（v12.1 行为，无 GATE_SKIP）。
+root_session() { # <user>
+  OCC_ARGS="$OCC_BIN"
+  MARKER_RUN=/run/aik-occ-exit
+  MARKER_TMP=/tmp/aik-occ-exit
+  LOGF=$GATE_LOGF
+  ERRF=$GATE_ERRF
+  HOME=/root; USER=root; export HOME USER
+  FB_PRE=; FB_OPT=; OCC_PRE=; SESS_ENV=
+  if [ "$TWO_PHASE" = 1 ] && [ "$1" = root ]; then
+    OCC_PRE="env AIK_CONSOLE_GATE_SKIP=1 AIK_CONSOLE_AUTHED=root "
+    SESS_ENV="AIK_CONSOLE_GATE_SKIP=1 AIK_CONSOLE_AUTHED=root "
+  fi
+}
 
 # v12：gate 权限归一（见头部 v12 注）。幂等——三条齐备才动；stat 取不
 # 到任何一项=不动（不拿空值去 chown）。已合规直接返回。
@@ -215,72 +459,87 @@ gate_perm_fix() {
     return 0
   fi
   if chown "0:$gpgid" "$GATE_FILE" && chmod 0640 "$GATE_FILE"; then
-    log "gate-perm normalized to 0640 root:$GATE_GROUP (was uid=$gpown gid=$gpgrp mode=$gpmode)"
+    log_gate "gate-perm normalized to 0640 root:$GATE_GROUP (was uid=$gpown gid=$gpgrp mode=$gpmode)"
   else
-    log "gate-perm normalize FAILED (uid=$gpown gid=$gpgrp mode=$gpmode)"
+    log_gate "gate-perm normalize FAILED (uid=$gpown gid=$gpgrp mode=$gpmode)"
   fi
   return 0
 }
 
-# DRY：打印本轮将 exec 的完整命令与解析值（uid/gid 由 id 实取）
-dry_print() {
-  echo "DRY tty=$TTY user=$t_user uid=${t_uid:-0} gid=${t_gid:-0} home=${t_home:-/root}"
-  echo "DRY log=$LOGF err=$ERRF marker=$MARKER_RUN (fallback $MARKER_TMP)"
-  if [ -n "$FBTERM_BIN" ]; then
-    # v11：两个 HOME 分家的一览行（仅非 root 目标：fbterm 读系统配置；
-    # occ 用用户家目录）
-    if [ -n "$FB_PRE" ]; then
-      echo "DRY fb: fbterm-home=/root (system .fbtermrc) occ-home=$t_home user=$t_user zoom=${zopt:-none}"
-      # v12.1：打印面与真执行同形（非 root 经 env）
-      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
-    else
-      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
-    fi
+# v13：阶段 G 真执行（root 身份；fb 链经 fbterm 拿 CJK 渲染，串口直起）。
+exec_gate() {
+  if [ "$SEAT_FB" = 1 ] && [ -n "$FBTERM_BIN" ]; then
+    FBTERM=1 OCC_NETCFG_TOOLS=1 AIK_CONSOLE_GATE_ONLY=1 \
+      AIK_CONSOLE_SEAT="$SEAT" AIK_CONSOLE_GATE_LAST="$GATE_LAST_SEAT" \
+      "$FBTERM_BIN" -- "$OCC_BIN" 2>> "$GATE_ERRF"
   else
-    echo "DRY exec: OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> $ERRF"
+    OCC_NETCFG_TOOLS=1 AIK_CONSOLE_GATE_ONLY=1 \
+      AIK_CONSOLE_SEAT="$SEAT" AIK_CONSOLE_GATE_LAST="$GATE_LAST_SEAT" \
+      "$OCC_BIN" 2>> "$GATE_ERRF"
   fi
 }
 
-case "$TTY" in
-  /dev/tty1|/dev/tty2|/dev/tty3)
-    resolve_target
-    [ "$DRY" = 1 ] || log "chain-start $TTY user=$t_user uid=${t_uid:-0}"
-    [ "$DRY" = 1 ] || printf '\033[2J\033[H' # P-38: fbterm 接管前清屏，清历史残影（boot 输出/printk 残条）
-    FBTERM_BIN=$(command -v fbterm 2>/dev/null)
-    # v11：DRY 可测面——无 fbterm 的机器上可指定桩路径验 fb 链打印面。
-    # 只在 DRY 生效；真 exec 的二进制一律取 command -v（env 不改 exec 面）
-    if [ "$DRY" = 1 ] && [ -n "${AIK_CONSOLE_FBTERM:-}" ]; then
-      FBTERM_BIN=$AIK_CONSOLE_FBTERM
+# v13：阶段 S 真执行（沿用 v12.1 的 fb 链/串口链形状）。
+exec_session() {
+  if [ "$SEAT_FB" = 1 ] && [ -n "$FBTERM_BIN" ]; then
+    if [ -n "$FB_PRE" ]; then
+      # v12.1：非 root 目标的两个环境赋值经 env 传给 fbterm（拼在命令前
+      # 会被 shell 当成命令名——rc=127）。
+      FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE"$FBTERM_BIN" $FB_OPT-- \
+        $OCC_PRE$OCC_ARGS 2>> "$ERRF"
+    else
+      FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE"$FBTERM_BIN" $FB_OPT-- \
+        $OCC_PRE$OCC_ARGS 2>> "$ERRF"
     fi
-    [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
-    n=0
-    while :; do
-      resolve_target
-      gate_perm_fix
-      if [ "$DRY" = 1 ]; then
-        dry_print
-        exit 0
-      fi
-      if [ -n "$FBTERM_BIN" ]; then
-        # v11：FB_PRE/FB_OPT/OCC_PRE 仅非 root 目标非空（root 目标命令逐字同 v10）
-        if [ -n "$FB_PRE" ]; then
-          # v12.1：非 root 目标的两个环境赋值经 env 传给 fbterm。v11 把它们
-          # 放进 $FB_PRE 拼在命令前——shell 在展开之前就判定哪些词是「变量
-          # 赋值前缀」，展开出来的 HOME=/root 不算赋值而被当成命令名
-          # （「HOME=/root: not found」rc=127，每 2 秒重启一次）：非 root 的
-          # VGA 控制台在 v11/v12 上起不来（17.11.1 台架管理章咬出；串口分支
-          # 不经此行所以没暴露；当时的测试只验了 DRY 打印面）。root 目标
-          # 命令逐字不变。
-          FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE"$FBTERM_BIN" $FB_OPT-- \
-            $OCC_PRE$OCC_ARGS 2>> "$ERRF"
-        else
-          FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE"$FBTERM_BIN" $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> "$ERRF"
-        fi
-      else
-        OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
-      fi
-      rc=$?
-      n=$((n+1))
+  else
+    # 串口的 NAME=VALUE 必须经 env：拼在命令前时 shell 在展开**之前**就
+    # 判定赋值前缀，展开出来的 AIK_CONSOLE_GATE_SKIP=1 会被当成命令名
+    # （rc=127，v11/v12 的 HOME=/root 同型坑）。单阶段回退（旧 occ）不带
+    # 任何 env——命令逐字同 v12.1。
+    if [ -n "$SESS_ENV" ]; then
+      OCC_NETCFG_TOOLS=1 env $SESS_ENV$OCC_ARGS 2>> "$ERRF"
+    else
+      OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
+    fi
+  fi
+}
+
+# v13：阶段 G 一轮。返回 0=认证成功进阶段 S；1=退出/失败（console 退出）。
+# 成功判据只有一条：marker 必须是 `2 0 <合法用户名>`——身份只认门写出的
+# 认证用户名，绝不因「marker 说成功但没用户」回落 .last/admin（那等于
+# 未认证直进会话；skipgate 旁路就属于这种形态）。
+phase_gate() {
+  log_gate "gate-start tty=$TTY seat=$SEAT"
+  exec_gate
+  grc=$?
+  gate_mark_read
+  gok=1
+  if [ "$G_MARK_OK" = 0 ] && [ -n "$G_MARK_USER" ]; then
+    gok=0
+  fi
+  log_gate "gate-exit rc=$grc ok=$gok user=${G_MARK_USER:-none} marker=${G_MARK_OK:-none} tty=$TTY seat=$SEAT"
+  [ "$gok" = 0 ]
+}
+
+# v13：阶段 S 循环（70 直接重起阶段 S）。返回 2=console 退出 0；1=回阶段 G。
+session_loop() {
+  while :; do
+    resolve_target
+    if [ "$t_failclosed" = 1 ]; then
+      log_gate "session-failclosed user=$t_user reason=$t_reason tty=$TTY seat=$SEAT"
+      echo "aik-console: 用户 '$t_user' 在本机没有账号——不启动会话（fail-closed，回登录门）" >&2
+      sleep 2
+      return 1
+    fi
+    if [ "$t_adminfb" = 1 ]; then
+      log_gate "admin-fallback-root user=$t_user reason=aikctl-unavailable tty=$TTY seat=$SEAT"
+    fi
+    seat_last_sync
+    log "session-start $TTY user=$t_user uid=${t_uid:-0} seat=$SEAT"
+    exec_session
+    rc=$?
+    n=$((n+1))
+    if [ "$SEAT_FB" = 1 ]; then
       log "occ-exit rc=$rc n=$n tty=fb user=$t_user fb=${FBTERM_BIN:+y}"
       # P-47：fbterm 吞退出码——occ 出带外 marker（读后即焚）
       # v9：按目标 uid 分路（uid==0=现名；/run 优先、/tmp 回落同序探测）
@@ -293,47 +552,108 @@ case "$TTY" in
       if [ -n "$mev_path" ]; then
         read -r mev < "$mev_path"
         rm -f "$mev_path"
-        [ "$mev" = "71" ] && { log "occ-logout-marker 71 tty=fb user=$t_user"; exit 0; }
+        [ "$mev" = "71" ] && { log "occ-logout-marker 71 tty=fb user=$t_user"; return 2; }
         log "occ-exit-marker $mev tty=fb user=$t_user"
       fi
-      # P-41/P-44：72=occ 输出看门狗自退（fbterm 楔死）——单独留痕，
-      # 循环行为不变（sleep 2 重启整链自愈）
+      # P-41/P-44：72=occ 输出看门狗自退——留痕，回阶段 G（重新认证）
       [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=fb"
-      # P-41/P-44d/v7e：137=SIGKILL——fbterm 被 occ 致命收口击毙（真楔死
-      # 不随 pty 关闭退出；且 fbterm 吞退出码，137=出带外线索位。
-      # SIGKILL 而非 SIGTERM：fbterm 接住 TERM 清理后仍退 0=线索不亮）
+      # P-41/P-44d/v7e：137=SIGKILL（fbterm 被楔死收口击毙）
       [ "$rc" -eq 137 ] && log "occ-wd rc=137 tty=fb"
-      # P-41 观测线：139=SIGSEGV fbterm 崩溃计数（4~13 分钟 segfault 面）
+      # P-41 观测线：139=SIGSEGV fbterm 崩溃计数
       [ "$rc" -eq 139 ] && log "fbterm-crash rc=139 tty=fb"
-      [ "$rc" -eq 71 ] && { log "occ-logout tty=fb user=$t_user"; exit 0; }
+      [ "$rc" -eq 71 ] && { log "occ-logout tty=fb user=$t_user"; return 2; }
       [ "$rc" -eq 70 ] && continue
       sleep 2
-    done
-    ;;
-  /dev/ttyS*)
+      return 1
+    fi
+    log "occ-exit rc=$rc n=$n tty=serial user=$t_user"
+    [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=serial"
+    [ "$rc" -eq 71 ] && { log "occ-logout tty=serial user=$t_user"; return 2; }
+    [ "$rc" -eq 70 ] && continue
+    sleep 2
+    return 1
+  done
+}
+
+# v13 DRY：阶段 G 打印面（含探针结论；旧 occ 只打 legacy 一行）。
+dry_gate() {
+  echo "DRY seat=$SEAT gate-last=$GATE_LAST_SEAT gate-marker=$GATE_MARK_RUN"
+  if [ "$TWO_PHASE" != 1 ]; then
+    echo "DRY legacy: occ 无 --console-gate-version（旧件）——回退 v12.1 单阶段，不启用 AIK_CONSOLE_GATE_ONLY"
+    return 0
+  fi
+  if [ "$SEAT_FB" = 1 ] && [ -n "$FBTERM_BIN" ]; then
+    echo "DRY gate: FBTERM=1 OCC_NETCFG_TOOLS=1 AIK_CONSOLE_GATE_ONLY=1 AIK_CONSOLE_SEAT=$SEAT AIK_CONSOLE_GATE_LAST=$GATE_LAST_SEAT $FBTERM_BIN -- $OCC_BIN 2>> $GATE_ERRF"
+  else
+    echo "DRY gate: OCC_NETCFG_TOOLS=1 AIK_CONSOLE_GATE_ONLY=1 AIK_CONSOLE_SEAT=$SEAT AIK_CONSOLE_GATE_LAST=$GATE_LAST_SEAT $OCC_BIN 2>> $GATE_ERRF"
+  fi
+}
+
+# v13 DRY：阶段 S 打印面（fail-closed 时只打 failclosed，不出现会话 exec）。
+dry_print() {
+  if [ "$t_failclosed" = 1 ]; then
+    echo "DRY tty=$TTY user=$t_user seat=$SEAT failclosed=$t_reason"
+    echo "DRY failclosed: user=$t_user reason=$t_reason (no session exec)"
+    return 0
+  fi
+  echo "DRY tty=$TTY user=$t_user uid=${t_uid:-0} gid=${t_gid:-0} home=${t_home:-/root} seat=$SEAT"
+  echo "DRY log=$LOGF err=$ERRF marker=$MARKER_RUN (fallback $MARKER_TMP)"
+  if [ "$SEAT_FB" = 1 ] && [ -n "$FBTERM_BIN" ]; then
+    # v11：两个 HOME 分家的一览行（仅非 root 目标：fbterm 读系统配置；
+    # occ 用用户家目录）
+    if [ -n "$FB_PRE" ]; then
+      echo "DRY fb: fbterm-home=/root (system .fbtermrc) occ-home=$t_home user=$t_user zoom=${zopt:-none}"
+      # v12.1：打印面与真执行同形（非 root 经 env）
+      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 env $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
+    else
+      echo "DRY exec: FBTERM=1 OCC_NETCFG_TOOLS=1 $FB_PRE$FBTERM_BIN $FB_OPT-- $OCC_PRE$OCC_ARGS 2>> $ERRF"
+    fi
+  else
+    # 与真执行同形：有身份 env 时经 env（不靠 shell 赋值前缀）
+    if [ -n "$SESS_ENV" ]; then
+      echo "DRY exec: OCC_NETCFG_TOOLS=1 env $SESS_ENV$OCC_ARGS 2>> $ERRF"
+    else
+      echo "DRY exec: OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> $ERRF"
+    fi
+  fi
+}
+
+# fbterm 解析（fb 席位才有；DRY 可指定桩路径，只影响打印面）
+FBTERM_BIN=
+if [ "$SEAT_FB" = 1 ]; then
+  FBTERM_BIN=$(command -v fbterm 2>/dev/null)
+  if [ "$DRY" = 1 ] && [ -n "${AIK_CONSOLE_FBTERM:-}" ]; then
+    FBTERM_BIN=$AIK_CONSOLE_FBTERM
+  fi
+  [ -x "$FBTERM_BIN" ] || FBTERM_BIN=
+fi
+
+# v13：能力探针（每进程一次——occ 二进制在 console 生命周期内不换）
+TWO_PHASE=0
+probe_two_phase && TWO_PHASE=1
+
+n=0
+if [ "$DRY" != 1 ]; then
+  log_gate "chain-start $TTY seat=$SEAT two-phase=$TWO_PHASE"
+  printf '\033[2J\033[H' # P-38: 接管前清屏，清历史残影（boot 输出/printk 残条）
+  [ "$SEAT_FB" = 0 ] && { stty rows 24 cols 80 2>/dev/null || true; }
+fi
+
+while :; do
+  seat_last_migrate
+  gate_perm_fix
+  if [ "$DRY" = 1 ]; then
+    dry_gate
     resolve_target
-    [ "$DRY" = 1 ] || stty rows 24 cols 80 2>> "$ERRF" || true
-    [ "$DRY" = 1 ] || log "chain-start $TTY user=$t_user uid=${t_uid:-0}"
-    [ "$DRY" = 1 ] || printf '\033[2J\033[H' # P-38: occ 接管前清屏，清历史残影
-    FBTERM_BIN=
-    n=0
-    while :; do
-      resolve_target
-      gate_perm_fix
-      if [ "$DRY" = 1 ]; then
-        dry_print
-        exit 0
-      fi
-      OCC_NETCFG_TOOLS=1 $OCC_ARGS 2>> "$ERRF"
-      rc=$?
-      n=$((n+1))
-      log "occ-exit rc=$rc n=$n tty=serial user=$t_user"
-      # P-41/P-44：serial 无 fbterm，但 tty 卡死时 occ 同路自退——留痕同款
-      [ "$rc" -eq 72 ] && log "occ-wd rc=72 tty=serial"
-      [ "$rc" -eq 71 ] && { log "occ-logout tty=serial user=$t_user"; exit 0; }
-      [ "$rc" -eq 70 ] && continue
-      sleep 2
-    done
-    ;;
-esac
+    dry_print
+    exit 0
+  fi
+  if [ "$TWO_PHASE" = 1 ]; then
+    rm -f "$GATE_MARK_RUN" 2>/dev/null
+    phase_gate || exit 0
+  fi
+  session_loop
+  sess_rc=$?
+  [ "$sess_rc" = 2 ] && exit 0
+done
 exit 0

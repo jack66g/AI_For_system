@@ -319,7 +319,20 @@ static int spawn_gate(const char *path, pid_t *pid)
 		}
 		{
 			int grc = tui_gate_enter();
+			/* CON-11：解锁时把门实际认证的用户名落到桩文件
+			 * （父进程断言「认证身份=门内实际校验的用户」） */
+			const char *aout = getenv("GATE_AUTHED_OUT");
 
+			if (grc == 0 && aout && aout[0]) {
+				FILE *af = fopen(aout, "w");
+
+				if (af) {
+					const char *au = tui_gate_authed_user();
+
+					fprintf(af, "%s\n", au ? au : "-");
+					fclose(af);
+				}
+			}
 			_exit(g_raw_exit ? grc : (grc == 0 ? 0 : 42));
 		}
 	}
@@ -506,6 +519,7 @@ int main(void)
 	{
 		char h_admin[128], h_u1[128], h_u2[128], rd[128];
 		char lb[64];
+		char aout[160];			/* CON-11：门内认证用户名落点 */
 		int ff = -1;
 		FILE *lf;
 
@@ -553,6 +567,9 @@ int main(void)
 
 		/* D3: ghost 拒绝（不枚举用户）→ 改回 u1 成功 + last 落盘 */
 		acc_n = 0;
+		snprintf(aout, sizeof(aout), "%s-authed", path);
+		unlink(aout);
+		setenv("GATE_AUTHED_OUT", aout, 1);
 		m = spawn_gate(path, &pid);
 		CHECK(m >= 0);
 		CHECK(wait_tok(m, "Enter 登录", 8));
@@ -568,6 +585,17 @@ int main(void)
 		CHECK(wait_exit(pid, &status, 15));
 		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 		close(m);
+		unsetenv("GATE_AUTHED_OUT");
+		/* CON-11：门内认证用户名=实际校验通过的用户（阶段 G 的
+		 * marker 就带它，阶段 S 据此起会话） */
+		lf = fopen(aout, "r");
+		CHECK(lf != NULL);
+		if (lf) {
+			CHECK(fgets(lb, sizeof(lb), lf) != NULL &&
+			      strcmp(lb, "u1\n") == 0);
+			fclose(lf);
+		}
+		unlink(aout);
 		lf = fopen(g_last, "r");
 		CHECK(lf != NULL);
 		if (lf) {
