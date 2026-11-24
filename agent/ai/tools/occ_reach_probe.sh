@@ -175,6 +175,98 @@ PROBE_LIST=(
 	"ok"$'\t'"whereis ls"
 	"ok"$'\t'"which awk"
 	"no"$'\t'"who"
+	# ---- AIF-01b 补测（2026-11-24 追加）----
+	# 上面 125 条是首批采集的原文，一字不改（已采集的 TSV 按命令文本顺序对行）。
+	# 起因：首批是「命令表每行一条样例」。对象读面（audit_occ_capabilities.py 的
+	# READ_MAP）里走沙箱 / 回环 / aikctl 的路径共 124 条，首批只直接命中 38 条；
+	# 出厂 root 可达的读面里另有 67 条（分布在 43 个对象上）一条没测。另有 4 条
+	# 样例的写法本身跑不起来（见第 1 组）。
+	# 判定列取 audit_occ_capabilities.py 对该条命令的现行静态判定；view=视图探针。
+	# 仍然只收只读探测。不收的：
+	#   * 内容型回环端点（记忆导出/图谱/问答/画像/配置、聊天、剪贴板、通知、壁纸、
+	#     截图、窗口）——输出首行会进证据与入库基线，可能带个人内容或凭据位；
+	#   * aik-sandbox status——它会顺手回收陈旧隔离区（aik-sandbox.c cmd_status），
+	#     不是纯读。
+	# ---- 1. 首批「静态 ok、实测读不到」的样例，换成能自退/能跑的写法 ----
+	"ok"$'\t'"arping -c 1 -I lo 127.0.0.1"
+	"view"$'\t'"nc -h"
+	"ok"$'\t'"nc -w 2 127.0.0.1 8000 </dev/null"
+	"ok"$'\t'"ctstat -c 1"
+	"ok"$'\t'"rtstat -c 1"
+	# ---- 2. 视图探针：给首批的【未定】与内核配置推断取旁证 ----
+	"view"$'\t'"ls /proc/net/stat"
+	"view"$'\t'"ls /sys/devices/system"
+	"view"$'\t'"cat /proc/locks"
+	"view"$'\t'"cat /proc/swaps"
+	"view"$'\t'"ls -ld /etc/localtime /etc/timezone"
+	"view"$'\t'"ls /dev"
+	# ---- 3. 对象读面（出厂 root 可达）里首批没测的沙箱命令，按对象顺序 ----
+	"ok"$'\t'"cat /proc/cpuinfo"
+	"ok"$'\t'"cat /proc/stat"
+	"ok"$'\t'"cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+	"ok"$'\t'"cat /proc/swaps"
+	"ok"$'\t'"cat /proc/pressure/cpu"
+	"ok"$'\t'"cat /proc/pressure/memory"
+	"ok"$'\t'"cat /proc/pressure/io"
+	"ok"$'\t'"cat /proc/diskstats"
+	"ok"$'\t'"cat /sys/block/sda/stat"
+	"ok"$'\t'"cat /sys/class/bdi/8:0/read_ahead_kb"
+	"ok"$'\t'"cat /proc/partitions"
+	"partial"$'\t'"cat /proc/mounts"
+	"ok"$'\t'"cat /proc/mdstat"
+	"ok"$'\t'"cat /proc/cmdline"
+	"ok"$'\t'"ip -j link"
+	"ok"$'\t'"cat /sys/class/net/eth0/statistics/rx_bytes"
+	"ok"$'\t'"ip -j route"
+	"ok"$'\t'"cat /proc/net/route"
+	"ok"$'\t'"cat /proc/net/tcp"
+	"ok"$'\t'"cat /proc/net/nf_conntrack"
+	"ok"$'\t'"cat /etc/resolv.conf"
+	"ok"$'\t'"ip -d -j link"
+	"ok"$'\t'"cat /sys/class/net/eth0/mtu"
+	"ok"$'\t'"cat /sys/bus/pci/devices/0000:00:02.0/vendor"
+	"ok"$'\t'"cat /sys/class/drm/card0/status"
+	"ok"$'\t'"cat /sys/class/thermal/thermal_zone0/temp"
+	"ok"$'\t'"cat /sys/class/hwmon/hwmon0/temp1_input"
+	"ok"$'\t'"cat /sys/class/power_supply/ACAD/online"
+	"ok"$'\t'"cat /proc/ai/status"
+	"ok"$'\t'"cat /proc/ai/control"
+	"ok"$'\t'"cat /proc/ai/decisions"
+	"ok"$'\t'"cat /proc/ai/chains"
+	"ok"$'\t'"cat /proc/ai/telemetry"
+	"ok"$'\t'"cat /proc/ai/hitrate"
+	"ok"$'\t'"cat /proc/ai/latency"
+	"ok"$'\t'"cat /sys/kernel/ai/stats/telemetry_emitted"
+	"ok"$'\t'"cat /sys/kernel/ai/stats/decisions_total"
+	"ok"$'\t'"cat /sys/kernel/ai/stats/runtime_state"
+	"ok"$'\t'"cat /sys/kernel/ai/model_out"
+	"ok"$'\t'"cat /sys/kernel/ai/decision/stats"
+	"partial"$'\t'"date"
+	# ---- 4. 对象读面里首批没测的回环端点（只收健康/统计/清单类）----
+	"ok"$'\t'"curl -s -m 5 http://127.0.0.1:8000/stats"
+	"ok"$'\t'"curl -s -m 5 http://127.0.0.1:8091/api/health"
+	"ok"$'\t'"curl -s -m 5 http://127.0.0.1:8091/api/stats"
+	"ok"$'\t'"curl -s -m 5 http://127.0.0.1:8091/api/apps"
+	"ok"$'\t'"curl -s -m 5 http://127.0.0.1:8091/api/theme"
+	# ---- 5. aikctl 读类子命令（对象读面引用到的）----
+	"ok"$'\t'"aikctl policy get"
+	"partial"$'\t'"aikctl compat hw"
+	"no"$'\t'"aikctl session list"
+	"no"$'\t'"aikctl policy get sudoers"
+	# ---- 6. 静态判不可达的沙箱路径：首批没测的逐条取实证 ----
+	"no"$'\t'"ps -eo pid,ni,pri,comm"
+	"no"$'\t'"cat /sys/fs/cgroup/cgroup.procs"
+	"no"$'\t'"cat /sys/fs/cgroup/cgroup.controllers"
+	"no"$'\t'"cat /sys/fs/cgroup/memory.current"
+	"no"$'\t'"systemctl list-timers --no-pager"
+	"no"$'\t'"systemctl --failed --no-legend"
+	"no"$'\t'"apt list --upgradable"
+	"no"$'\t'"cat /sys/kernel/security/apparmor/profiles"
+	"no"$'\t'"ip netns list"
+	"no"$'\t'"cat /etc/passwd"
+	"no"$'\t'"getent group"
+	"no"$'\t'"ps -eo user,tty,stat,comm"
+	"no"$'\t'"cat /sys/kernel/debug/kunit/results"
 )
 
 # ---------------------------------------------------------------------------
