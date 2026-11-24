@@ -200,8 +200,11 @@ def run(s):
     return r.stdout
 
 
-def with_disk(fn):
-    """挂台架盘根分区执行 fn()（每步 sudo；任一步非 0 即断言失败；必卸载）。"""
+def with_disk(fn, need_lib=False):
+    """挂台架盘根分区执行 fn()（每步 sudo；任一步非 0 即断言失败；必卸载）。
+    need_lib：首启之后才用的桥要往 /var/lib/aikernel 写 .last——全新装机上
+    这个目录可能还没有（旧台架种载荷时也是先建的）；首启之前不建，保持
+    装机后的原样。"""
     subprocess.run("sudo qemu-nbd -d %s 2>/dev/null" % NBD, shell=True,
                    capture_output=True)
     for s in ("sudo qemu-nbd -c %s %s" % (NBD, DISK),
@@ -209,6 +212,8 @@ def with_disk(fn):
               "sudo mkdir -p %s" % MNT,
               "sudo mount /dev/nbd1p2 %s" % MNT):
         run(s)
+    if need_lib:
+        run("sudo mkdir -p %s/var/lib/aikernel" % MNT)
     try:
         fn()
     finally:
@@ -221,7 +226,7 @@ def bridge(name, body):
     p = "/tmp/w17o-%s.sh" % name
     with open(p, "w", newline="\n") as fh:
         fh.write(body)
-    with_disk(lambda: run("sudo sh %s %s" % (p, MNT)))
+    with_disk(lambda: run("sudo sh %s %s" % (p, MNT)), need_lib=True)
 
 
 def seed_payloads():
@@ -246,7 +251,7 @@ def seed_payloads():
         run("sudo chmod 755 %s/var/tmp/mu2a.sh" % MNT)
         run("sudo cp /tmp/w17o-mu2b.sh %s/root/mu2b.sh" % MNT)
         run("sudo cp /tmp/w17o-b7gen.py %s/root/b7gen.py" % MNT)
-        run("sudo cp /tmp/w17o-b7.conf %s/root/b7.conf" % MNT)
+        run("sudo cp /tmp/w17o-b7conf.conf %s/root/b7.conf" % MNT)
         run("sudo sed -i 's|exec /usr/local/bin/aik-console|export "
             "OCC_TUI_WD_MS=0; exec /usr/local/bin/aik-console|' "
             "%s/root/.profile" % MNT)
@@ -260,7 +265,7 @@ def flip_last(user):
         run("echo %s | sudo tee %s/var/lib/aikernel/console-gate.last "
             ">/dev/null" % (user, MNT))
         run("sudo chmod 600 %s/var/lib/aikernel/console-gate.last" % MNT)
-    with_disk(body)
+    with_disk(body, need_lib=True)
     print("console-gate.last -> %s" % user)
 
 
@@ -484,6 +489,9 @@ def main():
         seed_payloads()
     if "--install-only" in sys.argv:
         print("INSTALL-ONLY-DONE")
+        return 0
+    if "--seed-only" in sys.argv:      # 只验种载荷这一步（不开机）
+        print("SEED-ONLY-DONE")
         return 0
 
     # ---------------- 轮 FB：真实首启 ----------------
