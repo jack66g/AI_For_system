@@ -212,8 +212,7 @@ NO_LAST_SH = (
     "  echo 'bridge2: admin OS account ALREADY exists (unexpected)'\n"
     "  exit 1\n"
     "fi\n"
-    "echo 'bridge2: .last removed; admin OS account absent (console must '\n"
-    "     'create it on next boot)'\n")
+    "echo 'bridge2: .last removed; admin OS account absent — the console must create it on next boot'\n")
 LEGACY_SH = (
     "#!/bin/sh\n"
     "# bridge 3: simulate a legacy machine (17.10/17.11): gate is 0600\n"
@@ -558,7 +557,8 @@ def main():
         print("SEED-ONLY-DONE")
         return 0
 
-    if "--resume-after-firstboot" in sys.argv:
+    if "--resume-after-firstboot" in sys.argv or \
+            "--resume-before-round3" in sys.argv:
         # 首启章已真跑过、证据在串口日志里（客户机按载荷末尾的 poweroff
         # 干净关了机）：从这里接着跑后续章节，不重装。证据必须完整——载荷
         # 收尾标记不在就断言失败，不拿半截日志充数。
@@ -608,15 +608,23 @@ def main():
     if not good_fb:
         return 1
 
-    # ---------------- 桥1：追加 root 条目（电池轮用）----------------
-    print("== bridge 1: append root entry (bench-only) ==")
-    bridge("root-entry", ROOT_ENTRY_SH)
+    if "--resume-before-round3" not in sys.argv:
+        # 桥1：追加 root 条目（电池轮用）
+        print("== bridge 1: append root entry (bench-only) ==")
+        bridge("root-entry", ROOT_ENTRY_SH)
 
-    # ---------------- 轮2：root 电池 ----------------
-    print("== boot round 2: root battery ==")
-    out, _, b6t = boot_round("root", ROOT_DRIVE, b"==B1==", 90)
-    with open(os.path.join(EVD, "w17o-battery.txt"), "w") as fh:
-        fh.write(out)
+        # 轮2：root 电池
+        print("== boot round 2: root battery ==")
+        out, _, b6t = boot_round("root", ROOT_DRIVE, b"==B1==", 90)
+        with open(os.path.join(EVD, "w17o-battery.txt"), "w") as fh:
+            fh.write(out)
+    else:
+        # 电池章已跑过、证据已落盘：从证据复核，不重跑
+        with open(os.path.join(EVD, "w17o-battery.txt"), encoding="utf-8") as fh:
+            out = fh.read()
+        assert "W17IDONE2" in out, "battery evidence incomplete"
+        b6t = "==B1==" in out
+        print("== battery chapter: resumed from saved evidence ==")
     b5 = blk(out, "==B5==", "==B7==")
     b7 = out.rsplit("==B7==", 1)[1].rsplit("==B8==", 1)[0] \
         if "==B8==" in out else ""
