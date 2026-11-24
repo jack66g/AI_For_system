@@ -34,6 +34,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 L1 = os.path.expanduser("~")         # 打版机上的家目录（脚本以打版机用户跑，
@@ -59,6 +60,45 @@ PHASE_T0 = [0.0]
 
 def phase(tag):
     print("== phase %-16s t=%.1fs ==" % (tag, time.time() - PHASE_T0[0]))
+
+
+def start_reader(ser):
+    """串口套接字持续排空（后台线程）。
+
+    客户机上的登录门空闲时也在持续整屏重绘（约 50 次/秒、每次约 1.3KB；
+    142 真机实测串口侧 occ 空闲 CPU 3–12%——已立项）。台架若在等待/打字期间
+    不读套接字，两三秒就写满，客户机的串口输出随即堵住：occ 的输出看门狗
+    （15 秒写不出去=终端楔死）会让串口那一侧的 occ 退出重启，载荷刚写出的
+    结果也会在 poweroff 时丢掉。w17n 是靠「载荷跑几分钟、期间一直在读」蒙对
+    的；这里改成一直读。首跑验尸：串口侧 occ 两次 rc=72，fb.sh 已执行
+    （journal 有 stop serial-getty）但串口标记全丢。"""
+    ser._stop_reader = False
+    ser.eof = False
+
+    def loop():
+        while not ser._stop_reader:
+            try:
+                d = ser.s.recv(65536)
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except OSError:
+                ser.eof = True
+                return
+            if not d:
+                ser.eof = True
+                return
+            ser.buf += d
+            ser.log.write(d)
+            ser.log.flush()
+
+    threading.Thread(target=loop, daemon=True).start()
+    ser.pump = lambda: True      # 读交给线程；wait/wait_after 只查缓冲
+
+
+def stop_reader(ser):
+    ser._stop_reader = True
+    time.sleep(0.15)
 
 
 def bench_kill():
@@ -298,7 +338,10 @@ def install_round():
         ser.wait(b"Press ENTER", 3000)
         time.sleep(1)
         ser.send(b"\r")
-        wait_after(ser, mark, b"Power down", 300)
+        # 安装器是「重启」；QEMU 带 -no-reboot，客户机一复位进程就退出。旧脚本
+        # 只等 Power down，要白等满 300 秒才往下走。
+        wait_after(ser, mark, rb"Power down|Restarting system|machine restart",
+                   300)
         time.sleep(3)
     finally:
         ser.drain_close()
@@ -333,6 +376,7 @@ def boot_round(tag, drive_line, marker, wait_cmd, pre_sleep=25,
     phase("qemu-start[%s]" % tag)
     time.sleep(2)
     ser = Serial(sock, os.path.join(EVD, "w17o-boot-%s-serial.log" % tag))
+    start_reader(ser)
     out = ""
     wizzed = False
     frame = False
@@ -382,6 +426,14 @@ def boot_round(tag, drive_line, marker, wait_cmd, pre_sleep=25,
             b1_mark = len(ser.buf)
         else:
             for attempt in range(attempts):
+                # 起点取在敲密码之前：载荷可能在「开始等」之前就跑完并关机
+                # （首跑二验：F1..F7 与 Power down 全在日志里，只是落在等待
+                # 起点之后——起点取在了敲完命令之后）。
+                mark0 = len(ser.buf)
+
+                def found():
+                    return ser.buf.find(marker, mark0)
+
                 type_line(PW)
                 if wizard:              # 首启向导：设置密码 / 确认密码
                     time.sleep(6)
@@ -390,13 +442,24 @@ def boot_round(tag, drive_line, marker, wait_cmd, pre_sleep=25,
                 for line in drive_line:
                     type_line(line)
                     time.sleep(line_sleep)
-                mark = len(ser.buf)
-                if wait_after(ser, mark, marker, wait_cmd):
+                t0 = time.time()
+                while found() < 0 and not ser.eof and \
+                        time.time() - t0 < wait_cmd:
+                    time.sleep(0.2)
+                idx = found()
+                if idx >= 0:
                     main_tui = True
-                    b1_mark = mark
+                    b1_mark = idx
                     print("sendkey drive OK [%s attempt %d]"
                           " - marker on serial" % (tag, attempt + 1))
                     break
+                if ser.eof:
+                    tail = ANSI.sub(b"", ser.buf[mark0:]).replace(
+                        b"\r", b"").decode("utf-8", "replace")
+                    raise AssertionError(
+                        "VM exited before marker %r [%s attempt %d]; "
+                        "serial tail after attempt start:\n%s"
+                        % (marker, tag, attempt + 1, tail[-1500:]))
                 print("sendkey attempt %d [%s]: no marker, retry"
                       % (attempt + 1, tag))
         phase("main-tui[%s]" % tag)
@@ -414,6 +477,7 @@ def boot_round(tag, drive_line, marker, wait_cmd, pre_sleep=25,
         except Exception:
             pass
     finally:
+        stop_reader(ser)
         ser.drain_close()
         cleanup_qemu()
         bench_kill()
@@ -494,13 +558,30 @@ def main():
         print("SEED-ONLY-DONE")
         return 0
 
-    # ---------------- 轮 FB：真实首启 ----------------
-    print("== boot round FB: real first boot (wizard) ==")
-    out_fb, fb_wiz, fb_tui = boot_round(
-        "firstboot", FB_DRIVE, b"==F1==", 90, pre_sleep=60, wizard=True,
-        attempts=4)
-    with open(os.path.join(EVD, "w17o-firstboot.txt"), "w") as fh:
-        fh.write(out_fb)
+    if "--resume-after-firstboot" in sys.argv:
+        # 首启章已真跑过、证据在串口日志里（客户机按载荷末尾的 poweroff
+        # 干净关了机）：从这里接着跑后续章节，不重装。证据必须完整——载荷
+        # 收尾标记不在就断言失败，不拿半截日志充数。
+        rawp = os.path.join(EVD, "w17o-boot-firstboot-serial.log")
+        with open(rawp, "rb") as fh:
+            raw = fh.read()
+        i = raw.rfind(b"==F1==")
+        assert i >= 0, "no first-boot evidence in " + rawp
+        assert b"W17OFB2" in raw[i:], "first-boot payload did not finish"
+        out_fb = ANSI.sub(b"", raw[i:]).replace(b"\r", b"").decode(
+            "utf-8", "replace")
+        fb_wiz = re.search(WIZ_RE, ANSI.sub(b"", raw)) is not None
+        fb_tui = True
+        with open(os.path.join(EVD, "w17o-firstboot.txt"), "w") as fh:
+            fh.write(out_fb)
+        print("== FB chapter: resumed from serial evidence ==")
+    else:
+        print("== boot round FB: real first boot (wizard) ==")
+        out_fb, fb_wiz, fb_tui = boot_round(
+            "firstboot", FB_DRIVE, b"==F1==", 90, pre_sleep=60, wizard=True,
+            attempts=4)
+        with open(os.path.join(EVD, "w17o-firstboot.txt"), "w") as fh:
+            fh.write(out_fb)
     fb1 = blk(out_fb, "==F1==", "==F2==")
     fb2 = blk(out_fb, "==F2==", "==F3==")
     fb3 = blk(out_fb, "==F3==", "==F4==")
