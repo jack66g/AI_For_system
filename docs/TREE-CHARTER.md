@@ -179,7 +179,7 @@
 | 5.6 | 语言表生成器不在仓内 | `agent/ai/occ/occ_tui/tui_lang_tab.h` 头注声明由 `gen_lang_tab.py` / `mk_tab_delta.py` / `mk_tab_p2a.py` 生成，三者均未被跟踪 | ENG-04 |
 | 5.7 | 打版机家目录散脚本 | 家目录顶层 `*.sh` / `*.py` 共 103 个 | ENG-13 |
 | 5.8 | 顶层 `MANIFEST.sha256` 失效 | 以 main@ccfc5f8 计：1448 条中 350 条 FAILED（83 条文件不存在、267 条哈希不符）；91 条指向已不再跟踪的路径；544 个被跟踪文件不在清单内。对照：`kernel-overlays/MANIFEST.sha256` 172 条全绿 | ENG-10 |
-| 5.9 | 打版链依赖未入库的构建产物 | `build/w17n_factory_refresh.py:91-92` 与 `build/w17n_build_iso.sh:79-81` 取用 `agent/ai/aistreamd/aik-pqdump`，该件未跟踪；`aik-sandbox` 同类且更糟——make 目标把产物输出到 `agent/ai/aik-sandbox`（`agent/ai/Makefile:337-341`），打版链却取 `agent/ai/sandbox/aik-sandbox`（refresh:161-162、build_iso:127-129），两处文件大小不同（1,111,040 对 1,111,080），**出厂件不是由现行配方从工作区编出的**；该锚出库后须从提交历史取回才能打版（主会话 11-24 已取回并核对与出厂树件 sha256 一致） | ENG-07、ENG-14 |
+| 5.9 | 打版链依赖未入库的构建产物 | `build/w17n_factory_refresh.py:91-92` 与 `build/w17n_build_iso.sh:79-81` 取用 `agent/ai/aistreamd/aik-pqdump`，该件未跟踪；`aik-sandbox` 同类且更糟——make 目标把产物输出到 `agent/ai/aik-sandbox`（`agent/ai/Makefile:337-341`），打版链却取 `agent/ai/sandbox/aik-sandbox`（refresh:161-162、build_iso:127-129），两处文件大小不同（1,111,040 对 1,111,080）。**11-25 ENG-14 定谳：这是「旧构建 vs 新构建」而非两条配方**——当前源码重编 = 1,111,080B / md5 6ad156b1，与出厂件、旧锚三者同一件；1,111,040B 是 O-8 修复前的陈旧构建。刷新脚本与打 ISO 已改取 Makefile 产物 `agent/ai/aik-sandbox`，旧 `sandbox/` 锚退役 | ENG-07、ENG-14 |
 | 5.10 | 版本号多处定义、`VERSION` 不存在 | 见 1.4 | ENG-04 |
 
 本棒新发现、待主会话编号：
@@ -193,7 +193,7 @@
 - **出库 40 件**：`.d` 25、`aipd/tests/` 测试 ELF 11、`sandbox/aik-sandbox` 1、运行报告 3（`tools/tools_report.txt`、`tools_report.txt`、`occ/tests/orch_b2_report.txt`）。
 - **删除 3 件**一次性调试脚本：`build/w17nd.py`、`w17ne.py`、`w17ng.py`。
 - **保留未动**：`tools/tool_catalog.txt`（部署脚本与 preflight 以 md5 当冻结基线比对，属「带门的生成物」）；三件同源锚 ELF；factory 的 11 件预编译件。
-- **合并后的遗留动作**：主仓检出本提交时会删掉工作区里的 `agent/ai/sandbox/aik-sandbox` 与 `aipd/tests/test_*`。现役 make 目标（`agent/ai/Makefile:337-341`）把 aik-sandbox 输出到 `agent/ai/aik-sandbox`，而打版链取用的是 `agent/ai/sandbox/aik-sandbox`（`build/w17n_factory_refresh.py:161-162`）——**下次打版前必须先重建并放回该路径**，路径不一致本身交 ENG-03 修。
+- **合并后的遗留动作**：主仓检出本提交时会删掉工作区里的 `agent/ai/sandbox/aik-sandbox` 与 `aipd/tests/test_*`。现役 make 目标（`agent/ai/Makefile:337-341`）把 aik-sandbox 输出到 `agent/ai/aik-sandbox`，而旧打版链曾取 `agent/ai/sandbox/aik-sandbox`。**11-25 ENG-14 已修**：刷新脚本与 build_iso 改取 Makefile 产物 `agent/ai/aik-sandbox`，旧 `sandbox/` 锚退役；打版前只需 `make -C agent/ai aik-sandbox` 重建。
 
 ## 6. 基线与豁免的维护
 
