@@ -73,6 +73,7 @@
 #define V_MSG_FLOAT	"Input should be a valid number"
 #define V_MSG_BOOL	"Input should be a valid boolean"
 #define V_MSG_BLANK	"Value error, text must not be blank"
+#define V_MSG_INVALID_UTF8	"Value error, text contains invalid unicode"
 
 /* ------------------------------------------------------------------ */
 /* JSON 构造助手（失败只置 bad，不中断流程；所有权：成功即转移）        */
@@ -770,6 +771,10 @@ static int validate_add(vctx *v, const aik_json *obj, const vloc *base,
 		v_add(v, "missing", V_MSG_MISSING, obj, &loc, 0);
 	} else if (aik_json_typeof(j) != AIK_JSON_STR) {
 		v_add(v, "string_type", V_MSG_STRING, j, &loc, 0);
+	} else if (!aik_memory_text_is_utf8(aik_json_str(j))) {
+		/* 不把非法 UTF-8 字节写进 422 JSON。 */
+		v_add_owned(v, "value_error", V_MSG_INVALID_UTF8,
+			    aik_json_new_null(), &loc, 1);
 	} else if (text_is_blank(aik_json_str(j))) {
 		v_add(v, "value_error", V_MSG_BLANK, j, &loc, 1);
 	} else {
@@ -1647,6 +1652,9 @@ static int validate_update(vctx *v, const aik_json *obj, const vloc *base)
 	if (j && aik_json_typeof(j) != AIK_JSON_NULL) {
 		if (aik_json_typeof(j) != AIK_JSON_STR)
 			v_add(v, "string_type", V_MSG_STRING, j, &loc, 0);
+		else if (!aik_memory_text_is_utf8(aik_json_str(j)))
+			v_add_owned(v, "value_error", V_MSG_INVALID_UTF8,
+				    aik_json_new_null(), &loc, 1);
 		else if (text_is_blank(aik_json_str(j)))
 			v_add(v, "value_error", V_MSG_BLANK, j, &loc, 1);
 	}

@@ -1943,6 +1943,21 @@ static void run_update_tests(void)
 	check_str("update.blank.keep_text", m->text, "gamma delta");
 	check_int("update.blank.keep_version", m->version, old_version);
 
+	/* ed5378a test_lone_surrogate_rejected：非法文本进不了 add/update。 */
+	check_int("add.surrogate.rc",
+		  add_mem(e, "invalid\xed\xa0\x80" " text", NULL, NULL, 0,
+			  0.5, "user", NULL, err, sizeof(err)) == NULL, 1);
+	check_str("add.surrogate.error", err, "text contains invalid unicode");
+	patch = jobj();
+	jput(patch, "text", jstr("update\xed\xbf\xbf" " text"));
+	check_int("update.surrogate.rc",
+		  aik_engine_update(e, mid, patch, err, sizeof(err)), -1);
+	aik_json_free(patch);
+	check_str("update.surrogate.error", err, "text contains invalid unicode");
+	check_str("update.surrogate.keep_text", m->text, "gamma delta");
+	check_int("add.valid_supplementary_utf8",
+		  aik_memory_text_is_utf8("ok\xf0\x9f\x98\x80"), 1);
+
 	/* metadata-only：不 touched，但 ns 保留 */
 	old_version = m->version;
 	old_last_hit = m->last_hit;

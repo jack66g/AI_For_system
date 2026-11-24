@@ -48,7 +48,8 @@
  *
  * 单线程；无全局状态。错误一律写 err 并返回 -1。
  * 自 e72bc75 起在此处有意偏离，依据上游 ed5378a：
- * update 入口拒绝空白文本（sme/memory_manager.py::update_memory）。
+ * update 入口拒绝空白文本，add/update 拒绝非法 UTF-8
+ * （sme/memory_manager.py::update_memory / _check_encodable_text）。
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -1956,6 +1957,10 @@ static aik_memory *engine_add_core(aik_engine *e, const char *text,
 		set_err(err, errlen, "memory text must not be blank");
 		return NULL;
 	}
+	if (!aik_memory_text_is_utf8(text)) {
+		set_err(err, errlen, "text contains invalid unicode");
+		return NULL;
+	}
 	m = aik_memory__new();
 	if (!m)
 		goto oom;
@@ -3215,6 +3220,10 @@ int aik_engine_update(aik_engine *e, const char *id, const aik_json *patch,
 
 		if (aik_text__is_blank(text)) {
 			set_err(err, errlen, "memory text must not be empty");
+			goto out;
+		}
+		if (!aik_memory_text_is_utf8(text)) {
+			set_err(err, errlen, "text contains invalid unicode");
 			goto out;
 		}
 		if (!text_strip_equals(text, m->text)) {

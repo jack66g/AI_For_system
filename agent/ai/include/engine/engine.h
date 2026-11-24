@@ -201,6 +201,9 @@ int aik_engine_import(aik_engine *e, const aik_json *items,
 int aik_memory_numbers_check(const aik_json *item, const char **field,
 			     const char **msg);
 
+/* 写入文本是否为严格 UTF-8（NULL 无效）。 */
+int aik_memory_text_is_utf8(const char *text);
+
 /*
  * aik_engine_add - 新增一条记忆（sme/memory_manager.py::add_memory）
  *

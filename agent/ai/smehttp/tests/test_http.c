@@ -3408,6 +3408,15 @@ int main(void)
 	test_health(srv.port);
 	test_add_valid(srv.port, text);
 	test_blank_text(srv.port);
+	{
+		int status = -1;
+		aik_json *root = call_json(srv.port, "POST", "/memories",
+			"{\"text\":\"invalid\\ud800 text\"}", &status, NULL);
+
+		check_int(status, 422, "add invalid UTF-8 status");
+		check_true(root != NULL, "add invalid UTF-8 readable error");
+		aik_json_free(root);
+	}
 	test_missing_text(srv.port);
 	test_get_missing(srv.port);
 	test_search(srv.port, text);

@@ -5,6 +5,8 @@
  * 对齐 REF-PY e72bc75 `sme/models.py::Memory.to_dict/from_dict` 与
  * `sme/memory_manager.py::add_memory` 的字段语义。本文件只做纯数据操作，
  * 不触碰 space/retrieval/配置。
+ * 自 e72bc75 起在此处有意偏离，依据上游 ed5378a：
+ * 新增写入口共用的 UTF-8 校验（sme/memory_manager.py::_check_encodable_text）。
  *
  * 内部符号（aik_engine__dup / aik_json__clone / aik_text__is_blank /
  * aik_memory__new / aik_memory__free / aik_json__str_array /
@@ -157,6 +159,23 @@ static int utf8_next(const unsigned char *p, unsigned int *cp)
 	if (*cp > 0x10ffff)
 		return -1;
 	return len;
+}
+
+int aik_memory_text_is_utf8(const char *text)
+{
+	const unsigned char *p = (const unsigned char *)text;
+
+	if (!p)
+		return 0;
+	while (*p) {
+		unsigned int cp;
+		int len = utf8_next(p, &cp);
+
+		if (len < 0)
+			return 0;
+		p += len;
+	}
+	return 1;
 }
 
 /*
