@@ -8,6 +8,11 @@
  * Generate: python -B -I work/refactor/scripts/gen_config_items.py <REF> <OUT>
  * Size: 101 items / 6 presets / 10 groups
  *
+ * MEM-02d hand edit (2026-11-25): llm.model / llm.temperature 两项的
+ * registry 默认值按上游 ed5378a 的 config_items.py 改为 gpt-4o-mini / 0.3
+ * （与 config_default.h 的 SMEConfig 默认 DOM 对齐）。其余 ITEMS 仍钉
+ * e72bc75；llm.base_url 按上游 ed5378a 保持 ""（其 modified 仍为 true）。
+ *
  * Non-ASCII bytes use 3-digit octal escapes; source stays pure ASCII.
  * Include this file from exactly one TU (smeconfig/config_items.c).
  */
@@ -35,7 +40,7 @@ const aik_config_item aik_config_items[] = {
 	  "\"\"" },
 	{ "llm.model", "\346\250\241\345\236\213", "llm", "\346\250\241\345\236\213\345\220\215\357\274\214\345\246\202 deepseek-v4-flash / gpt-4o-mini / qwen-plus",
 	  AIK_CFG_KIND_STR, NULL, 0, NULL, NULL, 1,
-	  "\"\"" },
+	  "\"gpt-4o-mini\"" },
 	{ "llm.reasoning_effort", "\346\216\250\347\220\206\347\272\247\345\210\253", "llm", "\346\216\250\347\220\206\345\236\213\346\250\241\345\236\213\357\274\210\345\246\202 deepseek-v4-flash\357\274\211\345\277\205\351\241\273\345\241\253 none\357\274\214\345\220\246\345\210\231\345\260\217 max_tokens \346\227\266\350\277\224\345\233\236\347\251\272\345\233\236\345\244\215",
 	  AIK_CFG_KIND_ENUM, AIK_CHOICES_3, 5, NULL, NULL, 0,
 	  "\"\"" },
@@ -44,7 +49,7 @@ const aik_config_item aik_config_items[] = {
 	  "1024" },
 	{ "llm.temperature", "\346\270\251\345\272\246", "llm", "\351\232\217\346\234\272\345\272\246 0~2\357\274\233\347\237\245\350\257\206\351\227\256\347\255\224\345\273\272\350\256\256 0.3~0.6\357\274\214\350\266\212\351\253\230\350\266\212\345\217\221\346\225\243",
 	  AIK_CFG_KIND_FLOAT, NULL, 0, "0", "2", 0,
-	  "0.6" },
+	  "0.3" },
 	{ "llm.timeout", "\350\266\205\346\227\266\357\274\210\347\247\222\357\274\211", "llm", "\350\257\267\346\261\202\350\266\205\346\227\266\347\247\222\346\225\260\357\274\233\346\234\254\345\234\260\346\250\241\345\236\213\345\217\257\350\260\203\345\244\247",
 	  AIK_CFG_KIND_FLOAT, NULL, 0, "1", "600", 0,
 	  "60" },

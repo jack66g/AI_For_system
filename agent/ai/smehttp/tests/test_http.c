@@ -46,6 +46,16 @@
  *      有限（1e999 溢出的 ±inf）→ 整批 422（value_error，loc 指到条目与
  *      字段，与空白 text 的 422 同款；importance 不在 [0,1] 同拒），
  *      什么都没入库；边界值放行后检索分数有限。
+ *
+ * MEM-02d（上游 ed5378a sme/config.py::_validate_field/from_dict）：
+ *  20. 配置文件装载入口对显式键跑注册表校验（与 PUT /config 同源
+ *      aik_config_item_validate）：llm.temperature=99、
+ *      ranking.importance=2.0、ranking.weight=-1、retrieval.fusion 枚举
+ *      坏值、temperature 类型错误 → 退出非零、不打印 LISTENING、stderr
+ *      只带「键名+原因」；合法显式值正常监听且 GET /config 生效；
+ *      JSON null、maintenance.every_s（上游 _FROMDICT_SKIP_VALIDATION）、
+ *      未注册键按上游豁免不阻断。临时配置不再写 api.port（监听端口由
+ *      --port 决定，避免测试用的 0 成为显式坏值）。
  * 自 MEM-02a 起配置热重建会往 storage.path 写快照，所以：
  *  - 默认配置那台服务器的子进程先 chdir 到临时目录（默认 storage.path
  *    是相对路径 data/engine.json），快照落在临时目录里而不是源码树；
@@ -213,7 +223,7 @@ static int write_config_ex(const char *path, const char *db, const char *token,
 		"  \"persistence\": {\"enabled\": %s},\n"
 		"  \"maintenance\": {\"background\": false},\n"
 		"  \"observability\": {\"enabled\": false},\n"
-		"  \"api\": {\"host\": \"127.0.0.1\", \"port\": 0, "
+		"  \"api\": {\"host\": \"127.0.0.1\", "
 		"\"auth_token\": \"%s\"}\n"
 		"}\n",
 		db, wal ? "true, \"sync_mode\": \"fsync\"" : "false", token);
@@ -223,14 +233,46 @@ static int write_config_ex(const char *path, const char *db, const char *token,
 }
 
 /*
- * start_server_ex - 起一台服务器
+ * write_config_text - 最小合法配置 + 调用方给的覆盖片段（MEM-02d 用）
+ *
+ * extra 是 JSON 成员串（如 "\"llm\": {\"temperature\": 1.5}"），可为空；
+ * 注意不要重复 fixed 段已出现的键。api.port 故意不写：监听端口由
+ * 命令行 --port 决定，避免把测试用的 0 当成显式配置值。
+ */
+static int write_config_text(const char *path, const char *db,
+			     const char *extra)
+{
+	FILE *f = fopen(path, "w");
+	int rc;
+
+	if (!f)
+		return -1;
+	rc = fprintf(
+		f,
+		"{\n"
+		"  \"seed\": 42,\n"
+		"  \"storage\": {\"path\": \"%s\", \"autosave\": false},\n"
+		"  \"api\": {\"host\": \"127.0.0.1\"}",
+		db);
+	if (rc >= 0 && extra && *extra)
+		rc = fprintf(f, ",\n  %s", extra);
+	if (rc >= 0)
+		rc = fprintf(f, "\n}\n");
+	if (fclose(f) != 0)
+		return -1;
+	return rc < 0 ? -1 : 0;
+}
+
+/*
+ * start_server_generic - 起一台服务器
  *
  * db 为 NULL 时 storage.path = <tmp>/engine-<tag>.json.gz；否则用调用方
  * 给的恢复存储路径（MEM-02a 用它让两台服务器共用同一路径）。
+ * extra 非 NULL 时改用 write_config_text 写最小配置 + 覆盖片段（MEM-02d）。
  */
-static int start_server_ex(test_server *ts, const char *tmpdir,
-			   const char *tag, const char *token, int wal,
-			   const char *db)
+static int start_server_generic(test_server *ts, const char *tmpdir,
+				const char *tag, const char *token, int wal,
+				const char *db, const char *extra)
 {
 	int fds[2];
 	char line[256];
@@ -245,7 +287,8 @@ static int start_server_ex(test_server *ts, const char *tmpdir,
 	else
 		snprintf(ts->db_path, sizeof(ts->db_path), "%s/engine-%s.json.gz",
 			 tmpdir, tag);
-	if (write_config_ex(ts->cfg_path, ts->db_path, token, wal) != 0) {
+	if ((extra ? write_config_text(ts->cfg_path, ts->db_path, extra)
+		   : write_config_ex(ts->cfg_path, ts->db_path, token, wal)) != 0) {
 		fprintf(stderr, "test_http: cannot write config\n");
 		return -1;
 	}
@@ -296,6 +339,13 @@ static int start_server_ex(test_server *ts, const char *tmpdir,
 	}
 	ts->port = port;
 	return 0;
+}
+
+static int start_server_ex(test_server *ts, const char *tmpdir,
+			   const char *tag, const char *token, int wal,
+			   const char *db)
+{
+	return start_server_generic(ts, tmpdir, tag, token, wal, db, NULL);
 }
 
 static int start_server(test_server *ts, const char *tmpdir, const char *tag,
@@ -2882,6 +2932,154 @@ static void test_config_reset(int port, const char *cfg_path)
 }
 
 /* ------------------------------------------------------------------ */
+/* MEM-02d：装载入口取值校验                                           */
+/*   - 坏配置文件：非零退出、不打印 LISTENING、stderr 带「键名+原因」   */
+/*   - 好配置：正常监听且显式值生效                                    */
+/*   - 上游豁免：JSON null / maintenance.every_s / 未注册键不阻断       */
+/* ------------------------------------------------------------------ */
+static void test_mem02d_startup(const char *tmpdir)
+{
+	static const struct {
+		const char *tag;
+		const char *extra;
+		const char *want;
+		const char *must_not;	/* 用户值不得回显到 stderr */
+	} bad[] = {
+		{ "m02d-temp99", "\"llm\": {\"temperature\": 99}",
+		  "config llm.temperature: 不能大于 2", "99" },
+		{ "m02d-importance", "\"ranking\": {\"importance\": 2.0}",
+		  "config ranking.importance: 不能大于 1", "2.0" },
+		{ "m02d-weight", "\"ranking\": {\"weight\": -1}",
+		  "config ranking.weight: 不能小于 0", "-1" },
+		{ "m02d-enum", "\"retrieval\": {\"fusion\": \"bogus\"}",
+		  "config retrieval.fusion: 可选值：weighted / minmax",
+		  "bogus" },
+		{ "m02d-type", "\"llm\": {\"temperature\": \"m02d-marker\"}",
+		  "config llm.temperature: 应为数字", "m02d-marker" },
+	};
+	test_server ts;
+	int status = -1;
+	aik_json *root;
+	const aik_json *groups;
+	char err_path[512];
+	char out[1024];
+	char *errlog;
+	size_t errlen = 0;
+	int fds[2];
+	int wstatus = 0;
+	pid_t pid;
+	ssize_t n;
+	size_t used;
+	size_t i;
+
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memset(&ts, 0, sizeof(ts));
+		snprintf(ts.cfg_path, sizeof(ts.cfg_path), "%s/sme-%s.json",
+			 tmpdir, bad[i].tag);
+		snprintf(ts.db_path, sizeof(ts.db_path),
+			 "%s/engine-%s.json.gz", tmpdir, bad[i].tag);
+		snprintf(err_path, sizeof(err_path), "%s/%s.err", tmpdir,
+			 bad[i].tag);
+		(void)unlink(err_path);
+		check_true(write_config_text(ts.cfg_path, ts.db_path,
+					     bad[i].extra) == 0,
+			   "mem02d/%s: cannot write config", bad[i].tag);
+		if (pipe(fds) != 0) {
+			check_true(0, "mem02d/%s: pipe failed", bad[i].tag);
+			continue;
+		}
+		pid = fork();
+		if (pid == 0) {
+			int efd;
+
+			close(fds[0]);
+			if (dup2(fds[1], STDOUT_FILENO) < 0)
+				_exit(127);
+			close(fds[1]);
+			efd = open(err_path,
+				   O_WRONLY | O_CREAT | O_TRUNC, 0600);
+			if (efd >= 0) {
+				(void)dup2(efd, STDERR_FILENO);
+				close(efd);
+			}
+			execl(server_bin(), "smehttp", "--config",
+			      ts.cfg_path, "--host", "127.0.0.1",
+			      "--port", "0", (char *)NULL);
+			_exit(127);
+		}
+		if (pid < 0) {
+			close(fds[0]);
+			close(fds[1]);
+			check_true(0, "mem02d/%s: fork failed", bad[i].tag);
+			continue;
+		}
+		close(fds[1]);
+		used = 0;
+		while (used + 1 < sizeof(out)) {
+			n = read(fds[0], out + used, sizeof(out) - 1 - used);
+			if (n <= 0)
+				break;
+			used += (size_t)n;
+		}
+		out[used] = '\0';
+		close(fds[0]);
+		check_true(waitpid(pid, &wstatus, 0) == pid,
+			   "mem02d/%s: waitpid", bad[i].tag);
+		check_true(WIFEXITED(wstatus) &&
+				   WEXITSTATUS(wstatus) != 0 &&
+				   WEXITSTATUS(wstatus) != 127,
+			   "mem02d/%s: bad config must exit non-zero",
+			   bad[i].tag);
+		check_true(strstr(out, "LISTENING") == NULL,
+			   "mem02d/%s: must not listen", bad[i].tag);
+		errlog = read_file_all(err_path, &errlen);
+		check_true(errlog != NULL &&
+				   strstr(errlog, bad[i].want) != NULL,
+			   "mem02d/%s: stderr missing '%s'",
+			   bad[i].tag, bad[i].want);
+		check_true(errlog == NULL ||
+				   strstr(errlog, bad[i].must_not) == NULL,
+			   "mem02d/%s: stderr echoed user value '%s'",
+			   bad[i].tag, bad[i].must_not);
+		free(errlog);
+		(void)unlink(ts.cfg_path);
+		(void)unlink(ts.db_path);
+		(void)unlink(err_path);
+	}
+
+	/* 合法显式值：正常监听，GET /config 回生效值 */
+	if (start_server_generic(&ts, tmpdir, "m02d-good", "", 0, NULL,
+				 "\"llm\": {\"temperature\": 1.5}") != 0) {
+		check_true(0, "mem02d: good config did not start");
+	} else {
+		root = call_json(ts.port, "GET", "/config", NULL, &status,
+				 NULL);
+		check_int(status, 200, "mem02d good config.get status");
+		if (root) {
+			groups = aik_json_get(root, "groups");
+
+			check_true(payload_is_num(groups, "llm.temperature",
+						  1.5),
+				   "mem02d: llm.temperature=1.5 not applied");
+		}
+		aik_json_free(root);
+		check_true(stop_server(&ts) == 0,
+			   "mem02d good server did not exit 0");
+	}
+
+	/* 上游豁免：null 值、maintenance.every_s、未注册键都不阻断启动 */
+	if (start_server_generic(
+		    &ts, tmpdir, "m02d-skip", "", 0, NULL,
+		    "\"maintenance\": {\"every_s\": 0.1}, "
+		    "\"llm\": {\"reasoning_effort\": null, \"bogus\": 1}") != 0) {
+		check_true(0, "mem02d: exempt config did not start");
+	} else {
+		check_true(stop_server(&ts) == 0,
+			   "mem02d skip server did not exit 0");
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* mrl_dim 闸门（非空库改 embedding 身份必须拒绝）                    */
 /* ------------------------------------------------------------------ */
 static void test_config_gate(int port)
@@ -3588,6 +3786,9 @@ int main(void)
 	test_config_reset(srv.port, srv.cfg_path);
 	check_true(stop_server(&srv) == 0,
 		   "defaults server did not exit 0 on SIGTERM");
+
+	/* MEM-02d：配置文件装载入口的取值校验（自起独立服务器） */
+	test_mem02d_startup(tmpdir);
 
 	if (start_server(&srv, tmpdir, "mem02c", "") != 0) {
 		fprintf(stderr, "test_http: cannot start server (mem02c)\n");

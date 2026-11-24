@@ -24,9 +24,11 @@ test_factory_config.py - 记忆层「出厂配置」验证（MEM-FACTORY / ENG-1
   D 种子导入数值校验：importance=2.0 的坏种子经 --import-seed 必须非零
     退出且不监听；POST /import 坏值整批 422（value_error，定位到条目与
     字段）；好种子导入成功且重启不翻倍。
-  E MEM-02d 边界：纯默认下 DOM 默认值与注册表默认值是否一致；配置文件
-    装载是否做取值校验（上游 _validate_field 在 from_dict 入口），以及
-    PUT /config 是否拒绝越界值。
+  E MEM-02d 边界：纯默认下注册表 item 默认值已对齐 DOM（llm.model /
+    llm.temperature 取上游 ed5378a，modified 不再误报；llm.base_url 按
+    上游保持 ''，仍 modified=true）；坏配置文件在装载入口被注册表校验器
+    拒绝（非零退出、不监听、stderr 只带键名+原因）；PUT /config 同样
+    拒绝越界值。
 
 不依赖 root：C 组默认以当前用户运行，用 0555 目录模拟「不可写」；若以
 root 运行，则目录 root 属主 + setpriv --reuid=nobody 降权运行（任务书的
@@ -1124,22 +1126,26 @@ def group_e(ctx, ck):
         items = cfg_items(cfgdoc)
         ck.eq("E1 DOM default llm.model", cval(items, "llm.model"), "gpt-4o-mini")
         ck.eq("E1 DOM default llm.temperature", cval(items, "llm.temperature"), 0.3)
-        ck.eq("E1 registry item default llm.model", items["llm.model"].get("default"), "")
+        ck.eq("E1 registry item default llm.model", items["llm.model"].get("default"), "gpt-4o-mini")
         ck.eq("E1 registry item default llm.temperature",
-              items["llm.temperature"].get("default"), 0.6)
+              items["llm.temperature"].get("default"), 0.3)
         ck.eq("E1 llm.model flagged modified under pure defaults",
-              items["llm.model"].get("modified"), True)
+              items["llm.model"].get("modified"), False)
         ck.eq("E1 llm.temperature flagged modified under pure defaults",
-              items["llm.temperature"].get("modified"), True)
+              items["llm.temperature"].get("modified"), False)
+        ck.eq("E1 llm.base_url modified stays true (upstream ed5378a)",
+              items["llm.base_url"].get("modified"), True)
         ck.info("E1 note",
-                "AIK_CONFIG_DEFAULT_JSON (defaults DOM) and the registry item "
-                "table disagree on llm.model/llm.temperature")
+                "registry item defaults for llm.model/temperature follow "
+                "upstream ed5378a and match AIK_CONFIG_DEFAULT_JSON; "
+                "llm.base_url keeps registry default '' (upstream), so its "
+                "modified flag stays true")
         rc = srv.stop()
         ck.eq("E1 SIGTERM exit code", rc, 0)
     finally:
         srv.kill_if_alive()
 
-    # E2 配置文件装载不校验取值；写路径校验（MEM-02d 的 _validate_field）
+    # E2 装载入口校验：坏值拒绝启动（MEM-02d 移植上游 _validate_field）
     cfg = ctx.stage_config("e2")
     doc = read_json(cfg)
     doc["llm"]["temperature"] = 99
@@ -1148,18 +1154,39 @@ def group_e(ctx, ck):
     os.chmod(cfg, 0o644)
     data = ctx.new_dir("e2", "data")
     cwd = ctx.new_dir("e2", "cwd")
-    srv = ctx.start_server("e2-outofrange", cfg, data, cwd)
+    srv = Server(ctx, "e2-outofrange", cfg, data, cwd)
+    start_err = None
     try:
-        ck.check("E2 service starts with out-of-range value in config file",
-                 srv.proc.poll() is None, "")
-        items = cfg_items(srv.get_json("/config"))
-        ck.eq("E2 file value applied without range check",
-              cval(items, "llm.temperature"), 99)
-        ck.eq("E2 out-of-range value flagged modified",
-              items["llm.temperature"].get("modified"), True)
-        status, body = srv.request("PUT", "/config",
-                                   {"values": {"llm.temperature": 99},
-                                    "save": False})
+        srv.start(8.0)
+    except RuntimeError as exc:
+        start_err = str(exc)
+    finally:
+        srv.kill_if_alive()
+    ck.check("E2 bad config refuses to start", start_err is not None,
+             "aikd started with llm.temperature=99")
+    ck.check("E2 bad config exits non-zero with key+reason",
+             start_err is not None and "rc=1" in start_err
+             and "config llm.temperature: 不能大于 2" in start_err,
+             start_err or "")
+    out_text = ""
+    try:
+        with open(srv.out_path, "r", encoding="utf-8", errors="replace") as fh:
+            out_text = fh.read()
+    except OSError:
+        pass
+    ck.check("E2 bad config prints no LISTENING", "LISTENING" not in out_text,
+             out_text[-200:])
+
+    # 写路径回归：好配置正常启动，PUT /config 同值仍被拒（200 ok:false）
+    cfg2 = ctx.stage_config("e2-good")
+    os.chmod(cfg2, 0o644)
+    data2 = ctx.new_dir("e2good", "data")
+    cwd2 = ctx.new_dir("e2good", "cwd")
+    srv2 = ctx.start_server("e2-good", cfg2, data2, cwd2)
+    try:
+        status, body = srv2.request("PUT", "/config",
+                                    {"values": {"llm.temperature": 99},
+                                     "save": False})
         ck.eq("E2 PUT status", status, 200)
         ck.eq("E2 PUT ok", (body or {}).get("ok"), False)
         errs = (body or {}).get("errors") or {}
@@ -1167,12 +1194,12 @@ def group_e(ctx, ck):
                  "errors=%s" % ",".join(errs.keys()))
         ctx.measure["e.put_reject"] = {"errors": list(errs.keys())}
         ck.info("E2 MEM-02d boundary",
-                "config-file load has no value validation; only PUT /config "
-                "and presets go through the registry validator")
-        rc = srv.stop()
+                "config-file load goes through the registry validator and "
+                "refuses to listen; PUT /config rejects the same value")
+        rc = srv2.stop()
         ck.eq("E2 SIGTERM exit code", rc, 0)
     finally:
-        srv.kill_if_alive()
+        srv2.kill_if_alive()
 
 
 GROUPS = {"a": group_a, "b": group_b, "c": group_c, "d": group_d, "e": group_e}

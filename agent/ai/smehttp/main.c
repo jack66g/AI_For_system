@@ -303,6 +303,62 @@ static void apply_data_dir(aik_config *cfg)
 }
 
 /* ------------------------------------------------------------------ */
+/*
+ * validate_explicit_config - 配置文件显式键的装载入口取值校验（MEM-02d）
+ *
+ * 对齐上游 ed5378a `sme/config.py::_validate_field`（`from_dict` 逐字段
+ * 校验，P3-15）：
+ *   - 只校验「配置层白名单（= `_explicit_keys`）∩ 注册表」的键；
+ *   - JSON null 跳过（上游 `value is None`）；
+ *   - `maintenance.every_s` 跳过（上游 `_FROMDICT_SKIP_VALIDATION`：测试/
+ *     高频打点用 0.1s，UI 下限 1s 只是人工输入约束）；
+ *   - 未注册键沿用 hasattr 白名单的「静默忽略」语义，不在此拒绝；
+ *   - 错误文案 `config <section.key>: <原因>`（上游同形），**不回显用户值**。
+ *
+ * 只用于新配置文件的装载入口；快照/WAL 里的旧配置不走这里（上游同样只
+ * 在 from_dict 校验，保住旧快照兼容）。返回 0 合法、-1 值非法、-2 内部
+ * 错误（OOM）。
+ */
+static int validate_explicit_config(const aik_config *cfg, char *err,
+				    size_t errlen)
+{
+	const aik_json *dom = aik_config_dom(cfg);
+	size_t i;
+
+	if (err && errlen)
+		err[0] = '\0';
+	if (!dom)
+		return 0;
+	for (i = 0; i < aik_config_item_count; i++) {
+		const aik_config_item *it = &aik_config_items[i];
+		const aik_json *v;
+		char reason[256];
+		int rc;
+
+		if (!aik_config_is_explicit(cfg, it->path))
+			continue;
+		if (strcmp(it->path, "maintenance.every_s") == 0)
+			continue;
+		v = aik_config_item_get(dom, it);
+		if (!v || aik_json_typeof(v) == AIK_JSON_NULL)
+			continue;
+		reason[0] = '\0';
+		rc = aik_config_item_validate(it, v, reason, sizeof(reason));
+		if (rc == -2) {
+			snprintf(err, errlen, "config %s: 值非法（内部错误）",
+				 it->path);
+			return -2;
+		}
+		if (rc != 0) {
+			snprintf(err, errlen, "config %s: %s", it->path,
+				 reason);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 int main(int argc, char **argv)
 {
 	const char *config_arg = NULL;
@@ -398,6 +454,15 @@ int main(int argc, char **argv)
 			  : aik_config_defaults(err, sizeof(err));
 	if (!cfg) {
 		fprintf(stderr, "smehttp: config: %s\n", err);
+		return 1;
+	}
+	/*
+	 * MEM-02d：显式键先过注册表校验（与 PUT /config 同源
+	 * aik_config_item_validate）；坏值打印键名+原因、退出非零、不监听。
+	 */
+	if (validate_explicit_config(cfg, err, sizeof(err)) != 0) {
+		fprintf(stderr, "smehttp: %s\n", err);
+		aik_config_free(cfg);
 		return 1;
 	}
 	apply_data_dir(cfg);	/* T7a：数据根覆写（第一遍，先于快照装载） */

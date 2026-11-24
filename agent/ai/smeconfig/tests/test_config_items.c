@@ -322,7 +322,7 @@ static void test_registry(void)
 		      "registry: llm.temperature minimum");
 		check(it->maximum && strcmp(it->maximum, "2") == 0,
 		      "registry: llm.temperature maximum");
-		check(strcmp(it->default_json, "0.6") == 0,
+		check(strcmp(it->default_json, "0.3") == 0,
 		      "registry: llm.temperature default");
 	}
 
@@ -359,6 +359,8 @@ static void test_registry(void)
 	it = aik_config_item_find("llm.model");
 	check(it != NULL && it->required == 1,
 	      "registry: llm.model must be required");
+	check(it != NULL && strcmp(it->default_json, "\"gpt-4o-mini\"") == 0,
+	      "mem02d: llm.model default must be gpt-4o-mini");
 	it = aik_config_item_find("storage.path");
 	check(it != NULL && it->required == 1,
 	      "registry: storage.path must be required");
@@ -524,6 +526,93 @@ static void test_groups_presets(const aik_json *cdef)
 	free(disp);
 	aik_json_free(groups);
 	aik_json_free(presets);
+}
+
+/* ------------------------------------------------------------------ */
+/* 2b) MEM-02d：纯默认下 llm.* 的 modified 判定                        */
+/* ------------------------------------------------------------------ */
+/* groups payload 里按 path 找一项；未找到返回 NULL */
+static const aik_json *group_item_by_path(const aik_json *groups,
+					  const char *path)
+{
+	size_t i, j;
+
+	for (i = 0; i < aik_json_count(groups); i++) {
+		const aik_json *arr =
+			aik_json_get(aik_json_at(groups, i), "items");
+
+		for (j = 0; j < aik_json_count(arr); j++) {
+			const aik_json *it = aik_json_at(arr, j);
+			const char *p =
+				aik_json_str(aik_json_get(it, "path"));
+
+			if (p && strcmp(p, path) == 0)
+				return it;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * MEM-02d（A 判定：出厂配置显式覆盖 llm.*，对齐不改运行时）：
+ * item 表 llm.model / llm.temperature 对齐 DOM（= 上游 ed5378a），
+ * 纯默认下不再误报 modified；llm.base_url 上游 ed5378a 未对齐，仍 true。
+ */
+static void test_mem02d_llm_defaults(const aik_json *cdef)
+{
+	aik_json *disp = aik_config_display(cdef);
+	aik_json *groups = aik_config_groups_build(disp);
+	const aik_json *p;
+	const aik_json *d;
+
+	check(groups != NULL, "mem02d: groups_build failed");
+	if (!groups) {
+		free(disp);
+		return;
+	}
+
+	p = group_item_by_path(groups, "llm.model");
+	check(p != NULL, "mem02d: llm.model payload missing");
+	if (p) {
+		d = aik_json_get(p, "default");
+		check(d && aik_json_typeof(d) == AIK_JSON_STR &&
+		      strcmp(aik_json_str(d), "gpt-4o-mini") == 0,
+		      "mem02d: llm.model default");
+		check(aik_json_typeof(aik_json_get(p, "modified")) ==
+			      AIK_JSON_BOOL &&
+		      aik_json_bool(aik_json_get(p, "modified")) == 0,
+		      "mem02d: llm.model modified must be false");
+	}
+
+	p = group_item_by_path(groups, "llm.temperature");
+	check(p != NULL, "mem02d: llm.temperature payload missing");
+	if (p) {
+		d = aik_json_get(p, "default");
+		check(d && aik_json_typeof(d) == AIK_JSON_NUM &&
+		      aik_json_num(d) == 0.3,
+		      "mem02d: llm.temperature default");
+		check(aik_json_typeof(aik_json_get(p, "modified")) ==
+			      AIK_JSON_BOOL &&
+		      aik_json_bool(aik_json_get(p, "modified")) == 0,
+		      "mem02d: llm.temperature modified must be false");
+	}
+
+	/* 上游 ed5378a 只改 model/temperature；base_url 的 default 仍是 "" */
+	p = group_item_by_path(groups, "llm.base_url");
+	check(p != NULL, "mem02d: llm.base_url payload missing");
+	if (p) {
+		d = aik_json_get(p, "default");
+		check(d && aik_json_typeof(d) == AIK_JSON_STR &&
+		      strcmp(aik_json_str(d), "") == 0,
+		      "mem02d: llm.base_url default stays empty");
+		check(aik_json_typeof(aik_json_get(p, "modified")) ==
+			      AIK_JSON_BOOL &&
+		      aik_json_bool(aik_json_get(p, "modified")) == 1,
+		      "mem02d: llm.base_url modified stays true (upstream)");
+	}
+
+	free(disp);
+	aik_json_free(groups);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1718,6 +1807,7 @@ int main(void)
 
 	test_registry();
 	test_groups_presets(aik_config_dom(cdef));
+	test_mem02d_llm_defaults(aik_config_dom(cdef));
 	test_mutated();
 	test_save_load(aik_config_dom(cdef));
 	test_parse();
