@@ -40,6 +40,7 @@
 #include <fcntl.h>
 #include <grp.h>				/* P-60/D1：setgroups（降权） */
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,21 @@ static int g_raw_exit;
  * 该组=沿用、不建不删；否则测 0600 老口径。 */
 static int g_made_group;
 
+/* 信号收口（建了组才挂）：默认动作直接杀进程，atexit 的 groupdel 跑不
+ * 到——自建的组会留在机器上。收到信号先删组，再回归默认动作（仍按
+ * 信号死，退出状态与旧行为一致）。gate 子进程 fork 后清 g_made_group
+ * （见 spawn_gate），不会替父进程删组。 */
+static void gate_group_on_signal(int sig)
+{
+	if (g_made_group) {
+		int rc = system("groupdel aik-gate >/dev/null 2>&1");
+
+		(void)rc;		/* 尽力而为：删不掉也只能带着信息死 */
+	}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 static void gate_group_cleanup(void)
 {
 	if (g_made_group) {
@@ -116,6 +132,11 @@ static void gate_group_setup(void)
 		g_made_group = 1;
 		printf("[D7] created group aik-gate gid 942 (groupdel at "
 		       "exit): 0640 path\n");
+		/* 信号收口：INT/TERM/ALRM（后者=挂起硬杀线）先删组再按
+		 * 信号死——atexit 在被信号杀时跑不到 */
+		signal(SIGINT, gate_group_on_signal);
+		signal(SIGTERM, gate_group_on_signal);
+		signal(SIGALRM, gate_group_on_signal);
 	} else {
 		printf("SKIP D7 0640 path (groupadd -g 942 aik-gate failed;"
 		       " testing 0600 fallback)\n");
@@ -235,6 +256,7 @@ static int spawn_gate(const char *path, pid_t *pid)
 	if (*pid == 0) {
 		int s = open(slave, O_RDWR);
 
+		g_made_group = 0;		/* P-60/D7：子进程不替父进程删组 */
 		if (s < 0)
 			_exit(99);
 		setsid();

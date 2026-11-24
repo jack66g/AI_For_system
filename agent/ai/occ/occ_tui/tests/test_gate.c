@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <grp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,20 @@ static void write_file(const char *p, const char *s)
  * 期望值由测试侧独立查组得出（不复用被测的判定函数——否则「把契约
  * 改没了」的变异会连期望值一起改，测试空过）。 */
 static int g_made_group;		/* 本测试建的 aik-gate 组（退出时删） */
+
+/* 信号收口（建了组才挂）：默认动作直接杀进程，atexit 的 groupdel 跑不
+ * 到——自建的组会留在机器上。收到信号先删组，再回归默认动作（仍按
+ * 信号死，退出状态与旧行为一致）。 */
+static void gate_group_on_signal(int sig)
+{
+	if (g_made_group) {
+		int rc = system("groupdel aik-gate >/dev/null 2>&1");
+
+		(void)rc;		/* 尽力而为：删不掉也只能带着信息死 */
+	}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
 
 static void gate_group_cleanup(void)
 {
@@ -79,6 +94,12 @@ static void gate_group_setup(void)
 		g_made_group = 1;
 		printf("[D7] created group aik-gate gid 942 (groupdel at "
 		       "exit): 0640 path\n");
+		/* 信号收口：默认动作直接杀进程，atexit 的 groupdel 跑不到
+		 * ——自建的组会留在机器上。挂上 INT/TERM/ALRM（后者=挂起
+		 * 硬杀线）：先删组，再回归默认动作。 */
+		signal(SIGINT, gate_group_on_signal);
+		signal(SIGTERM, gate_group_on_signal);
+		signal(SIGALRM, gate_group_on_signal);
 	} else {
 		printf("SKIP D7 0640 path (groupadd -g 942 aik-gate failed;"
 		       " testing 0600 fallback)\n");
